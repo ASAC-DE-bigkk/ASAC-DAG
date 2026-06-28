@@ -12,6 +12,7 @@ from airflow.providers.standard.operators.python import PythonOperator
 DBT_PROJECT_DIR = os.environ.get("DBT_PROJECT_DIR", "/opt/airflow/dbt/elt_smoke")
 DBT_PROFILES_DIR = os.environ.get("DBT_PROFILES_DIR", DBT_PROJECT_DIR)
 DBT_BIN = os.environ.get("DBT_BIN", "dbt")
+DBT_TARGET = os.environ.get("DBT_TARGET", "prod")
 SAMPLE_EVENTS_PATH = os.environ.get(
     "SAMPLE_EVENTS_PATH",
     os.path.join(DBT_PROJECT_DIR, "seeds", "sample_events.csv"),
@@ -22,14 +23,19 @@ IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 def dbt_command(args: str) -> str:
     dbt_bin = shlex.quote(DBT_BIN)
+    dbt_target = shlex.quote(DBT_TARGET)
     project_dir = shlex.quote(DBT_PROJECT_DIR)
     profiles_dir = shlex.quote(DBT_PROFILES_DIR)
     return (
         "set -euo pipefail\n"
         f"cd {project_dir}\n"
         f"DBT_PROFILES_DIR={profiles_dir} "
-        f"{dbt_bin} --no-use-colors {args}"
+        f"{dbt_bin} --no-use-colors --target {dbt_target} {args}"
     )
+
+
+def is_dev_target() -> bool:
+    return DBT_TARGET == "dev"
 
 
 def required_env(name: str) -> str:
@@ -37,6 +43,30 @@ def required_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def r2_env_name(name: str) -> str:
+    if is_dev_target():
+        dev_name = "R2_DEV_" + name.removeprefix("R2_")
+        if os.environ.get(dev_name):
+            return dev_name
+    return name
+
+
+def r2_env(name: str) -> str:
+    return required_env(r2_env_name(name))
+
+
+def trino_catalog() -> str:
+    if is_dev_target():
+        return os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    return os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
+
+
+def smoke_schema() -> str:
+    if is_dev_target():
+        return os.environ.get("DEV_SMOKE_SCHEMA", "dev_local")
+    return os.environ.get("SMOKE_SCHEMA", "ops_smoke")
 
 
 def sql_identifier(value: str) -> str:
@@ -59,7 +89,11 @@ def build_raw_object_key() -> str:
     now = datetime.now(timezone.utc)
     load_date = now.strftime("%Y-%m-%d")
     ts_nodash = now.strftime("%Y%m%dT%H%M%S%f")
-    return f"raw/sample_events/load_date={load_date}/sample_events_{ts_nodash}.csv"
+    if is_dev_target():
+        raw_prefix = os.environ.get("R2_DEV_RAW_PREFIX", f"dev/{smoke_schema()}/raw/sample_events")
+    else:
+        raw_prefix = os.environ.get("R2_RAW_PREFIX", "raw/sample_events")
+    return f"{raw_prefix.rstrip('/')}/load_date={load_date}/sample_events_{ts_nodash}.csv"
 
 
 def current_dag_run_id() -> str:
@@ -69,10 +103,10 @@ def current_dag_run_id() -> str:
 def upload_raw_sample_events(sample_path: str, raw_object_key: str) -> str:
     import boto3
 
-    bucket_name = required_env("R2_BUCKET_NAME")
-    endpoint_url = required_env("R2_ENDPOINT")
-    access_key_id = required_env("R2_ACCESS_KEY_ID")
-    secret_access_key = required_env("R2_SECRET_ACCESS_KEY")
+    bucket_name = r2_env("R2_BUCKET_NAME")
+    endpoint_url = r2_env("R2_ENDPOINT")
+    access_key_id = r2_env("R2_ACCESS_KEY_ID")
+    secret_access_key = r2_env("R2_SECRET_ACCESS_KEY")
 
     if not os.path.exists(sample_path):
         raise FileNotFoundError(f"Sample source file not found: {sample_path}")
@@ -98,8 +132,8 @@ def upload_raw_sample_events(sample_path: str, raw_object_key: str) -> str:
 def load_bronze_sample_events(sample_path: str, raw_object_key: str, dag_run_id: str) -> int:
     import trino.dbapi
 
-    catalog = sql_identifier(os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg"))
-    schema = sql_identifier(os.environ.get("SMOKE_SCHEMA", "ops_smoke"))
+    catalog = sql_identifier(trino_catalog())
+    schema = sql_identifier(smoke_schema())
     table = sql_identifier(BRONZE_TABLE)
     qualified_schema = f"{catalog}.{schema}"
     qualified_table = f"{qualified_schema}.{table}"
