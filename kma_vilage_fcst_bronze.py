@@ -25,12 +25,8 @@ BRONZE_TABLE = "bronze_kma_vilage_fcst"
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def runtime_target() -> str:
-    return os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
-
-
 def is_dev_target() -> bool:
-    return runtime_target() == "dev"
+    return os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod")) == "dev"
 
 
 def required_env(name: str) -> str:
@@ -85,18 +81,6 @@ def sql_timestamp(value: datetime) -> str:
     return "TIMESTAMP " + sql_string(utc_value.strftime("%Y-%m-%d %H:%M:%S.%f"))
 
 
-def current_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def compact_kst_timestamp(value: datetime) -> str:
-    return value.astimezone(KST).strftime("%Y%m%dT%H%M%SKST")
-
-
-def payload_hash(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
-
-
 def build_raw_object_key(
     collected_at: datetime,
     request_id: str,
@@ -110,25 +94,22 @@ def build_raw_object_key(
         raw_prefix = os.environ.get("ASK_SEOUL_RAW_PREFIX", "bronze")
     return (
         f"{raw_prefix.rstrip('/')}/{SOURCE_DOMAIN}/{SOURCE_ID}/load_date={load_date}/"
-        f"{compact_kst_timestamp(collected_at)}_base-{base_date}{base_time}_{request_id}.json"
+        f"{collected_at.astimezone(KST).strftime('%Y%m%dT%H%M%SKST')}"
+        f"_base-{base_date}{base_time}_{request_id}.json"
     )
 
 
-def r2_client():
+def upload_raw_object(raw_bytes: bytes, object_key: str) -> str:
     import boto3
 
-    return boto3.client(
+    bucket_name = r2_env("R2_BUCKET_NAME")
+    boto3.client(
         "s3",
         endpoint_url=r2_env("R2_ENDPOINT"),
         aws_access_key_id=r2_env("R2_ACCESS_KEY_ID"),
         aws_secret_access_key=r2_env("R2_SECRET_ACCESS_KEY"),
         region_name="auto",
-    )
-
-
-def upload_raw_object(raw_bytes: bytes, object_key: str) -> str:
-    bucket_name = r2_env("R2_BUCKET_NAME")
-    r2_client().put_object(
+    ).put_object(
         Bucket=bucket_name,
         Key=object_key,
         Body=raw_bytes,
@@ -145,12 +126,6 @@ def fetch_url(url: str) -> tuple[int, bytes]:
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.status, response.read()
-
-
-def encode_service_key(service_key: str) -> str:
-    if "%" in service_key:
-        return service_key
-    return urllib.parse.quote_plus(service_key)
 
 
 def resolve_kma_base_datetime() -> tuple[str, str]:
@@ -174,6 +149,7 @@ def resolve_kma_base_datetime() -> tuple[str, str]:
 
 def build_kma_url(base_date: str, base_time: str, nx: int, ny: int) -> str:
     params = {
+        "serviceKey": required_env("KMA_SERVICE_KEY"),
         "numOfRows": os.environ.get("KMA_NUM_OF_ROWS", "1000"),
         "pageNo": os.environ.get("KMA_PAGE_NO", "1"),
         "dataType": "JSON",
@@ -182,8 +158,7 @@ def build_kma_url(base_date: str, base_time: str, nx: int, ny: int) -> str:
         "nx": str(nx),
         "ny": str(ny),
     }
-    query = "serviceKey=" + encode_service_key(required_env("KMA_SERVICE_KEY"))
-    query += "&" + urllib.parse.urlencode(params)
+    query = urllib.parse.urlencode(params, safe="%")
     return f"{KMA_BASE_URL.rstrip('/')}/getVilageFcst?{query}"
 
 
@@ -347,7 +322,7 @@ def insert_kma_bronze_rows(
 
 
 def ingest_kma_vilage_fcst(**context) -> dict:
-    collected_at = current_utc()
+    collected_at = datetime.now(timezone.utc)
     request_id = str(uuid.uuid4())
     place_id = os.environ.get("ASK_SEOUL_KMA_PLACE_ID", "seoul_station")
     nx = int(os.environ.get("ASK_SEOUL_KMA_NX", "60"))
@@ -357,7 +332,7 @@ def ingest_kma_vilage_fcst(**context) -> dict:
     url = build_kma_url(base_date=base_date, base_time=base_time, nx=nx, ny=ny)
     http_status, raw_bytes = fetch_url(url)
     metadata, rows = parse_kma_response(raw_bytes)
-    raw_hash = payload_hash(raw_bytes)
+    raw_hash = hashlib.sha256(raw_bytes).hexdigest()
     raw_object_key = build_raw_object_key(
         collected_at=collected_at,
         request_id=request_id,
