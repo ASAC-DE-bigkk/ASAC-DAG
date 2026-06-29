@@ -40,6 +40,7 @@ KST = "Asia/Seoul"
 
 DEFAULT_PARAMS = {
     "target": "dev",
+    "datasets": [],  # subset of dataset slugs; empty = all enabled
     "date_from": "",
     "date_to": "",
     "lookback_days": 31,
@@ -68,10 +69,12 @@ def _plan(**context) -> list[dict]:
         date_from = end.in_timezone(KST).subtract(days=int(params["lookback_days"])).strftime("%Y%m%d")
 
     include_detail = bool(params["include_detail"])
+    wanted = set(params.get("datasets") or [])
     names = [
         ds.name
         for ds in enabled_datasets()
-        if include_detail or ds.kind != "kopis_detail"
+        if (include_detail or ds.kind != "kopis_detail")
+        and (not wanted or ds.name in wanted)
     ]
     print(f"plan: {len(names)} datasets, window {date_from}~{date_to}, ingest_ts={ingest_ts}")
     return [
