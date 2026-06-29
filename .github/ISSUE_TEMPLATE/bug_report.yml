@@ -1,12 +1,3 @@
----
-name: Bug report
-about: 깨진 동작·잘못된 데이터·실패한 DAG/테스트
-title: ''
-labels: ''
-assignees: ''
-
----
-
 name: 🐛 버그 신고
 description: 깨진 동작·잘못된 데이터·실패한 DAG/테스트
 title: "[Bug] "

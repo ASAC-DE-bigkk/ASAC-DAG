@@ -1,12 +1,3 @@
----
-name: data-ingestion
-about: 새 API/소스를 메달리온(Bronze→Silver→Gold)에 적재하는 작업
-title: ''
-labels: ''
-assignees: ''
-
----
-
 name: 📥 데이터 소스 적재
 description: 새 API/소스를 메달리온(Bronze→Silver→Gold)에 적재하는 작업
 title: "[Ingest] "
