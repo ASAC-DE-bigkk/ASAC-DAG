@@ -240,13 +240,13 @@ def raw_prefix() -> str:
     return os.environ.get("SEOUL_PPLTN_RAW_PREFIX", "bronze")
 
 
-def build_raw_object_key(area_name: str, collected_at: datetime, request_id: str) -> str:
-    load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
-    safe_area = urllib.parse.quote(area_name, safe="")
+def build_raw_object_key(area_name: str, collected_at: datetime) -> str:
+    # seoul-dev 버킷 기준: bronze/population/<날짜>/<시>/<분>/<장소>.json (KST)
+    kst = collected_at.astimezone(KST)
     return (
-        f"{raw_prefix().rstrip('/')}/{SOURCE_DOMAIN}/{SOURCE_ID}/load_date={load_date}/"
-        f"{collected_at.astimezone(KST).strftime('%Y%m%dT%H%M%SKST')}"
-        f"_{safe_area}_{request_id}.json"
+        f"{raw_prefix().rstrip('/')}/{SOURCE_DOMAIN}/"
+        f"{kst.strftime('%Y-%m-%d')}/{kst.strftime('%H')}/{kst.strftime('%M')}/"
+        f"{area_name}.json"
     )
 
 
@@ -278,7 +278,7 @@ def fetch_url(url: str) -> tuple[int, bytes]:
 
 
 def build_seoul_ppltn_url(area_name: str) -> str:
-    api_key = urllib.parse.quote(required_env("SEOUL_OPEN_API_KEY"), safe="")
+    api_key = urllib.parse.quote(required_env("SEOUL_API_KEY"), safe="")
     area = urllib.parse.quote(area_name, safe="")
     return f"{SEOUL_OPEN_API_BASE_URL.rstrip('/')}/{api_key}/json/citydata_ppltn/1/5/{area}"
 
@@ -483,7 +483,7 @@ def ingest_seoul_ppltn(**context) -> dict:
             http_status, raw_bytes = fetch_url(url)
             metadata, row = parse_seoul_ppltn_response(raw_bytes)
             raw_hash = hashlib.sha256(raw_bytes).hexdigest()
-            raw_object_key = build_raw_object_key(area_name, collected_at, request_id)
+            raw_object_key = build_raw_object_key(area_name, collected_at)
             upload_raw_object(raw_bytes, raw_object_key)
             values.append(
                 build_bronze_row_values(
