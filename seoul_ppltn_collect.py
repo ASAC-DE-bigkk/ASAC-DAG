@@ -23,7 +23,7 @@ SOURCE_DOMAIN = "population"
 BRONZE_TABLE = "bronze_seoul_ppltn"
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# citydata_ppltn(서울시 실시간 도시데이터) 인구혼잡도 대상 장소(AREA_NM) 118곳.
+# citydata_ppltn(서울시 실시간 도시데이터) 인구혼잡도 대상 장소(AREA_NM) 121곳.
 # 장소명이 요청 URL에 그대로 박히므로 장소당 1회 호출(fan-out)한다.
 AREAS = [
     "강남 MICE 관광특구",
