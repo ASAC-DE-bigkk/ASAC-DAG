@@ -48,6 +48,12 @@ def r2_env(name: str) -> str:
     return required_env(r2_env_name(name))
 
 
+def traffic_dag_schedule() -> str | None:
+    if "ASK_SEOUL_TRAFFIC_DAG_SCHEDULE" in os.environ:
+        return os.environ["ASK_SEOUL_TRAFFIC_DAG_SCHEDULE"] or None
+    return "* * * * *" if is_dev_target() else None
+
+
 def trino_catalog() -> str:
     if is_dev_target():
         return os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
@@ -428,7 +434,7 @@ with DAG(
     dag_id="seoul_traffic_incident_bronze",
     description="Loads Seoul TOPIS AccInfo XML into R2 and validates the Iceberg bronze runtime.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
-    schedule=os.environ.get("ASK_SEOUL_TRAFFIC_DAG_SCHEDULE") or None,
+    schedule=traffic_dag_schedule(),
     catchup=False,
     max_active_runs=1,
     tags=["ask_seoul", "traffic", "bronze", "r2", "iceberg"],
