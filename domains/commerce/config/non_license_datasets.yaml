@@ -1,0 +1,19 @@
+# 인허가(LOCALDATA) 외 / 비활성 데이터셋 — **수집 대상 아님**.
+# registry.py 는 dataset_registry.yaml 만 로드한다(이 파일은 로드하지 않음).
+# 작업 중 섞여 들어갔으나 '지방행정 인허가데이터 표준'이 아니라 격리/파킹한 것.
+# 사유·재활성 절차: docs/pipeline/non-license-datasets.md
+non_license_datasets:
+  - oa_id: "OA-20337"
+    name_ko: "서울시 병의원 위치 정보"
+    short: "medical_location"
+    category: "health_medical"
+    schedule: "monthly"
+    service_name: null            # 위치정보(좌표) — 비-LOCALDATA, 인허가 스냅샷 아님
+    reason: "위치정보 데이터셋(좌표). LOCALDATA 인허가 표준/스키마가 아니며 코드 미발견."
+  - oa_id: "OA-13663"
+    name_ko: "서울시 식품위생업소 현황"
+    short: "food_hygiene_status"
+    category: "food"
+    schedule: "irregular"
+    service_name: "SeoulFoodHygieneBizHealthImport"   # 53컬럼·~119만건, 비-LOCALDATA 스키마
+    reason: "'현황' 집계형. 봉투는 호출되나 공통 19컬럼(MGTNO 등) 없음 → silver 정규화 부적합."

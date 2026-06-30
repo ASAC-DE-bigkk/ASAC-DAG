@@ -1,0 +1,7 @@
+# commerce 번들 전용 ignore. 루트 .gitignore 의 `.env.*` 규칙을 이 폴더 안에서 보강한다.
+
+# 런타임 시크릿(SEOUL_OPENAPI_KEY, R2 토큰) — 절대 커밋 금지.
+.env.commerce
+
+# 단, 템플릿은 추적한다(부모 .gitignore 의 .env.* 무시를 재허용).
+!.env.commerce.example

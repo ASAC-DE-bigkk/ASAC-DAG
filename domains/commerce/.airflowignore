@@ -1,0 +1,9 @@
+# Airflow DAG 파서가 무시할 경로.
+# ⚠️ Airflow 3.x 부터 DAG_IGNORE_FILE_SYNTAX 기본값이 glob 이다(2.x 는 regexp).
+# 따라서 glob 패턴으로 쓴다 — 이 파일이 있는 dags/domains/commerce/ 기준 상대경로.
+# DAG 가 아닌 패키지/설정/테스트/문서는 파싱 대상에서 제외(자기-부트스트랩 import 라
+# 단독 파싱 시 ModuleNotFoundError 가 날 수 있으므로 반드시 제외).
+include/**
+config/**
+tests/**
+docs/**
