@@ -72,11 +72,31 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _run_ds(ctx) -> str:
+    """run 의 논리 수집일(YYYY-MM-DD, silver 파티션).
+
+    Airflow 3.x 는 수동 Trigger 시 logical_date 가 None 일 수 있고, 그때는 ds/ts/
+    data_interval_* 매크로가 컨텍스트에 주입되지 않아 ctx["ds"] 가 KeyError 가 난다.
+    → ds → data_interval_start → logical_date → dag_run → 현재(KST) 순으로 폴백.
+    """
+    ds = ctx.get("ds")
+    if ds:
+        return ds
+    dt = ctx.get("data_interval_start") or ctx.get("logical_date")
+    if dt is None:
+        dag_run = ctx.get("dag_run")
+        dt = getattr(dag_run, "logical_date", None) or getattr(dag_run, "run_after", None)
+    if dt is not None:
+        dt = dt.astimezone(KST) if dt.tzinfo else dt
+        return dt.strftime("%Y-%m-%d")
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
 # ── 공통 태스크(두 DAG 공유) ──────────────────────────────────────────────────
 @task
 def resolve_observed_date(**ctx) -> str:
     override = (ctx["params"].get("observed_date") or "").strip()
-    observed_date = override or ctx["ds"]
+    observed_date = override or _run_ds(ctx)
     log.info("observed_date=%s (collectible=%d, pending=%d)",
              observed_date, len(COLLECTIBLE_SHORTS), len(PENDING))
     for d in PENDING:
