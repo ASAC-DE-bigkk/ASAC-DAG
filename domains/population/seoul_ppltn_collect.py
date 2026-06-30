@@ -283,6 +283,18 @@ def build_seoul_ppltn_url(area_name: str) -> str:
     return f"{SEOUL_OPEN_API_BASE_URL.rstrip('/')}/{api_key}/json/citydata_ppltn/1/5/{area}"
 
 
+def redact_secret(text: str) -> str:
+    # SEOUL_API_KEY는 요청 URL 경로에 포함되므로, 예외 메시지/로그로 흘러들어가도
+    # 노출되지 않도록 raw/percent-encoded 형태 모두 마스킹한다.
+    api_key = os.environ.get("SEOUL_API_KEY")
+    if not api_key:
+        return text
+    masked = text
+    for token in {api_key, urllib.parse.quote(api_key, safe="")}:
+        masked = masked.replace(token, "***REDACTED***")
+    return masked
+
+
 def parse_seoul_ppltn_response(raw_bytes: bytes) -> tuple[dict, dict]:
     data = json.loads(raw_bytes)
 
@@ -499,7 +511,7 @@ def ingest_seoul_ppltn(**context) -> dict:
                 )
             )
         except Exception as exc:
-            failures.append({"area_nm": area_name, "error": str(exc)})
+            failures.append({"area_nm": area_name, "error": redact_secret(str(exc))})
 
     insert_seoul_ppltn_bronze_rows(cursor, qualified_table, values)
 
