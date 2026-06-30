@@ -1,4 +1,4 @@
-"""서울 지하철 ELT (transit 도메인) — 수집 → R2 객체 적재(bronze 원본 + silver 변환) → Iceberg bronze(Trino).
+"""서울 지하철 ELT (transit 도메인) — 수집 → R2 bronze 객체(원본) → Iceberg bronze(Trino).
 
 sample(dbt_trino_iceberg_smoke) 패턴을 따른다:
   - 클래식 DAG + PythonOperator(ingest)
@@ -59,10 +59,11 @@ def current_dag_run_id() -> str:
     return os.environ.get("AIRFLOW_CTX_DAG_RUN_ID", "unknown")
 
 
-def _land_objects(dataset: str, raws: list, records: list, run_id: str) -> None:
-    """객체 메달리온 적재: bronze(원본 그대로) + silver(변환 envelope). 팀 <stage>/<domain> 규약.
+def _land_objects(dataset: str, raws: list, run_id: str) -> None:
+    """bronze 객체 적재: target(역/호선)별 원본 응답을 page-NNNN 으로. 팀 <stage>/<domain> 규약.
 
     raws: target(역/호선)별 원본 응답 리스트 → bronze 는 target 당 1페이지로 적재.
+    (변환/정제는 ASAC-DBT silver — DAG 은 bronze 까지만.)
     """
     targets = [r["request_params"]["target"] for r in raws]
     rows_cap = raws[0]["request_params"]["rows"] if raws else None
@@ -74,14 +75,7 @@ def _land_objects(dataset: str, raws: list, records: list, run_id: str) -> None:
         rows=sum(r["rows"] for r in raws), run_id=run_id,
         request_params={"targets": targets, "rows": rows_cap}, ext="json",
     )
-    # silver: 변환값 = 전 target envelope 합본 (한 줄=한 레코드)
-    res_s = land(
-        stage="silver", domain=DOMAIN, source=SOURCE, dataset=dataset,
-        pages=["\n".join(json.dumps(r, ensure_ascii=False) for r in records)],
-        kind=dataset, rows=len(records), run_id=run_id, ext="jsonl",
-    )
-    print(f"object landed [{dataset}] targets={len(targets)}: "
-          f"bronze={res_b['manifest_key']} / silver={res_s['manifest_key']}")
+    print(f"object landed [{dataset}] targets={len(targets)}: bronze={res_b['manifest_key']}")
 
 
 def _load_bronze(table: str, records: list, dag_run_id: str) -> int:
@@ -149,8 +143,8 @@ def ingest_subway() -> dict:
         # target(역/호선)당 1회만 호출 → records(silver/bronze테이블) + raws(bronze객체) 동시 확보
         res = collect_subway(key, dataset)
         records, raws = res["records"], res["raws"]
-        # 1) 객체 메달리온 적재 (bronze 원본 + silver 변환)
-        _land_objects(dataset, raws, records, dag_run_id)
+        # 1) bronze 객체 적재 (원본 보존)
+        _land_objects(dataset, raws, dag_run_id)
         # 2) Iceberg bronze 적재
         counts[dataset] = _load_bronze(table, records, dag_run_id)
     print(f"ingest counts: {counts}")
