@@ -1,8 +1,8 @@
 """서울 공영주차 ELT (transit 도메인) — GetParkingInfo 실시간 점유 → R2 객체 + Iceberg bronze.
 
 지하철과 동일 envelope 패턴(JSON):
-  - 단일 호출(123개 전체), records 재사용으로 R2(bronze 원본 + silver 변환) + Iceberg bronze.
-  - 이 DAG = Bronze 한정. silver/gold 는 ASAC-DBT 별도.
+  - 단일 호출(123개 전체) → R2 bronze 객체(원본) + Iceberg bronze.
+  - 이 DAG = Bronze 한정. silver/gold(변환·정제)는 ASAC-DBT 별도.
 """
 
 import json
@@ -48,21 +48,14 @@ def current_dag_run_id() -> str:
 
 
 def _land_objects(res: dict, run_id: str) -> None:
-    """bronze(원본 응답 JSON) + silver(envelope jsonl) 적재."""
-    records = res["records"]
+    """bronze 객체 적재(원본 응답 JSON). 변환/정제는 ASAC-DBT silver — DAG 은 bronze 까지만."""
     res_b = land(
         stage="bronze", domain=DOMAIN, source=SOURCE, dataset=DATASET,
         pages=[json.dumps(res["raw"], ensure_ascii=False)],
         endpoint=res["endpoint"], kind=DATASET, rows=res["rows"],
         run_id=run_id, request_params=res["request_params"], ext="json",
     )
-    res_s = land(
-        stage="silver", domain=DOMAIN, source=SOURCE, dataset=DATASET,
-        pages=["\n".join(json.dumps(r, ensure_ascii=False) for r in records)],
-        kind=DATASET, rows=len(records), run_id=run_id, ext="jsonl",
-    )
-    print(f"object landed [{DATASET}] rows={res['rows']}: "
-          f"bronze={res_b['manifest_key']} / silver={res_s['manifest_key']}")
+    print(f"object landed [{DATASET}] rows={res['rows']}: bronze={res_b['manifest_key']}")
 
 
 def _load_bronze(records: list, dag_run_id: str) -> int:

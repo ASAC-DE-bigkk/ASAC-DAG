@@ -47,10 +47,10 @@
 
 ## Bronze 적재 형태
 
-**R2 객체** (`seoul-dev`): 지하철과 동일 envelope 패턴(JSON)
+**R2 객체** (`seoul-dev`): bronze 원본만(변환은 ASAC-DBT)
 ```
 bronze/transit/seoul_parking/parking/load_date=…/ingest_ts=…/page-0001.json   # 원본 응답
-silver/transit/seoul_parking/parking/load_date=…/ingest_ts=…/page-0001.jsonl  # envelope 변환
++ _manifest.json
 ```
 **Iceberg** `iceberg_dev.dev_codingpoppy94.bronze_parking` — 주차장당 1행:
 `source` / `ts_source`(=`NOW_PRK_VHCL_UPDT_TM`) / `ts_collected` / `lat`·`lon`(NULL) / `raw`(주차장 행 JSON) / `ingested_at` / `dag_run_id`.
