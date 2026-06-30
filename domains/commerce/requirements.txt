@@ -1,0 +1,13 @@
+# commerce 카테고리 런타임 파이썬 의존성(번들 자립용 명세).
+# 호스트 Airflow 이미지에 아래가 설치돼 있어야 commerce 가 정상 동작한다.
+# 현재 호스트 이미지(Dockerfile.airflow)에는 boto3/pandas/pyarrow 가 이미 포함돼 있어
+# silver(parquet)·R2 백엔드 모두 추가 설치 없이 동작한다. (s3fs 는 미설치 → 사용 안 함)
+
+# Airflow 에 보통 동봉(명시용):
+requests>=2.31
+PyYAML>=6.0
+
+# 기능별(이미지에 이미 포함 — 명세용):
+pandas>=2.0      # silver: parquet 정규화(write_parquet)
+pyarrow>=14      # silver: parquet 엔진
+boto3>=1.34      # STORAGE_BACKEND=r2: Cloudflare R2(S3 호환) 클라이언트 — s3fs 아님
