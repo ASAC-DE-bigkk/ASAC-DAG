@@ -34,7 +34,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from culture_ingest.common.config import RunContext  # noqa: E402
 from culture_ingest.source.datasets import enabled_datasets  # noqa: E402
-from culture_ingest.source.ingest import IngestOptions, ingest_one  # noqa: E402
+from culture_ingest.source.ingest import (  # noqa: E402
+    IngestOptions,
+    build_run_report,
+    ingest_one,
+    write_run_report,
+)
 
 KST = "Asia/Seoul"
 
@@ -47,6 +52,7 @@ DEFAULT_PARAMS = {
     "include_detail": True,
     "max_detail": 200,
     "kopis_rows": 100,
+    "fail_on_violation": False,  # True면 계약 위반(완전성·드리프트·freshness) 시 run 실패
 }
 
 
@@ -126,12 +132,44 @@ def _ingest(
 
 
 def _report(**context) -> None:
-    """모든 매핑 태스크 결과를 모아 적재 요약을 로그로 남긴다(all_done로 항상 실행)."""
-    rows = context["ti"].xcom_pull(task_ids="ingest_dataset") or []
-    rows = [r for r in rows if r]
-    landed = [r for r in rows if not r["error"]]
-    total_rows = sum(r["rows"] for r in landed)
-    print(f"culture bronze ingest done: {len(landed)}/{len(rows)} datasets landed, {total_rows} rows")
+    """매핑 태스크 결과를 모아 정량 run 리포트를 만들고 R2에 남긴다(all_done로 항상 실행).
+
+    커버리지·완전성·드리프트·freshness를 한 곳에 모아 "깨지면 빨리 알고, 무엇이 영향인지"를
+    숫자로 surface 한다(계획안 Slide 6②·7). 위반이 있으면 run을 실패로 표시한다.
+    """
+    params = context["params"]
+    end = context["data_interval_end"]
+    ctx = RunContext(
+        load_date=end.in_timezone(KST).strftime("%Y-%m-%d"),
+        ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
+        run_id=context["dag_run"].run_id,
+    )
+    summaries = [r for r in (context["ti"].xcom_pull(task_ids="ingest_dataset") or []) if r]
+    expected = len(summaries)  # plan이 내보낸 데이터셋 수 = 이번 run의 기대 커버리지
+    report = build_run_report(summaries, ctx, expected_total=expected)
+
+    cov = report["coverage"]
+    print(
+        f"[culture bronze] coverage {cov['landed']}/{cov['expected']} ({cov['coverage_pct']}%) · "
+        f"rows={report['total_rows']} · violations={report['violation_count']} · "
+        f"freshness_max={report['freshness']['max_age_hours']}h · SLO={'PASS' if report['slo_passed'] else 'FAIL'}"
+    )
+    for v in report["violations"]:
+        print(f"  ⚠ {v['dataset']}: {v['violation']}")
+
+    try:
+        key = write_run_report(report, ctx=ctx, target=params["target"])
+        print(f"[culture bronze] run report -> {key}")
+    except Exception as exc:  # noqa: BLE001 -- 리포트 적재 실패가 run 판정을 가리지 않게
+        print(f"[culture bronze] run report 적재 실패(무시): {exc}")
+
+    # 런타임 신뢰성 게이트(opt-in): fail_on_violation=True일 때만 위반 시 run 실패.
+    # 기본은 surface 전용 — 계약 v0가 안정화되기 전 거짓 경보를 피한다.
+    # (수집 자체 실패는 ingest_dataset 매핑 태스크가 이미 빨갛게 실패시킨다.)
+    if bool(params.get("fail_on_violation")) and not report["slo_passed"]:
+        raise AirflowException(
+            f"culture bronze SLO 위반: failed={cov['failed']} violations={report['violation_count']}"
+        )
 
 
 with DAG(

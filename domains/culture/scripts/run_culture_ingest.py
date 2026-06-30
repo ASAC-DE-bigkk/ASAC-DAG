@@ -21,7 +21,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from culture_ingest.source.config import LANDING_ROOT  # noqa: E402
-from culture_ingest.source.ingest import IngestOptions, run_batch  # noqa: E402
+from culture_ingest.source.ingest import (  # noqa: E402
+    IngestOptions,
+    build_run_report,
+    run_batch,
+    write_run_report,
+)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -82,6 +87,25 @@ def main(argv=None) -> int:
             f"  [{status}] {r.name:<28} pages={r.pages:<4} rows={r.rows:<6} "
             f"bytes={r.bytes_written:<9} {r.error}"
         )
+
+    # 정량 run 리포트 (커버리지·완전성·드리프트·freshness) 빌드 + 적재
+    report = build_run_report([r.summary() for r in results], ctx, expected_total=len(results))
+    cov = report["coverage"]
+    print(
+        f"\nREPORT coverage={cov['landed']}/{cov['expected']} ({cov['coverage_pct']}%) "
+        f"rows={report['total_rows']} violations={report['violation_count']} "
+        f"freshness_max={report['freshness']['max_age_hours']}h SLO={'PASS' if report['slo_passed'] else 'FAIL'}"
+    )
+    for v in report["violations"]:
+        print(f"  ! {v['dataset']}: {v['violation']}")
+    try:
+        key = write_run_report(
+            report, ctx=ctx, target=args.target, env_file=args.env_file,
+            dry_run=args.dry_run, local_dir=args.local_dir,
+        )
+        print(f"  run report -> {sink}/{key}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  run report 적재 실패(무시): {exc}", file=sys.stderr)
 
     landed = [r for r in results if r.ok and r.pages > 0]
     skipped = [r for r in results if "skipped" in r.error]

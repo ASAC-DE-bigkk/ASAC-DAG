@@ -28,6 +28,10 @@ class Dataset:
     row_tag: str = "db"  # XML 행 요소 (대부분 KOPIS는 "db", 예매상황판은 "boxof")
     enabled: bool = True
     note: str = ""
+    # --- 수집 계약 v0 (코드로 강제, 계획안 Slide 6①·7) -------------------------
+    min_rows: int = 1  # 완전성 하한: 정상 적재라면 최소 이만큼은 와야 함(미만 = 경고)
+    freshness_sla_hours: float = 30.0  # freshness 목표: 마지막 적재가 이 시간 이내여야
+    key_fields: tuple = ()  # 드리프트 기준: 원본 레코드에 반드시 있어야 하는 필드/태그
 
 
 # --- KOPIS (XML) -- 공연예술통합전산망 --------------------------------------------
@@ -41,6 +45,7 @@ KOPIS_DATASETS = [
         title="공연목록(pblprfr)",
         uses_date_window=True,
         base_params={"signgucode": "11"},  # 11 = 서울 (도메인 = 서울 도시데이터)
+        key_fields=("mt20id", "prfnm"),
     ),
     Dataset(
         name="kopis_performance_detail",
@@ -52,6 +57,7 @@ KOPIS_DATASETS = [
         id_source_endpoint="pblprfr",
         id_field="mt20id",
         base_params={"signgucode": "11"},  # 11 = 서울 (상세 크롤 범위를 서울로 한정)
+        key_fields=("mt20id", "prfnm"),
     ),
     Dataset(
         name="kopis_facility",
@@ -61,6 +67,8 @@ KOPIS_DATASETS = [
         load_pattern="scd2_dim",
         title="공연시설목록(prfplc)",
         base_params={"signgucode": "11"},  # 11 = 서울
+        freshness_sla_hours=24 * 8,  # 공연장은 SCD2 차원(느린 변화) → freshness 여유
+        key_fields=("mt10id", "fcltynm"),
     ),
     Dataset(
         name="kopis_facility_detail",
@@ -72,6 +80,8 @@ KOPIS_DATASETS = [
         id_source_endpoint="prfplc",
         id_field="mt10id",
         base_params={"signgucode": "11"},  # 11 = 서울
+        freshness_sla_hours=24 * 8,  # 좌표 차원(느린 변화)
+        key_fields=("mt10id", "fcltynm"),
     ),
     Dataset(
         name="kopis_festival",
@@ -82,6 +92,7 @@ KOPIS_DATASETS = [
         title="축제(prffest)",
         uses_date_window=True,
         base_params={"signgucode": "11"},  # 11 = 서울
+        key_fields=("mt20id", "prfnm"),
     ),
     Dataset(
         name="kopis_boxoffice",
@@ -93,6 +104,7 @@ KOPIS_DATASETS = [
         uses_date_window=True,
         base_params={"area": "11"},  # 11 = 서울 (boxoffice는 area 코드 사용)
         row_tag="boxof",
+        key_fields=("prfnm",),
         note="기간 랭킹(top 50) 스냅샷. 페이징 없음(cpage 무시). 파라미터=stdate/eddate/area/catecode/srchseatscale. ⚠️ stdate~eddate 최대 31일(초과 시 returncode 05). 일배치 DAG는 ≤31일 롤링창 사용.",
     ),
 ]

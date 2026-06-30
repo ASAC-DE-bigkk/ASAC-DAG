@@ -84,6 +84,7 @@ class DatasetResult:
     bytes_written: int = 0
     object_keys: list[str] = field(default_factory=list)
     error: str = ""
+    checks: dict = field(default_factory=dict)  # 수집 검증 결과 (common.checks.evaluate_landing)
 
     @property
     def ok(self) -> bool:
@@ -100,6 +101,7 @@ class DatasetResult:
             "rows": self.rows,
             "bytes": self.bytes_written,
             "error": self.error,
+            "checks": self.checks,
         }
 
 

@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
+from culture_ingest.common.checks import evaluate_landing, extract_record_fields
 from culture_ingest.common.config import (
     RunContext,
     build_r2_settings,
@@ -75,6 +77,7 @@ def _manifest(ds: Dataset, ctx: RunContext, result: DatasetResult, params: dict)
         "rows": result.rows,
         "bytes": result.bytes_written,
         "object_keys": result.object_keys,
+        "checks": result.checks,  # 수집 검증 결과(완전성·드리프트·freshness)
     }
 
 
@@ -84,6 +87,7 @@ def ingest_dataset(ds: Dataset, clients: Clients, landing: Landing, opts: Ingest
     """
     prefix = landing.prefix_for(ds.source, ds.name)
     result = DatasetResult(name=ds.name, source=ds.source, endpoint=ds.endpoint, prefix=prefix)
+    sample_body: bytes | None = None  # 첫 페이지 = 드리프트(관측 스키마) 점검용 샘플
     try:
         if ds.kind == "kopis_list":
             # KOPIS 목록: 페이지를 끝까지 돌며 각 페이지를 page-NNNN.xml로 적재.
@@ -94,7 +98,7 @@ def ingest_dataset(ds: Dataset, clients: Clients, landing: Landing, opts: Ingest
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-            landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params))
+                sample_body = sample_body or page.body
 
         elif ds.kind == "kopis_boxoffice":
             # 예매상황판: 페이징 없이 단일 GET 1건만 적재(page-0001.xml).
@@ -105,17 +109,18 @@ def ingest_dataset(ds: Dataset, clients: Clients, landing: Landing, opts: Ingest
             result.rows += page.row_count
             result.bytes_written += len(page.body)
             result.object_keys.append(key)
-            landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params))
+            sample_body = page.body
 
         elif ds.kind == "seoul_list":
             # 서울 목록: 1000행 윈도우를 page-NNNNNN.json으로 적재.
+            params = {"service": ds.endpoint}
             for page in clients.seoul.list_pages(ds.endpoint, opts.max_rows):
                 key = landing.write_page(prefix, f"page-{page.index:06d}.json", page.body, "json")
                 result.pages += 1
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-            landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, {"service": ds.endpoint}))
+                sample_body = sample_body or page.body
 
         elif ds.kind == "kopis_detail":
             # 상세: 목록에서 id를 모아 건별 상세를 id=<값>.xml로 적재.
@@ -131,14 +136,93 @@ def ingest_dataset(ds: Dataset, clients: Clients, landing: Landing, opts: Ingest
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
+                sample_body = sample_body or page.body
             params = {**ds.base_params, "id_field": ds.id_field, "max_detail": opts.max_detail, "ids": len(ids)}
-            landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params))
 
         else:
             result.error = f"unknown kind: {ds.kind}"
+            return result
+
+        # 수집 검증 (계약 v0): 완전성·드리프트·freshness 점검 후 매니페스트에 동봉.
+        observed = extract_record_fields(ds.source, sample_body, ds.row_tag, ds.endpoint) if sample_body else []
+        result.checks = evaluate_landing(ds, result.rows, observed, landing.ctx.ingest_ts)
+        if result.checks["violations"]:
+            print(f"  [contract] {ds.name}: " + " | ".join(result.checks["violations"]))
+        landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params))
     except Exception as exc:  # noqa: BLE001 -- 데이터셋별로 잡아 두고 배치는 계속 진행
         result.error = f"{type(exc).__name__}: {exc}"
     return result
+
+
+# --- run 리포트 (정량 측정: 커버리지·완전성·freshness, 계획안 Slide 6②·7) --------
+
+def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int) -> dict:
+    """데이터셋별 요약을 모아 run 단위 신뢰성 리포트를 만든다.
+
+    "깨지면 얼마나 빨리 알고, 무엇이 영향인지 숫자로" — bronze v0의 SLO 측정점.
+    """
+    rows = [s for s in summaries if s]
+    landed = [s for s in rows if not s["error"]]
+    skipped = [s for s in rows if s["error"] and "skipped" in s["error"]]
+    failed = [s for s in rows if s["error"] and "skipped" not in s["error"]]
+
+    violations: list[dict] = []
+    ages: list[float] = []
+    for s in landed:
+        ch = s.get("checks") or {}
+        for v in ch.get("violations", []):
+            violations.append({"dataset": s["name"], "violation": v})
+        if ch.get("freshness_age_hours") is not None:
+            ages.append(ch["freshness_age_hours"])
+
+    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 이면 통과
+    slo_passed = not failed and not violations
+    return {
+        "domain": "culture",
+        "layer": "bronze",
+        "load_date": ctx.load_date,
+        "ingest_ts": ctx.ingest_ts,
+        "run_id": ctx.run_id,
+        "coverage": {
+            "expected": expected_total,
+            "landed": len(landed),
+            "skipped": len(skipped),
+            "failed": len(failed),
+            "coverage_pct": round(100.0 * len(landed) / expected_total, 1) if expected_total else 0.0,
+        },
+        "total_rows": sum(s["rows"] for s in landed),
+        "freshness": {"max_age_hours": max(ages) if ages else None},
+        "violation_count": len(violations),
+        "violations": violations,
+        "failed_datasets": [{"dataset": s["name"], "error": s["error"]} for s in failed],
+        "slo_passed": slo_passed,
+        "datasets": rows,
+    }
+
+
+def write_run_report(
+    report: dict,
+    *,
+    ctx: RunContext,
+    target: str = "dev",
+    env_file: str | None = None,
+    dry_run: bool = False,
+    local_dir: str = "./_dryrun",
+    root: str = culture_config.LANDING_ROOT,
+) -> str:
+    """run 리포트를 적재 대상에 JSON으로 남긴다. 키를 반환."""
+    key = f"{root}/_reports/load_date={ctx.load_date}/ingest_ts={ctx.ingest_ts}/run_report.json"
+    body = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
+    if dry_run:
+        sink = LocalSink(local_dir)
+    else:
+        settings = build_r2_settings(target, env_file)
+        missing = missing_r2(settings)
+        if missing:
+            raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
+        sink = R2Sink(settings)
+    sink.put(key, body, "application/json")
+    return key
 
 
 # --- 런타임 빌더 ---------------------------------------------------------------
