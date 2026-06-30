@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from seoul_transit import config
 from seoul_transit.r2_landing import land
-from seoul_transit.subway import collect_subway_arrival, collect_subway_position, fetch_subway_raw
+from seoul_transit.subway import collect_subway
 
 CATALOG = os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
 SCHEMA = os.environ.get("SMOKE_SCHEMA", "ops_smoke")
@@ -36,10 +36,10 @@ IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DOMAIN = os.environ.get("TRANSIT_DOMAIN", "transit")
 SOURCE = os.environ.get("TRANSIT_SOURCE", "seoul_subway")
 
-# (bronze 테이블, collector) 매핑
+# bronze 테이블 -> dataset 매핑
 SOURCES = {
-    "bronze_subway_arrival": ("subway_arrival", collect_subway_arrival),
-    "bronze_subway_position": ("subway_position", collect_subway_position),
+    "bronze_subway_arrival": "subway_arrival",
+    "bronze_subway_position": "subway_position",
 }
 
 
@@ -59,23 +59,29 @@ def current_dag_run_id() -> str:
     return os.environ.get("AIRFLOW_CTX_DAG_RUN_ID", "unknown")
 
 
-def _land_objects(dataset: str, key: str, records: list, run_id: str) -> None:
-    """객체 메달리온 적재: bronze(원본 그대로) + silver(변환 envelope). 팀 <stage>/<domain> 규약."""
-    # bronze: 원본 API 응답 그대로
-    f = fetch_subway_raw(key, dataset)
+def _land_objects(dataset: str, raws: list, records: list, run_id: str) -> None:
+    """객체 메달리온 적재: bronze(원본 그대로) + silver(변환 envelope). 팀 <stage>/<domain> 규약.
+
+    raws: target(역/호선)별 원본 응답 리스트 → bronze 는 target 당 1페이지로 적재.
+    """
+    targets = [r["request_params"]["target"] for r in raws]
+    rows_cap = raws[0]["request_params"]["rows"] if raws else None
+    # bronze: target별 원본 API 응답을 페이지로 (page-0001=target1, …)
     res_b = land(
         stage="bronze", domain=DOMAIN, source=SOURCE, dataset=dataset,
-        pages=[json.dumps(f["raw"], ensure_ascii=False)],
-        endpoint=f["endpoint"], kind=dataset, rows=f["rows"],
-        run_id=run_id, request_params=f["request_params"], ext="json",
+        pages=[json.dumps(r["raw"], ensure_ascii=False) for r in raws],
+        endpoint=raws[0]["endpoint"] if raws else "", kind=dataset,
+        rows=sum(r["rows"] for r in raws), run_id=run_id,
+        request_params={"targets": targets, "rows": rows_cap}, ext="json",
     )
-    # silver: 변환값 = collect_* envelope (현재 우리가 보여주는 그대로), 한 줄=한 레코드
+    # silver: 변환값 = 전 target envelope 합본 (한 줄=한 레코드)
     res_s = land(
         stage="silver", domain=DOMAIN, source=SOURCE, dataset=dataset,
         pages=["\n".join(json.dumps(r, ensure_ascii=False) for r in records)],
         kind=dataset, rows=len(records), run_id=run_id, ext="jsonl",
     )
-    print(f"object landed: bronze={res_b['manifest_key']} / silver={res_s['manifest_key']}")
+    print(f"object landed [{dataset}] targets={len(targets)}: "
+          f"bronze={res_b['manifest_key']} / silver={res_s['manifest_key']}")
 
 
 def _load_bronze(table: str, records: list, dag_run_id: str) -> int:
@@ -139,10 +145,12 @@ def ingest_subway() -> dict:
     key = config.load_key()
     dag_run_id = current_dag_run_id()
     counts = {}
-    for table, (dataset, collector) in SOURCES.items():
-        records = collector(key)
-        # 1) 객체 메달리온 적재 (bronze 원본 + silver 변환) — records 재사용
-        _land_objects(dataset, key, records, dag_run_id)
+    for table, dataset in SOURCES.items():
+        # target(역/호선)당 1회만 호출 → records(silver/bronze테이블) + raws(bronze객체) 동시 확보
+        res = collect_subway(key, dataset)
+        records, raws = res["records"], res["raws"]
+        # 1) 객체 메달리온 적재 (bronze 원본 + silver 변환)
+        _land_objects(dataset, raws, records, dag_run_id)
         # 2) Iceberg bronze 적재
         counts[dataset] = _load_bronze(table, records, dag_run_id)
     print(f"ingest counts: {counts}")
@@ -153,7 +161,7 @@ with DAG(
     dag_id="transit_subway_elt",
     description="지하철 실시간 → R2 raw 랜딩 → Iceberg bronze(Trino). silver/gold 는 ASAC-DBT.",
     start_date=datetime(2026, 1, 1),
-    schedule=config.schedule_for("subway", "*/5 * * * *"),
+    schedule=config.schedule_for("subway", "*/20 * * * *"),
     catchup=False,
     max_active_runs=1,
     tags=["seoul", "transit", "subway", "ingest", "bronze", "trino", "iceberg"],

@@ -1,54 +1,44 @@
 """지하철 도착·위치 → 원본 보존 엔벨로프.
 
 raw = 원본 행 그대로. ts_source = recptnDt. 좌표는 응답에 없어 None.
-도착↔위치 join 키 = trainNo (raw 안에 있음).
+도착↔위치 join 키 = trainNo (도착 btrainNo == 위치 trainNo).
+
+다중 target 수집: 도착=여러 역, 위치=여러 호선. target 당 1회만 호출(이중 호출 없음) —
+한 번의 응답에서 silver용 envelope 와 bronze용 원본을 같이 뽑는다.
 """
 
 from . import config
 from .api import get, subway_url
 from .records import envelope, now_kst
 
-# dataset -> (service, list_key, target_attr)
+# dataset -> (service, list_key, targets_attr, rows_attr, source)
 _DATASETS = {
-    "subway_arrival": ("realtimeStationArrival", "realtimeArrivalList", "SUBWAY_STATION"),
-    "subway_position": ("realtimePosition", "realtimePositionList", "SUBWAY_LINE"),
+    "subway_arrival":  ("realtimeStationArrival", "realtimeArrivalList",  "SUBWAY_STATIONS", "ARRIVAL_ROWS",  "subway_arrival"),
+    "subway_position": ("realtimePosition",       "realtimePositionList", "SUBWAY_LINES",    "POSITION_ROWS", "subway_position"),
 }
 
 
-def fetch_subway_raw(key: str, dataset: str) -> dict:
-    """원본 API 응답 dict 와 메타 반환 (R2 raw 적재용, 가공 없음).
+def collect_subway(key: str, dataset: str) -> dict:
+    """dataset(arrival/position)을 설정된 전 target(역/호선)에 1회씩 호출.
 
-    반환: {raw, rows, endpoint, request_params}
+    반환:
+      {"records": [envelope, ...],                               # silver / bronze 테이블용
+       "raws":    [{raw, rows, endpoint, request_params}, ...]}  # target별 원본 (bronze 객체용)
     """
-    service, list_key, target_attr = _DATASETS[dataset]
-    target = getattr(config, target_attr)
-    rows_cap = config.ARRIVAL_ROWS if dataset == "subway_arrival" else config.POSITION_ROWS
-    d = get(subway_url(key, service, rows_cap, target))
-    return {
-        "raw": d,
-        "rows": len(d.get(list_key, [])),
-        "endpoint": service,
-        "request_params": {"target": target, "rows": rows_cap},
-    }
-
-
-def collect_subway_arrival(key: str) -> list:
-    """역명 기준 실시간 도착정보."""
+    service, list_key, targets_attr, rows_attr, source = _DATASETS[dataset]
+    rows_cap = getattr(config, rows_attr)
     tc = now_kst()
-    url = subway_url(key, "realtimeStationArrival", config.ARRIVAL_ROWS, config.SUBWAY_STATION)
-    d = get(url)
-    return [
-        envelope("subway_arrival", r, ts_source=r.get("recptnDt"), ts_collected=tc)
-        for r in d.get("realtimeArrivalList", [])
-    ]
-
-
-def collect_subway_position(key: str) -> list:
-    """호선 기준 실시간 열차 위치."""
-    tc = now_kst()
-    url = subway_url(key, "realtimePosition", config.POSITION_ROWS, config.SUBWAY_LINE)
-    d = get(url)
-    return [
-        envelope("subway_position", r, ts_source=r.get("recptnDt"), ts_collected=tc)
-        for r in d.get("realtimePositionList", [])
-    ]
+    records, raws = [], []
+    for target in getattr(config, targets_attr):
+        d = get(subway_url(key, service, rows_cap, target))
+        rows = d.get(list_key, [])
+        records.extend(
+            envelope(source, r, ts_source=r.get("recptnDt"), ts_collected=tc) for r in rows
+        )
+        raws.append({
+            "raw": d,
+            "rows": len(rows),
+            "endpoint": service,
+            "request_params": {"target": target, "rows": rows_cap},
+        })
+    return {"records": records, "raws": raws}

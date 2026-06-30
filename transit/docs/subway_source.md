@@ -6,6 +6,27 @@ silver/gold 설계·도메인 통합 시 레퍼런스. 필드는 **실제 적재
 - 인증키: `SEOUL_API` (서울 열린데이터광장, 실시간 권한)
 - 수집 코드: [`seoul_transit/subway.py`](../seoul_transit/subway.py) · [`api.py`](../seoul_transit/api.py)
 
+## 사용 API (정식 명칭)
+
+| # | 서비스명 | 서비스ID | 호스트/엔드포인트 | 우리 사용 |
+|---|---------|---------|------------------|:--:|
+| 1 | **서울시 지하철 실시간 도착정보** | OA-12764 | `swopenapi.seoul.go.kr/api/subway/.../realtimeStationArrival` | ✅ 도착 |
+| 2 | **서울시 지하철 실시간 열차 위치정보** | OA-12601 | `swopenapi.seoul.go.kr/api/subway/.../realtimePosition` | ✅ 위치 |
+| 3 | 서울시 실시간 도시데이터(citydata) | — | `openapi.seoul.go.kr:8088/.../citydata/1/5/{장소명}` | ❌ 지하철엔 미사용(별개 API) |
+
+> #1·#2 는 지하철 전용 호스트(`swopenapi…`), #3 citydata 는 다른 호스트(`openapi…:8088`)의 장소 번들 API.
+> citydata 응답 안에도 지하철 도착(`SUB_STTS`)이 들어있으나, 이 도메인은 **#1·#2(지하철 전용 API)를 사용**한다.
+
+## 수집 스코프 & 호출 예산
+
+| dataset | API | 단위 | 기본 대상 | env |
+|---------|-----|------|----------|-----|
+| `subway_position` | #2 위치 | **호선** | **1~9호선** (9) | `SUBWAY_LINES` |
+| `subway_arrival` | #1 도착 | **역** | **강남·잠실·사당** (3, 핵심 환승역) | `SUBWAY_STATIONS` |
+
+- **호출량**: target 당 1콜(이중 호출 없음) → 1런 = 9+3 = **12콜**. 스케줄 `*/20`(72런/일) → **864콜/일 < 일일 1000건**.
+- 도착 전 역(수백 개)은 1000/일 한도로 불가 → **핵심 환승역만**. 호선·역은 env 로 조정(`SUBWAY_LINES`/`SUBWAY_STATIONS`), 주기는 `SUBWAY_SCHEDULE`.
+
 ---
 
 ## 0. 공통 — 수집 엔벨로프 & 시각 규약
@@ -36,7 +57,7 @@ silver/gold 설계·도메인 통합 시 레퍼런스. 필드는 **실제 적재
 |------|----|
 | 엔드포인트 | `http://swopenapi.seoul.go.kr/api/subway/{KEY}/json/realtimeStationArrival/0/{N}/{역명}` |
 | 리스트 키 | `realtimeArrivalList` |
-| 호출 스코프 | `SUBWAY_STATION`(기본 강남), `SUBWAY_ARRIVAL_ROWS`(기본 20) |
+| 호출 스코프 | `SUBWAY_STATIONS`(기본 강남,잠실,사당 — 핵심 환승역), `SUBWAY_ARRIVAL_ROWS`(기본 20) |
 | `source` | `subway_arrival` |
 
 ### 주요 필드 (raw)
@@ -80,7 +101,7 @@ silver/gold 설계·도메인 통합 시 레퍼런스. 필드는 **실제 적재
 |------|----|
 | 엔드포인트 | `http://swopenapi.seoul.go.kr/api/subway/{KEY}/json/realtimePosition/0/{N}/{호선명}` |
 | 리스트 키 | `realtimePositionList` |
-| 호출 스코프 | `SUBWAY_LINE`(기본 2호선), `SUBWAY_POSITION_ROWS`(기본 100) |
+| 호출 스코프 | `SUBWAY_LINES`(기본 1~9호선), `SUBWAY_POSITION_ROWS`(기본 200) |
 | `source` | `subway_position` |
 
 ### 주요 필드 (raw)
@@ -133,9 +154,9 @@ silver/gold 설계·도메인 통합 시 레퍼런스. 필드는 **실제 적재
 
 **R2 객체** (`seoul-dev` 버킷, 멘티 dev):
 ```
-bronze/transit/seoul_subway/<dataset>/load_date=YYYY-MM-DD/ingest_ts=…/page-0001.json   # 원본 응답
-silver/transit/seoul_subway/<dataset>/load_date=YYYY-MM-DD/ingest_ts=…/page-0001.jsonl  # envelope 변환
-+ _manifest.json (rows·endpoint·request_params·run_id)
+bronze/transit/seoul_subway/<dataset>/load_date=YYYY-MM-DD/ingest_ts=…/page-NNNN.json   # 원본 응답 (target=역/호선 당 1페이지)
+silver/transit/seoul_subway/<dataset>/load_date=YYYY-MM-DD/ingest_ts=…/page-0001.jsonl  # 전 target envelope 합본
++ _manifest.json (rows·endpoint·request_params.targets·run_id)
 ```
 
 **Iceberg 테이블** `iceberg_dev.dev_codingpoppy94.bronze_subway_{arrival,position}`:
