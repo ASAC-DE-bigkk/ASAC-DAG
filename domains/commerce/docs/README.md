@@ -33,7 +33,7 @@ docs/
 ├─ operations/     operations.md · deploy-local.md · deploy-dev.md · deploy-prod.md
 ├─ pipeline/       common_info.md
 │  └─ bronze/      pagination-ordering.md · api-call-volume.md · status-tracking-model.md · uncollectable-datasets.md
-└─ security/       security.md
+└─ security/       security.md · adoption.md
 ```
 
 코드: [../include/](../include/) (`common`·`bronze`·`silver`) · DAG [../seoul_commerce_dag.py](../seoul_commerce_dag.py) ·

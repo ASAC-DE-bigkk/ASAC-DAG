@@ -812,6 +812,8 @@ Before finalizing, check:
 - Is backfill considered where relevant?
 - Is failure/retry behavior considered?
 - Is the response useful to a working developer?
+- **Security (§20)**: 시크릿이 로그·예외·저장물(at-rest)·알림으로 샐 수 있는 코드를 추가/수정했다면
+  `redact()`/입력검증을 적용했는가? 마무리 전 `python -m security` 가 차단(CRITICAL/HIGH) 0 인가?
 
 
 If not, revise before responding.
@@ -835,8 +837,8 @@ Continuation / porting guarantee: **everything an agent needs to continue is und
 the runtime env file `.env.commerce`, and the change log `change-log.md`. When `dags/` is moved
 into another Airflow project, read `dags/domains/<category>/CLAUDE.md` then `Share.md` to resume.
 Keep all CLAUDE-chain links (CLAUDE.md → Share.md → project_setting/configuration/common_info/
-README/**change-log**) **inside the bundle** — never point the continuation path at host-project
-files, since those do not travel with `dags/`.
+README/**change-log**/**security**) **inside the bundle** — never point the continuation path at
+host-project files, since those do not travel with `dags/`.
 
 
 ### Change Log Rule (대단위 변경 기록)
@@ -881,7 +883,46 @@ Rules to follow when adding or editing pipeline code:
 
 When asked to share context, point to [Share.md](Share.md) — it links the heritage
 spec, the runtime-args contract ([docs/configuration.md](docs/configuration/configuration.md)), the
-pipeline contract ([docs/common_info.md](docs/pipeline/common_info.md)), and operations docs.
+pipeline contract ([docs/common_info.md](docs/pipeline/common_info.md)), operations docs, and the
+**security gate** ([docs/security/security.md](docs/security/security.md), §20 below).
+
+
+## 20. Security Gate (수시 불러오기·적용·점검)
+
+
+이 번들은 시크릿 누출·입력 주입·흔한 취약 패턴을 막는 **보안 서브시스템**을 갖는다.
+코드: [include/security/](include/security/) (stdlib·이식 가능) · 위협모델/로직:
+[docs/security/security.md](docs/security/security.md) · 타 번들 이식: [docs/security/adoption.md](docs/security/adoption.md).
+이 셋은 CLAUDE-chain(§19)에 포함되어 세션이 바뀌어도 따라온다.
+
+
+**Recall (불러오기)**: 보안에 닿는 작업 전 [docs/security/security.md](docs/security/security.md) 를 읽는다.
+다른 번들/프로젝트로 가져갈 때는 [docs/security/adoption.md](docs/security/adoption.md) 를 따른다(복사-붙여넣기 프롬프트 포함).
+
+
+**Apply (적용 트리거)** — 아래에 해당하는 코드를 추가/수정하면 즉시 대응:
+
+
+- 외부 API/네트워크 예외·URL 을 **로그**에 남김 → `redact()` (예외가 저장물로 가면 필수)
+- error/메타데이터를 **스토리지/마커/DB 에 저장** → 저장 전 `redact()` (at-rest 누출 차단)
+- 외부 채널(**webhook/email/slack**)로 전송 → `redact(message)`·`redact(context)`
+- **사용자 입력**(params)을 경로/식별자로 사용 → `assert_iso_date()` / `assert_safe_segment()`
+- **새 시크릿 env** → 이름을 `KEY/SECRET/TOKEN/CREDENTIAL/ACCESS_KEY/…` 규칙에 맞춤(자동 마스킹) 또는 `register_secret()`
+- **새 DAG/엔트리포인트** → env 적재 직후 `install_log_redaction()` 1회
+- HTTP 는 `timeout=` · yaml 은 `safe_load` · `eval/exec/pickle/shell=True/verify=False` 금지
+
+
+**Check (점검 — 단일 포인트)**: 작업 마무리 전 항상 실행, 차단(CRITICAL/HIGH) 0 이어야 한다.
+
+
+```bash
+PYTHONPATH=dags/domains/commerce/include python -m security
+PYTHONPATH=dags/domains/commerce/include pytest dags/domains/commerce/tests/test_security.py -q
+```
+
+
+새 점검은 [include/security/audit.py](include/security/audit.py) 에 `check_*(root)->Finding` 추가 후
+`STATIC_CHECKS` 에 등록하면 종합검증에 자동 포함된다. 이 게이트는 §18 Final Quality Gate 에도 들어 있다.
 
 
 

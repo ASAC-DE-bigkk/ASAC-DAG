@@ -28,9 +28,13 @@
   **bronze 마커 at-rest 키 비노출 end-to-end**), `python -m security` 차단 이슈 0.
 - **이식성**: `include/security/` 디렉터리 복사 + DAG 한 줄(`install_log_redaction()`) + 누출
   지점 `redact()` 로 타 번들/프로젝트에 일괄 적용. 시크릿은 env 이름 규칙으로 자동 식별.
+- **점검/연결 구조(거버넌스)**: 에이전트(Claude/Codex)가 수시로 불러오고 적용·점검하도록 연결.
+  CLAUDE.md **§20 Security Gate**(Recall/Apply 트리거/Check) + §18 Final Quality Gate 에 보안 항목 +
+  §19 CLAUDE-chain 에 `security` 포함(세션 이동에도 따라옴). Share.md **§5 보안** 섹션.
+  타 프로젝트 이식 가이드 `docs/security/adoption.md`(복사-붙여넣기 프롬프트 포함) 신설.
 - 파일: `include/security/*`(신규), `seoul_commerce_dag.py`, `include/bronze/clients.py`,
   `include/bronze/bronze_tasks.py`, `include/common/notify.py`, `tests/test_security.py`(신규),
-  `docs/security/*`(신규), `docs/README.md`·`Share.md`(인덱스).
+  `docs/security/{README,security,adoption}.md`(신규), `docs/README.md`·`Share.md`·`README.md`·`CLAUDE.md`(인덱스/규약).
 
 ### 15. silver 가공을 bronze DAG에서 분리 — DAG 라인은 원본 수집(bronze) 전용
 - **배경**: `seoul_commerce_daily`/`seoul_commerce_recollect` 의 공통 흐름(`_wire`)이 bronze 수집과
