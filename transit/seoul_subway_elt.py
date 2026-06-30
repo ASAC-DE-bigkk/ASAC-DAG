@@ -6,8 +6,8 @@ sample(dbt_trino_iceberg_smoke) 패턴을 따른다:
 차이: 소스가 고정 CSV 가 아니라 실시간 API(seoul_transit collector).
 
 이 DAG = Bronze 한정(도메인 부트스트랩 + 지하철 적재). silver/gold/dbt 는 ASAC-DBT 별도 이슈.
-동봉 패키지 seoul_transit 는 같은 폴더에 있어 Airflow 가 DAG 디렉터리를 sys.path 에 올리므로
-`from seoul_transit import ...` 가 그대로 import 된다.
+동봉 패키지 seoul_transit 는 같은 폴더에 있고, Airflow 3.x 는 dags 하위 디렉터리를
+sys.path 에 자동 추가하지 않으므로(plugins 마운트도 없음) 아래에서 직접 path 에 올려 import 한다.
 """
 
 import json
