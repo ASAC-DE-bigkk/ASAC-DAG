@@ -41,6 +41,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-rows", type=int, default=None, help="서울 행 수 상한")
     p.add_argument("--max-detail", type=int, default=200)
     p.add_argument("--include-detail", action="store_true")
+    p.add_argument("--write-iceberg", action="store_true", help="R2 적재 후 bronze Iceberg 테이블에도 적재(Trino)")
     p.add_argument("--dry-run", action="store_true", help="로컬 디렉토리에 기록, R2 건너뜀")
     p.add_argument("--local-dir", default="./_dryrun")
     p.add_argument("--run-id", default="manual")
@@ -57,6 +58,7 @@ def main(argv=None) -> int:
         max_rows=args.max_rows,
         max_detail=args.max_detail,
         include_detail=args.include_detail,
+        write_iceberg=args.write_iceberg,
     )
 
     try:

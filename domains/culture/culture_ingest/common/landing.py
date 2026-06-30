@@ -85,6 +85,7 @@ class DatasetResult:
     object_keys: list[str] = field(default_factory=list)
     error: str = ""
     checks: dict = field(default_factory=dict)  # 수집 검증 결과 (common.checks.evaluate_landing)
+    iceberg_rows: int = 0  # bronze Iceberg 테이블에 적재된 행 수 (write_iceberg 시)
 
     @property
     def ok(self) -> bool:
@@ -102,6 +103,7 @@ class DatasetResult:
             "bytes": self.bytes_written,
             "error": self.error,
             "checks": self.checks,
+            "iceberg_rows": self.iceberg_rows,
         }
 
 

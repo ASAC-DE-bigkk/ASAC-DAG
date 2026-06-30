@@ -20,6 +20,8 @@ from culture_ingest.common.config import (
     missing_r2,
 )
 from culture_ingest.common.landing import DatasetResult, Landing, LocalSink, R2Sink
+from culture_ingest.common.records import parse_records
+from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_settings
 
 from . import config as culture_config
 from .clients import KopisClient, SeoulClient
@@ -37,6 +39,7 @@ class IngestOptions:
     max_rows: int | None = None  # 서울 행 수 상한 (None = 전체)
     max_detail: int = 200  # KOPIS 상세 엔드포인트에서 크롤할 id 상한
     include_detail: bool = False  # kopis_detail 데이터셋 실행 여부
+    write_iceberg: bool = False  # R2 적재 후 bronze Iceberg 테이블에도 적재(Trino)
 
 
 @dataclass
@@ -81,24 +84,42 @@ def _manifest(ds: Dataset, ctx: RunContext, result: DatasetResult, params: dict)
     }
 
 
-def ingest_dataset(ds: Dataset, clients: Clients, landing: Landing, opts: IngestOptions) -> DatasetResult:
+def ingest_dataset(
+    ds: Dataset,
+    clients: Clients,
+    landing: Landing,
+    opts: IngestOptions,
+    warehouse: BronzeWarehouse | None = None,
+) -> DatasetResult:
     """데이터셋 1개를 받아 페이지 + 매니페스트를 적재한다. 에러는 예외로 던지지 않고
     결과(result)에 담아, 배치가 한 데이터셋 실패를 넘어 계속 돌 수 있게 한다.
+
+    ``warehouse``가 주어지면 R2 적재 후 bronze Iceberg 테이블에도 적재한다.
     """
     prefix = landing.prefix_for(ds.source, ds.name)
     result = DatasetResult(name=ds.name, source=ds.source, endpoint=ds.endpoint, prefix=prefix)
     sample_body: bytes | None = None  # 첫 페이지 = 드리프트(관측 스키마) 점검용 샘플
+    # Iceberg 적재 시에만 페이지 본문을 모은다(아니면 메모리 낭비 없이 카운트만).
+    landed_pages: list[tuple[str, str, bytes]] = []  # (page_no, raw_object_key, body)
+
+    def _record_page(filename: str, key: str, body: bytes) -> None:
+        nonlocal sample_body
+        sample_body = sample_body or body
+        if warehouse is not None:
+            landed_pages.append((filename, key, body))
+
     try:
         if ds.kind == "kopis_list":
             # KOPIS 목록: 페이지를 끝까지 돌며 각 페이지를 page-NNNN.xml로 적재.
             params = _with_date_window(ds.endpoint, ds.base_params, opts)
             for page in clients.kopis.list_pages(ds.endpoint, params, opts.kopis_rows, opts.max_pages):
-                key = landing.write_page(prefix, f"page-{page.index:04d}.xml", page.body, "xml")
+                filename = f"page-{page.index:04d}.xml"
+                key = landing.write_page(prefix, filename, page.body, "xml")
                 result.pages += 1
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-                sample_body = sample_body or page.body
+                _record_page(filename, key, page.body)
 
         elif ds.kind == "kopis_boxoffice":
             # 예매상황판: 페이징 없이 단일 GET 1건만 적재(page-0001.xml).
@@ -109,18 +130,19 @@ def ingest_dataset(ds: Dataset, clients: Clients, landing: Landing, opts: Ingest
             result.rows += page.row_count
             result.bytes_written += len(page.body)
             result.object_keys.append(key)
-            sample_body = page.body
+            _record_page("page-0001.xml", key, page.body)
 
         elif ds.kind == "seoul_list":
             # 서울 목록: 1000행 윈도우를 page-NNNNNN.json으로 적재.
             params = {"service": ds.endpoint}
             for page in clients.seoul.list_pages(ds.endpoint, opts.max_rows):
-                key = landing.write_page(prefix, f"page-{page.index:06d}.json", page.body, "json")
+                filename = f"page-{page.index:06d}.json"
+                key = landing.write_page(prefix, filename, page.body, "json")
                 result.pages += 1
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-                sample_body = sample_body or page.body
+                _record_page(filename, key, page.body)
 
         elif ds.kind == "kopis_detail":
             # 상세: 목록에서 id를 모아 건별 상세를 id=<값>.xml로 적재.
@@ -130,13 +152,14 @@ def ingest_dataset(ds: Dataset, clients: Clients, landing: Landing, opts: Ingest
             id_params = _with_date_window(ds.id_source_endpoint, ds.base_params, opts)
             ids = clients.kopis.list_ids(ds.id_source_endpoint, id_params, ds.id_field, opts.max_detail)
             for identifier in ids:
+                filename = f"id={identifier}.xml"
                 page = clients.kopis.detail(ds.endpoint, identifier)
-                key = landing.write_page(prefix, f"id={identifier}.xml", page.body, "xml")
+                key = landing.write_page(prefix, filename, page.body, "xml")
                 result.pages += 1
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-                sample_body = sample_body or page.body
+                _record_page(filename, key, page.body)
             params = {**ds.base_params, "id_field": ds.id_field, "max_detail": opts.max_detail, "ids": len(ids)}
 
         else:
@@ -149,6 +172,16 @@ def ingest_dataset(ds: Dataset, clients: Clients, landing: Landing, opts: Ingest
         if result.checks["violations"]:
             print(f"  [contract] {ds.name}: " + " | ".join(result.checks["violations"]))
         landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params))
+
+        # bronze Iceberg 적재 (선택): 페이지를 레코드로 풀어 테이블에 INSERT.
+        if warehouse is not None and result.rows > 0:
+            records = [
+                (key, filename, rec)
+                for filename, key, body in landed_pages
+                for rec in parse_records(ds.source, body, ds.row_tag, ds.endpoint)
+            ]
+            result.iceberg_rows = warehouse.load(ds, landing.ctx, records)
+            print(f"  [iceberg] {ds.name}: {result.iceberg_rows} rows -> {warehouse.qualified(ds.name)}")
     except Exception as exc:  # noqa: BLE001 -- 데이터셋별로 잡아 두고 배치는 계속 진행
         result.error = f"{type(exc).__name__}: {exc}"
     return result
@@ -191,6 +224,7 @@ def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int
             "coverage_pct": round(100.0 * len(landed) / expected_total, 1) if expected_total else 0.0,
         },
         "total_rows": sum(s["rows"] for s in landed),
+        "total_iceberg_rows": sum(s.get("iceberg_rows", 0) for s in landed),
         "freshness": {"max_age_hours": max(ages) if ages else None},
         "violation_count": len(violations),
         "violations": violations,
@@ -255,6 +289,11 @@ def build_landing(
     return Landing(R2Sink(settings), root, ctx)
 
 
+def build_warehouse(target: str = "prod") -> BronzeWarehouse:
+    """bronze Iceberg 적재용 Trino 웨어하우스(환경변수 기반)."""
+    return BronzeWarehouse(build_warehouse_settings(target))
+
+
 def run_batch(
     names: list[str] | None,
     *,
@@ -269,7 +308,8 @@ def run_batch(
     ctx = RunContext.create(run_id=run_id)
     clients = build_clients(env_file)
     landing = build_landing(ctx, target=target, env_file=env_file, dry_run=dry_run, local_dir=local_dir)
-    results = [ingest_dataset(ds, clients, landing, opts) for ds in select(names)]
+    warehouse = build_warehouse(target) if opts.write_iceberg and not dry_run else None
+    results = [ingest_dataset(ds, clients, landing, opts, warehouse) for ds in select(names)]
     return ctx, results
 
 
@@ -291,4 +331,5 @@ def ingest_one(
     ds = BY_NAME[name]
     clients = build_clients(env_file)
     landing = build_landing(ctx, target=target, env_file=env_file, dry_run=dry_run, local_dir=local_dir)
-    return ingest_dataset(ds, clients, landing, opts)
+    warehouse = build_warehouse(target) if opts.write_iceberg and not dry_run else None
+    return ingest_dataset(ds, clients, landing, opts, warehouse)
