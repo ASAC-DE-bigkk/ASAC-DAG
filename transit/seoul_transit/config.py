@@ -34,6 +34,9 @@ BUS_ROUTES = [s.strip() for s in os.environ.get(
     "BUS_ROUTES", "100100025,100100454,100100075,100100022,100100549"
 ).split(",") if s.strip()]
 
+# 공영주차 실시간(GetParkingInfo) — 단일 호출로 전체(123개). N 은 충분히 크게.
+PARKING_ROWS = int(os.environ.get("PARKING_ROWS", "1000"))
+
 
 def load_key(var: str = "SEOUL_API") -> str:
     """API 인증키를 환경변수에서 로드 (compose env_file 로 주입)."""
