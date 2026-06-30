@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 
-# 동봉 패키지(seoul_transit)는 이 DAG 파일과 같은 폴더(dags/transit/)에 있다.
+# 동봉 패키지(seoul_transit)는 이 DAG 파일과 같은 폴더(dags/domains/transit/)에 있다.
 # Airflow 3.x 는 dags 하위 디렉터리를 sys.path 에 자동 추가하지 않고(plugins 마운트도 없음),
 # 그래서 자기 폴더를 직접 path 에 올려 패키지를 import 한다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
