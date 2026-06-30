@@ -52,6 +52,10 @@ DAG 임포트 시 [include/common/env.py](include/common/env.py) 의 `load_comme
 | `R2_BUCKET` | `${R2_DEV_BUCKET_NAME}` | 루트는 `R2_DEV_BUCKET_NAME`/`R2_BUCKET_NAME`, commerce 는 `R2_BUCKET` — 참조로 매핑 |
 | `SEOUL_PAGE_SIZE` / `SEOUL_MAX_PAGES` | `1000` / (없음) | 페이지 크기 / 비우면 무제한(끝까지 순회) |
 
+> **보안**: 시크릿(인증키·R2 자격증명)이 로그·예외·마커(at-rest)·알림으로 새지 않게 마스킹하고,
+> 흔한 취약 패턴을 정적 점검한다. 단일 종합검증: `PYTHONPATH=…/include python -m security`.
+> 위협 모델·처리 로직: [docs/security/security.md](docs/security/security.md), 코드: [include/security/](include/security/).
+
 ## 빠른 시작
 
 호스트 Airflow 스택(`elt-infra`)을 띄운다(루트에서, 루트 `.env` 사용):

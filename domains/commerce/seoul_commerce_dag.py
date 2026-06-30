@@ -39,6 +39,12 @@ from common.env import load_commerce_env  # noqa: E402
 
 load_commerce_env()
 
+# 보안: env 적재 직후 로그 시크릿 마스킹 설치(이후 모든 commerce 로그/예외에서 키 자동 마스킹).
+# 종합검증/처리 로직: docs/security/security.md
+from security import assert_iso_date, install_log_redaction  # noqa: E402
+
+install_log_redaction()
+
 import pendulum
 from airflow.decorators import dag, task
 from airflow.models.param import Param
@@ -96,6 +102,8 @@ def _run_ds(ctx) -> str:
 @task
 def resolve_observed_date(**ctx) -> str:
     override = (ctx["params"].get("observed_date") or "").strip()
+    if override:
+        assert_iso_date(override)   # 경로 주입 방지 + 계약(YYYY-MM-DD). 잘못된 입력은 즉시 실패.
     observed_date = override or _run_ds(ctx)
     log.info("observed_date=%s (collectible=%d, pending=%d)",
              observed_date, len(COLLECTIBLE_SHORTS), len(PENDING))

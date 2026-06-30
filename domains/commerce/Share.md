@@ -41,6 +41,7 @@
 | [docs/deploy-local.md](docs/operations/deploy-local.md) · [docs/deploy-dev.md](docs/operations/deploy-dev.md) · [docs/deploy-prod.md](docs/operations/deploy-prod.md) | 배포 |
 | [docs/architecture.md](docs/architecture/architecture.md) · [docs/operations.md](docs/operations/operations.md) | 아키텍처 · 운영 런북 |
 | [docs/recollect-and-alerts.md](docs/operations/recollect-and-alerts.md) | 재수집 DAG · 알림 인터페이스(비활성) · API별 진행 가시성 |
+| [docs/security/security.md](docs/security/security.md) | **보안 대응** — 시크릿 마스킹·입력검증·정적점검 + **단일 포인트 종합검증**(`python -m security`). 코드: [include/security/](include/security/) (stdlib·이식 가능) |
 | [change-log.md](change-log.md) | 변경 이력(작성일·순서 내림차순) |
 
 ## 핵심 한 줄 요약
