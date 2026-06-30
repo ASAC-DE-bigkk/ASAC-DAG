@@ -2,12 +2,12 @@
 
 Examples
 --------
-  # dry run -> local scratch, no R2, prove the pipeline
+  # dry run -> local scratch, no R2, prove the pipeline (run from domains/culture)
   python scripts/run_culture_ingest.py --dry-run --local-dir ./_dryrun \
-      --env-file ../sample/.env --date-from 20260601 --date-to 20260628
+      --env-file ../../../sample/.env --date-from 20260601 --date-to 20260628
 
   # real landing -> seoul-dev bucket (all 12, detail capped)
-  python scripts/run_culture_ingest.py --target dev --env-file ../sample/.env \
+  python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.env \
       --date-from 20260101 --date-to 20261231 --include-detail --max-detail 200
 """
 
@@ -17,11 +17,11 @@ import argparse
 import os
 import sys
 
-# Make the `ingestion` package importable whether run from repo root or scripts/.
+# Make the `culture_ingest` package importable (parent of scripts/ = domains/culture).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ingestion.domains.culture.config import LANDING_ROOT  # noqa: E402
-from ingestion.domains.culture.ingest import IngestOptions, run_batch  # noqa: E402
+from culture_ingest.source.config import LANDING_ROOT  # noqa: E402
+from culture_ingest.source.ingest import IngestOptions, run_batch  # noqa: E402
 
 
 def parse_args(argv=None) -> argparse.Namespace:

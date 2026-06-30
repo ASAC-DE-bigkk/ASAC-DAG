@@ -12,12 +12,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ingestion.common.config import (
+from culture_ingest.common.config import (
     RunContext,
     build_r2_settings,
     missing_r2,
 )
-from ingestion.common.landing import DatasetResult, Landing, LocalSink, R2Sink
+from culture_ingest.common.landing import DatasetResult, Landing, LocalSink, R2Sink
 
 from . import config as culture_config
 from .clients import KopisClient, SeoulClient

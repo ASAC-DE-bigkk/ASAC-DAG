@@ -1,6 +1,6 @@
 """Culture-domain config: landing root + source API keys.
 
-The R2 target (shared) comes from ``ingestion.common.config``; only the
+The R2 target (shared) comes from ``culture_ingest.common.config``; only the
 culture-specific source keys and the bronze landing root live here.
 """
 
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ingestion.common.config import load_env_file, pick
+from culture_ingest.common.config import load_env_file, pick
 
 # Raw-as-ingested objects land under the culture domain's bronze layer prefix.
 LANDING_ROOT = "bronze/culture"

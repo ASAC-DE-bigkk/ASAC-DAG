@@ -2,7 +2,7 @@
 
 Daily batch. Fetches each adopted culture dataset from KOPIS / Seoul Open Data and
 lands the raw API responses to R2 under ``bronze/culture/`` (see
-``ingestion/domains/culture``). One mapped task per dataset, so a single dataset
+``culture_ingest``). One mapped task per dataset, so a single dataset
 failing is isolated, retriable, and visible in the grid.
 
 Secrets come from the container environment (compose ``env_file: .env`` injects
@@ -29,12 +29,12 @@ from airflow import DAG
 from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.python import PythonOperator
 
-# Repo root (= dags_folder) on sys.path so `ingestion.*` is importable.
+# This file's dir (domains/culture) on sys.path so `culture_ingest.*` imports.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ingestion.common.config import RunContext  # noqa: E402
-from ingestion.domains.culture.datasets import enabled_datasets  # noqa: E402
-from ingestion.domains.culture.ingest import IngestOptions, ingest_one  # noqa: E402
+from culture_ingest.common.config import RunContext  # noqa: E402
+from culture_ingest.source.datasets import enabled_datasets  # noqa: E402
+from culture_ingest.source.ingest import IngestOptions, ingest_one  # noqa: E402
 
 KST = "Asia/Seoul"
 

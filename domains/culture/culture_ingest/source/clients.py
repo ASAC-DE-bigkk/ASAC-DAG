@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 
-from ingestion.common.http import Page, build_session
+from culture_ingest.common.http import Page, build_session
 
 KOPIS_BASE = "http://www.kopis.or.kr/openApi/restful"
 SEOUL_BASE = "http://openapi.seoul.go.kr:8088"
