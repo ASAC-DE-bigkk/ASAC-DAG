@@ -9,7 +9,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
@@ -132,6 +132,7 @@ with DAG(
     schedule=config.schedule_for("parking", "*/20 * * * *"),
     catchup=False,
     max_active_runs=1,
+    default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},
     tags=["seoul", "transit", "parking", "ingest", "bronze", "trino", "iceberg"],
 ) as dag:
     ingest = PythonOperator(
