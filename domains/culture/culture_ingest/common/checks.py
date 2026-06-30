@@ -14,43 +14,22 @@
 
 from __future__ import annotations
 
-import json
 import re
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+
+from culture_ingest.common.records import parse_records
 
 # ingest_ts 포맷: "%Y%m%dT%H%M%SZ" (UTC)
 _INGEST_TS_RE = re.compile(r"^(\d{8})T(\d{6})Z$")
 
 
 def extract_record_fields(source: str, body: bytes, row_tag: str, endpoint: str) -> list[str]:
-    """원본 페이지 1장에서 레코드 한 건의 필드(태그/키) 이름 집합을 뽑는다.
+    """원본 페이지 1장에서 레코드 한 건의 필드(태그/키) 이름 목록을 뽑는다.
 
-    드리프트 감지의 기준이 되는 "관측된 스키마". 파싱 실패는 빈 목록으로 흘려보낸다
-    (bronze는 원본을 이미 보존했으므로 점검 실패가 적재를 막지 않는다).
+    드리프트 감지의 기준이 되는 "관측된 스키마". 첫 레코드의 키를 본다.
     """
-    try:
-        if source == "kopis":
-            root = ET.fromstring(body)
-            elem = next(root.iter(row_tag), None)
-            if elem is None:
-                return []
-            return sorted({child.tag for child in elem})
-        # seoul (JSON)
-        payload = json.loads(body.decode("utf-8", "ignore"))
-        container = payload.get(endpoint) if isinstance(payload, dict) else None
-        if not isinstance(container, dict):
-            # 서비스명 키를 못 찾으면 "row"를 품은 dict를 탐색
-            for value in (payload.values() if isinstance(payload, dict) else []):
-                if isinstance(value, dict) and "row" in value:
-                    container = value
-                    break
-        rows = (container or {}).get("row") or []
-        if rows and isinstance(rows[0], dict):
-            return sorted(rows[0].keys())
-        return []
-    except Exception:
-        return []
+    records = parse_records(source, body, row_tag, endpoint)
+    return sorted(records[0].keys()) if records else []
 
 
 def freshness_age_hours(ingest_ts: str, now: datetime | None = None) -> float | None:

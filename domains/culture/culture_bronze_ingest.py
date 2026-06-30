@@ -15,6 +15,8 @@ R2 ``bronze/culture/`` 아래에 적재한다(``culture_ingest`` 참고). 데이
   include_detail  KOPIS 상세 엔드포인트도 크롤(상한 있음)               기본 True
   max_detail      상세 크롤당 id 상한                                  기본 200
   kopis_rows      KOPIS 목록 페이지 크기                               기본 100
+  write_iceberg   R2 적재 후 bronze Iceberg 테이블에도 적재(Trino)     기본 False
+  fail_on_violation  계약 위반 시 run 실패                             기본 False
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ DEFAULT_PARAMS = {
     "max_detail": 200,
     "kopis_rows": 100,
     "fail_on_violation": False,  # True면 계약 위반(완전성·드리프트·freshness) 시 run 실패
+    "write_iceberg": False,  # True면 R2 적재 후 bronze Iceberg 테이블에도 적재(Trino)
 }
 
 
@@ -97,6 +100,7 @@ def _plan(**context) -> list[dict]:
             "include_detail": include_detail,
             "max_detail": int(params["max_detail"]),
             "kopis_rows": int(params["kopis_rows"]),
+            "write_iceberg": bool(params["write_iceberg"]),
         }
         for name in names
     ]
@@ -113,6 +117,7 @@ def _ingest(
     include_detail: bool,
     max_detail: int,
     kopis_rows: int,
+    write_iceberg: bool,
     **context,
 ) -> dict:
     """데이터셋 1개를 적재 (매핑 태스크 1개). 실패 시 AirflowException으로 그 태스크만 실패."""
@@ -123,9 +128,13 @@ def _ingest(
         kopis_rows=kopis_rows,
         max_detail=max_detail,
         include_detail=include_detail,
+        write_iceberg=write_iceberg,
     )
     result = ingest_one(name, ctx=ctx, opts=opts, target=target)
-    print(f"{name}: pages={result.pages} rows={result.rows} bytes={result.bytes_written} {result.error}")
+    print(
+        f"{name}: pages={result.pages} rows={result.rows} bytes={result.bytes_written} "
+        f"iceberg_rows={result.iceberg_rows} {result.error}"
+    )
     if result.error and "skipped" not in result.error:
         raise AirflowException(f"{name} failed: {result.error}")
     return result.summary()
