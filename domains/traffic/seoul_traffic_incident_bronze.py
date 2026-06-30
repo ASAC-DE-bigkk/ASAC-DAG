@@ -219,6 +219,16 @@ def create_schema_if_needed(cursor, qualified_schema: str) -> None:
             raise
 
 
+def ensure_seoul_traffic_bronze_schema(cursor, qualified_table: str) -> None:
+    for column_name, column_type in (
+        ("request_params_json", "varchar"),
+        ("load_date", "varchar"),
+    ):
+        cursor.execute(
+            f"ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
+        )
+
+
 def create_seoul_traffic_bronze_table(cursor, catalog: str, schema: str) -> str:
     qualified_schema = f"{catalog}.{schema}"
     qualified_table = f"{qualified_schema}.{BRONZE_TABLE}"
@@ -259,6 +269,7 @@ def create_seoul_traffic_bronze_table(cursor, catalog: str, schema: str) -> str:
         )
         """
     )
+    ensure_seoul_traffic_bronze_schema(cursor, qualified_table)
     return qualified_table
 
 
