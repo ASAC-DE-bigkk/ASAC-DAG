@@ -18,13 +18,15 @@ Airflow 카테고리 번들이다. **서빙 DB·외부 매니페스트 없이** 
 ```text
 bronze  {prefix}/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl   # API당 1파일(원본 페이지 NDJSON)
 state   .../run_id=<...>/_markers/<short>.completed|.incomplete + _RUN.*                        # 수집 결과 마커(DB·매니페스트 대체)
-silver  {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet  # 공통 19컬럼 정규화
+silver  {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet  # 공통 19컬럼 정규화 (로직만 보존·DAG 미와이어링)
 ```
 
+- **현 DAG 라인은 bronze(원본 수집) 전용**이다. silver 가공 로직은 [include/silver/](include/silver/)
+  에 보존되어 있으나 DAG 오케스트레이션에서 분리되어 있다(별도 silver DAG 없음).
 - **전체 순회 + 완전성 점검**: 1회 ≤1000건(`SEOUL_PAGE_SIZE`)씩 마지막 페이지까지 순회하고
   수집건수 == `list_total_count` 를 확인해야 `completed` 마커. 불완전은 `incomplete` 마커.
 - **DAG 실행 1회 = run_id 폴더 1개**, bronze 는 그 폴더 안에서만 파일 생성.
-- **중복/재수집**: 매 실행 전체 수집(스킵 없음) → **중복 제거는 silver 가 `MGTNO` 로**.
+- **중복/재수집**: 매 실행 전체 수집(스킵 없음) → **중복 제거는 silver 가 `MGTNO` 로**(silver 로직 기준).
 
 ## 환경변수 (정상 동작 조건)
 

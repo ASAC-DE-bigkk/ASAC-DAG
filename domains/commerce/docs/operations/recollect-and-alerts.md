@@ -8,7 +8,7 @@ bronze 저장 구조(run_id 폴더 + 마커)를 기반으로 한 운영 보조 3
 주기적으로 다시 수집**하는 안전망 DAG.
 
 - 스케줄: `0 */6 * * *`(6시간마다). 수동 트리거도 가능. `max_active_runs=1`.
-- 흐름: `find_incomplete_targets` → `ingest_one.expand` → `build_silver_one` / `finalize_run`.
+- 흐름: `find_incomplete_targets` → `ingest_one.expand` → `finalize_run`. (bronze 전용 — silver 분리)
 - **대상 선정**([../../include/bronze/markers.py](../../include/bronze/markers.py)):
   1. `latest_run_id` — `bronze/commerce/` 아래 가장 최근 `run_id` 폴더(사전식=시간순).
   2. `incomplete_targets` — 수집 대상 중 그 run 에서 **`<short>.completed` 마커가 없는** API
@@ -58,7 +58,7 @@ except Exception as exc:
 
 ## 3. API별 진행 가시성 (Airflow Grid/Graph)
 
-`ingest_one`·`build_silver_one` 은 Dynamic Task Mapping 으로 **API당 1개 태스크 인스턴스**이고,
+`ingest_one` 은 Dynamic Task Mapping 으로 **API당 1개 태스크 인스턴스**이고,
 `map_index_template="{{ short }}"` 로 각 인스턴스를 **API(short) 이름으로 라벨링**한다
 ([../../seoul_commerce_dag.py](../../seoul_commerce_dag.py)).
 

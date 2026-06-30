@@ -7,6 +7,19 @@
 
 ## 2026-06-30
 
+### 15. silver 가공을 bronze DAG에서 분리 — DAG 라인은 원본 수집(bronze) 전용
+- **배경**: `seoul_commerce_daily`/`seoul_commerce_recollect` 의 공통 흐름(`_wire`)이 bronze 수집과
+  silver 적재를 한 DAG 안에 묶고 있었다. bronze 는 "원본 수집"만 담당해야 한다는 역할 경계에 맞춰
+  silver 를 DAG 오케스트레이션에서 **완전히 분리**.
+- **변경**: DAG 파일에서 `from silver import silver_tasks` 임포트, `build_silver_one` 태스크,
+  `_wire` 의 `build_silver_one.expand(...)` 결선을 제거. 흐름은
+  `… → ingest_one.expand → finalize_run` 로 단순화. `finalize_run` 은 ingest 요약만 집계(불변).
+- **보존**: silver **로직은 그대로 유지**(`include/silver/silver_tasks.py`·`validators.py` 무수정).
+  사용자 결정에 따라 **별도 silver DAG 는 생성하지 않음** — 로직만 보존하고 오케스트레이션은 비움.
+  `observed_date` 파라미터/파생값은 여전히 silver 파티션 키 의미로 남는다.
+- 검증: `seoul_commerce_dag.py` 구문 검사 통과 + 잔여 silver 참조는 docstring 설명뿐(임포트/결선 없음).
+- 파일: `seoul_commerce_dag.py`(docstring 다이어그램·임포트·태스크·`_wire`).
+
 ### 14. bronze 경로에 연/월/일 파티션 추가 (`/<YYYY>/<MM>/<DD>/run_id=…`)
 - bronze 저장 구조를 `…/bronze/commerce/run_id=<ts>/…` → **`…/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<ts>/…`**
   로 변경. 연/월/일은 **run_id 날짜에서 파생**(별도 인자 없음) → 같은 날 실행이 같은 날짜 폴더에 모인다.

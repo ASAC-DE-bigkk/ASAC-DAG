@@ -60,9 +60,10 @@ docker compose exec airflow-scheduler sh -lc 'find /opt/airflow/data -maxdepth 4
 
 ## 5. 의존성 주의 (silver)
 
-silver(parquet) 태스크는 `pandas`/`pyarrow` 가 필요하다. 호스트 이미지에 없으면
-`build_silver_one` 이 실패한다 → [requirements.txt](../../requirements.txt) 설치(호스트 변경, 합의 후).
-bronze 만 검증하려면 silver 실패는 무시 가능(bronze 결과는 run_id 폴더의 마커에 남는다).
+현재 DAG 라인은 **bronze 전용**이라 실행에 `pandas`/`pyarrow` 가 필요 없다. silver 가공 로직
+([../../include/silver/](../../include/silver/))은 보존되어 있으나 DAG 에 와이어링되어 있지 않다.
+silver 로직을 직접 돌리거나 향후 별도 DAG 로 붙일 때는 `pandas`/`pyarrow` 가 필요하므로
+[requirements.txt](../../requirements.txt) 설치(호스트 변경, 합의 후).
 
 ## 6. 정리
 
@@ -83,5 +84,5 @@ PYTHONPATH=dags/domains/commerce/include python -m pytest dags/domains/commerce/
 |---|---|
 | `check_api_key` 실패 | `.env.commerce` 의 `SEOUL_OPENAPI_KEY` 미설정/오타 |
 | DAG 안 보임 | `docker compose logs airflow-dag-processor` 에서 import 에러 확인 |
-| `build_silver_one` 실패 | 이미지에 `pandas`/`pyarrow` 없음 → requirements 설치 |
+| silver 로직 실행 시 import 에러 | 이미지에 `pandas`/`pyarrow` 없음 → requirements 설치(현 DAG 라인은 bronze 전용이라 불필요) |
 | 산출물이 사라짐 | local 볼륨 미마운트(위 §4 영속성) → r2 사용 |
