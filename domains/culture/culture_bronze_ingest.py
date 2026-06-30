@@ -59,6 +59,22 @@ DEFAULT_PARAMS = {
 }
 
 
+def _interval_end(context) -> pendulum.DateTime:
+    """실행 기준 시각. 스케줄 run은 data_interval_end를 쓰고, data interval이 없는 run
+    (Airflow 3는 수동 트리거 시 logical_date=None·interval 미부여)은 dag_run.run_after/now로
+    폴백한다. .in_timezone()/.subtract() 사용을 위해 pendulum 인스턴스로 보장.
+    """
+    end = context.get("data_interval_end")
+    if end is None:
+        dag_run = context["dag_run"]
+        end = (
+            getattr(dag_run, "run_after", None)
+            or getattr(dag_run, "logical_date", None)
+            or pendulum.now("UTC")
+        )
+    return pendulum.instance(end)
+
+
 def _plan(**context) -> list[dict]:
     """적재할 데이터셋마다 op_kwargs dict 하나씩을 만들고, 실행 컨텍스트를 공유한다.
 
@@ -66,7 +82,7 @@ def _plan(**context) -> list[dict]:
     재시도한 실행은 같은 파티션을 덮어쓴다.
     """
     params = context["params"]
-    end = context["data_interval_end"]
+    end = _interval_end(context)
     load_date = end.in_timezone(KST).strftime("%Y-%m-%d")
     ingest_ts = end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ")
     run_id = context["dag_run"].run_id
@@ -147,7 +163,7 @@ def _report(**context) -> None:
     숫자로 surface 한다(계획안 Slide 6②·7). 위반이 있으면 run을 실패로 표시한다.
     """
     params = context["params"]
-    end = context["data_interval_end"]
+    end = _interval_end(context)
     ctx = RunContext(
         load_date=end.in_timezone(KST).strftime("%Y-%m-%d"),
         ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
