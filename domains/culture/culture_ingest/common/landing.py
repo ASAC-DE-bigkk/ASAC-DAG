@@ -1,13 +1,13 @@
-"""Landing sink: writes fetched pages to R2 (or local scratch for dry runs).
+"""적재 싱크: 받아온 페이지를 R2(또는 dry-run 시 로컬 디렉토리)에 기록한다.
 
-Layout (inside the target bucket, e.g. ``seoul-dev``)::
+경로 구조 (대상 버킷, 예: ``seoul-dev`` 안)::
 
     <root>/<source>/<dataset>/load_date=<KST>/ingest_ts=<UTC>/page-NNNN.<ext>
     <root>/<source>/<dataset>/load_date=.../ingest_ts=.../_manifest.json
 
-``root`` is supplied by the domain (e.g. ``bronze/culture``). The manifest records
-endpoint, params, page/row counts and timestamps so the downstream bronze load
-and lineage can be reconstructed without re-deriving the run.
+``root``는 도메인이 넘겨준다(예: ``bronze/culture``). 매니페스트는 엔드포인트,
+파라미터, 페이지/행 수, 타임스탬프를 기록해 두므로, 후속 bronze 적재와 리니지가
+실행을 다시 추론하지 않고도 재구성될 수 있다.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .config import R2Settings, RunContext, landing_prefix
 
 
 class Sink:
-    """Abstract write target."""
+    """추상 기록 대상 (R2 또는 로컬)."""
 
     def put(self, key: str, body: bytes, content_type: str) -> None:  # pragma: no cover
         raise NotImplementedError
@@ -30,6 +30,8 @@ class Sink:
 
 
 class R2Sink(Sink):
+    """실제 R2 버킷에 객체를 올리는 싱크 (boto3 S3 클라이언트)."""
+
     def __init__(self, settings: R2Settings):
         import boto3
 
@@ -50,7 +52,7 @@ class R2Sink(Sink):
 
 
 class LocalSink(Sink):
-    """Dry-run sink: mirrors the object layout under a local directory."""
+    """dry-run 싱크: 객체 경로 구조를 로컬 디렉토리에 그대로 재현한다."""
 
     def __init__(self, root_dir: str):
         self.root_dir = root_dir
@@ -65,11 +67,14 @@ class LocalSink(Sink):
         return f"file://{self.root_dir}"
 
 
+# 확장자 -> HTTP Content-Type 매핑
 _CONTENT_TYPE = {"xml": "application/xml", "json": "application/json"}
 
 
 @dataclass
 class DatasetResult:
+    """데이터셋 1개 적재 결과 집계 (페이지/행/바이트 수, 객체 키, 에러)."""
+
     name: str
     source: str
     endpoint: str
@@ -85,7 +90,7 @@ class DatasetResult:
         return not self.error
 
     def summary(self) -> dict:
-        """JSON-serializable summary (for Airflow XCom / CLI reporting)."""
+        """JSON 직렬화 가능한 요약 (Airflow XCom / CLI 리포트용)."""
         return {
             "name": self.name,
             "source": self.source,
@@ -99,7 +104,7 @@ class DatasetResult:
 
 
 class Landing:
-    """Writes pages + manifest for one dataset run under ``root``."""
+    """``root`` 아래에 데이터셋 한 실행분의 페이지 + 매니페스트를 기록한다."""
 
     def __init__(self, sink: Sink, root: str, ctx: RunContext):
         self.sink = sink

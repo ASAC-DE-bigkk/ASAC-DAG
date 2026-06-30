@@ -1,56 +1,75 @@
-# culture domain — bronze ingestion
+# culture 도메인 — bronze 원본 적재
 
-Self-contained Airflow pipeline that lands the culture domain's raw source data
-(KOPIS + Seoul Open Data) into R2 under `bronze/culture/`. Everything for this
-domain lives under `domains/culture/`, matching the repo's per-domain layout.
+문화(culture) 도메인의 원본 소스 데이터(**KOPIS** + **서울 열린데이터광장**)를
+Cloudflare R2의 `bronze/culture/` 경로에 그대로 적재하는 Airflow 파이프라인입니다.
+이 도메인에 필요한 모든 코드는 레포의 **도메인별 디렉토리 규칙**에 맞춰
+`domains/culture/` 한 트리 안에 자기완결로 모여 있습니다.
 
-## Layout
+## 폴더 구조와 역할
 
 ```
 domains/culture/
-├─ culture_bronze_ingest.py        # DAG entry (the ONLY file Airflow scans here)
-├─ culture_ingest/                 # importable package (excluded from DAG scan)
-│  ├─ common/                      #   domain-agnostic: R2 sink, http, run context
-│  │  ├─ config.py                 #     R2Settings, RunContext, landing_prefix
-│  │  ├─ http.py                   #     session/retry, Page
-│  │  └─ landing.py                #     Sink (R2/Local), Landing, DatasetResult
-│  └─ source/                      #   culture source layer
-│     ├─ config.py                 #     LANDING_ROOT, source API keys
-│     ├─ clients.py                #     KOPIS (XML) + Seoul OA (JSON) clients
-│     ├─ datasets.py               #     dataset registry (single source of truth)
-│     └─ ingest.py                 #     orchestration + run_batch / ingest_one
-├─ scripts/run_culture_ingest.py   # local CLI (dry-run / R2 landing)
-└─ .airflowignore                  # keep only the DAG file in DAG scanning
+├─ culture_bronze_ingest.py        # ⭐ Airflow DAG 엔트리 (여기서 유일하게 스캔되는 파일)
+├─ culture_ingest/                 # 임포트 전용 패키지 (DAG 스캔 제외, import만)
+│  ├─ common/                      #   도메인 무관 공통 프레임워크
+│  │  ├─ config.py                 #     R2 접속정보 · 실행 컨텍스트(RunContext) · 파티션 경로 규칙
+│  │  ├─ http.py                   #     재시도 붙은 HTTP 세션 · 페이지(Page) 자료구조
+│  │  └─ landing.py                #     적재 싱크(R2/로컬) · 페이지/매니페스트 기록 · 결과(DatasetResult)
+│  └─ source/                      #   culture 소스 계층 (이 도메인 전용)
+│     ├─ config.py                 #     적재 루트(LANDING_ROOT) · 소스 API 키 로딩
+│     ├─ clients.py                #     KOPIS(XML) · 서울 열린데이터(JSON) HTTP 클라이언트
+│     ├─ datasets.py               #     12개 데이터셋 레지스트리 (단일 진실 원천)
+│     └─ ingest.py                 #     적재 오케스트레이션 (run_batch / ingest_one)
+├─ scripts/
+│  └─ run_culture_ingest.py        # 로컬 실행용 CLI (dry-run / R2 적재)
+├─ .airflowignore                  # DAG 파일만 스캔, 패키지는 import만 되게 제외
+└─ README.md                       # (이 문서)
 ```
 
-Airflow scans the dags folder recursively, so this DAG is picked up at
-`domains/culture/culture_bronze_ingest.py`. `culture_ingest/` and `scripts/`
-are excluded from DAG scanning via `.airflowignore` but stay importable — the
-DAG puts `domains/culture/` on `sys.path` and imports `culture_ingest.*`.
+### 각 파일 역할 한눈에
 
-## Secrets
+| 파일 | 역할 |
+|------|------|
+| `culture_bronze_ingest.py` | 일배치 DAG. `plan → ingest_dataset(데이터셋별 동적 매핑) → report` 흐름. 데이터셋 하나가 실패해도 격리·재시도. |
+| `common/config.py` | R2 접속정보 해석(dev→`R2_DEV_*`, prod→`R2_*`), `.env` 파싱, 실행 1회를 식별하는 `RunContext`, 객체 키 prefix 생성. |
+| `common/http.py` | 429/5xx에 자동 재시도하는 `requests` 세션, 소스 무관 페이지 단위 응답 묶음 `Page`. |
+| `common/landing.py` | 받아온 페이지를 R2(또는 로컬)에 쓰는 싱크, 실행마다 `_manifest.json` 기록, 적재 결과 집계 `DatasetResult`. |
+| `source/config.py` | 적재 루트 `bronze/culture`, KOPIS/서울 API 키 환경변수 로딩·검증. |
+| `source/clients.py` | KOPIS(XML, 페이징/상세/예매상황판)와 서울 열린데이터(JSON, 1000행 윈도우) 호출. **원본 bytes만 받아오고 파싱은 안 함**(파싱은 후속 dbt 몫). |
+| `source/datasets.py` | 채택한 12개 데이터셋을 한 줄씩 정의한 레지스트리. 데이터셋 추가 = 여기 한 줄 추가, 코드 변경 없음. |
+| `source/ingest.py` | 데이터셋 1개 → 원본 객체 + 매니페스트 적재. CLI용 `run_batch`(여러 개)·DAG용 `ingest_one`(1개) 진입점. |
+| `scripts/run_culture_ingest.py` | Airflow 없이 로컬에서 dry-run 또는 실제 R2 적재를 돌리는 CLI. |
 
-The DAG reads keys from the environment. `docker-compose` injects `sample/.env`
-(`env_file:`) into every Airflow container, so `KOPIS_SERVICE_KEY`,
-`SEOUL_OPENAPI_KEY`, and `R2_DEV_*` are available as `os.environ`. Never commit
-keys; `.env` is gitignored in the `sample` superproject.
+Airflow는 dags 폴더를 재귀적으로 스캔하므로 이 DAG는
+`domains/culture/culture_bronze_ingest.py`에서 자동 인식됩니다.
+`culture_ingest/`와 `scripts/`는 `.airflowignore`로 **DAG 스캔에서는 제외**되지만
+import은 됩니다 — DAG가 자기 디렉토리(`domains/culture/`)를 `sys.path`에 넣고
+`culture_ingest.*`를 불러옵니다.
 
-## R2 layout (bronze raw)
+## 시크릿(인증키)
+
+DAG는 키를 **환경변수에서만** 읽습니다. `docker-compose`가 `sample/.env`를
+(`env_file:`로) 모든 Airflow 컨테이너에 주입하므로 `KOPIS_SERVICE_KEY`,
+`SEOUL_OPENAPI_KEY`, `R2_DEV_*`가 `os.environ`으로 들어옵니다.
+**키는 절대 커밋하지 않습니다** — `.env`는 `sample` 상위 레포에서 gitignore 처리됩니다.
+
+## R2 적재 경로 (bronze 원본)
 
 ```
-bronze/culture/<source>/<dataset>/load_date=<KST>/ingest_ts=<UTC>/page-NNNN.<xml|json>
-                                                                 /_manifest.json
+bronze/culture/<소스>/<데이터셋>/load_date=<KST날짜>/ingest_ts=<UTC시각>/page-NNNN.<xml|json>
+                                                                       /_manifest.json
 ```
-`ingest_ts` isolates each run, so retries/partial runs don't corrupt prior data.
+`ingest_ts`가 실행 1회를 격리하므로, 재시도나 중단된 부분 실행이
+이전 데이터를 덮어쓰거나 오염시키지 않습니다.
 
-## Run locally
+## 로컬 실행
 
 ```bash
-# from domains/culture/ — dry-run to a local dir (no R2)
+# domains/culture/ 에서 실행 — 로컬 디렉토리로 dry-run (R2 안 씀)
 python scripts/run_culture_ingest.py --dry-run --local-dir ./_dryrun \
     --env-file ../../../sample/.env --date-from 20260601 --date-to 20260628
 
-# real landing to seoul-dev
+# seoul-dev 버킷에 실제 적재
 python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.env \
     --date-from 20260101 --date-to 20261231 --include-detail --max-detail 200
 ```

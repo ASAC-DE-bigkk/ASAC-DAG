@@ -1,20 +1,20 @@
-"""Airflow DAG: culture domain bronze (raw) ingestion -> R2.
+"""Airflow DAG: culture 도메인 bronze(원본) 적재 -> R2.
 
-Daily batch. Fetches each adopted culture dataset from KOPIS / Seoul Open Data and
-lands the raw API responses to R2 under ``bronze/culture/`` (see
-``culture_ingest``). One mapped task per dataset, so a single dataset
-failing is isolated, retriable, and visible in the grid.
+일배치. 채택한 culture 데이터셋을 KOPIS / 서울 열린데이터에서 받아 원본 API 응답을
+R2 ``bronze/culture/`` 아래에 적재한다(``culture_ingest`` 참고). 데이터셋마다
+매핑 태스크 1개라서, 한 데이터셋 실패가 격리되고 재시도 가능하며 그리드에서 바로 보인다.
 
-Secrets come from the container environment (compose ``env_file: .env`` injects
-``KOPIS_SERVICE_KEY``, ``SEOUL_OPENAPI_KEY``, ``R2_DEV_*``) -- no values live here.
+시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가
+``KOPIS_SERVICE_KEY``, ``SEOUL_OPENAPI_KEY``, ``R2_DEV_*``를 주입) -- 값은 여기 없다.
 
-Params (override at trigger time):
-  target          "dev" | "prod"            (default dev -> bucket seoul-dev)
-  date_from/to    YYYYMMDD; empty -> rolling [end-lookback_days, end]
-  lookback_days   window size for date endpoints (<=31 for boxoffice) default 31
-  include_detail  also crawl KOPIS detail endpoints (bounded)          default True
-  max_detail      id cap per detail crawl                              default 200
-  kopis_rows      KOPIS list page size                                 default 100
+파라미터 (트리거 시 덮어쓰기 가능):
+  target          "dev" | "prod"            (기본 dev -> 버킷 seoul-dev)
+  datasets        적재할 데이터셋 슬러그 일부; 빈 값 -> 활성 전체
+  date_from/to    YYYYMMDD; 비면 -> 롤링 [end-lookback_days, end]
+  lookback_days   날짜창 크기 (boxoffice는 <=31)                       기본 31
+  include_detail  KOPIS 상세 엔드포인트도 크롤(상한 있음)               기본 True
+  max_detail      상세 크롤당 id 상한                                  기본 200
+  kopis_rows      KOPIS 목록 페이지 크기                               기본 100
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from airflow import DAG
 from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.python import PythonOperator
 
-# This file's dir (domains/culture) on sys.path so `culture_ingest.*` imports.
+# 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from culture_ingest.common.config import RunContext  # noqa: E402
@@ -40,7 +40,7 @@ KST = "Asia/Seoul"
 
 DEFAULT_PARAMS = {
     "target": "dev",
-    "datasets": [],  # subset of dataset slugs; empty = all enabled
+    "datasets": [],  # 데이터셋 슬러그 일부; 빈 값 = 활성 전체
     "date_from": "",
     "date_to": "",
     "lookback_days": 31,
@@ -51,10 +51,10 @@ DEFAULT_PARAMS = {
 
 
 def _plan(**context) -> list[dict]:
-    """Build one op_kwargs dict per dataset to ingest, sharing a run context.
+    """적재할 데이터셋마다 op_kwargs dict 하나씩을 만들고, 실행 컨텍스트를 공유한다.
 
-    All mapped tasks land under the same ``ingest_ts`` (derived from the run's
-    data interval, so a retried run overwrites the same partition).
+    모든 매핑 태스크는 같은 ``ingest_ts``(실행의 data interval에서 유도)에 적재되므로,
+    재시도한 실행은 같은 파티션을 덮어쓴다.
     """
     params = context["params"]
     end = context["data_interval_end"]
@@ -62,12 +62,14 @@ def _plan(**context) -> list[dict]:
     ingest_ts = end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ")
     run_id = context["dag_run"].run_id
 
+    # 날짜창: 명시 안 하면 [end-lookback_days, end] 롤링 윈도우 사용.
     date_from = params["date_from"]
     date_to = params["date_to"]
     if not (date_from and date_to):
         date_to = end.in_timezone(KST).strftime("%Y%m%d")
         date_from = end.in_timezone(KST).subtract(days=int(params["lookback_days"])).strftime("%Y%m%d")
 
+    # 데이터셋 필터: include_detail 꺼지면 상세 제외, datasets 지정 시 그 부분집합만.
     include_detail = bool(params["include_detail"])
     wanted = set(params.get("datasets") or [])
     names = [
@@ -107,7 +109,7 @@ def _ingest(
     kopis_rows: int,
     **context,
 ) -> dict:
-    """Ingest a single dataset (one mapped task)."""
+    """데이터셋 1개를 적재 (매핑 태스크 1개). 실패 시 AirflowException으로 그 태스크만 실패."""
     ctx = RunContext(load_date=load_date, ingest_ts=ingest_ts, run_id=run_id)
     opts = IngestOptions(
         date_from=date_from,
@@ -124,6 +126,7 @@ def _ingest(
 
 
 def _report(**context) -> None:
+    """모든 매핑 태스크 결과를 모아 적재 요약을 로그로 남긴다(all_done로 항상 실행)."""
     rows = context["ti"].xcom_pull(task_ids="ingest_dataset") or []
     rows = [r for r in rows if r]
     landed = [r for r in rows if not r["error"]]
@@ -142,13 +145,16 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["ingest", "culture", "bronze", "r2"],
 ) as dag:
+    # 1) plan: 적재할 데이터셋 목록과 공유 ingest_ts를 계산.
     plan = PythonOperator(task_id="plan", python_callable=_plan)
 
+    # 2) ingest_dataset: plan 결과를 동적 매핑해 데이터셋마다 태스크 1개씩 병렬 실행.
     ingest_dataset_task = PythonOperator.partial(
         task_id="ingest_dataset",
         python_callable=_ingest,
     ).expand(op_kwargs=plan.output)
 
+    # 3) report: 일부 데이터셋이 실패해도(all_done) 항상 요약을 남김.
     report = PythonOperator(task_id="report", python_callable=_report, trigger_rule="all_done")
 
     plan >> ingest_dataset_task >> report

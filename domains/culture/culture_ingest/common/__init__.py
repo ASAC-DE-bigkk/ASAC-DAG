@@ -1,1 +1,1 @@
-"""Domain-agnostic ingestion framework (R2 sink, http session, run context)."""
+"""도메인 무관 공통 적재 프레임워크 (R2 싱크, HTTP 세션, 실행 컨텍스트)."""

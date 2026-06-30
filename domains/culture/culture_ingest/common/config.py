@@ -1,9 +1,9 @@
-"""Domain-agnostic runtime config: R2 credentials, run context, env loading.
+"""도메인 무관 런타임 설정: R2 인증정보, 실행 컨텍스트, env 로딩.
 
-Source API keys are domain-specific and live in each domain's own config; this
-module only knows about the shared R2 target and the partition layout. Values
-come from the process environment (Airflow injects ``sample/.env`` via
-``env_file``); a ``.env`` path can also be passed for local runs.
+소스 API 키는 도메인마다 다르므로 각 도메인의 자체 config에 둡니다. 이 모듈은
+공용 R2 적재 대상과 파티션 경로 규칙만 압니다. 값은 프로세스 환경변수에서
+가져오며(Airflow는 ``env_file``로 ``sample/.env``를 주입), 로컬 실행 시에는
+``.env`` 경로를 직접 넘길 수도 있습니다.
 """
 
 from __future__ import annotations
@@ -12,11 +12,11 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
-KST = timezone(timedelta(hours=9))
+KST = timezone(timedelta(hours=9))  # 한국 표준시 (UTC+9)
 
 
 def load_env_file(path: str | None) -> dict[str, str]:
-    """Parse a dotenv-style file into a dict. Missing/empty path -> empty dict."""
+    """dotenv 형식 파일을 dict로 파싱. 경로가 없거나 비면 빈 dict 반환."""
     values: dict[str, str] = {}
     if not path or not os.path.exists(path):
         return values
@@ -35,13 +35,13 @@ def load_env_file(path: str | None) -> dict[str, str]:
 
 
 def pick(name: str, env: dict[str, str]) -> str:
-    """Process env wins over the .env fallback."""
+    """프로세스 환경변수가 .env 폴백보다 우선."""
     return os.environ.get(name) or env.get(name, "")
 
 
 @dataclass(frozen=True)
 class R2Settings:
-    """Cloudflare R2 (S3-compatible) target for one environment."""
+    """한 환경(dev/prod)에 대한 Cloudflare R2(S3 호환) 적재 대상."""
 
     target: str  # "dev" | "prod"
     endpoint: str
@@ -51,9 +51,9 @@ class R2Settings:
 
 
 def build_r2_settings(target: str = "dev", env_file: str | None = None) -> R2Settings:
-    """Resolve R2 settings for ``target``.
+    """``target``에 맞는 R2 설정을 해석.
 
-    dev -> ``R2_DEV_*`` (bucket ``seoul-dev``); prod -> ``R2_*`` (bucket ``seoul``).
+    dev -> ``R2_DEV_*`` (버킷 ``seoul-dev``), prod -> ``R2_*`` (버킷 ``seoul``).
     """
     env = load_env_file(env_file)
     prefix = "R2_DEV_" if target == "dev" else "R2_"
@@ -67,7 +67,7 @@ def build_r2_settings(target: str = "dev", env_file: str | None = None) -> R2Set
 
 
 def missing_r2(settings: R2Settings) -> list[str]:
-    """Names of required-but-empty R2 fields (for preflight error messages)."""
+    """필수인데 비어 있는 R2 필드 이름 목록 (사전 점검 에러 메시지용)."""
     prefix = "R2_DEV_" if settings.target == "dev" else "R2_"
     pairs = (
         ("ENDPOINT", settings.endpoint),
@@ -80,11 +80,11 @@ def missing_r2(settings: R2Settings) -> list[str]:
 
 @dataclass(frozen=True)
 class RunContext:
-    """Identifies a single ingestion run; pins the partition timestamps."""
+    """적재 실행 1회를 식별. 파티션 타임스탬프를 고정한다."""
 
-    load_date: str  # YYYY-MM-DD in KST -- the partition key
-    ingest_ts: str  # YYYYMMDDTHHMMSSZ in UTC -- groups one run's objects
-    run_id: str  # free-form (Airflow run id, or "manual" for CLI)
+    load_date: str  # KST 기준 YYYY-MM-DD -- 파티션 키
+    ingest_ts: str  # UTC 기준 YYYYMMDDTHHMMSSZ -- 한 실행의 객체들을 묶음
+    run_id: str  # 자유 형식 (Airflow run id, CLI는 "manual")
 
     @staticmethod
     def create(run_id: str = "manual") -> "RunContext":
@@ -97,7 +97,7 @@ class RunContext:
 
 
 def landing_prefix(root: str, source: str, dataset: str, ctx: RunContext) -> str:
-    """Object-key prefix for one dataset's run (no trailing slash).
+    """데이터셋 한 번 실행분의 객체 키 prefix (끝에 슬래시 없음).
 
     ``<root>/<source>/<dataset>/load_date=<KST>/ingest_ts=<UTC>``
     """

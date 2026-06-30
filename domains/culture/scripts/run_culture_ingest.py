@@ -1,12 +1,12 @@
-"""Run culture raw ingestion outside Airflow (local R2 landing / dry runs).
+"""Airflow 없이 culture 원본 적재를 돌리는 로컬 CLI (로컬 R2 적재 / dry-run).
 
-Examples
---------
-  # dry run -> local scratch, no R2, prove the pipeline (run from domains/culture)
+예시
+----
+  # dry-run -> 로컬 디렉토리, R2 안 씀, 파이프라인 검증 (domains/culture 에서 실행)
   python scripts/run_culture_ingest.py --dry-run --local-dir ./_dryrun \
       --env-file ../../../sample/.env --date-from 20260601 --date-to 20260628
 
-  # real landing -> seoul-dev bucket (all 12, detail capped)
+  # 실제 적재 -> seoul-dev 버킷 (12개 전체, 상세는 상한 적용)
   python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.env \
       --date-from 20260101 --date-to 20261231 --include-detail --max-detail 200
 """
@@ -17,7 +17,7 @@ import argparse
 import os
 import sys
 
-# Make the `culture_ingest` package importable (parent of scripts/ = domains/culture).
+# `culture_ingest` 패키지를 import 가능하게 (scripts/의 부모 = domains/culture).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from culture_ingest.source.config import LANDING_ROOT  # noqa: E402
@@ -25,18 +25,18 @@ from culture_ingest.source.ingest import IngestOptions, run_batch  # noqa: E402
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Culture raw ingestion -> R2 bronze/culture")
+    p = argparse.ArgumentParser(description="culture 원본 적재 -> R2 bronze/culture")
     p.add_argument("--target", default="dev", choices=["dev", "prod"])
-    p.add_argument("--env-file", default=None, help="dotenv fallback (e.g. ../sample/.env)")
-    p.add_argument("--datasets", nargs="*", default=None, help="slugs or 'all' (default: all enabled)")
-    p.add_argument("--date-from", default="", help="YYYYMMDD for date-window endpoints")
-    p.add_argument("--date-to", default="", help="YYYYMMDD")
+    p.add_argument("--env-file", default=None, help="dotenv 폴백 (예: ../../../sample/.env)")
+    p.add_argument("--datasets", nargs="*", default=None, help="슬러그들 또는 'all' (기본: 활성 전체)")
+    p.add_argument("--date-from", default="", help="날짜창 엔드포인트용 시작일 YYYYMMDD")
+    p.add_argument("--date-to", default="", help="종료일 YYYYMMDD")
     p.add_argument("--kopis-rows", type=int, default=100)
-    p.add_argument("--max-pages", type=int, default=None, help="cap KOPIS list pages")
-    p.add_argument("--max-rows", type=int, default=None, help="cap Seoul rows")
+    p.add_argument("--max-pages", type=int, default=None, help="KOPIS 목록 페이지 상한")
+    p.add_argument("--max-rows", type=int, default=None, help="서울 행 수 상한")
     p.add_argument("--max-detail", type=int, default=200)
     p.add_argument("--include-detail", action="store_true")
-    p.add_argument("--dry-run", action="store_true", help="write to local dir, skip R2")
+    p.add_argument("--dry-run", action="store_true", help="로컬 디렉토리에 기록, R2 건너뜀")
     p.add_argument("--local-dir", default="./_dryrun")
     p.add_argument("--run-id", default="manual")
     return p.parse_args(argv)

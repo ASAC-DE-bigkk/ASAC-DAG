@@ -1,9 +1,9 @@
-"""Registry of the adopted culture datasets.
+"""채택한 culture 데이터셋 레지스트리.
 
-One row per dataset = the entire surface area that ingestion needs. Adding a new
-dataset is a single entry here; no new code. ``load_pattern`` records the
-medallion intent (spec v1) so the downstream bronze/silver dbt models can be
-generated consistently -- it does not affect raw landing.
+데이터셋 한 줄 = 적재에 필요한 정보 전부. 새 데이터셋 추가는 여기 한 줄 추가가
+끝이고 새 코드는 없다. ``load_pattern``은 메달리온 설계 의도(spec v1)를 기록해
+후속 bronze/silver dbt 모델을 일관되게 생성하기 위한 메모다 -- 원본 적재 동작에는
+영향을 주지 않는다.
 """
 
 from __future__ import annotations
@@ -13,24 +13,24 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class Dataset:
-    name: str  # stable slug = partition folder
+    name: str  # 안정적인 슬러그 = 파티션 폴더명
     source: str  # "kopis" | "seoul"
     kind: str  # "kopis_list" | "kopis_detail" | "kopis_boxoffice" | "seoul_list"
-    # endpoint: KOPIS path (e.g. "pblprfr") or Seoul service (e.g. "culturalEventInfo")
+    # endpoint: KOPIS 경로(예: "pblprfr") 또는 서울 서비스명(예: "culturalEventInfo")
     endpoint: str
-    load_pattern: str  # "interval_append" | "snapshot_append" | "scd2_dim"
+    load_pattern: str  # "interval_append"(구간) | "snapshot_append"(스냅샷) | "scd2_dim"(차원)
     title: str
-    uses_date_window: bool = False  # endpoints that take stdate/eddate
-    # detail kind only: where to harvest ids from
+    uses_date_window: bool = False  # stdate/eddate 날짜창을 받는 엔드포인트인지
+    # 아래 둘은 detail 종류에서만 사용: id를 어디서 수집할지
     id_source_endpoint: str = ""
     id_field: str = ""
     base_params: dict = field(default_factory=dict)
-    row_tag: str = "db"  # XML row element ("db" for most KOPIS, "boxof" for boxoffice)
+    row_tag: str = "db"  # XML 행 요소 (대부분 KOPIS는 "db", 예매상황판은 "boxof")
     enabled: bool = True
     note: str = ""
 
 
-# --- KOPIS (XML) --------------------------------------------------------------
+# --- KOPIS (XML) -- 공연예술통합전산망 --------------------------------------------
 KOPIS_DATASETS = [
     Dataset(
         name="kopis_performance",
@@ -51,7 +51,7 @@ KOPIS_DATASETS = [
         title="공연상세(pblprfr/{mt20id})",
         id_source_endpoint="pblprfr",
         id_field="mt20id",
-        base_params={"signgucode": "11"},  # 11 = 서울 (bounds the detail crawl to Seoul)
+        base_params={"signgucode": "11"},  # 11 = 서울 (상세 크롤 범위를 서울로 한정)
     ),
     Dataset(
         name="kopis_facility",
@@ -97,7 +97,7 @@ KOPIS_DATASETS = [
     ),
 ]
 
-# --- Seoul Open Data Plaza (JSON) ---------------------------------------------
+# --- 서울 열린데이터광장 (JSON) ---------------------------------------------------
 SEOUL_DATASETS = [
     Dataset(
         name="seoul_cultural_event",
@@ -156,11 +156,12 @@ BY_NAME = {ds.name: ds for ds in ALL_DATASETS}
 
 
 def enabled_datasets() -> list[Dataset]:
+    """활성화(enabled)된 데이터셋만 반환."""
     return [ds for ds in ALL_DATASETS if ds.enabled]
 
 
 def select(names: list[str] | None) -> list[Dataset]:
-    """Resolve a selection. ``None`` or ['all'] -> all enabled datasets."""
+    """선택 목록을 해석. ``None`` 또는 ['all']이면 -> 활성 데이터셋 전체."""
     if not names or names == ["all"]:
         return enabled_datasets()
     chosen: list[Dataset] = []

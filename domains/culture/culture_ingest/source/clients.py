@@ -1,8 +1,8 @@
-"""HTTP clients for the two culture data sources.
+"""두 culture 데이터 소스용 HTTP 클라이언트.
 
-Both clients only *fetch* raw bytes -- they do not parse business fields. Parsing
-belongs to the downstream bronze->silver dbt layer. The only inspection done here
-is the minimum needed to drive pagination and to record row counts in the manifest.
+두 클라이언트 모두 원본 bytes를 *받아오기만* 한다 -- 업무 필드는 파싱하지 않는다.
+파싱은 후속 bronze->silver dbt 레이어의 몫이다. 여기서 하는 응답 들여다보기는
+페이징을 돌리고 매니페스트에 행 수를 기록하는 데 필요한 최소한이 전부다.
 """
 
 from __future__ import annotations
@@ -15,22 +15,22 @@ from culture_ingest.common.http import Page, build_session
 KOPIS_BASE = "http://www.kopis.or.kr/openApi/restful"
 SEOUL_BASE = "http://openapi.seoul.go.kr:8088"
 
-# KOPIS list pages are XML <dbs><db>...</db></dbs>; count <db> entries per page.
+# KOPIS 목록 페이지는 XML <dbs><db>...</db></dbs> 형태 -- 페이지당 <db> 개수를 센다.
 _KOPIS_DB_RE = re.compile(r"<db>")
-# Seoul caps a single request window at 1000 rows.
+# 서울 API는 한 번 요청 윈도우를 최대 1000행으로 제한한다.
 SEOUL_WINDOW = 1000
 
 
 class KopisError(RuntimeError):
-    pass
+    """KOPIS 응답이 에러를 담고 있을 때 발생."""
 
 
 class SeoulError(RuntimeError):
-    pass
+    """서울 열린데이터 응답 코드가 정상이 아닐 때 발생."""
 
 
 class KopisClient:
-    """KOPIS open API (XML)."""
+    """KOPIS 공연예술통합전산망 open API (XML)."""
 
     def __init__(self, service_key: str, timeout: int = 30):
         self.service_key = service_key
@@ -38,6 +38,7 @@ class KopisClient:
         self.session = build_session()
 
     def _get(self, path: str, params: dict) -> bytes:
+        # 모든 요청에 인증키(service)를 붙이고, 응답 앞부분에 에러 태그가 있으면 예외.
         params = {"service": self.service_key, **params}
         resp = self.session.get(f"{KOPIS_BASE}/{path}", params=params, timeout=self.timeout)
         resp.raise_for_status()
@@ -49,13 +50,14 @@ class KopisClient:
 
     @staticmethod
     def _count(body: bytes) -> int:
+        # 페이지 안의 <db> 개수 = 행 수.
         return len(_KOPIS_DB_RE.findall(body.decode("utf-8", "ignore")))
 
     def list_pages(self, path: str, base_params: dict, rows: int, max_pages: int | None):
-        """Yield :class:`Page` objects paging a KOPIS list endpoint.
+        """KOPIS 목록 엔드포인트를 페이징하며 :class:`Page`를 하나씩 내보낸다.
 
-        Stops when a page returns fewer than ``rows`` items (last page) or when
-        ``max_pages`` is reached.
+        한 페이지가 ``rows``보다 적게 오면(마지막 페이지) 또는 ``max_pages``에
+        도달하면 멈춘다.
         """
         page = 1
         while True:
@@ -76,15 +78,15 @@ class KopisClient:
         return Page(index=1, body=body, row_count=self._count(body), ext="xml")
 
     def fetch_once(self, path: str, params: dict, row_tag: str) -> Page:
-        """Single GET (no pagination). Used for boxoffice, which returns a fixed
-        period ranking under <boxof> and ignores cpage/rows.
+        """단일 GET(페이징 없음). 예매상황판(boxoffice) 전용 -- 기간 랭킹을
+        <boxof> 아래로 한 번에 주고 cpage/rows를 무시한다.
         """
         body = self._get(path, params)
         count = len(re.findall(rf"<{row_tag}>", body.decode("utf-8", "ignore")))
         return Page(index=1, body=body, row_count=count, ext="xml")
 
     def list_ids(self, path: str, base_params: dict, id_field: str, limit: int) -> list[str]:
-        """Collect up to ``limit`` ids from a list endpoint (for detail crawls)."""
+        """목록 엔드포인트에서 최대 ``limit``개의 id를 수집한다(상세 크롤용)."""
         id_re = re.compile(rf"<{id_field}>(.*?)</{id_field}>")
         ids: list[str] = []
         for page in self.list_pages(path, base_params, rows=100, max_pages=None):
@@ -95,7 +97,7 @@ class KopisClient:
 
 
 class SeoulClient:
-    """Seoul Open Data Plaza open API (JSON)."""
+    """서울 열린데이터광장 open API (JSON)."""
 
     def __init__(self, api_key: str, timeout: int = 30):
         self.api_key = api_key
@@ -113,14 +115,14 @@ class SeoulClient:
         else:
             result = payload.get("RESULT", {})
         code = result.get("CODE", "")
-        # INFO-000 = ok, INFO-200 = no rows (acceptable terminal state).
+        # INFO-000 = 정상, INFO-200 = 데이터 없음(정상 종료로 간주).
         if code not in ("INFO-000", "INFO-200"):
             raise SeoulError(f"Seoul error for {service}: {result}")
         return body, payload.get(service, {})
 
     def list_pages(self, service: str, max_rows: int | None):
-        """Yield :class:`Page` windows of a Seoul service until exhausted."""
-        # First window also tells us the total count.
+        """서울 서비스를 1000행 윈도우 단위로 소진할 때까지 :class:`Page`로 내보낸다."""
+        # 첫 윈도우 응답이 전체 건수(list_total_count)도 알려준다.
         body, container = self._get_window(service, 1, SEOUL_WINDOW)
         total = int(container.get("list_total_count", 0))
         rows = container.get("row", []) or []
@@ -128,6 +130,7 @@ class SeoulClient:
             return
         yield Page(index=1, body=body, row_count=len(rows), ext="json")
 
+        # 남은 행을 1000개씩 윈도우를 밀어가며 가져온다(max_rows 있으면 거기까지).
         target = total if max_rows is None else min(total, max_rows)
         start = SEOUL_WINDOW + 1
         while start <= target:
