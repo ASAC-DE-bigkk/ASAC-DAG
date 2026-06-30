@@ -161,34 +161,53 @@ class BronzeWarehouse:
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
         collected = "TIMESTAMP " + _lit(now_utc)
         col_list = "(" + ", ".join(_COLUMNS) + ")"
+        prefix = f"INSERT INTO {table} {col_list} VALUES "
+
+        # 배치를 행 수(batch_size)뿐 아니라 **SQL 텍스트 길이**로도 끊는다.
+        # record_json이 큰 데이터셋(전시·세종 등)은 500행이면 INSERT가 Trino
+        # 최대 쿼리 길이(1,000,000자)를 넘기므로, 누적 바이트 한계로 안전하게 분할.
+        max_sql_chars = 800_000
 
         inserted = 0
-        for start in range(0, len(records), batch_size):
-            chunk = records[start : start + batch_size]
-            values = []
-            for offset, (raw_object_key, page_no, record) in enumerate(chunk):
-                record_json = json.dumps(record, ensure_ascii=False)
-                values.append(
-                    "("
-                    + ", ".join(
-                        [
-                            _lit(ds.name),
-                            _lit(ds.source),
-                            _lit(ds.endpoint),
-                            str(start + offset),
-                            _lit(record_json),
-                            _lit(raw_object_key),
-                            _lit(page_no),
-                            _lit(ctx.load_date),
-                            _lit(ctx.ingest_ts),
-                            _lit(ctx.run_id),
-                            collected,
-                        ]
-                    )
-                    + ")"
+        buffer: list[str] = []
+        buffer_len = len(prefix)
+
+        def _flush() -> None:
+            nonlocal inserted, buffer, buffer_len
+            if buffer:
+                self.client.execute(prefix + ", ".join(buffer))
+                inserted += len(buffer)
+                buffer = []
+                buffer_len = len(prefix)
+
+        for seq, (raw_object_key, page_no, record) in enumerate(records):
+            record_json = json.dumps(record, ensure_ascii=False)
+            value = (
+                "("
+                + ", ".join(
+                    [
+                        _lit(ds.name),
+                        _lit(ds.source),
+                        _lit(ds.endpoint),
+                        str(seq),
+                        _lit(record_json),
+                        _lit(raw_object_key),
+                        _lit(page_no),
+                        _lit(ctx.load_date),
+                        _lit(ctx.ingest_ts),
+                        _lit(ctx.run_id),
+                        collected,
+                    ]
                 )
-            self.client.execute(f"INSERT INTO {table} {col_list} VALUES " + ", ".join(values))
-            inserted += len(chunk)
+                + ")"
+            )
+            # 행 수 또는 SQL 길이 상한에 닿으면 먼저 비운다(현재 value는 다음 배치로).
+            if buffer and (len(buffer) >= batch_size or buffer_len + len(value) + 2 > max_sql_chars):
+                _flush()
+            buffer.append(value)
+            buffer_len += len(value) + 2
+
+        _flush()
         return inserted
 
     def count(self, dataset: str, ingest_ts: str | None = None) -> int:
