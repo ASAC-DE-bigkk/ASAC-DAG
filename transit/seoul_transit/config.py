@@ -9,6 +9,7 @@
 """
 
 import os
+import urllib.parse
 from datetime import timedelta, timezone
 
 KST = timezone(timedelta(hours=9))
@@ -27,6 +28,12 @@ SUBWAY_STATIONS = [s.strip() for s in os.environ.get(
 ARRIVAL_ROWS = int(os.environ.get("SUBWAY_ARRIVAL_ROWS", "20"))
 POSITION_ROWS = int(os.environ.get("SUBWAY_POSITION_ROWS", "200"))
 
+# 버스(서울 TOPIS) — 노선(busRouteId) 단위. 기본: 간선 146·361·472·143·100.
+# 전 노선은 호출량 큼 → 핵심 노선만. busRouteId 는 노선목록 API(busRouteInfo)로 확보.
+BUS_ROUTES = [s.strip() for s in os.environ.get(
+    "BUS_ROUTES", "100100025,100100454,100100075,100100022,100100549"
+).split(",") if s.strip()]
+
 
 def load_key(var: str = "SEOUL_API") -> str:
     """API 인증키를 환경변수에서 로드 (compose env_file 로 주입)."""
@@ -34,6 +41,14 @@ def load_key(var: str = "SEOUL_API") -> str:
     if not value:
         raise RuntimeError(f"{var} 환경변수가 설정돼 있지 않음 (sample/.env 에 추가 필요)")
     return value
+
+
+def load_bus_key(var: str = "PUBLIC_DATA_API_DE") -> str:
+    """버스(공공데이터포털 Decoding) 키 → URL 인코딩해서 반환.
+
+    Decoding 키(`/`·`==` 포함)는 그대로 쓰면 ACCESS DENIED → quote 필수.
+    """
+    return urllib.parse.quote(load_key(var), safe="")
 
 
 def schedule_for(source: str, default: str) -> str:
