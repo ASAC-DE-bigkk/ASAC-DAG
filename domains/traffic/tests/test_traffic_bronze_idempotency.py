@@ -51,8 +51,14 @@ def test_traffic_insert_replaces_same_retry_scope_before_append():
     )
 
     assert inserted == 1
-    assert len(cursor.statements) == 2
-    delete_sql, insert_sql = cursor.statements
+    assert len(cursor.statements) == 4
+    audit_delete_sql, audit_insert_sql, delete_sql, insert_sql = cursor.statements
+    assert audit_delete_sql.startswith(
+        "DELETE FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit WHERE"
+    )
+    assert audit_insert_sql.startswith(
+        "INSERT INTO iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit"
+    )
     assert delete_sql.startswith("DELETE FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident WHERE")
     assert f"source_id = '{SOURCE_ID}'" in delete_sql
     assert "dag_run_id = 'scheduled__2026-07-01T09:15:00+09:00'" in delete_sql

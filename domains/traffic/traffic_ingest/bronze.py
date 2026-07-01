@@ -12,6 +12,7 @@ from traffic_ingest.common.runtime import (
 
 
 BRONZE_TABLE = "bronze_seoul_traffic_incident"
+REQUEST_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
 KST = ZoneInfo("Asia/Seoul")
 
 
@@ -66,7 +67,124 @@ def create_seoul_traffic_bronze_table(cursor, catalog: str, schema: str) -> str:
         """
     )
     ensure_seoul_traffic_bronze_schema(cursor, qualified_table)
+    create_seoul_traffic_request_audit_table(cursor, qualified_schema)
     return qualified_table
+
+
+def create_seoul_traffic_request_audit_table(cursor, qualified_schema: str) -> str:
+    qualified_table = f"{qualified_schema}.{REQUEST_AUDIT_TABLE}"
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {qualified_table} (
+            request_id varchar,
+            source_id varchar,
+            request_params_json varchar,
+            start_index integer,
+            end_index integer,
+            raw_object_key varchar,
+            payload_hash varchar,
+            http_status integer,
+            result_code varchar,
+            result_msg varchar,
+            list_total_count integer,
+            row_count integer,
+            collected_at timestamp(6),
+            load_date varchar,
+            dag_run_id varchar
+        )
+        WITH (
+            format = 'PARQUET'
+        )
+        """
+    )
+    return qualified_table
+
+
+def request_audit_table_for(qualified_bronze_table: str) -> str:
+    qualified_schema = qualified_bronze_table.rsplit(".", 1)[0]
+    return f"{qualified_schema}.{REQUEST_AUDIT_TABLE}"
+
+
+def metadata_int(metadata: dict, key: str) -> int:
+    value = metadata.get(key)
+    if value is None or value == "":
+        return 0
+    return int(value)
+
+
+def validate_seoul_traffic_row_count(rows: list[dict], metadata: dict) -> None:
+    list_total_count = metadata_int(metadata, "list_total_count")
+    if list_total_count > 0 and not rows:
+        raise RuntimeError(
+            "Seoul traffic bronze validation failed: "
+            f"list_total_count={list_total_count}, parsed row_count=0"
+        )
+
+
+def insert_seoul_traffic_request_audit(
+    cursor,
+    qualified_bronze_table: str,
+    rows: list[dict],
+    metadata: dict,
+    request_id: str,
+    start_index: int,
+    end_index: int,
+    raw_object_key: str,
+    raw_hash: str,
+    http_status: int,
+    collected_at: datetime,
+    dag_run_id: str,
+) -> None:
+    qualified_audit_table = request_audit_table_for(qualified_bronze_table)
+    load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
+    request_params = request_params_json(start_index, end_index)
+    cursor.execute(
+        f"""
+        DELETE FROM {qualified_audit_table}
+        WHERE source_id = {sql_string(SOURCE_ID)}
+            AND dag_run_id = {sql_string(dag_run_id)}
+            AND start_index = {sql_int(start_index)}
+            AND end_index = {sql_int(end_index)}
+        """
+    )
+    cursor.execute(
+        f"""
+        INSERT INTO {qualified_audit_table} (
+            request_id,
+            source_id,
+            request_params_json,
+            start_index,
+            end_index,
+            raw_object_key,
+            payload_hash,
+            http_status,
+            result_code,
+            result_msg,
+            list_total_count,
+            row_count,
+            collected_at,
+            load_date,
+            dag_run_id
+        )
+        VALUES (
+            {sql_string(request_id)},
+            {sql_string(SOURCE_ID)},
+            {sql_string(request_params)},
+            {sql_int(start_index)},
+            {sql_int(end_index)},
+            {sql_string(raw_object_key)},
+            {sql_string(raw_hash)},
+            {sql_int(http_status)},
+            {sql_string(metadata.get('result_code'))},
+            {sql_string(metadata.get('result_msg'))},
+            {sql_int(metadata.get('list_total_count'))},
+            {sql_int(len(rows))},
+            {sql_timestamp(collected_at)},
+            {sql_string(load_date)},
+            {sql_string(dag_run_id)}
+        )
+        """
+    )
 
 
 def insert_seoul_traffic_bronze_rows(
@@ -83,6 +201,22 @@ def insert_seoul_traffic_bronze_rows(
     collected_at: datetime,
     dag_run_id: str,
 ) -> int:
+    validate_seoul_traffic_row_count(rows, metadata)
+    insert_seoul_traffic_request_audit(
+        cursor=cursor,
+        qualified_bronze_table=qualified_table,
+        rows=rows,
+        metadata=metadata,
+        request_id=request_id,
+        start_index=start_index,
+        end_index=end_index,
+        raw_object_key=raw_object_key,
+        raw_hash=raw_hash,
+        http_status=http_status,
+        collected_at=collected_at,
+        dag_run_id=dag_run_id,
+    )
+
     cursor.execute(
         f"""
         DELETE FROM {qualified_table}
@@ -199,6 +333,27 @@ def verify_seoul_traffic_bronze_runtime(
             "Seoul traffic bronze verification failed: "
             f"expected_rows={expected_rows}, actual_rows={table_rows}"
         )
+    if expected_rows == 0 and raw_object_key:
+        audit_table = request_audit_table_for(qualified_table)
+        audit_filters = [
+            f"source_id = {sql_string(SOURCE_ID)}",
+            f"raw_object_key = {sql_string(raw_object_key)}",
+        ]
+        if dag_run_id:
+            audit_filters.append(f"dag_run_id = {sql_string(dag_run_id)}")
+        cursor.execute(
+            f"""
+            SELECT count(*) AS request_audit_rows
+            FROM {audit_table}
+            WHERE {" AND ".join(audit_filters)}
+            """
+        )
+        audit_row = cursor.fetchone()
+        if int(audit_row[0]) != 1:
+            raise RuntimeError(
+                "Seoul traffic bronze verification failed: "
+                f"expected_request_audit_rows=1, actual_request_audit_rows={audit_row[0]}"
+            )
     if expected_rows and int(row[1]) != 1:
         raise RuntimeError(f"Seoul traffic bronze verification failed: raw_object_count={row[1]}")
     print(
