@@ -128,27 +128,49 @@ def check_api_key() -> dict:
 
 @task
 def plan_all_targets() -> list[str]:
-    """daily: 수집 대상 전체(중복 제거는 silver)."""
-    log.info("plan(daily): 수집 대상 %d종", len(COLLECTIBLE_SHORTS))
-    return list(COLLECTIBLE_SHORTS)
+    """daily: 수집 대상 전체. 단, **동일 KST 일자에 이미 completed 인 API 는 제외**(feat/59).
+
+    같은 날 (수동) 재실행 시 이미 성공한 API 는 다시 수집하지 않는다.
+    """
+    settings = get_settings()
+    storage = get_storage()
+    kst_today = datetime.now(KST).strftime("%Y-%m-%d")
+    targets = markers.plan_excluding_same_day_completed(
+        storage, settings.storage_prefix, kst_today, list(COLLECTIBLE_SHORTS))
+    log.info("plan(daily, kst=%s): 대상 %d/%d종 (동일자 성공분 제외)",
+             kst_today, len(targets), len(COLLECTIBLE_SHORTS))
+    return targets
 
 
 @task
 def find_incomplete_targets() -> list[str]:
-    """recollect: 최근 run 에서 completed 가 아닌(미완료/미시도) API만. 없으면 빈 리스트 → 수집 안 함."""
+    """recollect: 최근 run 의 incomplete 중 **KST 날짜가 오늘과 같은** 것만(feat/59).
+
+    KST 일자가 바뀌면 그 정보는 다른 일자라 재수집하지 않는다(빈 리스트) — 새 일자 수집이 처리.
+    """
     settings = get_settings()
     storage = get_storage()
-    latest = markers.latest_run_id(storage, settings.storage_prefix)
-    targets = markers.incomplete_targets(storage, settings.storage_prefix, latest, COLLECTIBLE_SHORTS)
-    log.info("recollect: latest_run=%s, 재수집 대상=%d %s", latest, len(targets), targets)
+    kst_today = datetime.now(KST).strftime("%Y-%m-%d")
+    targets = markers.recollect_targets_same_day(
+        storage, settings.storage_prefix, COLLECTIBLE_SHORTS, kst_today)
+    log.info("recollect(kst=%s): 재수집 대상=%d %s", kst_today, len(targets), targets)
     return targets
 
 
 @task(map_index_template="{{ short }}")          # Airflow Grid/Graph 에 API(short)로 라벨
 def ingest_one(short: str, observed_date: str, bronze_run_id: str, **ctx) -> dict:
     get_current_context()["short"] = short        # 매핑 인스턴스 라벨 = API 이름
-    return bronze_tasks.fetch_dataset_to_bronze(
+    summary = bronze_tasks.fetch_dataset_to_bronze(
         registry.by_short(short), observed_date, ctx["run_id"], bronze_run_id)
+    if summary.get("status") == "ok":             # feat/59: 성공 시 같은 KST 일자 실패 파편 정리(한 파일)
+        try:
+            removed = markers.cleanup_incomplete(
+                get_storage(), get_settings().storage_prefix, short, keep_run_id=bronze_run_id)
+            if removed:
+                log.info("%s: 이전 실패 파편 %d개 정리(한 파일 관리)", short, len(removed))
+        except Exception as exc:                  # 정리 실패가 수집을 막지 않게
+            log.warning("%s: cleanup_incomplete 실패(무시): %s", short, exc)
+    return summary
 
 
 @task(trigger_rule=TriggerRule.ALL_DONE)
