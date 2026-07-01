@@ -50,6 +50,39 @@ def build_seoul_acc_info_url(start_index: int, end_index: int) -> str:
     return f"{SEOUL_OPEN_API_BASE_URL.rstrip('/')}/{api_key}/xml/AccInfo/{start_index}/{end_index}/"
 
 
+def metadata_total_count(metadata: dict) -> int:
+    value = metadata.get("list_total_count")
+    if value is None or value == "":
+        return 0
+    return int(value)
+
+
+def next_acc_info_page_ranges(
+    start_index: int,
+    end_index: int,
+    list_total_count: int,
+    page_size: int | None = None,
+) -> list[tuple[int, int]]:
+    if start_index < 1:
+        raise ValueError(f"start_index must be positive: {start_index}")
+    if end_index < start_index:
+        raise ValueError(f"end_index must be >= start_index: {start_index}, {end_index}")
+
+    resolved_page_size = page_size if page_size is not None else (end_index - start_index + 1)
+    if resolved_page_size < 1:
+        raise ValueError(f"page_size must be positive: {resolved_page_size}")
+    if list_total_count <= end_index:
+        return []
+
+    ranges = []
+    page_start = end_index + 1
+    while page_start <= list_total_count:
+        page_end = min(page_start + resolved_page_size - 1, list_total_count)
+        ranges.append((page_start, page_end))
+        page_start = page_end + 1
+    return ranges
+
+
 def xml_text(element: ET.Element | None, name: str) -> str | None:
     if element is None:
         return None
