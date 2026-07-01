@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 
 import requests
 
+from culture_ingest.common.config import normalize_target
+
 # 안전한 SQL 식별자(카탈로그/스키마/테이블)만 허용 — 인젝션 방지.
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -47,8 +49,9 @@ class WarehouseSettings:
     schema: str   # culture (도메인 스키마)
 
 
-def build_warehouse_settings(target: str = "prod", env: dict | None = None) -> WarehouseSettings:
+def build_warehouse_settings(target: str = "dev", env: dict | None = None) -> WarehouseSettings:
     """target에 맞는 Trino/Iceberg 접속 설정. 값은 환경변수에서."""
+    target = normalize_target(target)
     env = env if env is not None else os.environ
     dev = target == "dev"
     catalog = (

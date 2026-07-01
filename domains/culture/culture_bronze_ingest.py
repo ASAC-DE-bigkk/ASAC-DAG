@@ -34,7 +34,7 @@ from airflow.providers.standard.operators.python import PythonOperator
 # 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from culture_ingest.common.config import RunContext  # noqa: E402
+from culture_ingest.common.config import RunContext, normalize_target  # noqa: E402
 from culture_ingest.source.datasets import enabled_datasets  # noqa: E402
 from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
@@ -82,6 +82,7 @@ def _plan(**context) -> list[dict]:
     재시도한 실행은 같은 파티션을 덮어쓴다.
     """
     params = context["params"]
+    target = normalize_target(params["target"])  # 오타 target을 plan에서 즉시 fail-fast
     end = _interval_end(context)
     load_date = end.in_timezone(KST).strftime("%Y-%m-%d")
     ingest_ts = end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ")
@@ -107,7 +108,7 @@ def _plan(**context) -> list[dict]:
     return [
         {
             "name": name,
-            "target": params["target"],
+            "target": target,
             "load_date": load_date,
             "ingest_ts": ingest_ts,
             "run_id": run_id,
