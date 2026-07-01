@@ -208,3 +208,42 @@ def build_increment(today_rows: Iterable[dict], *, tmp_dir: str, today_sorted_pa
             out.write(json.dumps(r, ensure_ascii=False)); out.write("\n"); inc += 1
     return {"mode": "changed", "key": today_key, "count": today_count,
             "increment_count": inc, "identical": False}
+
+
+# ── 스토리지 orchestration(save 증분 + diff-target 롤링 교체) ────────────────────
+def incremental_store(storage, *, increment_key: str, target_key: str, target_key_file: str,
+                      rows: Iterable[dict], tmp_dir: str) -> dict:
+    """오늘 rows 를 증분 저장 모델로 스토리지에 반영. storage 는 exists/read_bytes/write_bytes 만 필요.
+
+    - 전날 diff-target(있으면) 다운로드 + 검증키 사이드카 로드 → 비교.
+    - build_increment 로 mode/증분 산출.
+    - 상이/첫수집: 증분(증분_count>0) → increment_key 업로드, **diff-target 을 오늘본으로 교체**(+키 사이드카).
+    - 동일: 아무 것도 안 씀(마커만은 호출측). raw 원본은 애초에 저장 안 함(수집 페이지는 휘발).
+    반환: {mode, key(검증키), count, increment_count, identical, increment_key(실제 기록시 키 or None)}.
+    """
+    prev_target_path = None
+    prev_key = None
+    if storage.exists(target_key):
+        prev_target_path = os.path.join(tmp_dir, "prev_target.jsonl")
+        with open(prev_target_path, "wb") as f:
+            f.write(storage.read_bytes(target_key))
+        if storage.exists(target_key_file):
+            prev_key = storage.read_bytes(target_key_file).decode("utf-8").strip()
+
+    today_sorted_path = os.path.join(tmp_dir, "today_sorted.jsonl")
+    increment_path = os.path.join(tmp_dir, "increment.jsonl")
+    res = build_increment(rows, tmp_dir=tmp_dir, today_sorted_path=today_sorted_path,
+                          increment_path=increment_path, prev_target_path=prev_target_path,
+                          prev_key=prev_key)
+
+    written_increment = None
+    if not res["identical"]:
+        if res["increment_count"] > 0:
+            with open(increment_path, "rb") as f:
+                storage.write_bytes(increment_key, f.read())
+            written_increment = increment_key
+        with open(today_sorted_path, "rb") as f:                 # diff-target 롤링 교체
+            storage.write_bytes(target_key, f.read())
+        storage.write_bytes(target_key_file, res["key"].encode("utf-8"))
+    res["increment_key"] = written_increment
+    return res

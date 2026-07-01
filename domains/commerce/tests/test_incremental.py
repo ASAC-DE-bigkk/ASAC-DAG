@@ -2,7 +2,24 @@
 
     PYTHONPATH=dags/domains/commerce/include pytest dags/domains/commerce/tests/test_incremental.py -q
 """
+import os
+
 from bronze import incremental as inc
+
+
+class _FakeStorage:
+    """메모리 dict 스토리지(exists/read_bytes/write_bytes) — orchestration 오프라인 테스트용."""
+    def __init__(self):
+        self.data: dict[str, bytes] = {}
+
+    def exists(self, k):
+        return k in self.data
+
+    def read_bytes(self, k):
+        return self.data[k]
+
+    def write_bytes(self, k, b):
+        self.data[k] = b
 
 
 def _row(mgtno, updatedt, name="x"):
@@ -108,3 +125,29 @@ def test_build_increment_changed(tmp_path):
                               increment_path=ip, prev_target_path=prev, prev_key=pkey)
     assert res["mode"] == "changed" and res["increment_count"] == 1
     assert list(inc.read_rows(ip))[0]["MGTNO"] == "9"   # 신규분만
+
+
+# ── orchestration(스토리지 브리지): first → identical → changed ─────────────────
+def test_incremental_store_lifecycle(tmp_path):
+    st = _FakeStorage()
+    tk, tkf = "_diff_target/tour.jsonl", "_diff_target/tour.key"
+    day1 = [_row("1", "2026-01-01 00:00:00"), _row("2", "2026-02-01 00:00:00")]
+
+    def _run(run, rows):
+        d = tmp_path / run
+        d.mkdir()
+        return inc.incremental_store(st, increment_key=f"{run}/tour.jsonl", target_key=tk,
+                                     target_key_file=tkf, rows=rows, tmp_dir=str(d))
+
+    r1 = _run("run1", [dict(r) for r in day1])                 # 첫 수집
+    assert r1["mode"] == "first" and r1["increment_key"] == "run1/tour.jsonl"
+    assert st.exists("run1/tour.jsonl") and st.exists(tk) and st.exists(tkf)
+
+    r2 = _run("run2", [dict(r) for r in day1])                 # 동일 → 증분 없음
+    assert r2["mode"] == "identical" and r2["increment_key"] is None
+    assert not st.exists("run2/tour.jsonl")
+
+    r3 = _run("run3", [dict(r) for r in day1] + [_row("9", "2026-06-01 00:00:00")])  # 변경
+    assert r3["mode"] == "changed" and r3["increment_count"] == 1
+    assert st.exists("run3/tour.jsonl")
+    assert len([l for l in st.read_bytes(tk).decode().splitlines() if l.strip()]) == 3  # target 교체됨(3행)

@@ -25,10 +25,16 @@ response:
   RAM, O(n log n)), `verification_key`(정렬본 순서민감 sha256), `diff_new_rows`(정렬 병합 스트리밍 diff
   — 같은 키는 정규화 문자열 직접비교로 hot loop 경량). **파일 브리지**: `sort_rows_to_file`(정렬→row-NDJSON+키),
   `read_rows`, `build_increment`(첫수집=full / 동일=증분없음 / 상이=diff 신규분 — 모델 그대로 구현).
-- 단위테스트 **12 통과**(정렬·순서민감키·diff 4종 + 파일브리지 first/identical/changed).
-- 커밋·푸시(feat/58). **후속**: DAG 통합(page→row 저장 변경 + 검증키 마커 저장 + save/diff-target 경로),
-  step0(기존 데이터 1회성 검증키·diff-target 백필), step1-3(비교→동일=마커만/상이=신규분 save), step4(수집
-  원본 삭제는 재검증 뒤 맨 나중), docs.
+- 단위테스트 **13 통과**(정렬·순서민감키·diff 4종 + 파일브리지 first/identical/changed + orchestration
+  first→identical→changed).
+- **DAG 통합**: `common/paths.py`에 diff-target 경로(`_diff_target/<short>.jsonl` + `.key` 사이드카).
+  `incremental_store`(스토리지 브리지: 전날 target 다운로드→비교→증분 업로드→target 롤링 교체).
+  `bronze_tasks._write_bronze`가 **status==ok 일 때만** 페이지→row 파싱→증분 저장(중간 중단은 미저장),
+  마커에 `verification_key/increment_mode/increment_count/sorted_row_count` 기록. page-NDJSON → row-NDJSON.
+- 커밋·푸시(feat/58). **후속**: step0(기존 데이터 1회성 diff-target/검증키 백필), step4(수집원본 삭제는
+  재검증 뒤 맨 나중 — 본 모델은 raw 페이지가 휘발이라 별도 삭제 대상 없음, 재검증으로 갈음), docs,
+  다운스트림(dbt 로더) row-NDJSON 대응은 feat/58 밖.
+- **미검증(정직)**: DAG 배선 end-to-end 는 실수집(서울 API 호출) 필요 — 오프라인 단위테스트까지만.
 
 ## 2026-06-30
 
