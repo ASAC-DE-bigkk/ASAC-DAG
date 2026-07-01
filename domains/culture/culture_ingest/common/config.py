@@ -50,11 +50,24 @@ class R2Settings:
     bucket: str
 
 
+VALID_TARGETS = ("dev", "prod")
+
+
+def normalize_target(target: str) -> str:
+    """``target``을 검증해 반환. dev/prod 외 값은 즉시 실패시켜, 오타(예: "prd", "Prod")가
+    조용히 prod 버킷·카탈로그로 새는 것을 막는다(CLI ``choices``와 같은 보호를 DAG에도).
+    """
+    if target not in VALID_TARGETS:
+        raise ValueError(f"target must be one of {VALID_TARGETS}, got {target!r}")
+    return target
+
+
 def build_r2_settings(target: str = "dev", env_file: str | None = None) -> R2Settings:
     """``target``에 맞는 R2 설정을 해석.
 
     dev -> ``R2_DEV_*`` (버킷 ``seoul-dev``), prod -> ``R2_*`` (버킷 ``seoul``).
     """
+    target = normalize_target(target)
     env = load_env_file(env_file)
     prefix = "R2_DEV_" if target == "dev" else "R2_"
     return R2Settings(

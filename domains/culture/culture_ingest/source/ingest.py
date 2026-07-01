@@ -289,7 +289,7 @@ def build_landing(
     return Landing(R2Sink(settings), root, ctx)
 
 
-def build_warehouse(target: str = "prod") -> BronzeWarehouse:
+def build_warehouse(target: str = "dev") -> BronzeWarehouse:
     """bronze Iceberg 적재용 Trino 웨어하우스(환경변수 기반)."""
     return BronzeWarehouse(build_warehouse_settings(target))
 
