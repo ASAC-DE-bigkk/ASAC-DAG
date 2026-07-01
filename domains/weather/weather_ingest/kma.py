@@ -1,7 +1,9 @@
+import csv
 import json
 import os
 import urllib.parse
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from weather_ingest.common.runtime import raw_prefix, required_env
@@ -16,6 +18,7 @@ KST = ZoneInfo("Asia/Seoul")
 
 SOURCE_ID = "kma_vilage_fcst"
 SOURCE_DOMAIN = "weather_forecast"
+DEFAULT_GRID_CSV = Path(__file__).resolve().parents[1] / "config" / "seoul_kma_grids.csv"
 
 
 def build_raw_object_key(
@@ -23,13 +26,34 @@ def build_raw_object_key(
     request_id: str,
     base_date: str,
     base_time: str,
+    nx: int,
+    ny: int,
 ) -> str:
     load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
     return (
         f"{raw_prefix().rstrip('/')}/{SOURCE_DOMAIN}/{SOURCE_ID}/load_date={load_date}/"
+        f"nx={nx}/ny={ny}/"
         f"{collected_at.astimezone(KST).strftime('%Y%m%dT%H%M%SKST')}"
         f"_base-{base_date}{base_time}_{request_id}.json"
     )
+
+
+def load_kma_grids(path: str | None = None) -> list[dict]:
+    grid_path = Path(path or os.environ.get("ASK_SEOUL_KMA_GRID_CSV") or DEFAULT_GRID_CSV)
+    grids = []
+    seen = set()
+    with grid_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            nx = int(row["nx"])
+            ny = int(row["ny"])
+            key = (nx, ny)
+            if key in seen:
+                continue
+            seen.add(key)
+            grids.append({"place_id": row.get("place_id") or f"kma_{nx}_{ny}", "nx": nx, "ny": ny})
+    if not grids:
+        raise RuntimeError(f"No KMA grids configured: {grid_path}")
+    return grids
 
 
 def request_params_json(base_date: str, base_time: str, nx: int, ny: int) -> str:
@@ -81,6 +105,14 @@ def build_kma_url(base_date: str, base_time: str, nx: int, ny: int) -> str:
     }
     query = urllib.parse.urlencode(params, safe="%")
     return f"{KMA_BASE_URL.rstrip('/')}/getVilageFcst?{query}"
+
+
+if __name__ == "__main__":
+    configured = load_kma_grids()
+    assert len(configured) == 80
+    assert configured[0] == {"place_id": "kma_56_130", "nx": 56, "ny": 130}
+    assert configured[-1] == {"place_id": "kma_65_123", "nx": 65, "ny": 123}
+    print(f"configured_kma_grids={len(configured)}")
 
 
 def parse_kma_response(raw_bytes: bytes) -> tuple[dict, list[dict]]:

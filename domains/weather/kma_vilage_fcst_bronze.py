@@ -27,6 +27,7 @@ from weather_ingest.kma import (  # noqa: E402
     SOURCE_ID,
     build_kma_url,
     build_raw_object_key,
+    load_kma_grids,
     parse_kma_response,
     resolve_kma_base_datetime,
 )
@@ -42,63 +43,69 @@ def kma_dag_schedule() -> str | None:
 
 
 def ingest_kma_vilage_fcst(**context) -> dict:
-    collected_at = datetime.now(timezone.utc)
-    request_id = str(uuid.uuid4())
-    place_id = os.environ.get("ASK_SEOUL_KMA_PLACE_ID", "seoul_station")
-    nx = int(os.environ.get("ASK_SEOUL_KMA_NX", "60"))
-    ny = int(os.environ.get("ASK_SEOUL_KMA_NY", "127"))
     base_date, base_time = resolve_kma_base_datetime()
-
-    url = build_kma_url(base_date=base_date, base_time=base_time, nx=nx, ny=ny)
-    http_status, raw_bytes = fetch_url(url, "ask-seoul-kma-bronze/1.0")
-    metadata, rows = parse_kma_response(raw_bytes)
-    raw_hash = sha256_hex(raw_bytes)
-    raw_object_key = build_raw_object_key(
-        collected_at=collected_at,
-        request_id=request_id,
-        base_date=base_date,
-        base_time=base_time,
-    )
-    upload_raw_object(
-        raw_bytes=raw_bytes,
-        object_key=raw_object_key,
-        content_type="application/json; charset=utf-8",
-        log_label="KMA raw payload",
-    )
-
+    grids = load_kma_grids()
     cursor, catalog, schema = trino_cursor()
     qualified_table = create_kma_bronze_table(cursor, catalog, schema)
-    inserted = insert_kma_bronze_rows(
-        cursor=cursor,
-        qualified_table=qualified_table,
-        rows=rows,
-        metadata=metadata,
-        request_id=request_id,
-        place_id=place_id,
-        base_date=base_date,
-        base_time=base_time,
-        nx=nx,
-        ny=ny,
-        raw_object_key=raw_object_key,
-        raw_hash=raw_hash,
-        http_status=http_status,
-        collected_at=collected_at,
-        dag_run_id=context["run_id"],
-    )
-    print(f"Inserted {inserted} KMA rows into {qualified_table}")
+    inserted = 0
+    raw_object_keys = []
+    for grid in grids:
+        collected_at = datetime.now(timezone.utc)
+        request_id = str(uuid.uuid4())
+        nx = int(grid["nx"])
+        ny = int(grid["ny"])
+        url = build_kma_url(base_date=base_date, base_time=base_time, nx=nx, ny=ny)
+        http_status, raw_bytes = fetch_url(url, "ask-seoul-kma-bronze/1.0")
+        metadata, rows = parse_kma_response(raw_bytes)
+        raw_hash = sha256_hex(raw_bytes)
+        raw_object_key = build_raw_object_key(
+            collected_at=collected_at,
+            request_id=request_id,
+            base_date=base_date,
+            base_time=base_time,
+            nx=nx,
+            ny=ny,
+        )
+        upload_raw_object(
+            raw_bytes=raw_bytes,
+            object_key=raw_object_key,
+            content_type="application/json; charset=utf-8",
+            log_label="KMA raw payload",
+        )
+        inserted += insert_kma_bronze_rows(
+            cursor=cursor,
+            qualified_table=qualified_table,
+            rows=rows,
+            metadata=metadata,
+            request_id=request_id,
+            place_id=str(grid["place_id"]),
+            base_date=base_date,
+            base_time=base_time,
+            nx=nx,
+            ny=ny,
+            raw_object_key=raw_object_key,
+            raw_hash=raw_hash,
+            http_status=http_status,
+            collected_at=collected_at,
+            dag_run_id=context["run_id"],
+        )
+        raw_object_keys.append(raw_object_key)
+    print(f"Inserted {inserted} KMA rows for {len(grids)} grids into {qualified_table}")
     return {
         "source_id": SOURCE_ID,
-        "raw_object_key": raw_object_key,
+        "raw_object_keys": raw_object_keys,
         "inserted": inserted,
+        "grid_count": len(grids),
     }
 
 
 def verify_kma_bronze_runtime(**context) -> int:
     ingest_result = context["ti"].xcom_pull(task_ids="ingest_kma_vilage_fcst") or {}
     return verify_kma_bronze_rows(
-        raw_object_key=ingest_result["raw_object_key"],
+        raw_object_keys=ingest_result["raw_object_keys"],
         dag_run_id=context["run_id"],
         expected_rows=int(ingest_result["inserted"]),
+        expected_raw_objects=int(ingest_result["grid_count"]),
     )
 
 
