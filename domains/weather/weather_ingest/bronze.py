@@ -64,6 +64,26 @@ def create_kma_bronze_table(cursor, catalog: str, schema: str) -> str:
     return qualified_table
 
 
+def metadata_int(metadata: dict, key: str) -> int:
+    value = metadata.get(key)
+    if value is None or value == "":
+        return 0
+    return int(value)
+
+
+def validate_kma_row_count(rows: list[dict], metadata: dict, nx: int, ny: int) -> None:
+    if not rows:
+        raise RuntimeError("KMA API returned no forecast rows.")
+
+    total_count = metadata_int(metadata, "total_count")
+    parsed_count = len(rows)
+    if total_count > parsed_count:
+        raise RuntimeError(
+            "KMA bronze validation failed: "
+            f"total_count={total_count}, parsed row_count={parsed_count}, nx={nx}, ny={ny}"
+        )
+
+
 def insert_kma_bronze_rows(
     cursor,
     qualified_table: str,
@@ -81,8 +101,7 @@ def insert_kma_bronze_rows(
     collected_at: datetime,
     dag_run_id: str,
 ) -> int:
-    if not rows:
-        raise RuntimeError("KMA API returned no forecast rows.")
+    validate_kma_row_count(rows, metadata, nx, ny)
 
     cursor.execute(
         f"""
