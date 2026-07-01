@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-07-02
+
+### 17. bronze 증분화 코어 — 정렬·검증키·diff (feat/58-commerce-bronze-sort-diff)
+request:
+- bronze 수집이 매 실행 전체를 다시 받는 문제를 해소한다. 각 API 파일에서 UPDATEDT 존재를 먼저
+  확인하고(모두 있으면) **UPDATEDT 내림차순 row 정렬**(날짜가 숫자가 아니면 숫자키로 치환). 정렬은
+  **전량 RAM 금지 → 파일 단위 스트리밍**, 퀵정렬보다 낮은 Big-O 가 있으면 그 방식. 저장 포맷은
+  **row-NDJSON(UPDATEDT desc)로 전환**. **API 단위 해시 검증키**를 만들고, 수집 파일 삭제 로직은
+  재검증 통과 뒤 **맨 마지막(step4)**에만 적용. 브랜치 feat/58-commerce-bronze-sort-diff.
+- (합의) 정렬 알고리즘 = 외부 병합 정렬, 저장 = row-NDJSON.
+response:
+- **-1단계 확인(실데이터)**: 39종 전부 UPDATEDT 100% `datetime` → 14자리 정수키로 정렬 가능 확인.
+- **include/bronze/incremental.py**: `external_merge_sort`(청크→임시파일→heapq 병합, 스트리밍·바운디드
+  RAM, O(n log n)), `verification_key`(정렬본 순서민감 sha256), `diff_new_rows`(정렬 병합 스트리밍 diff
+  — 같은 키는 정규화 문자열 직접비교로 hot loop 경량). 단위테스트 **8 통과**(다중청크 정렬·순서민감
+  키·identical/new-head/changed/deleted diff).
+- 커밋·푸시(feat/58). **후속**: DAG 통합(page→row 저장 변경 + 검증키 마커 저장), step0(기존 데이터
+  1회성 검증키 백필), step1-3(비교→동일=마커만/상이=diff 파생파일), step4(삭제 맨 나중+재검증), docs.
+
 ## 2026-06-30
 
 ### 16. 보안 대응 전용 패키지 + 단일 포인트 종합검증 도입 (`include/security/`)
