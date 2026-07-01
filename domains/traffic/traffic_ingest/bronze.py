@@ -217,6 +217,16 @@ def insert_seoul_traffic_bronze_rows(
         dag_run_id=dag_run_id,
     )
 
+    cursor.execute(
+        f"""
+        DELETE FROM {qualified_table}
+        WHERE source_id = {sql_string(SOURCE_ID)}
+            AND dag_run_id = {sql_string(dag_run_id)}
+            AND start_index = {sql_int(start_index)}
+            AND end_index = {sql_int(end_index)}
+        """
+    )
+
     if not rows:
         print("Seoul traffic API returned no incident rows; raw XML was preserved without bronze rows.")
         return 0

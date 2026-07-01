@@ -59,13 +59,16 @@ def test_zero_row_insert_writes_request_audit_without_incident_rows():
     )
 
     assert inserted == 0
-    assert len(cursor.statements) == 2
-    delete_sql, audit_sql = cursor.statements
-    assert delete_sql.startswith(
+    assert len(cursor.statements) == 3
+    audit_delete_sql, audit_sql, bronze_delete_sql = cursor.statements
+    assert audit_delete_sql.startswith(
         "DELETE FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit WHERE"
     )
     assert audit_sql.startswith(
         "INSERT INTO iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit"
+    )
+    assert bronze_delete_sql.startswith(
+        "DELETE FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident WHERE"
     )
     assert f"'{SOURCE_ID}'" in audit_sql
     assert "'bronze/traffic/accinfo/request-1.xml'" in audit_sql
