@@ -170,8 +170,24 @@ def _report(**context) -> None:
         run_id=context["dag_run"].run_id,
     )
     summaries = [r for r in (context["ti"].xcom_pull(task_ids="ingest_dataset") or []) if r]
-    expected = len(summaries)  # plan이 내보낸 데이터셋 수 = 이번 run의 기대 커버리지
-    report = build_run_report(summaries, ctx, expected_total=expected)
+    # 기대 커버리지 = plan이 계획한 데이터셋 수(성공 summary 수가 아님). 하드 실패한
+    # ingest_dataset 매핑 인스턴스는 예외를 던져 XCom에 결과를 안 남기므로, summaries만
+    # 세면 실패가 분모에서도 사라져 coverage가 늘 ~100%로 보인다(#39).
+    planned = [d["name"] for d in (context["ti"].xcom_pull(task_ids="plan") or [])]
+    returned = {s["name"] for s in summaries}
+    # 결과를 못 남긴(=예외로 실패한) 데이터셋을 실패 summary로 복원해 리포트에 드러낸다.
+    missing = [
+        {
+            "name": name, "source": "", "endpoint": "", "prefix": "",
+            "pages": 0, "rows": 0, "bytes": 0,
+            "error": "task failed (no result reported)",
+            "checks": {}, "iceberg_rows": 0,
+        }
+        for name in planned
+        if name not in returned
+    ]
+    expected = len(planned) or len(summaries)  # plan XCom이 없으면 성공 수로 폴백
+    report = build_run_report(summaries + missing, ctx, expected_total=expected)
 
     cov = report["coverage"]
     print(
