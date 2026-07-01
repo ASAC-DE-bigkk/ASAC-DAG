@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+import requests
+
 from culture_ingest.common.checks import evaluate_landing, extract_record_fields
 from culture_ingest.common.config import (
     RunContext,
@@ -24,7 +26,7 @@ from culture_ingest.common.records import parse_records
 from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_settings
 
 from . import config as culture_config
-from .clients import KopisClient, SeoulClient
+from .clients import KopisClient, KopisError, SeoulClient
 from .datasets import BY_NAME, Dataset, select
 
 
@@ -151,16 +153,42 @@ def ingest_dataset(
                 return result
             id_params = _with_date_window(ds.id_source_endpoint, ds.base_params, opts)
             ids = clients.kopis.list_ids(ds.id_source_endpoint, id_params, ds.id_field, opts.max_detail)
+            detail_errors: list[str] = []
             for identifier in ids:
+                try:
+                    page = clients.kopis.detail(ds.endpoint, identifier)
+                except (requests.RequestException, KopisError) as exc:
+                    # 개별 상세 실패(예: KOPIS 간헐적 400)는 그 id만 건너뛰고 계속 진행 —
+                    # 한 건이 크롤 전체를 죽이지 않게. 과다 실패는 아래에서 태스크 실패로.
+                    detail_errors.append(f"{identifier}: {type(exc).__name__}")
+                    continue
                 filename = f"id={identifier}.xml"
-                page = clients.kopis.detail(ds.endpoint, identifier)
                 key = landing.write_page(prefix, filename, page.body, "xml")
                 result.pages += 1
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
                 _record_page(filename, key, page.body)
-            params = {**ds.base_params, "id_field": ds.id_field, "max_detail": opts.max_detail, "ids": len(ids)}
+            # 일시적 단건 실패는 관용하되, 하나도 못 받거나 과반이 실패하면 실질 장애로
+            # 보고 태스크를 실패시켜 재시도·알림한다.
+            if ids and (not result.pages or len(detail_errors) > len(ids) // 2):
+                result.error = (
+                    f"detail crawl failed: {len(detail_errors)}/{len(ids)} ids "
+                    f"(e.g. {detail_errors[:3]})"
+                )
+                return result
+            if detail_errors:
+                print(
+                    f"  [detail] {ds.name}: {len(detail_errors)}/{len(ids)} id 건너뜀 "
+                    f"(일시 오류, 계속 진행) e.g. {detail_errors[:3]}"
+                )
+            params = {
+                **ds.base_params,
+                "id_field": ds.id_field,
+                "max_detail": opts.max_detail,
+                "ids": len(ids),
+                "detail_skipped": len(detail_errors),
+            }
 
         else:
             result.error = f"unknown kind: {ds.kind}"
