@@ -163,14 +163,16 @@ class BronzeWarehouse:
         col_list = "(" + ", ".join(_COLUMNS) + ")"
         prefix = f"INSERT INTO {table} {col_list} VALUES "
 
-        # 배치를 행 수(batch_size)뿐 아니라 **SQL 텍스트 길이**로도 끊는다.
-        # record_json이 큰 데이터셋(전시·세종 등)은 500행이면 INSERT가 Trino
-        # 최대 쿼리 길이(1,000,000자)를 넘기므로, 누적 바이트 한계로 안전하게 분할.
-        max_sql_chars = 800_000
+        # 배치를 행 수(batch_size)뿐 아니라 **SQL UTF-8 바이트 길이**로도 끊는다.
+        # record_json이 큰 데이터셋(전시·세종 등)은 500행이면 INSERT가 Trino 최대 쿼리
+        # 길이를 넘긴다. 한글은 UTF-8에서 1자=최대 3바이트라 문자 수로 세면 과소 측정되고
+        # (실제 전송은 sql.encode("utf-8")), 문자 800k라도 바이트로는 훨씬 커질 수 있으므로
+        # 실제 바이트로 세어 안전하게 분할한다(#21).
+        max_sql_bytes = 800_000
 
         inserted = 0
         buffer: list[str] = []
-        buffer_len = len(prefix)
+        buffer_len = len(prefix.encode("utf-8"))
 
         def _flush() -> None:
             nonlocal inserted, buffer, buffer_len
@@ -178,7 +180,7 @@ class BronzeWarehouse:
                 self.client.execute(prefix + ", ".join(buffer))
                 inserted += len(buffer)
                 buffer = []
-                buffer_len = len(prefix)
+                buffer_len = len(prefix.encode("utf-8"))
 
         for seq, (raw_object_key, page_no, record) in enumerate(records):
             record_json = json.dumps(record, ensure_ascii=False)
@@ -201,11 +203,12 @@ class BronzeWarehouse:
                 )
                 + ")"
             )
-            # 행 수 또는 SQL 길이 상한에 닿으면 먼저 비운다(현재 value는 다음 배치로).
-            if buffer and (len(buffer) >= batch_size or buffer_len + len(value) + 2 > max_sql_chars):
+            # 행 수 또는 SQL 바이트 상한에 닿으면 먼저 비운다(현재 value는 다음 배치로).
+            vbytes = len(value.encode("utf-8"))
+            if buffer and (len(buffer) >= batch_size or buffer_len + vbytes + 2 > max_sql_bytes):
                 _flush()
             buffer.append(value)
-            buffer_len += len(value) + 2
+            buffer_len += vbytes + 2
 
         _flush()
         return inserted
