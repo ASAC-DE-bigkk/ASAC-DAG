@@ -41,14 +41,27 @@ culture가 채택한 **12개 데이터셋**(KOPIS 6 + 서울 열린데이터 6).
 
 ### KOPIS (XML · 공연예술통합전산망)
 
-> 🚧 TODO(후속 PR): base URL, `service` 키, 페이징(`cpage`/`rows`), 상세 크롤(id 수집→건별),
-> boxoffice 단일 GET(cpage 무시·top50·`stdate~eddate` **≤31일**), 에러 태그(`returncode`/`errmsg`)
+- **Base**: `http://www.kopis.or.kr/openApi/restful` · 모든 요청에 `service=<KOPIS_SERVICE_KEY>` 부착.
+- **인증/에러**: 응답 앞부분에 `<errmsg>`/`<returncode>`가 있으면 `KopisError`.
+- **행 수**: 페이지 XML의 `<db>` 개수(예매상황판은 `<boxof>`).
+- **페이징 (`kopis_list`)** — `cpage`(1부터)·`rows`(기본 100)로 반복. 한 페이지가 `rows`보다 적게
+  오면(마지막) 또는 `max_pages` 도달 시 정지.
+- **상세 (`kopis_detail`)** — 목록에서 id(`mt20id`/`mt10id`)를 `max_detail`개까지 모아, 건별로
+  `{endpoint}/{id}` 상세를 적재. `include_detail=False`면 skip.
+- **예매상황판 (`kopis_boxoffice`)** — 페이징 없는 **단일 GET**(`cpage`/`rows` 무시). 기간 랭킹
+  top50을 `<boxof>`로 한 번에. `stdate~eddate` **≤ 31일**(초과 시 `returncode 05`).
+- **날짜창**: `pblprfr`·`prffest`·`boxoffice`만 `stdate/eddate`를 받는다.
 
 코드: [`source/clients.py`](../culture_ingest/source/clients.py) (`KopisClient`)
 
 ### 서울 열린데이터광장 (JSON)
 
-> 🚧 TODO(후속 PR): base URL, **1000행 윈도우** 페이징(`list_total_count`), `RESULT.CODE`
-> (INFO-000 정상 / INFO-200 데이터 없음), `max_rows` 상한(첫 윈도우부터 적용, [change-log #44](../change-log.md))
+- **Base**: `http://openapi.seoul.go.kr:8088` · URL 형식 `/{SEOUL_OPENAPI_KEY}/json/{service}/{start}/{end}/`.
+- **결과 코드**: `RESULT.CODE`가 `INFO-000`(정상)·`INFO-200`(데이터 없음, 정상 종료로 간주)만 통과,
+  그 외는 `SeoulError`.
+- **1000행 윈도우 페이징** — 한 요청은 최대 1000행. 첫 윈도우 응답의 `list_total_count`로 전체
+  건수를 알고 `1001~`로 창을 밀며 소진. `row`가 비면 종료.
+- **`max_rows` 상한** — 있으면 `min(total, max_rows)`까지. **첫 윈도우도** `min(1000, max_rows)`로
+  요청해 샘플/드라이런 행수 제어가 첫 페이지부터 먹는다. → [change-log #44](../change-log.md)
 
 코드: [`source/clients.py`](../culture_ingest/source/clients.py) (`SeoulClient`)

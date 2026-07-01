@@ -36,10 +36,27 @@ python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.en
 
 ## 재수집 (backfill)
 
-> 🚧 TODO(후속 PR): 특정 데이터셋/날짜 재수집(`datasets`·`date_from/to`), `ingest_ts` 멱등이라
-> 같은 창 재실행 안전, boxoffice 31일 창 제약
+`ingest_ts`가 실행을 격리하고 같은 파티션을 덮어쓰므로(멱등), **같은 창을 다시 돌려도 안전**하다.
+
+- **특정 데이터셋만**: 파라미터 `datasets=["kopis_boxoffice", …]`(빈 값=전체). CLI는 `--datasets`.
+- **특정 기간**: `date_from`/`date_to`(YYYYMMDD) 명시. 안 주면 `[end - lookback_days, end]` 롤링창.
+- **boxoffice 제약**: `stdate~eddate` **≤ 31일**(초과 시 `returncode 05`) → 긴 기간은 31일씩 나눠 재수집.
+- **상세(detail)**: `include_detail=True` + `max_detail`로 크롤 id 상한 조정.
+
+```bash
+# 예: boxoffice만 특정 주간 재수집 (dev, 로컬 CLI)
+python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.env \
+    --datasets kopis_boxoffice --date-from 20260601 --date-to 20260628
+```
 
 ## 디버깅
 
-> 🚧 TODO(후속 PR): 태스크 red 로그 읽는 법, `run_report.json` 확인 → [reliability.md](reliability.md),
-> 흔한 오류(키 누락·날짜창 31일 초과 `returncode 05`·`target` 오타 즉시 실패)
+1. **어느 데이터셋이 깨졌나** — Airflow 그리드에서 red `ingest_dataset` 매핑 인덱스 → 태스크 로그.
+   데이터셋별로 태스크가 갈려 있어 바로 짚인다.
+2. **정량 상태** — `run_report.json`(`_reports/…`)의 `coverage`·`violations`·`failed_datasets`·
+   `slo_passed` 확인. → [reliability.md](reliability.md)
+3. **흔한 오류**
+   - `Missing culture source keys` / `Missing R2 config` — env 미주입(위 **시크릿 (env)** 절 참고).
+   - KOPIS `returncode 05` — 날짜창 31일 초과(특히 boxoffice) → 창을 좁혀 재수집.
+   - `target must be one of ('dev', 'prod')` — `target` 오타(`plan`에서 즉시 실패).
+   - 서울 `SeoulError`(INFO-000/200 외) — 서비스명·키·쿼터 확인.

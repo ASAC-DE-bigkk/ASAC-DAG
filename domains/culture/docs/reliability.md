@@ -27,10 +27,32 @@
 
 ### run_report 구조
 
-> 🚧 TODO(후속 PR): `coverage{expected,landed,skipped,failed,coverage_pct}` ·
-> `violations` · `failed_datasets` · `freshness` · `slo_passed` 필드 표
+`build_run_report`가 만드는 dict(→ `run_report.json`):
+
+| 필드 | 내용 |
+|------|------|
+| `domain` · `layer` | `culture` · `bronze` |
+| `load_date` · `ingest_ts` · `run_id` | 이 run 식별 |
+| `coverage.expected` | **plan이 계획한 데이터셋 수**(분모) |
+| `coverage.landed` / `skipped` / `failed` | 적재 성공 / skip(옵션 off 등) / 실패 수 |
+| `coverage.coverage_pct` | `landed / expected × 100` |
+| `total_rows` · `total_iceberg_rows` | 적재 행 수 합(raw / Iceberg) |
+| `freshness.max_age_hours` | 데이터셋 중 가장 오래된 적재 경과(시간) |
+| `violation_count` · `violations[]` | 계약 위반 수 · `{dataset, violation}` |
+| `failed_datasets[]` | 하드 실패 `{dataset, error}` |
+| `slo_passed` | `실패 0 && 위반 0` |
+| `datasets[]` | 데이터셋별 summary 전체 |
+
+적재 위치: `bronze/culture/_reports/load_date=…/ingest_ts=…/run_report.json` → [storage.md](storage.md).
 
 ## 실패 모드 & 대응
 
-> 🚧 TODO(후속 PR): 수집 실패(태스크 red, 재시도) vs 계약 위반(surface) 구분,
-> 재수집 절차 → [operations.md](operations.md)
+| 유형 | 어떻게 드러나나 | 기본 동작 | 대응 |
+|------|----------------|-----------|------|
+| **수집 실패** (API 5xx·키 오류·파싱 실패) | 매핑 태스크 **red**(`AirflowException`) | 그 태스크만 실패·재시도(2회), run은 계속(`report`는 all_done) | 로그 확인 → 재수집 |
+| **계약 위반** (완전성·드리프트·freshness) | `run_report.violations` + 로그 `⚠` | **surface만**(run 성공 유지) | `fail_on_violation=True`면 run 실패로 승격 |
+| **커버리지 저하** (일부 데이터셋 누락) | `coverage_pct < 100` · `failed_datasets` | — | 누락 데이터셋 재수집 |
+| **target 오타** | `plan` 태스크 **red**(`ValueError`) | run 즉시 중단(fail-fast) | `target`을 `dev`/`prod`로 |
+
+- **수집 실패 ≠ 계약 위반**: 전자는 태스크가 빨갛게(항상 실패), 후자는 숫자로만(opt-in 게이트).
+- 세부 재수집·디버깅 절차 → [operations.md](operations.md).
