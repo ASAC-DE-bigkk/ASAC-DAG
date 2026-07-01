@@ -1,4 +1,7 @@
-"""seoul_commerce — 서울 인허가(commerce) 수집·가공 라인 (DB·외부 매니페스트 없음).
+"""seoul_commerce — 서울 인허가(commerce) **원본 수집(bronze) 라인** (DB·외부 매니페스트 없음).
+
+이 DAG 라인은 bronze(원본 수집)만 담당한다. silver 가공은 여기서 분리되어 있고
+가공 로직은 include/silver/ 에 그대로 보존되어 있다(별도 오케스트레이션 없음).
 
 DAG 2개(공통 태스크 공유):
   - **seoul_commerce_daily**     : 수집 대상 전체를 매 실행 수집(@daily).
@@ -8,15 +11,13 @@ DAG 2개(공통 태스크 공유):
   resolve_observed_date ─┐
   make_bronze_run_id ────┤
   check_api_key (gate) ──┤
-  (plan_all|find_incomplete) ─┴─> ingest_one.expand ─┬─> build_silver_one.expand
-                                                      └─> finalize_run ─> (_RUN 마커/metrics)
+  (plan_all|find_incomplete) ─┴─> ingest_one.expand ──> finalize_run ─> (_RUN 마커/metrics)
 
-- **API 단위 진행 가시성**: `ingest_one`/`build_silver_one` 은 Dynamic Task Mapping + 각 매핑
-  인스턴스를 **API(short) 이름으로 라벨링**(`map_index_template`) → Airflow Grid/Graph 에서
+- **API 단위 진행 가시성**: `ingest_one` 은 Dynamic Task Mapping + 각 매핑 인스턴스를
+  **API(short) 이름으로 라벨링**(`map_index_template`) → Airflow Grid/Graph 에서
   성공/실패/대기 job 을 API 별로 확인. 결과 요약은 run 폴더의 마커(`_markers/*`)에도 남는다.
 - bronze: 1회 page_size(≤1000)씩 끝까지 순회 + 완전성 점검. **DAG 실행 1회 = run_id 폴더 1개**,
   API당 1파일(NDJSON) + API별 마커(completed|incomplete). 상태는 그 마커가 전부.
-- silver: bronze NDJSON → 공통 19컬럼 정규화(parquet). 중복 제거는 silver 가 MGTNO 로.
 - 데이터셋 간 실패 격리: ingest 가 비인증 오류를 status=failed(=incomplete 마커)로 반환.
 
 코드: dags/domains/commerce/include/ · 레지스트리: config/dataset_registry.yaml
@@ -38,6 +39,12 @@ from common.env import load_commerce_env  # noqa: E402
 
 load_commerce_env()
 
+# 보안: env 적재 직후 로그 시크릿 마스킹 설치(이후 모든 commerce 로그/예외에서 키 자동 마스킹).
+# 종합검증/처리 로직: docs/security/security.md
+from security import assert_iso_date, install_log_redaction  # noqa: E402
+
+install_log_redaction()
+
 import pendulum
 from airflow.decorators import dag, task
 from airflow.models.param import Param
@@ -52,7 +59,6 @@ from bronze import bronze_tasks, markers
 from common import paths, registry
 from common.settings import get_settings
 from common.storage import get_storage
-from silver import silver_tasks
 
 log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
@@ -96,6 +102,8 @@ def _run_ds(ctx) -> str:
 @task
 def resolve_observed_date(**ctx) -> str:
     override = (ctx["params"].get("observed_date") or "").strip()
+    if override:
+        assert_iso_date(override)   # 경로 주입 방지 + 계약(YYYY-MM-DD). 잘못된 입력은 즉시 실패.
     observed_date = override or _run_ds(ctx)
     log.info("observed_date=%s (collectible=%d, pending=%d)",
              observed_date, len(COLLECTIBLE_SHORTS), len(PENDING))
@@ -143,15 +151,6 @@ def ingest_one(short: str, observed_date: str, bronze_run_id: str, **ctx) -> dic
         registry.by_short(short), observed_date, ctx["run_id"], bronze_run_id)
 
 
-@task(map_index_template="{{ short }}")
-def build_silver_one(summary: dict) -> dict:
-    get_current_context()["short"] = summary.get("short", "?")
-    if summary.get("status") != "ok" or not summary.get("bronze_key"):
-        return {"short": summary.get("short"), "skipped": True, "reason": summary.get("status")}
-    return silver_tasks.build_silver(
-        summary["short"], summary["observed_date"], summary["bronze_key"])
-
-
 @task(trigger_rule=TriggerRule.ALL_DONE)
 def finalize_run(bronze_run_id: str, observed_date: str, summaries: list[dict]) -> dict:
     summaries = [s for s in (summaries or []) if s]
@@ -180,14 +179,13 @@ def finalize_run(bronze_run_id: str, observed_date: str, summaries: list[dict]) 
 
 
 def _wire(targets):
-    """공통 흐름: targets(list[str]) → ingest → silver / finalize."""
+    """공통 흐름(bronze 전용): targets(list[str]) → ingest → finalize."""
     observed_date = resolve_observed_date()
     bronze_run_id = make_bronze_run_id()
     gate = check_api_key()
     bronze = ingest_one.partial(
         observed_date=observed_date, bronze_run_id=bronze_run_id).expand(short=targets)
     gate >> bronze
-    build_silver_one.expand(summary=bronze)
     finalize_run(bronze_run_id, observed_date, bronze)
 
 

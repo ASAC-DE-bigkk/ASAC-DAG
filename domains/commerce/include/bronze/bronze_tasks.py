@@ -26,6 +26,7 @@ from common.hashing import sha256_hex
 from common.schemas import DOMAIN, SOURCE_SYSTEM, Dataset
 from common.settings import get_settings
 from common.storage import Storage, get_storage
+from security import redact   # 마커(error)·요약에 저장되는 메시지의 시크릿 마스킹(이중 방어)
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
         "list_total_count": list_total_count, "complete": complete,
         "bronze_key": object_key, "pages": page_metas,
     }
+    error = redact(error) if error else error   # 저장 전 시크릿 마스킹(§2.5)
     if error:
         marker["error"] = error
     storage.write_json(marker_key, marker)     # 인증키 제외 리니지(§2.1)
@@ -146,7 +148,7 @@ def fetch_dataset_to_bronze(dataset: Dataset, observed_date: str, run_id: str,
     except SeoulAuthError:
         raise  # 인증 오류 → 전체 빠른 실패
     except Exception as exc:  # 데이터셋 단위 실패 격리 → incomplete 마커로 재수집 유도
-        log.warning("%s: 수집 중단(오류): %s", short, exc)
+        log.warning("%s: 수집 중단(오류): %s", short, redact(str(exc)))
         return _write_bronze(storage, prefix=prefix, bronze_run_id=bronze_run_id, dataset=dataset,
                              raw_pages=raw_pages, page_metas=page_metas, base=base, status="failed",
                              rows_total=rows_total, list_total_count=total_count or 0,

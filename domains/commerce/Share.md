@@ -41,11 +41,26 @@
 | [docs/deploy-local.md](docs/operations/deploy-local.md) · [docs/deploy-dev.md](docs/operations/deploy-dev.md) · [docs/deploy-prod.md](docs/operations/deploy-prod.md) | 배포 |
 | [docs/architecture.md](docs/architecture/architecture.md) · [docs/operations.md](docs/operations/operations.md) | 아키텍처 · 운영 런북 |
 | [docs/recollect-and-alerts.md](docs/operations/recollect-and-alerts.md) | 재수집 DAG · 알림 인터페이스(비활성) · API별 진행 가시성 |
+| [docs/security/security.md](docs/security/security.md) | **보안 대응** — 시크릿 마스킹·입력검증·정적점검 + **단일 포인트 종합검증**(`python -m security`). 코드: [include/security/](include/security/) (stdlib·이식 가능) |
 | [change-log.md](change-log.md) | 변경 이력(작성일·순서 내림차순) |
+
+## 5. 보안 (수시 불러오기·적용·점검)
+
+코드: [include/security/](include/security/) (stdlib·이식 가능). 규약: [CLAUDE.md](CLAUDE.md) §20 Security Gate.
+
+| 자료 | 내용 |
+|---|---|
+| [docs/security/security.md](docs/security/security.md) | 위협 모델(상정한 공격/누출 경로) · 처리 로직 · 적용 지점 |
+| [docs/security/adoption.md](docs/security/adoption.md) | **Claude/Codex 적용·이식 가이드** — 3단계 · 트리거 · 복사-붙여넣기 프롬프트 |
+
+- **불러오기**: 보안 관련 작업 전 `security.md` 를, 타 번들 이식 시 `adoption.md` 를 읽는다.
+- **적용**: 외부 예외/URL 로그·저장물(마커)·알림·사용자 입력 경로화 지점에 `redact()`/입력검증(§20 트리거).
+- **점검(단일 포인트)**: `PYTHONPATH=dags/domains/commerce/include python -m security` → 차단(CRITICAL/HIGH) 0.
 
 ## 핵심 한 줄 요약
 
 - **DB·외부 매니페스트 없음**: 수집 상태·이력은 run_id 폴더의 마커(`_markers/<short>.completed|.incomplete`).
+- **보안 게이트**: 시크릿은 로그·예외·마커(at-rest)·알림에서 마스킹(`include/security/`), 마무리 전 `python -m security` 로 점검(CLAUDE.md §20).
 - **이식성**: DAG 가 자기 `include` 를 sys.path 에 부트스트랩 + `.env.commerce` 를 적재 →
   `dags/` 만 옮기면 코드도 인자도 함께 따라온다.
 - **카테고리 자립**: `dags/domains/commerce/` 안에 코드·설정·테스트·문서·규약(CLAUDE.md·Share.md)·

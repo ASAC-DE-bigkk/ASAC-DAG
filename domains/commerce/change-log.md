@@ -7,6 +7,48 @@
 
 ## 2026-06-30
 
+### 16. 보안 대응 전용 패키지 + 단일 포인트 종합검증 도입 (`include/security/`)
+- **배경**: 로그/예외(특히 `requests` 네트워크 실패 메시지)에 서울 OpenAPI 인증키가 박힌 URL 이
+  들어가, 로그뿐 아니라 **bronze 마커 JSON(error 필드)으로 키가 영구 저장(at-rest 누출)**될
+  위험이 있었다. 그 외 흔한 공격/누출 경로(알림 전송, 경로 주입, 하드코딩 키, `.env` 추적,
+  `yaml.load`/`eval`/`verify=False`/timeout 누락)도 함께 상정해 종합 대응.
+- **추가**: 이식 가능한 **stdlib-only 독립 패키지** `include/security/`:
+  - `redaction.py` — literal(env 시크릿 실제값) + structural(서울 URL 경로키·`Bearer`·`AKIA`·
+    `secret=`/`token=` 등) **2중 마스킹**. `redact()` 는 str/dict/list/예외 재귀.
+  - `log_filter.py` — `install_log_redaction()` 가 루트/airflow 로거·핸들러에 마스킹 필터 부착
+    (msg/args/traceback 마스킹, idempotent).
+  - `inputs.py` — `assert_iso_date`/`assert_safe_segment`(경로 주입 차단).
+  - `audit.py` — 정적 점검 7종 + 런타임 자기검증(redactor/log).
+  - `verify.py`(+`__main__.py`) — **단일 포인트** `run_security_verification()`/`assert_secure()`
+    및 CLI `python -m security`(exit code=차단 이슈 유무).
+- **적용**: DAG 는 env 적재 직후 `install_log_redaction()` 호출 + `resolve_observed_date` 에
+  `assert_iso_date()`. bronze `clients.py`(예외/경고 로그)·`bronze_tasks.py`(마커 error·실패 로그)·
+  `common/notify.py`(알림 message/context)에 `redact()` 적용(이중 방어).
+- **검증**: 전체 단위테스트 58 통과(보안 30 신규 — 마스킹/로그필터/입력검증/정적감사 +
+  **bronze 마커 at-rest 키 비노출 end-to-end**), `python -m security` 차단 이슈 0.
+- **이식성**: `include/security/` 디렉터리 복사 + DAG 한 줄(`install_log_redaction()`) + 누출
+  지점 `redact()` 로 타 번들/프로젝트에 일괄 적용. 시크릿은 env 이름 규칙으로 자동 식별.
+- **점검/연결 구조(거버넌스)**: 에이전트(Claude/Codex)가 수시로 불러오고 적용·점검하도록 연결.
+  CLAUDE.md **§20 Security Gate**(Recall/Apply 트리거/Check) + §18 Final Quality Gate 에 보안 항목 +
+  §19 CLAUDE-chain 에 `security` 포함(세션 이동에도 따라옴). Share.md **§5 보안** 섹션.
+  타 프로젝트 이식 가이드 `docs/security/adoption.md`(복사-붙여넣기 프롬프트 포함) 신설.
+- 파일: `include/security/*`(신규), `seoul_commerce_dag.py`, `include/bronze/clients.py`,
+  `include/bronze/bronze_tasks.py`, `include/common/notify.py`, `tests/test_security.py`(신규),
+  `docs/security/{README,security,adoption}.md`(신규), `docs/README.md`·`Share.md`·`README.md`·`CLAUDE.md`(인덱스/규약).
+
+### 15. silver 가공을 bronze DAG에서 분리 — DAG 라인은 원본 수집(bronze) 전용
+- **배경**: `seoul_commerce_daily`/`seoul_commerce_recollect` 의 공통 흐름(`_wire`)이 bronze 수집과
+  silver 적재를 한 DAG 안에 묶고 있었다. bronze 는 "원본 수집"만 담당해야 한다는 역할 경계에 맞춰
+  silver 를 DAG 오케스트레이션에서 **완전히 분리**.
+- **변경**: DAG 파일에서 `from silver import silver_tasks` 임포트, `build_silver_one` 태스크,
+  `_wire` 의 `build_silver_one.expand(...)` 결선을 제거. 흐름은
+  `… → ingest_one.expand → finalize_run` 로 단순화. `finalize_run` 은 ingest 요약만 집계(불변).
+- **보존**: silver **로직은 그대로 유지**(`include/silver/silver_tasks.py`·`validators.py` 무수정).
+  사용자 결정에 따라 **별도 silver DAG 는 생성하지 않음** — 로직만 보존하고 오케스트레이션은 비움.
+  `observed_date` 파라미터/파생값은 여전히 silver 파티션 키 의미로 남는다.
+- 검증: `seoul_commerce_dag.py` 구문 검사 통과 + 잔여 silver 참조는 docstring 설명뿐(임포트/결선 없음).
+- 파일: `seoul_commerce_dag.py`(docstring 다이어그램·임포트·태스크·`_wire`).
+
 ### 14. bronze 경로에 연/월/일 파티션 추가 (`/<YYYY>/<MM>/<DD>/run_id=…`)
 - bronze 저장 구조를 `…/bronze/commerce/run_id=<ts>/…` → **`…/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<ts>/…`**
   로 변경. 연/월/일은 **run_id 날짜에서 파생**(별도 인자 없음) → 같은 날 실행이 같은 날짜 폴더에 모인다.

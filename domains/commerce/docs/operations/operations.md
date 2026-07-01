@@ -71,7 +71,7 @@ docker compose exec airflow-scheduler \
 | API 서버 | `:30585` UI Grid·Graph |
 | 수집 신선도 | 최신 `run_id=...` 폴더 + `_markers/_RUN.*`(`observed_date`/`rows`) 확인 |
 | 수집 메트릭 | `finalize_run` 로그·`_RUN.completed\|.incomplete`(`datasets_ok`/`incomplete_shorts`/`rows`) |
-| **API별 job 진행** | Airflow **Grid/Graph** 에서 `ingest_one[<short>]`·`build_silver_one[<short>]` 매핑 인스턴스로 성공/실패/대기 확인(API 이름 라벨) → [recollect-and-alerts.md](recollect-and-alerts.md) §3 |
+| **API별 job 진행** | Airflow **Grid/Graph** 에서 `ingest_one[<short>]` 매핑 인스턴스로 성공/실패/대기 확인(API 이름 라벨) → [recollect-and-alerts.md](recollect-and-alerts.md) §3 |
 | 미완료 재수집 | `seoul_commerce_recollect`(6h)가 미완료 API만 자동 보강 → [recollect-and-alerts.md](recollect-and-alerts.md) §1 |
 
 ## service_name 검증

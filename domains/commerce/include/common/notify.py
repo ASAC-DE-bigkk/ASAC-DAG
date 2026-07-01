@@ -20,6 +20,8 @@ import logging
 import traceback
 from abc import ABC, abstractmethod
 
+from security import redact   # 외부 전송 전 메시지/컨텍스트의 시크릿 마스킹
+
 log = logging.getLogger(__name__)
 
 LEVELS = ("info", "warning", "error", "critical")
@@ -84,8 +86,10 @@ def notify_exception(exc: BaseException, *, where: str, context: dict | None = N
     message = f"where={where}\nerror={exc}\n\n{tb}"
     if log_tail:
         message += f"\n--- log tail ---\n{log_tail}"
+    message = redact(message)               # 외부 채널로 나가기 전 마스킹(§2.5)
+    safe_context = redact(context or {})
     try:
         get_notifier().send(subject=f"[commerce] 예외: {where}", message=message,
-                            level="error", context=context or {})
+                            level="error", context=safe_context)
     except Exception:  # 알림 실패가 본 파이프라인을 막지 않게(best-effort)
         log.exception("notify_exception 전송 실패(무시): where=%s", where)
