@@ -84,6 +84,18 @@ def insert_kma_bronze_rows(
     if not rows:
         raise RuntimeError("KMA API returned no forecast rows.")
 
+    cursor.execute(
+        f"""
+        DELETE FROM {qualified_table}
+        WHERE source_id = {sql_string(SOURCE_ID)}
+            AND dag_run_id = {sql_string(dag_run_id)}
+            AND base_date = {sql_string(base_date)}
+            AND base_time = {sql_string(base_time)}
+            AND nx = {sql_int(nx)}
+            AND ny = {sql_int(ny)}
+        """
+    )
+
     load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
     request_params = request_params_json(base_date, base_time, nx, ny)
     values = []
