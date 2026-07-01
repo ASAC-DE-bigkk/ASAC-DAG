@@ -34,7 +34,7 @@ from traffic_ingest.common.runtime import (  # noqa: E402
 def traffic_dag_schedule() -> str | None:
     if "ASK_SEOUL_TRAFFIC_DAG_SCHEDULE" in os.environ:
         return os.environ["ASK_SEOUL_TRAFFIC_DAG_SCHEDULE"] or None
-    return "* * * * *" if is_dev_target() else None
+    return "*/5 * * * *" if is_dev_target() else None
 
 
 def ingest_seoul_traffic_incident(**context) -> dict:

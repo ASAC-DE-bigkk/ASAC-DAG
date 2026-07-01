@@ -17,6 +17,7 @@ from weather_ingest.bronze import (  # noqa: E402
 )
 from weather_ingest.common.runtime import (  # noqa: E402
     fetch_url,
+    is_dev_target,
     sha256_hex,
     trino_cursor,
     upload_raw_object,
@@ -29,6 +30,15 @@ from weather_ingest.kma import (  # noqa: E402
     parse_kma_response,
     resolve_kma_base_datetime,
 )
+
+
+KMA_PUBLISH_CRON_KST = "20 2,5,8,11,14,17,20,23 * * *"
+
+
+def kma_dag_schedule() -> str | None:
+    if "ASK_SEOUL_KMA_DAG_SCHEDULE" in os.environ:
+        return os.environ["ASK_SEOUL_KMA_DAG_SCHEDULE"] or None
+    return KMA_PUBLISH_CRON_KST if is_dev_target() else None
 
 
 def ingest_kma_vilage_fcst(**context) -> dict:
@@ -96,7 +106,7 @@ with DAG(
     dag_id="kma_vilage_fcst_bronze",
     description="Loads KMA getVilageFcst raw JSON into R2 and validates the Iceberg bronze runtime.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
-    schedule=os.environ.get("ASK_SEOUL_KMA_DAG_SCHEDULE") or None,
+    schedule=kma_dag_schedule(),
     catchup=False,
     max_active_runs=1,
     tags=["ask_seoul", "kma", "bronze", "r2", "iceberg"],
