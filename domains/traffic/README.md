@@ -9,7 +9,7 @@ row와 metadata를 적재하는 것이다.
 
 | 파일 | 역할 |
 |---|---|
-| `seoul_traffic_incident_bronze.py` | Airflow DAG 엔트리포인트. 1분 dev schedule과 task 순서만 잡고 세부 로직은 domain package에 위임한다. |
+| `seoul_traffic_incident_bronze.py` | Airflow DAG 엔트리포인트. 5분 dev schedule과 task 순서만 잡고 세부 로직은 domain package에 위임한다. |
 | `traffic_ingest/acc_info.py` | TOPIS AccInfo 요청 URL, raw object key, XML 응답 파싱, redacted request metadata를 담당한다. |
 | `traffic_ingest/bronze.py` | Iceberg bronze table DDL, schema evolution, insert, runtime verify SQL을 담당한다. |
 | `traffic_ingest/common/runtime.py` | traffic 도메인 내부에서만 쓰는 env, HTTP, R2, Trino, SQL literal helper다. |
@@ -28,7 +28,7 @@ Airflow DAG
 ```
 
 traffic은 실시간성 있는 변수로 쓸 수 있어 dev에서는 커버리지를 넓게 보기 위해 기본
-1분 스케줄을 둔다. 단, prod에서는 명시적으로 `ASK_SEOUL_TRAFFIC_DAG_SCHEDULE`을
+5분 스케줄을 둔다. 단, prod에서는 명시적으로 `ASK_SEOUL_TRAFFIC_DAG_SCHEDULE`을
 넣지 않으면 자동 스케줄을 만들지 않는다.
 
 ## Bronze metadata 결정 이유
