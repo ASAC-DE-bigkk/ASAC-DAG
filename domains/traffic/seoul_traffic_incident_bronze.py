@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+DAG_DIR = os.path.dirname(os.path.abspath(__file__))
+if DAG_DIR not in sys.path:
+    sys.path.insert(0, DAG_DIR)
 
 from traffic_ingest.acc_info import (  # noqa: E402
     KST,
@@ -18,7 +20,7 @@ from traffic_ingest.acc_info import (  # noqa: E402
 from traffic_ingest.bronze import (  # noqa: E402
     create_seoul_traffic_bronze_table,
     insert_seoul_traffic_bronze_rows,
-    verify_seoul_traffic_bronze_runtime,
+    verify_seoul_traffic_bronze_runtime as verify_seoul_traffic_bronze_rows,
 )
 from traffic_ingest.common.runtime import (  # noqa: E402
     fetch_url,
@@ -80,6 +82,15 @@ def ingest_seoul_traffic_incident(**context) -> dict:
         "raw_object_key": raw_object_key,
         "inserted": inserted,
     }
+
+
+def verify_seoul_traffic_bronze_runtime(**context) -> int:
+    ingest_result = context["ti"].xcom_pull(task_ids="ingest_seoul_traffic_incident") or {}
+    return verify_seoul_traffic_bronze_rows(
+        raw_object_key=ingest_result["raw_object_key"],
+        dag_run_id=context["run_id"],
+        expected_rows=int(ingest_result["inserted"]),
+    )
 
 
 with DAG(

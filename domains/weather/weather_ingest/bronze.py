@@ -147,9 +147,18 @@ def insert_kma_bronze_rows(
     return len(rows)
 
 
-def verify_kma_bronze_runtime() -> int:
+def verify_kma_bronze_runtime(
+    raw_object_key: str | None = None,
+    dag_run_id: str | None = None,
+    expected_rows: int | None = None,
+) -> int:
     cursor, catalog, schema = trino_cursor()
     qualified_table = f"{catalog}.{schema}.{BRONZE_TABLE}"
+    filters = [f"source_id = {sql_string(SOURCE_ID)}"]
+    if raw_object_key:
+        filters.append(f"raw_object_key = {sql_string(raw_object_key)}")
+    if dag_run_id:
+        filters.append(f"dag_run_id = {sql_string(dag_run_id)}")
     cursor.execute(
         f"""
         SELECT
@@ -157,12 +166,19 @@ def verify_kma_bronze_runtime() -> int:
             count(DISTINCT raw_object_key) AS raw_object_count,
             max(collected_at) AS last_collected_at
         FROM {qualified_table}
-        WHERE source_id = {sql_string(SOURCE_ID)}
+        WHERE {" AND ".join(filters)}
         """
     )
     row = cursor.fetchone()
+    row_count = int(row[0])
+    if expected_rows is not None and row_count != expected_rows:
+        raise RuntimeError(
+            f"KMA bronze verification failed: expected_rows={expected_rows}, actual_rows={row_count}"
+        )
+    if expected_rows and int(row[1]) != 1:
+        raise RuntimeError(f"KMA bronze verification failed: raw_object_count={row[1]}")
     print(
         "kma_vilage_fcst_bronze "
         f"row_count={row[0]} raw_object_count={row[1]} last_collected_at={row[2]}"
     )
-    return int(row[0])
+    return row_count

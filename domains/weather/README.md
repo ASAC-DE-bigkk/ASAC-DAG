@@ -78,3 +78,7 @@ domains/weather/
 `weather_ingest/common`은 최상위 공통 프레임워크가 아니다. weather 도메인 내부에서 반복되는
 런타임 접속/직렬화 코드만 묶은 얇은 helper이며, API별 성공 기준과 schema 판단은 source/bronze
 모듈에 남긴다.
+
+traffic 도메인의 `traffic_ingest/common/runtime.py`와 같은 런타임 helper를 의도적으로 복제한다.
+R2/Trino/env 동작을 바꿀 때는 두 도메인 runtime을 같이 확인하고, 세 번째 도메인에서도 같은 코드가
+반복되면 그때 최소 공통 모듈 추출을 다시 논의한다.

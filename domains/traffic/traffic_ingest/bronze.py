@@ -83,11 +83,14 @@ def insert_seoul_traffic_bronze_rows(
     collected_at: datetime,
     dag_run_id: str,
 ) -> int:
-    rows_to_insert = rows or [{}]
+    if not rows:
+        print("Seoul traffic API returned no incident rows; raw XML was preserved without bronze rows.")
+        return 0
+
     load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
     request_params = request_params_json(start_index, end_index)
     values = []
-    for row in rows_to_insert:
+    for row in rows:
         values.append(
             "("
             f"{sql_string(request_id)}, "
@@ -157,9 +160,18 @@ def insert_seoul_traffic_bronze_rows(
     return len(rows)
 
 
-def verify_seoul_traffic_bronze_runtime() -> int:
+def verify_seoul_traffic_bronze_runtime(
+    raw_object_key: str | None = None,
+    dag_run_id: str | None = None,
+    expected_rows: int | None = None,
+) -> int:
     cursor, catalog, schema = trino_cursor()
     qualified_table = f"{catalog}.{schema}.{BRONZE_TABLE}"
+    filters = [f"source_id = {sql_string(SOURCE_ID)}"]
+    if raw_object_key:
+        filters.append(f"raw_object_key = {sql_string(raw_object_key)}")
+    if dag_run_id:
+        filters.append(f"dag_run_id = {sql_string(dag_run_id)}")
     cursor.execute(
         f"""
         SELECT
@@ -167,12 +179,20 @@ def verify_seoul_traffic_bronze_runtime() -> int:
             count(DISTINCT raw_object_key) AS raw_object_count,
             max(collected_at) AS last_collected_at
         FROM {qualified_table}
-        WHERE source_id = {sql_string(SOURCE_ID)}
+        WHERE {" AND ".join(filters)}
         """
     )
     row = cursor.fetchone()
+    table_rows = int(row[0])
+    if expected_rows is not None and table_rows != expected_rows:
+        raise RuntimeError(
+            "Seoul traffic bronze verification failed: "
+            f"expected_rows={expected_rows}, actual_rows={table_rows}"
+        )
+    if expected_rows and int(row[1]) != 1:
+        raise RuntimeError(f"Seoul traffic bronze verification failed: raw_object_count={row[1]}")
     print(
         "seoul_traffic_incident_bronze "
         f"table_rows={row[0]} raw_object_count={row[1]} last_collected_at={row[2]}"
     )
-    return int(row[0])
+    return table_rows
