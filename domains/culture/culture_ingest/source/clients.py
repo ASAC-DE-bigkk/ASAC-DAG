@@ -121,9 +121,15 @@ class SeoulClient:
         return body, payload.get(service, {})
 
     def list_pages(self, service: str, max_rows: int | None):
-        """서울 서비스를 1000행 윈도우 단위로 소진할 때까지 :class:`Page`로 내보낸다."""
-        # 첫 윈도우 응답이 전체 건수(list_total_count)도 알려준다.
-        body, container = self._get_window(service, 1, SEOUL_WINDOW)
+        """서울 서비스를 1000행 윈도우 단위로 소진할 때까지 :class:`Page`로 내보낸다.
+
+        ``max_rows``가 주어지면 **첫 윈도우부터** 그 상한을 지킨다 — 샘플/드라이런이
+        1000행을 통째로 받지 않게 한다. (``list_total_count``는 윈도우 크기와 무관하게
+        전체 건수를 주므로, 첫 윈도우를 줄여도 남은 페이징 계산엔 영향이 없다.)
+        """
+        # 첫 윈도우도 max_rows를 존중(없으면 1000). 응답이 전체 건수도 알려준다.
+        first_end = SEOUL_WINDOW if max_rows is None else min(SEOUL_WINDOW, max_rows)
+        body, container = self._get_window(service, 1, first_end)
         total = int(container.get("list_total_count", 0))
         rows = container.get("row", []) or []
         if not rows:
@@ -132,7 +138,7 @@ class SeoulClient:
 
         # 남은 행을 1000개씩 윈도우를 밀어가며 가져온다(max_rows 있으면 거기까지).
         target = total if max_rows is None else min(total, max_rows)
-        start = SEOUL_WINDOW + 1
+        start = first_end + 1
         while start <= target:
             end = min(start + SEOUL_WINDOW - 1, target)
             body, container = self._get_window(service, start, end)
