@@ -51,6 +51,10 @@
 - 단위테스트 **14 통과**([../../../tests/test_incremental.py](../../../tests/test_incremental.py)):
   다중청크 정렬·순서민감 검증키·diff(identical/new-head/changed/deleted)·파일브리지·orchestration
   (first→identical→changed)·step0 시드→identical.
-- **end-to-end(라이브 수집)**: 서울 API 실제 호출이 필요 — 오프라인 단위테스트까지 완료.
+- **end-to-end 라이브 검증 완료**(실 Seoul API, 격리 프리픽스 `_verify58` → 검증 후 전량 삭제):
+  run1=first(row-NDJSON) → run2 동일=identical(증분 미생성) → 변경분=changed(변경/신규만 증분, diff-target 롤링).
+  **이력 보존**: 이전 run 증분 유지 + 같은 업장의 원본·변경 두 버전 공존(이력 추적 가능). 실 bronze 무오염.
+- **사이드 이펙트**: 기존 page-NDJSON 과 신규 row-NDJSON **형식 혼재**(이력 손실 아님 — 구 run 보존).
+  실운영 첫 수집은 `_diff_target` 미존재라 mode=first 전체 저장(자가 시드); step0 사전 시드 시 첫 수집부터 diff.
 - **다운스트림**: bronze 가 row-NDJSON 으로 바뀌어, page 파서를 쓰는 소비자(dbt 로더 등)의 row 기준
   조정은 feat/58 밖(별도).
