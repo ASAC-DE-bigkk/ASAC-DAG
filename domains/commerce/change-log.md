@@ -14,15 +14,21 @@ request:
   **전량 RAM 금지 → 파일 단위 스트리밍**, 퀵정렬보다 낮은 Big-O 가 있으면 그 방식. 저장 포맷은
   **row-NDJSON(UPDATEDT desc)로 전환**. **API 단위 해시 검증키**를 만들고, 수집 파일 삭제 로직은
   재검증 통과 뒤 **맨 마지막(step4)**에만 적용. 브랜치 feat/58-commerce-bronze-sort-diff.
-- (합의) 정렬 알고리즘 = 외부 병합 정렬, 저장 = row-NDJSON.
+- (합의 Q&A) **정렬 알고리즘** = 외부 병합 정렬(스트리밍·바운디드 RAM). **저장 포맷** = row-NDJSON(UPDATEDT desc).
+- (합의 Q&A — 증분 저장/비교기준 모델, 크리티컬) 구 데이터 소실·버전이력 유실 방지를 위해 **2계열**:
+  ① **save(증분 영구 저장)** — 첫 수집=full, 이후=신규/변경분만 누적(이력 보존, 삭제 안 함).
+  ② **diff-target(롤링 최신본)** — 다음날 비교 기준. 첫 수집 시 save 와 **같은 내용으로 따로 생성**.
+  매일: 오늘본 vs diff-target diff → 신규분을 save 로 증분 저장 → **diff-target 을 오늘본으로 교체(구 diff-target 삭제)**.
 response:
 - **-1단계 확인(실데이터)**: 39종 전부 UPDATEDT 100% `datetime` → 14자리 정수키로 정렬 가능 확인.
 - **include/bronze/incremental.py**: `external_merge_sort`(청크→임시파일→heapq 병합, 스트리밍·바운디드
   RAM, O(n log n)), `verification_key`(정렬본 순서민감 sha256), `diff_new_rows`(정렬 병합 스트리밍 diff
-  — 같은 키는 정규화 문자열 직접비교로 hot loop 경량). 단위테스트 **8 통과**(다중청크 정렬·순서민감
-  키·identical/new-head/changed/deleted diff).
-- 커밋·푸시(feat/58). **후속**: DAG 통합(page→row 저장 변경 + 검증키 마커 저장), step0(기존 데이터
-  1회성 검증키 백필), step1-3(비교→동일=마커만/상이=diff 파생파일), step4(삭제 맨 나중+재검증), docs.
+  — 같은 키는 정규화 문자열 직접비교로 hot loop 경량). **파일 브리지**: `sort_rows_to_file`(정렬→row-NDJSON+키),
+  `read_rows`, `build_increment`(첫수집=full / 동일=증분없음 / 상이=diff 신규분 — 모델 그대로 구현).
+- 단위테스트 **12 통과**(정렬·순서민감키·diff 4종 + 파일브리지 first/identical/changed).
+- 커밋·푸시(feat/58). **후속**: DAG 통합(page→row 저장 변경 + 검증키 마커 저장 + save/diff-target 경로),
+  step0(기존 데이터 1회성 검증키·diff-target 백필), step1-3(비교→동일=마커만/상이=신규분 save), step4(수집
+  원본 삭제는 재검증 뒤 맨 나중), docs.
 
 ## 2026-06-30
 

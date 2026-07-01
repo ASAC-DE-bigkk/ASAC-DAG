@@ -152,3 +152,59 @@ def diff_new_rows(today_sorted: Iterable[dict], prev_sorted: Iterable[dict]) -> 
                 t.next(); p.next()          # 미변경
             else:
                 yield t.next(); p.next()    # 같은 키·다른 내용 → 변경분
+
+
+# ── 파일 브리지(저장 모델: save 증분 + diff-target 롤링) ─────────────────────────
+def sort_rows_to_file(rows: Iterable[dict], *, dest_path: str, tmp_dir: str,
+                      chunk_rows: int = 100_000) -> tuple[str, int]:
+    """rows 를 외부 병합 정렬해 dest_path(row-NDJSON)로 기록. (검증키, row수) 반환."""
+    h = hashlib.sha256()
+    n = 0
+    with open(dest_path, "w", encoding="utf-8") as f:
+        for r in external_merge_sort(rows, tmp_dir=tmp_dir, chunk_rows=chunk_rows):
+            f.write(json.dumps(r, ensure_ascii=False))
+            f.write("\n")
+            h.update(normalize(r).encode("utf-8"))
+            h.update(b"\n")
+            n += 1
+    return h.hexdigest(), n
+
+
+def read_rows(path: str) -> Iterator[dict]:
+    """row-NDJSON 파일 스트리밍 읽기."""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+
+def build_increment(today_rows: Iterable[dict], *, tmp_dir: str, today_sorted_path: str,
+                    increment_path: str, prev_target_path: str | None = None,
+                    prev_key: str | None = None, chunk_rows: int = 100_000) -> dict:
+    """하루치 증분 산출(파일 기반, 스트리밍).
+
+    - 오늘 수집 rows 를 정렬해 `today_sorted_path`(= 새 diff-target 후보)로 기록 + 검증키 계산.
+    - 첫 수집(prev 없음): 증분 = 전체(save=diff-target 동일 내용) → increment_path 에 전체 기록.
+    - 전날 target 과 검증키 동일: 증분 없음(마커만) → increment_path 미기록.
+    - 상이: `diff_new_rows(today, prev)` 로 신규/변경분만 increment_path 에 기록.
+    새 diff-target = today_sorted_path (호출측이 교체 업로드). 반환: mode/key/count/increment_count/identical.
+    """
+    today_key, today_count = sort_rows_to_file(today_rows, dest_path=today_sorted_path,
+                                               tmp_dir=tmp_dir, chunk_rows=chunk_rows)
+    if prev_target_path is None:                         # 첫 수집 — 전체를 증분(save)로
+        inc = 0
+        with open(increment_path, "w", encoding="utf-8") as out:
+            for r in read_rows(today_sorted_path):
+                out.write(json.dumps(r, ensure_ascii=False)); out.write("\n"); inc += 1
+        return {"mode": "first", "key": today_key, "count": today_count,
+                "increment_count": inc, "identical": False}
+    if prev_key is not None and today_key == prev_key:    # 전날과 동일 — 증분 없음
+        return {"mode": "identical", "key": today_key, "count": today_count,
+                "increment_count": 0, "identical": True}
+    inc = 0                                               # 상이 — 신규/변경분만
+    with open(increment_path, "w", encoding="utf-8") as out:
+        for r in diff_new_rows(read_rows(today_sorted_path), read_rows(prev_target_path)):
+            out.write(json.dumps(r, ensure_ascii=False)); out.write("\n"); inc += 1
+    return {"mode": "changed", "key": today_key, "count": today_count,
+            "increment_count": inc, "identical": False}
