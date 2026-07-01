@@ -31,10 +31,14 @@ response:
   `incremental_store`(스토리지 브리지: 전날 target 다운로드→비교→증분 업로드→target 롤링 교체).
   `bronze_tasks._write_bronze`가 **status==ok 일 때만** 페이지→row 파싱→증분 저장(중간 중단은 미저장),
   마커에 `verification_key/increment_mode/increment_count/sorted_row_count` 기록. page-NDJSON → row-NDJSON.
-- 커밋·푸시(feat/58). **후속**: step0(기존 데이터 1회성 diff-target/검증키 백필), step4(수집원본 삭제는
-  재검증 뒤 맨 나중 — 본 모델은 raw 페이지가 휘발이라 별도 삭제 대상 없음, 재검증으로 갈음), docs,
-  다운스트림(dbt 로더) row-NDJSON 대응은 feat/58 밖.
-- **미검증(정직)**: DAG 배선 end-to-end 는 실수집(서울 API 호출) 필요 — 오프라인 단위테스트까지만.
+- **step0**: `seed_diff_target`(1회성 diff-target/검증키 시드). 미실행이어도 첫 수집이 self-seed 하므로 선택.
+- **step4**: 본 모델은 raw 페이지가 휘발(메모리)이라 "수집 파일 삭제" 별도 대상 없음 → "미저장(status!=ok) +
+  재검증"으로 갈음(단위테스트로 first/identical/changed 재검증).
+- **docs**: [docs/pipeline/bronze/incremental-sort-diff.md](docs/pipeline/bronze/incremental-sort-diff.md)
+  (모델·정렬·검증키·diff·수집흐름·step0·검증). 단위테스트 **14 통과**.
+- 커밋·푸시(feat/58). **미검증(정직)**: DAG 배선 end-to-end 는 실수집(서울 API 호출) 필요 — 오프라인
+  단위테스트까지. **다운스트림(dbt 로더) row-NDJSON 대응은 feat/58 밖**.
+- (부수) CLAUDE.md 영어 통일 + Change Log Rule 에 request:/response: 규격 명시(별도 커밋).
 
 ## 2026-06-30
 

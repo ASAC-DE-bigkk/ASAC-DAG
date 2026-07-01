@@ -151,3 +151,18 @@ def test_incremental_store_lifecycle(tmp_path):
     assert r3["mode"] == "changed" and r3["increment_count"] == 1
     assert st.exists("run3/tour.jsonl")
     assert len([l for l in st.read_bytes(tk).decode().splitlines() if l.strip()]) == 3  # target 교체됨(3행)
+
+
+def test_step0_seed_then_identical(tmp_path):
+    """step0 시드 후, 같은 내용의 첫 수집은 identical(증분 없음) 이어야."""
+    st = _FakeStorage()
+    tk, tkf = "_diff_target/x.jsonl", "_diff_target/x.key"
+    rows = [_row("1", "2026-01-01 00:00:00"), _row("2", "2026-03-01 00:00:00")]
+    d0 = tmp_path / "seed"; d0.mkdir()
+    seed = inc.seed_diff_target(st, target_key=tk, target_key_file=tkf,
+                                rows=[dict(r) for r in rows], tmp_dir=str(d0))
+    assert st.exists(tk) and st.exists(tkf)
+    d1 = tmp_path / "run1"; d1.mkdir()
+    res = inc.incremental_store(st, increment_key="run1/x.jsonl", target_key=tk,
+                                target_key_file=tkf, rows=[dict(r) for r in rows], tmp_dir=str(d1))
+    assert res["mode"] == "identical" and res["key"] == seed["key"]   # 시드와 동일 → 증분 없음

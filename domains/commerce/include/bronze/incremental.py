@@ -247,3 +247,17 @@ def incremental_store(storage, *, increment_key: str, target_key: str, target_ke
         storage.write_bytes(target_key_file, res["key"].encode("utf-8"))
     res["increment_key"] = written_increment
     return res
+
+
+def seed_diff_target(storage, *, target_key: str, target_key_file: str,
+                     rows: Iterable[dict], tmp_dir: str) -> dict:
+    """step0(1회성): 기존 수집물로 diff-target(정렬 전체본) + 검증키 사이드카를 시드한다.
+
+    증분 파일은 만들지 않는다 — 이후 첫 수집이 이 target 과 비교되어 변경분만 저장되게 하는 기준.
+    """
+    sorted_path = os.path.join(tmp_dir, "seed_sorted.jsonl")
+    key, count = sort_rows_to_file(rows, dest_path=sorted_path, tmp_dir=tmp_dir)
+    with open(sorted_path, "rb") as f:
+        storage.write_bytes(target_key, f.read())
+    storage.write_bytes(target_key_file, key.encode("utf-8"))
+    return {"key": key, "count": count}
