@@ -46,7 +46,7 @@ def request_params_json(start_index: int, end_index: int) -> str:
 
 
 def build_seoul_acc_info_url(start_index: int, end_index: int) -> str:
-    api_key = urllib.parse.quote(required_env("SEOUL_OPEN_API_KEY"), safe="")
+    api_key = urllib.parse.quote(required_env("SEOUL_API_KEY_TRIC"), safe="")
     return f"{SEOUL_OPEN_API_BASE_URL.rstrip('/')}/{api_key}/xml/AccInfo/{start_index}/{end_index}/"
 
 
