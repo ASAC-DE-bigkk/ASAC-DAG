@@ -53,8 +53,8 @@
 
 - [x] Step 0 — 스캐폴딩: `dags/common/`, `dags/docs/`, 본 계획 문서 생성
 - [ ] Step 0.5 — 계약(contract) 통일 (코드 통합 전 선행):
-  - [ ] 서울 API 키 환경변수 이름 통합 → [plans/2026-07-02-feat-env-key-unification.md](plans/2026-07-02-feat-env-key-unification.md)
-  - [ ] DAG 네이밍 규칙 정의·적용 → [plans/2026-07-02-feat-dag-naming-convention.md](plans/2026-07-02-feat-dag-naming-convention.md)
+  - [x] 서울 API 키 환경변수 이름 통합 → [plans/2026-07-02-feat-env-key-unification.md](plans/2026-07-02-feat-env-key-unification.md)
+  - [x] DAG 네이밍 규칙 정의·적용 → [plans/2026-07-02-feat-dag-naming-convention.md](plans/2026-07-02-feat-dag-naming-convention.md)
   - [ ] 저장 계약 — R2 원본 `raw/` 전환 → [plans/2026-07-02-feat-r2-raw-prefix.md](plans/2026-07-02-feat-r2-raw-prefix.md) (#75)
 - [ ] Step 1 — 관심사별 상세 비교 분석 (도메인별 구현 차이·의도 파악)
 - [ ] Step 2 — 통합 우선순위 및 인터페이스 합의 (TBD)
