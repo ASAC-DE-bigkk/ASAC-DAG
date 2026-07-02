@@ -35,4 +35,4 @@
 | 날짜 | 계획 | 상태 |
 |---|---|---|
 | 2026-07-02 | [서울 API 키 환경변수 이름 통합](2026-07-02-feat-env-key-unification.md) | 진행 중 (#70) |
-| 2026-07-02 | [DAG 네이밍 규칙 정의 및 통합](2026-07-02-feat-dag-naming-convention.md) | 초안 |
+| 2026-07-02 | [DAG 네이밍 규칙 정의 및 통합](2026-07-02-feat-dag-naming-convention.md) | 진행 중 (#73) |

@@ -1,10 +1,10 @@
 # DAG 네이밍 규칙 정의 및 통합
 
-- 상태: 초안 (규칙 합의 필요)
+- 상태: 진행 중 (규칙 합의 완료 2026-07-02)
 - 작성일: 2026-07-02
-- 이슈: #NN (생성 예정) / 브랜치: `feat/NN-dag-naming`
+- 이슈: [#73](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/73) / 브랜치: `feat/73-dag-naming` (feat/70 위 스택)
 - 담당 항목: 사용자 이슈 초안 3번
-- 선행: [2026-07-02-feat-env-key-unification.md](2026-07-02-feat-env-key-unification.md) 완료 후 착수
+- 선행: [2026-07-02-feat-env-key-unification.md](2026-07-02-feat-env-key-unification.md) (PR #72) — 머지 순서 준수
 
 ## 배경 — 현재 dag_id 현황
 
@@ -21,32 +21,31 @@
 문제 요약: ① 접두가 `seoul_`/도메인/소스로 제각각, ② 단계 표기가
 `bronze`·`ingest`·`collect`·`transform`·`elt`·`daily`로 혼재, ③ dag_id ↔ 파일명 불일치 존재.
 
-## 제안 규칙 (초안)
+## 확정 규칙 (2026-07-02 합의)
 
 ```
 dag_id = <domain>_<dataset>_<stage>
-파일명 = <dag_id>.py  (1 DAG = 1 파일, dag_id와 일치)
+파일명 = <dag_id>.py  (한 파일에 밀접한 DAG 쌍이 공존하면 공통 접두 파일명)
 ```
 
 - **domain**: `dags/domains/` 폴더명과 동일 (commerce · culture · population · traffic · transit · weather). 도메인 무관 공통 DAG는 `common`.
-- **dataset**: 소스/데이터셋 식별자 (bus, subway, parking, incident, vilage_fcst, ppltn, localdata, events …). 모든 이름이 서울 데이터이므로 `seoul_` 접두는 중복 → 제거.
-- **stage**: 파이프라인 단계 —
-  - `bronze` 수집만 / `silver` `gold` 변환만 (dbt 트리거 포함)
-  - `elt` 수집+변환 일괄 / `recollect` 재수집 보조 / `smoke` 스모크 테스트
+- **dataset**: 도메인 안에 **복수 파이프라인이 있을 때만** 사용(단일이거나 도메인 전체를 한 DAG가 커버하면 생략). 모든 이름이 서울 데이터이므로 `seoul_` 접두는 중복 → 제거.
+- **stage(역할형)**: `bronze` 수집만 / `transform` dbt 변환(silver+gold 등 복수 레이어 포함)
+  / `elt` 수집+변환 일괄 / `recollect` 재수집 보조 / `smoke` 스모크 테스트
 
-### 적용 매핑 (초안 — 도메인 담당자 확인 필요)
+### 적용 매핑 (확정)
 
-| 현재 | 제안 | 비고 |
+| 현재 | 신규 | 비고 |
 |---|---|---|
-| `seoul_commerce_daily` | `commerce_localdata_elt` | bronze+silver 일괄이므로 elt. dataset 명칭은 담당자 확인 |
+| `seoul_commerce_daily` | `commerce_localdata_elt` | dataset=localdata(소스 API 명칭). 파일 `commerce_localdata.py`에 recollect와 공존 |
 | `seoul_commerce_recollect` | `commerce_localdata_recollect` | |
-| `culture_bronze_ingest` | `culture_<dataset>_bronze` | KOPIS+서울문화행사 복수 소스 — dataset 명칭 결정 필요 |
-| `seoul_ppltn_collect` | `population_ppltn_bronze` | |
-| `seoul_ppltn_transform` | `population_ppltn_silver` | dbt로 silver/gold 변환 — `silver` vs `transform` 결정 필요 |
+| `culture_bronze_ingest` | `culture_bronze` | KOPIS+서울문화행사를 한 DAG가 커버 → dataset 생략 |
+| `seoul_ppltn_collect` | `population_bronze` | 단일 파이프라인 → dataset 생략 |
+| `seoul_ppltn_transform` | `population_transform` | dbt silver+gold 모두 생성 → 역할형 transform |
 | `seoul_traffic_incident_bronze` | `traffic_incident_bronze` | |
 | `transit_bus_elt` 외 2 | (유지 — 규칙 부합) | 파일명만 `transit_*_elt.py`로 rename |
-| `kma_vilage_fcst_bronze` | `weather_vilage_fcst_bronze` | |
-| `dbt_trino_iceberg_smoke` | `common_dbt_smoke` 또는 유지 | 스모크는 예외 허용 여부 결정 |
+| `kma_vilage_fcst_bronze` | `weather_vilage_fcst_bronze` | `vilage` 철자는 KMA API 명칭 그대로 유지 |
+| `dbt_trino_iceberg_smoke` | `common_dbt_smoke` | 공통 DAG는 `common` 접두 |
 
 ## 리스크
 
@@ -55,9 +54,10 @@ dag_id = <domain>_<dataset>_<stage>
 - DAG 간 참조 갱신 필요: `seoul_ppltn_transform`이 docstring/로직에서 `seoul_ppltn_collect`를 참조.
 - 모니터링·알림·문서에 박힌 dag_id 문자열 일괄 치환 필요 (각 도메인 docs, README).
 
-## 열어둔 질문 (합의 필요)
+## 합의 결과 (2026-07-02, 열린 질문 4건 확정)
 
-1. `elt` vs 레이어 접미(`bronze`/`silver`) 이원화 방안 동의 여부
-2. commerce/culture의 dataset 명칭 (localdata? events? kopis?)
-3. 스모크 DAG(`dbt_trino_iceberg_smoke`) 예외 처리 여부
-4. 전환 시 옛 DAG 이력 보존 정책 (그냥 두기 vs 삭제)
+1. stage는 **역할형**(bronze/transform/elt/recollect/smoke) — 레이어형 기각
+2. 단일 파이프라인/도메인 전체 커버 DAG는 **dataset 생략** (population_bronze, culture_bronze)
+3. commerce dataset = **localdata** (소스 API 명칭 기준)
+4. 스모크 DAG는 **common_dbt_smoke**로 rename (예외 없음)
+5. 옛 DAG 실행 이력은 옛 dag_id로 메타DB에 보존(삭제하지 않음) — 신규 id는 새로 시작
