@@ -1,6 +1,6 @@
 # 환경변수 관리 Infisical 전환 (.env → app.infisical.com)
 
-- 상태: 초안 (기획 — 팀 의견 수렴 중)
+- 상태: 진행 중 — B안(과도기) 가동 완료 2026-07-02, A안 정착 대기
 - 작성일: 2026-07-02
 - 이슈: [#76](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/76) (논의) / 브랜치: `feat/76-infisical-secrets` (합의 후)
 - 선행: [#70 env 키 통합](2026-07-02-feat-env-key-unification.md) (PR #72) — 통일된 키 이름 체계 위에 도입
@@ -54,6 +54,17 @@ infisical export --projectId <id> --env dev --format dotenv > .env
 - 현 파이프라인은 `os.environ` 직접 참조라 적용 범위가 안 맞고 운영 부담 큼 — **비추천(현 단계)**
 
 **권장 경로: B안(과도기, 즉시) → A안(정착)**. 두 안 모두 코드의 `os.environ` 참조는 무변경.
+
+## 진행 기록 (2026-07-02)
+
+- [x] Infisical Cloud 셋업: Organization·Project 생성, dev 환경에 시크릿 51키 업로드 (사용자)
+- [x] CLI 설치 + `infisical login` + `.infisical.json` 생성·커밋 (sample#6)
+- [x] **B안 가동**: `infisical export --env dev --format dotenv > .env` → 키 51개 백업과 완전 일치 확인
+  → 컨테이너 재기동 → 컨테이너 env 정상(따옴표 오염 0) → `traffic_incident_bronze` 트리거 success
+- ⚠️ 운영 주의: PowerShell `>` 리다이렉트는 UTF-16 저장 — export 는 **Git Bash에서** 실행할 것
+- [ ] 팀원 전파 (login → export → 재기동), 개인값은 Personal Override 사용
+- [ ] A안 정착 (compose env_file 제거 + infisical run 래퍼) — 별도 브랜치
+- [ ] CI/서버용 Machine Identity 발급
 
 ## 단계별 계획 (합의 후 이슈화)
 

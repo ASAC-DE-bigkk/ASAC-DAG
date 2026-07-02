@@ -36,7 +36,7 @@
 |---|---|---|
 | 2026-07-02 | [서울 API 키 환경변수 이름 통합](2026-07-02-feat-env-key-unification.md) | 진행 중 (#70) |
 | 2026-07-02 | [DAG 네이밍 규칙 정의 및 통합](2026-07-02-feat-dag-naming-convention.md) | 진행 중 (#73) |
-| 2026-07-02 | [환경변수 관리 Infisical 전환](2026-07-02-feat-infisical-secrets.md) | 의견 수렴 (#76) |
+| 2026-07-02 | [환경변수 관리 Infisical 전환](2026-07-02-feat-infisical-secrets.md) | 진행 중 (#76, B안 가동) |
 | 2026-07-02 | [공통 에러 모듈 (RFC 9457 + R2)](2026-07-02-feat-common-error-module.md) | 의견 수렴 (#77) |
 | 2026-07-02 | [공통 HTTP 클라이언트](2026-07-02-feat-common-http-client.md) | 의견 수렴 (#78) |
 | 2026-07-02 | [R2 원본 경로 raw/ 전환](2026-07-02-feat-r2-raw-prefix.md) | 합의됨 (#75, commerce 마이그레이션 방식 대기) |
