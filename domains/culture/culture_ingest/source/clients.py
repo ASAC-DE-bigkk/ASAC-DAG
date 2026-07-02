@@ -8,9 +8,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
+import requests
+
 from culture_ingest.common.http import Page, build_session
+
+log = logging.getLogger(__name__)
 
 KOPIS_BASE = "http://www.kopis.or.kr/openApi/restful"
 SEOUL_BASE = "http://openapi.seoul.go.kr:8088"
@@ -57,14 +62,23 @@ class KopisClient:
         """KOPIS 목록 엔드포인트를 페이징하며 :class:`Page`를 하나씩 내보낸다.
 
         한 페이지가 ``rows``보다 적게 오면(마지막 페이지) 또는 ``max_pages``에
-        도달하면 멈춘다.
+        도달하면 멈춘다. 총 행수가 ``rows``의 정확한 배수면 마지막 페이지가 꽉 차
+        다음 페이지를 조회하게 되는데, KOPIS는 범위 밖 페이지에 HTTP 400을 준다 —
+        이 오버슛 400은 '목록 끝'으로 처리한다(#84). 1페이지의 400은 진짜 오류.
         """
         page = 1
         while True:
             if max_pages is not None and page > max_pages:
                 return
             params = {**base_params, "cpage": page, "rows": rows}
-            body = self._get(path, params)
+            try:
+                body = self._get(path, params)
+            except requests.HTTPError as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if page > 1 and status == 400:
+                    log.info("[kopis] %s cpage=%d 오버슛 400 — 목록 끝으로 종료", path, page)
+                    return
+                raise
             count = self._count(body)
             if count == 0:
                 return

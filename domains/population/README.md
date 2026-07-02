@@ -1,7 +1,7 @@
 # population 도메인 — bronze 원본 적재
 
 서울시 **실시간 도시데이터 인구혼잡도**(`citydata_ppltn`, 121개 장소)를 5분마다 수집해
-Cloudflare R2의 `bronze/population/` 경로에 원본으로 적재하고, Iceberg bronze 테이블에
+Cloudflare R2의 `raw/population/` 경로에 원본으로 적재하고, Iceberg bronze 테이블에
 **원본 payload + 추적 메타데이터**로 넣는 Airflow 파이프라인입니다. 이 도메인 코드는
 레포의 도메인별 디렉토리 규칙(이슈 #16)에 맞춰 `domains/population/` 한 트리에
 자기완결로 모여 있습니다.
@@ -19,7 +19,7 @@ domains/population/
 │  │  ├─ bronze.py                #     ★ payload+메타데이터 bronze DDL/INSERT (멱등)
 │  │  └─ landing.py               #     R2/로컬 raw 적재 싱크
 │  └─ source/                     #   서울 citydata_ppltn 소스 전용
-│     ├─ config.py                #     적재 루트(bronze/population)·source_id·API 키
+│     ├─ config.py                #     적재 루트(raw/population)·source_id·API 키
 │     ├─ client.py                #     citydata_ppltn 호출 (원본 bytes만, 파싱 X)
 │     ├─ areas.py                 #     121개 장소(AREA_NM) 레지스트리
 │     └─ ingest.py                #     오케스트레이션 fetch→R2 raw→bronze insert + 리포트
@@ -56,14 +56,14 @@ API key가 요청 URL 경로에 포함되므로, 예외 로깅 시 `redact_secre
 ## R2 적재 경로 (bronze 원본, 이슈 #16 규칙)
 
 ```
-bronze/population/seoul_ppltn/load_date=<KST날짜>/<ingest_ts>_<request_id>.json
+raw/population/seoul_ppltn/load_date=<KST날짜>/<ingest_ts>_<request_id>.json
 ```
 `ingest_ts`가 실행 1회를 격리하고, bronze 테이블 적재는 같은 `ingest_ts` 파티션을
 delete-then-insert로 멱등 처리하므로 재시도가 중복을 만들지 않습니다.
 
 run마다 정량 리포트도 남깁니다(일배치 리포트/알림 DAG의 소스):
 ```
-bronze/population/_reports/load_date=<KST>/ingest_ts=<UTC>/run_report.json
+raw/population/_reports/load_date=<KST>/ingest_ts=<UTC>/run_report.json
 ```
 
 ## 로컬 실행

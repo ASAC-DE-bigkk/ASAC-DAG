@@ -10,8 +10,8 @@ import os
 
 from ..common.config import load_env_file, pick
 
-# raw 원본 객체가 적재되는 bronze prefix (이슈 #16: bronze/<domain>).
-LANDING_ROOT = "bronze/population"
+# raw 원본 객체가 적재되는 raw prefix (이슈 #16 → #75: raw/<domain>).
+LANDING_ROOT = "raw/population"
 
 # 추적 메타데이터 source_id -- raw path와 bronze row 양쪽에 쓰인다.
 SOURCE_ID = "seoul_ppltn"

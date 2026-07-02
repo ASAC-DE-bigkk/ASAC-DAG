@@ -154,7 +154,7 @@ silver/gold 설계·도메인 통합 시 레퍼런스. 필드는 **실제 적재
 
 **R2 객체** (`seoul-dev` 버킷, 멘티 dev):
 ```
-bronze/transit/seoul_subway/<dataset>/load_date=YYYY-MM-DD/ingest_ts=…/page-NNNN.json   # 원본 응답 (target=역/호선 당 1페이지)
+raw/transit/seoul_subway/<dataset>/load_date=YYYY-MM-DD/ingest_ts=…/page-NNNN.json   # 원본 응답 (target=역/호선 당 1페이지)
 + _manifest.json (rows·endpoint·request_params.targets·run_id)
 # silver 부터는 ASAC-DBT(Iceberg silver_* 테이블) — DAG 은 bronze 까지만.
 ```

@@ -1,7 +1,7 @@
 """서울 공영주차 ELT (transit 도메인) — GetParkingInfo 실시간 점유 → R2 객체 + Iceberg bronze.
 
 지하철과 동일 envelope 패턴(JSON):
-  - 단일 호출(123개 전체) → R2 bronze 객체(원본) + Iceberg bronze.
+  - 단일 호출(123개 전체) → R2 raw 객체(원본) + Iceberg bronze.
   - 이 DAG = Bronze 한정. silver/gold(변환·정제)는 ASAC-DBT 별도.
 """
 
@@ -50,7 +50,7 @@ def current_dag_run_id() -> str:
 def _land_objects(res: dict, run_id: str) -> None:
     """bronze 객체 적재(원본 응답 JSON). 변환/정제는 ASAC-DBT silver — DAG 은 bronze 까지만."""
     res_b = land(
-        stage="bronze", domain=DOMAIN, source=SOURCE, dataset=DATASET,
+        stage="raw", domain=DOMAIN, source=SOURCE, dataset=DATASET,
         pages=[json.dumps(res["raw"], ensure_ascii=False)],
         endpoint=res["endpoint"], kind=DATASET, rows=res["rows"],
         run_id=run_id, request_params=res["request_params"], ext="json",

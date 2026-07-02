@@ -43,7 +43,7 @@ def test_traffic_insert_replaces_same_retry_scope_before_append():
         request_id="request-1",
         start_index=1,
         end_index=1000,
-        raw_object_key="bronze/traffic/accinfo/request-1.xml",
+        raw_object_key="raw/traffic/accinfo/request-1.xml",
         raw_hash="abc123",
         http_status=200,
         collected_at=datetime(2026, 7, 1, 0, 15, tzinfo=timezone.utc),

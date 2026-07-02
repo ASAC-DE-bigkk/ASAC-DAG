@@ -7,7 +7,7 @@
 
 이슈 #16 정합:
 * dev/prod 분기는 카탈로그(iceberg_dev/iceberg)와 R2 버킷(seoul-dev/seoul)으로 가른다.
-* raw 객체 키는 ``bronze/<domain>/<source_id>/load_date=.../<ts>_<request_id>.json`` 규칙.
+* raw 객체 키는 ``raw/<domain>/<source_id>/load_date=.../<ts>_<request_id>.json`` 규칙.
 * ``redact_secret``으로 시크릿이 로그/경로/메타데이터에 원문으로 남지 않게 한다.
 """
 
@@ -135,6 +135,6 @@ def raw_object_key(root: str, source_id: str, ctx: RunContext, request_id: str, 
 
     ``<root>/<source_id>/load_date=<KST>/<ingest_ts>_<request_id>.<ext>``
 
-    예: ``bronze/population/seoul_ppltn/load_date=2026-07-01/20260701T090000Z_<uuid>.json``
+    예: ``raw/population/seoul_ppltn/load_date=2026-07-01/20260701T090000Z_<uuid>.json``
     """
     return f"{root}/{source_id}/load_date={ctx.load_date}/{ctx.ingest_ts}_{request_id}.{ext}"

@@ -33,8 +33,8 @@ def r2_env(name: str) -> str:
 
 def raw_prefix() -> str:
     if is_dev_target():
-        return os.environ.get("ASK_SEOUL_DEV_RAW_PREFIX", "bronze")
-    return os.environ.get("ASK_SEOUL_RAW_PREFIX", "bronze")
+        return os.environ.get("ASK_SEOUL_DEV_RAW_PREFIX", "raw")
+    return os.environ.get("ASK_SEOUL_RAW_PREFIX", "raw")
 
 
 def trino_catalog() -> str:

@@ -30,7 +30,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="culture 원본 적재 -> R2 bronze/culture")
+    p = argparse.ArgumentParser(description="culture 원본 적재 -> R2 raw/culture")
     p.add_argument("--target", default="dev", choices=["dev", "prod"])
     p.add_argument("--env-file", default=None, help="dotenv 폴백 (예: ../../../sample/.env)")
     p.add_argument("--datasets", nargs="*", default=None, help="슬러그들 또는 'all' (기본: 활성 전체)")

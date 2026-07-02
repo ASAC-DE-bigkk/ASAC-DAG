@@ -6,12 +6,12 @@ culture bronze가 R2에 남기는 것과, **dbt/silver가 의존하는 계약**.
 ## R2 raw 파티션
 
 ```text
-bronze/culture/<소스>/<데이터셋>/load_date=<KST>/ingest_ts=<UTC>/page-NNNN.<xml|json>
-                                                                /_manifest.json
+raw/culture/<소스>/<데이터셋>/load_date=<KST>/ingest_ts=<UTC>/page-NNNN.<xml|json>
+                                                             /_manifest.json
 ```
 
 - `ingest_ts`(UTC)가 **실행 1회를 격리** → 재시도/부분 실행이 이전 데이터를 안 덮어씀.
-- run마다 신뢰성 리포트: `bronze/culture/_reports/load_date=…/ingest_ts=…/run_report.json`
+- run마다 신뢰성 리포트: `raw/culture/_reports/load_date=…/ingest_ts=…/run_report.json`
   → [reliability.md](reliability.md)
 - dev → 버킷 `seoul-dev`, prod → `seoul`.
 

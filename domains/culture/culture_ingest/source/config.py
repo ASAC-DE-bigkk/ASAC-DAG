@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from culture_ingest.common.config import load_env_file, pick
 
 # 받아온 원본 객체는 culture 도메인의 bronze 레이어 prefix 아래에 적재된다.
-LANDING_ROOT = "bronze/culture"
+LANDING_ROOT = "raw/culture"
 
 KOPIS_KEY_ENV = "KOPIS_SERVICE_KEY"   # KOPIS 인증키 환경변수 이름
 SEOUL_KEY_ENV = "SEOUL_API_KEY_CULT"   # 서울 열린데이터 인증키 환경변수 이름

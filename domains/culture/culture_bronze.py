@@ -1,7 +1,7 @@
 """Airflow DAG: culture 도메인 bronze(원본) 적재 -> R2.
 
 일배치. 채택한 culture 데이터셋을 KOPIS / 서울 열린데이터에서 받아 원본 API 응답을
-R2 ``bronze/culture/`` 아래에 적재한다(``culture_ingest`` 참고). 데이터셋마다
+R2 ``raw/culture/`` 아래에 적재한다(``culture_ingest`` 참고). 데이터셋마다
 매핑 태스크 1개라서, 한 데이터셋 실패가 격리되고 재시도 가능하며 그리드에서 바로 보인다.
 
 시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가
@@ -40,6 +40,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     build_run_report,
     ingest_one,
+    normalize_mapped_results,
     write_run_report,
 )
 from culture_ingest.common.notify import build_report_payload, notifier_from_env  # noqa: E402
@@ -171,7 +172,8 @@ def _report(**context) -> None:
         ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
         run_id=context["dag_run"].run_id,
     )
-    summaries = [r for r in (context["ti"].xcom_pull(task_ids="ingest_dataset") or []) if r]
+    # 매핑 인스턴스 1개면 pull 이 dict 하나를 줄 수 있어 정규화 필수(#87).
+    summaries = normalize_mapped_results(context["ti"].xcom_pull(task_ids="ingest_dataset"))
     # 기대 커버리지 = plan이 계획한 데이터셋 수(성공 summary 수가 아님). 하드 실패한
     # ingest_dataset 매핑 인스턴스는 예외를 던져 XCom에 결과를 안 남기므로, summaries만
     # 세면 실패가 분모에서도 사라져 coverage가 늘 ~100%로 보인다(#39).
@@ -223,7 +225,7 @@ def _report(**context) -> None:
 
 with DAG(
     dag_id="culture_bronze",
-    description="Land culture domain raw source data (KOPIS + Seoul OA) to R2 bronze/culture.",
+    description="Land culture domain raw source data (KOPIS + Seoul OA) to R2 raw/culture.",
     start_date=pendulum.datetime(2026, 6, 1, tz=KST),
     schedule="@daily",
     catchup=False,

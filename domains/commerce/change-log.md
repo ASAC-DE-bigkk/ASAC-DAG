@@ -66,6 +66,8 @@ request:
   실측: bronze/commerce=0객체, raw/commerce=314객체[run 스냅샷·`_diff_target`·`_backup`])인데 **코드는
   아직 `bronze/commerce`** 를 써서 DAG 이 이동 데이터·시드 diff-target 을 못 읽는 어긋남 발생.
 - (결정) **raw/commerce 로 통일**하고, 레이어 접두 값을 **.env 로 관리**하도록 변경.
+- (팀 결정 #75) R2 오브젝트 원본 경로는 `raw/` 채택, Iceberg 테이블명·dag_id 의 `bronze` 명칭은
+  유지 (용어: **raw = R2 랜딩 원본, bronze = Iceberg 웨어하우스 원본층**).
 
 response:
 - **paths.py**: `BRONZE_LAYER="bronze/commerce"` → `RAW_LAYER=os.getenv("COMMERCE_RAW_LAYER","raw/commerce")`,
@@ -82,6 +84,8 @@ response:
 - **검증**: 전 테스트 **79 통과**(경로 단정 raw/commerce 로 갱신), 보안 게이트 PASS. 기능 확인 —
   `paths.bronze_diff_target_key`=`raw/commerce/_diff_target/…` 가 R2 이동본과 정합(실존 확인),
   `COMMERCE_RAW_LAYER` override 반영 확인 → **DAG 이 이동 데이터·시드 diff-target 을 그대로 사용.**
+- **⚠ 배포 순서(#75 계약)**: 마커 조회(`markers.py`)·diff-target 경로가 `RAW_LAYER` 에서 파생 —
+  **데이터 이관 완료 후 배포 필수**. 이관 전 배포 시 과거 run 미인식 → 전량 재수집·동일자 제외 계약 공백.
 - **후속(선택)**: 함수/변수명·docstring·문서의 conceptual "bronze" 용어를 raw 로 통일(대규모 리네임은 별도).
 
 ### 20. DAG 네이밍 통합 — seoul_commerce_daily/recollect → commerce_localdata_elt/recollect (feat/73-dag-naming)

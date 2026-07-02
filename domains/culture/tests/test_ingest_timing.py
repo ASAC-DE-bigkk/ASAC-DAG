@@ -20,7 +20,7 @@ import re
 def _run(tmp_path, name, include_detail=False):
     ds = BY_NAME[name]
     ctx = RunContext(load_date="2026-07-01", ingest_ts="20260701T000000Z", run_id="t")
-    landing = Landing(LocalSink(str(tmp_path)), "bronze/culture", ctx)
+    landing = Landing(LocalSink(str(tmp_path)), "raw/culture", ctx)
     opts = IngestOptions(include_detail=include_detail, max_detail=5)
 
     class DeadKopis:
