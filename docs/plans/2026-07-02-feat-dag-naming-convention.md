@@ -81,3 +81,11 @@ dag_id = <domain>_<dataset>_<stage>
    (population 생략 / traffic·weather·commerce 명시) 그대로 유지.
 3. **저장 계약(Iceberg 테이블명·R2 경로) 네이밍은 별도 이슈로 분리** — 데이터 마이그레이션
    비용 평가와 함께 추후 논의. dag_id 규칙과 저장 명칭은 독립 계약.
+
+## PR #74 리뷰 대응 (2026-07-02)
+
+| 제안 | 결정 | 사유 |
+|---|---|---|
+| stage `bronze` → `raw` (@yooseongjin527) | **bronze 유지** | 리포 전체가 메달리온 용어로 통일돼 있음(dbt 모델 `bronze_*`, Iceberg 테이블, 전 도메인 docs). DAG만 raw면 "raw DAG가 bronze 테이블에 적재"하는 용어 분열. transit처럼 R2 원본+Iceberg bronze를 둘 다 적재하는 DAG는 raw도 부정확 |
+| R2 버킷/경로 `bronze/` → `raw/` + 코드 수정 (@yooseongjin527) | **#75로 인계** | 저장 계약 변경은 기존 객체 마이그레이션·dbt source 수정이 따르므로 별도 이슈(#75)에서 비용 평가와 함께 논의(재검토 결정 3 유지). 제안 내용은 #75에 기록 |
+| `{source}_{domain}_{action}_{result}_{cycle}` (@Exisign) | **현행 유지** | ① `seoul_` 접두는 전 데이터가 서울이라 중복(제거 사유 회귀) ② cycle(daily) 포함 시 스케줄 변경마다 dag_id 변경 ③ 5토막은 과도. action+result 세분화 취지는 stage 역할형(bronze/transform/elt)이 이미 수용 |
