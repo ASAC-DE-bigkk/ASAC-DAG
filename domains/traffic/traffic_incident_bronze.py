@@ -12,7 +12,17 @@ from airflow.providers.standard.operators.python import PythonOperator
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
 if DAG_DIR not in sys.path:
     sys.path.insert(0, DAG_DIR)
+DOMAINS_DIR = os.path.dirname(DAG_DIR)
+if DOMAINS_DIR not in sys.path:
+    sys.path.insert(0, DOMAINS_DIR)
 
+from _shared.bronze_run_manifest import (  # noqa: E402
+    STATUS_FAILED,
+    STATUS_STARTED,
+    STATUS_SUCCESS,
+    failure_reason_from_context,
+    record_bronze_run_event,
+)
 from traffic_ingest.acc_info import (  # noqa: E402
     KST,
     SOURCE_ID,
@@ -40,6 +50,7 @@ TRAFFIC_DISCORD_WEBHOOK_ENV = "TRAFFIC_DISCORD_WEBHOOK_URL"
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
+DAG_ID = "traffic_incident_bronze"
 
 
 def discord_report_date(context) -> str:
@@ -246,39 +257,96 @@ def ingest_seoul_traffic_incident(**context) -> dict:
     }
 
 
+def record_seoul_traffic_run_started(**context) -> str:
+    cursor, catalog, schema = trino_cursor()
+    return record_bronze_run_event(
+        cursor,
+        catalog,
+        schema,
+        source_id=SOURCE_ID,
+        dag_id=DAG_ID,
+        dag_run_id=context["run_id"],
+        status=STATUS_STARTED,
+    )
+
+
+def record_seoul_traffic_run_failed(context) -> None:
+    try:
+        cursor, catalog, schema = trino_cursor()
+        record_bronze_run_event(
+            cursor,
+            catalog,
+            schema,
+            source_id=SOURCE_ID,
+            dag_id=DAG_ID,
+            dag_run_id=context["run_id"],
+            status=STATUS_FAILED,
+            failure_reason=failure_reason_from_context(context),
+        )
+    except Exception as exc:
+        print(f"Failed to record Seoul traffic run manifest failure: {type(exc).__name__}")
+
+
+def record_and_notify_seoul_traffic_run_failed(context) -> None:
+    record_seoul_traffic_run_failed(context)
+    notify_traffic_bronze_failure(context)
+
+
 def verify_seoul_traffic_bronze_runtime(**context) -> int:
     ingest_result = context["ti"].xcom_pull(task_ids="ingest_seoul_traffic_incident") or {}
-    return verify_seoul_traffic_bronze_rows(
+    verified_rows = verify_seoul_traffic_bronze_rows(
         raw_object_keys=ingest_result["raw_object_keys"],
         dag_run_id=context["run_id"],
         expected_rows=int(ingest_result["inserted"]),
         expected_raw_objects=int(ingest_result["page_count"]),
     )
+    cursor, catalog, schema = trino_cursor()
+    record_bronze_run_event(
+        cursor,
+        catalog,
+        schema,
+        source_id=SOURCE_ID,
+        dag_id=DAG_ID,
+        dag_run_id=context["run_id"],
+        status=STATUS_SUCCESS,
+        is_publishable=True,
+        expected_rows=int(ingest_result["list_total_count"]),
+        actual_rows=verified_rows,
+        expected_raw_objects=int(ingest_result["page_count"]),
+        actual_raw_objects=len(ingest_result["raw_object_keys"]),
+    )
+    return verified_rows
 
 
 with DAG(
-    dag_id="traffic_incident_bronze",
+    dag_id=DAG_ID,
     description="Loads Seoul TOPIS AccInfo XML into R2 and validates the Iceberg bronze runtime.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=traffic_dag_schedule(),
     catchup=False,
     max_active_runs=1,
+    on_failure_callback=record_seoul_traffic_run_failed,
     tags=["ask_seoul", "traffic", "bronze", "r2", "iceberg"],
 ) as dag:
+    start_manifest = PythonOperator(
+        task_id="record_seoul_traffic_run_started",
+        python_callable=record_seoul_traffic_run_started,
+    )
+
     ingest_traffic = PythonOperator(
         task_id="ingest_seoul_traffic_incident",
         python_callable=ingest_seoul_traffic_incident,
-        on_failure_callback=notify_traffic_bronze_failure,
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
+        on_failure_callback=record_and_notify_seoul_traffic_run_failed,
     )
 
     verify_bronze = PythonOperator(
         task_id="verify_seoul_traffic_bronze_runtime",
         python_callable=verify_seoul_traffic_bronze_runtime,
         on_success_callback=notify_traffic_bronze_success,
-        on_failure_callback=notify_traffic_bronze_failure,
+        on_failure_callback=record_and_notify_seoul_traffic_run_failed,
     )
 
-    ingest_traffic >> verify_bronze
+    start_manifest >> ingest_traffic >> verify_bronze
