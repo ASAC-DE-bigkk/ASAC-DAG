@@ -29,6 +29,7 @@ from weather_ingest.bronze import (  # noqa: E402
     verify_kma_bronze_runtime as verify_kma_bronze_rows,
 )
 from weather_ingest.common.runtime import (  # noqa: E402
+    download_raw_object,
     fetch_url,
     is_dev_target,
     sha256_hex,
@@ -71,8 +72,10 @@ def short_text(value: object, limit: int = 130) -> str:
 
 
 def stage_name(task_id: str) -> str:
-    if "ingest" in task_id:
+    if "land" in task_id or "ingest" in task_id:
         return "API 수집/R2 적재"
+    if "load" in task_id:
+        return "Bronze 적재"
     if "verify" in task_id:
         return "Bronze 검증"
     return "알 수 없음"
@@ -105,7 +108,7 @@ def send_weather_discord(title: str, description: str, color: int, footer: str) 
 
 def notify_weather_bronze_success(context) -> None:
     ti = context["ti"]
-    ingest_result = ti.xcom_pull(task_ids="ingest_kma_vilage_fcst") or {}
+    ingest_result = ti.xcom_pull(task_ids="load_kma_bronze") or {}
     raw_keys = ingest_result.get("raw_object_keys") or []
     api_call_count = ingest_result.get("api_call_count", len(raw_keys))
     run_id = context["run_id"]
@@ -157,14 +160,10 @@ def kma_dag_schedule() -> str | None:
     return KMA_PUBLISH_CRON_KST if is_dev_target() else None
 
 
-def ingest_kma_vilage_fcst(**context) -> dict:
+def land_kma_raw(**context) -> dict:
     base_date, base_time = resolve_kma_base_datetime()
     grids = load_kma_grids()
-    cursor, catalog, schema = trino_cursor()
-    qualified_table = create_kma_bronze_table(cursor, catalog, schema)
-    inserted = 0
-    expected_rows = 0
-    raw_object_keys = []
+    raw_objects = []
     for grid in grids:
         collected_at = datetime.now(timezone.utc)
         request_id = str(uuid.uuid4())
@@ -172,8 +171,7 @@ def ingest_kma_vilage_fcst(**context) -> dict:
         ny = int(grid["ny"])
         url = build_kma_url(base_date=base_date, base_time=base_time, nx=nx, ny=ny)
         http_status, raw_bytes = fetch_url(url, "ask-seoul-kma-bronze/1.0")
-        metadata, rows = parse_kma_response(raw_bytes)
-        expected_rows += int(metadata.get("total_count") or len(rows))
+        parse_kma_response(raw_bytes)
         raw_hash = sha256_hex(raw_bytes)
         raw_object_key = build_raw_object_key(
             collected_at=collected_at,
@@ -189,34 +187,75 @@ def ingest_kma_vilage_fcst(**context) -> dict:
             content_type="application/json; charset=utf-8",
             log_label="KMA raw payload",
         )
+        raw_objects.append(
+            {
+                "request_id": request_id,
+                "raw_object_key": raw_object_key,
+                "raw_hash": raw_hash,
+                "http_status": http_status,
+                "collected_at": collected_at.isoformat(),
+                "place_id": str(grid["place_id"]),
+                "base_date": base_date,
+                "base_time": base_time,
+                "nx": nx,
+                "ny": ny,
+            }
+        )
+    print(f"Landed {len(raw_objects)} KMA raw objects for {len(grids)} grids")
+    return {
+        "source_id": SOURCE_ID,
+        "raw_objects": raw_objects,
+        "raw_object_keys": [item["raw_object_key"] for item in raw_objects],
+        "grid_count": len(grids),
+        "api_call_count": len(raw_objects),
+        "base_date": base_date,
+        "base_time": base_time,
+    }
+
+
+def load_kma_bronze(**context) -> dict:
+    raw_result = context["ti"].xcom_pull(task_ids="land_kma_raw") or {}
+    raw_objects = raw_result.get("raw_objects") or []
+    if not raw_objects:
+        raise RuntimeError("KMA raw landing result is empty; cannot load bronze rows.")
+    cursor, catalog, schema = trino_cursor()
+    qualified_table = create_kma_bronze_table(cursor, catalog, schema)
+    inserted = 0
+    expected_rows = 0
+    raw_object_keys = []
+    for raw_object in raw_objects:
+        raw_bytes = download_raw_object(raw_object["raw_object_key"], "KMA raw payload")
+        metadata, rows = parse_kma_response(raw_bytes)
+        expected_rows += int(metadata.get("total_count") or len(rows))
+        collected_at = datetime.fromisoformat(raw_object["collected_at"])
         inserted += insert_kma_bronze_rows(
             cursor=cursor,
             qualified_table=qualified_table,
             rows=rows,
             metadata=metadata,
-            request_id=request_id,
-            place_id=str(grid["place_id"]),
-            base_date=base_date,
-            base_time=base_time,
-            nx=nx,
-            ny=ny,
-            raw_object_key=raw_object_key,
-            raw_hash=raw_hash,
-            http_status=http_status,
+            request_id=raw_object["request_id"],
+            place_id=raw_object["place_id"],
+            base_date=raw_object["base_date"],
+            base_time=raw_object["base_time"],
+            nx=int(raw_object["nx"]),
+            ny=int(raw_object["ny"]),
+            raw_object_key=raw_object["raw_object_key"],
+            raw_hash=raw_object["raw_hash"],
+            http_status=int(raw_object["http_status"]),
             collected_at=collected_at,
             dag_run_id=context["run_id"],
         )
-        raw_object_keys.append(raw_object_key)
-    print(f"Inserted {inserted} KMA rows for {len(grids)} grids into {qualified_table}")
+        raw_object_keys.append(raw_object["raw_object_key"])
+    print(f"Inserted {inserted} KMA rows for {len(raw_objects)} raw objects into {qualified_table}")
     return {
         "source_id": SOURCE_ID,
         "raw_object_keys": raw_object_keys,
         "inserted": inserted,
         "expected_rows": expected_rows,
-        "grid_count": len(grids),
-        "api_call_count": len(raw_object_keys),
-        "base_date": base_date,
-        "base_time": base_time,
+        "grid_count": int(raw_result.get("grid_count", len(raw_objects))),
+        "api_call_count": int(raw_result.get("api_call_count", len(raw_objects))),
+        "base_date": raw_result.get("base_date"),
+        "base_time": raw_result.get("base_time"),
     }
 
 
@@ -257,7 +296,7 @@ def record_and_notify_kma_run_failed(context) -> None:
 
 
 def verify_kma_bronze_runtime(**context) -> int:
-    ingest_result = context["ti"].xcom_pull(task_ids="ingest_kma_vilage_fcst") or {}
+    ingest_result = context["ti"].xcom_pull(task_ids="load_kma_bronze") or {}
     verified_rows = verify_kma_bronze_rows(
         raw_object_keys=ingest_result["raw_object_keys"],
         dag_run_id=context["run_id"],
@@ -297,9 +336,18 @@ with DAG(
         python_callable=record_kma_run_started,
     )
 
-    ingest_kma = PythonOperator(
-        task_id="ingest_kma_vilage_fcst",
-        python_callable=ingest_kma_vilage_fcst,
+    land_raw = PythonOperator(
+        task_id="land_kma_raw",
+        python_callable=land_kma_raw,
+        retries=3,
+        retry_delay=timedelta(minutes=1),
+        retry_exponential_backoff=True,
+        on_failure_callback=record_and_notify_kma_run_failed,
+    )
+
+    load_bronze = PythonOperator(
+        task_id="load_kma_bronze",
+        python_callable=load_kma_bronze,
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
@@ -313,4 +361,4 @@ with DAG(
         on_failure_callback=record_and_notify_kma_run_failed,
     )
 
-    start_manifest >> ingest_kma >> verify_bronze
+    start_manifest >> land_raw >> load_bronze >> verify_bronze
