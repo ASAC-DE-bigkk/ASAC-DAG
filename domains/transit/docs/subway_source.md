@@ -1,6 +1,6 @@
 # transit 도메인 — 지하철 실시간 데이터 소스 (data dictionary)
 
-`transit_subway_elt` DAG 가 수집하는 **2개 서울 열린데이터 실시간 API** 와 그 필드를 정리한다.
+`transit_subway_bronze` DAG 가 수집하는 **2개 서울 열린데이터 실시간 API** 와 그 필드를 정리한다.
 silver/gold 설계·도메인 통합 시 레퍼런스. 필드는 **실제 적재된 bronze raw 샘플**에서 추출(2026-06-30).
 
 - 인증키: `SEOUL_API_KEY_TRAN` (서울 열린데이터광장, 실시간 권한)

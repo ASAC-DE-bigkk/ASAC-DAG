@@ -152,7 +152,7 @@ def ingest_subway() -> dict:
 
 
 with DAG(
-    dag_id="transit_subway_elt",
+    dag_id="transit_subway_bronze",
     description="지하철 실시간 → R2 raw 랜딩 → Iceberg bronze(Trino). silver/gold 는 ASAC-DBT.",
     start_date=datetime(2026, 1, 1),
     schedule=config.schedule_for("subway", "*/20 * * * *"),

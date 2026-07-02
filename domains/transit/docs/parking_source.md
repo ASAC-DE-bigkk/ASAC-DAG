@@ -1,6 +1,6 @@
 # transit 도메인 — 공영주차 실시간 데이터 소스 (data dictionary)
 
-`transit_parking_elt` DAG 가 수집하는 **서울 공영주차 실시간 API** 와 필드를 정리한다.
+`transit_parking_bronze` DAG 가 수집하는 **서울 공영주차 실시간 API** 와 필드를 정리한다.
 필드는 실호출 기준(2026-06-30, 123개 주차장).
 
 - 인증키: `SEOUL_API_KEY_TRAN` (지하철과 공유)
