@@ -171,9 +171,19 @@ def test_run_security_verification_no_blocking():
 
 
 def test_verification_with_runtime_passes_after_install():
-    install_log_redaction()
-    report = run_security_verification(runtime_checks=True)
-    assert report.ok, report.render()
+    from security import install_security
+    from security.stdio_guard import (
+        uninstall_excepthook_redaction, uninstall_stdout_redaction,
+    )
+    status = install_security()
+    try:
+        assert status["log_redaction"] and status["stdout_redaction"] \
+            and status["excepthook_redaction"], status
+        report = run_security_verification(runtime_checks=True)
+        assert report.ok, report.render()
+    finally:   # 다른 테스트의 캡처/훅 상태를 오염시키지 않게 원복
+        uninstall_stdout_redaction()
+        uninstall_excepthook_redaction()
 
 
 # ── end-to-end: bronze 마커(at-rest)로 키가 새지 않음 ───────────────────────────
@@ -207,3 +217,235 @@ def test_bronze_marker_error_is_redacted(tmp_path, monkeypatch):
     marker = get_storage().read_json(summary["marker_key"])
     assert _KEY not in json.dumps(marker, ensure_ascii=False)
     assert PLACEHOLDER in marker.get("error", "")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 통합 보안 플러그인 확장(feat/96) — bootstrap · stdio · netio · fileio · api_guard · events
+# ════════════════════════════════════════════════════════════════════════════════
+from security import (  # noqa: E402
+    InsecureRequestBlocked, api_receipt, event_record, http_request,
+    install_security, is_security_installed, log_event, log_exception,
+    response_summary, safe_join, safe_key, scrub_exception, scrub_headers,
+    scrub_params, scrub_url, security_status, write_json_redacted,
+)
+from security.stdio_guard import (  # noqa: E402
+    install_excepthook_redaction, install_stdout_redaction,
+    is_excepthook_redaction_installed, is_stdout_redaction_installed,
+    uninstall_excepthook_redaction, uninstall_stdout_redaction,
+)
+
+
+@pytest.fixture
+def _registered_key():
+    """가짜 키를 기본 redactor 에 등록(모듈 전역이라 테스트 간 공유 — 등록만 하면 됨)."""
+    from security import register_secret
+    register_secret(_KEY)
+    return _KEY
+
+
+# ── bootstrap: 원샷 설치/상태/원복 ───────────────────────────────────────────────
+def test_install_security_one_shot_and_idempotent():
+    try:
+        st1 = install_security()
+        assert is_security_installed(), st1
+        st2 = install_security()          # 재호출해도 중복 부착/오류 없음
+        assert st2["log_redaction"] and st2["stdout_redaction"] and st2["excepthook_redaction"]
+        assert set(security_status()) == {
+            "log_redaction", "stdout_redaction", "excepthook_redaction"}
+    finally:
+        uninstall_stdout_redaction()
+        uninstall_excepthook_redaction()
+    assert not is_stdout_redaction_installed()
+    assert not is_excepthook_redaction_installed()
+
+
+# ── stdio_guard: print/stderr 경로 마스킹 ───────────────────────────────────────
+def test_stdout_redaction_masks_print(capsys, _registered_key):
+    install_stdout_redaction()
+    try:
+        print(f"leak? key={_KEY} done")
+        err_line = f"stderr leak {_KEY}"
+        print(err_line, file=__import__("sys").stderr)
+    finally:
+        uninstall_stdout_redaction()
+    out, err = capsys.readouterr()
+    assert _KEY not in out and PLACEHOLDER in out
+    assert _KEY not in err
+
+
+def test_excepthook_redaction_masks_uncaught_traceback(capsys, _registered_key):
+    import sys
+    install_excepthook_redaction()
+    try:
+        try:
+            raise RuntimeError(f"boom {_SEOUL_URL}")
+        except RuntimeError:
+            sys.excepthook(*sys.exc_info())            # 미처리 예외 경로 재현
+    finally:
+        uninstall_excepthook_redaction()
+    err = capsys.readouterr().err
+    assert "RuntimeError" in err and _KEY not in err
+
+
+def test_threading_excepthook_masks(capsys, _registered_key):
+    import threading
+    install_excepthook_redaction()
+    try:
+        t = threading.Thread(
+            target=lambda: (_ for _ in ()).throw(ValueError(f"thread boom {_KEY}")),
+            name="sec-test")
+        t.start()
+        t.join()
+    finally:
+        uninstall_excepthook_redaction()
+    err = capsys.readouterr().err
+    assert "ValueError" in err and _KEY not in err
+
+
+# ── netio: HTTP 정책(timeout 주입 · TLS 강제 · 예외 마스킹) ──────────────────────
+class _FakeSess:
+    """requests.Session 흉내 — 마지막 호출 kwargs 기록."""
+    def __init__(self, exc=None):
+        self.exc = exc
+        self.kwargs = {}
+
+    def request(self, method, url, **kwargs):
+        self.kwargs = {"method": method, "url": url, **kwargs}
+        if self.exc:
+            raise self.exc
+        return "RESP"
+
+
+def test_netio_injects_default_timeout():
+    sess = _FakeSess()
+    assert http_request("GET", "http://x/", session=sess) == "RESP"
+    assert sess.kwargs["timeout"] == 30.0             # 기본 timeout 주입(미지정 시)
+
+
+def test_netio_respects_explicit_timeout():
+    sess = _FakeSess()
+    http_request("GET", "http://x/", session=sess, timeout=7)
+    assert sess.kwargs["timeout"] == 7
+
+
+def test_netio_blocks_tls_verify_disable():
+    kw = {"verify": False}                            # 리터럴 회피(자기 감사)
+    with pytest.raises(InsecureRequestBlocked):
+        http_request("GET", "http://x/", session=_FakeSess(), **kw)
+
+
+def test_netio_rethrows_same_type_with_scrubbed_message(_registered_key):
+    exc = ConnectionError(f"Max retries exceeded with url: /{_KEY}/json/SVC/1/1/")
+    with pytest.raises(ConnectionError) as ei:
+        http_request("GET", "http://x/", session=_FakeSess(exc=exc), timeout=1)
+    assert _KEY not in str(ei.value) and PLACEHOLDER in str(ei.value)
+
+
+def test_scrub_exception_walks_cause_chain(_registered_key):
+    inner = ValueError(f"inner {_KEY}")
+    outer = RuntimeError(f"outer token={_KEY}")
+    outer.__cause__ = inner
+    scrub_exception(outer)
+    assert _KEY not in str(outer) and _KEY not in str(inner)
+
+
+# ── fileio: 경로 주입 차단 + at-rest 마스킹 저장 ────────────────────────────────
+def test_safe_key_joins_and_validates():
+    key = safe_key("raw/commerce", "2026/07/03", "run_id=x", "short.jsonl")
+    assert key == "raw/commerce/2026/07/03/run_id=x/short.jsonl"
+
+
+@pytest.mark.parametrize("parts", [
+    ("a", "../b"), ("a/../b",), ("/etc/passwd",), ("a", "b\\c"), ("",),
+])
+def test_safe_key_rejects_traversal(parts):
+    with pytest.raises(ValueError):
+        safe_key(*parts)
+
+
+def test_safe_join_confines_to_root(tmp_path):
+    p = safe_join(tmp_path, "x", "y.json")
+    assert str(p).startswith(str(tmp_path.resolve()))
+    with pytest.raises(ValueError):
+        safe_join(tmp_path, "..", "z")
+
+
+def test_write_json_redacted_masks_at_rest(tmp_path, _registered_key):
+    out = write_json_redacted(tmp_path / "m.json", {"error": f"url /{_KEY}/json/S/1/1/"})
+    text = out.read_text(encoding="utf-8")
+    assert _KEY not in text and PLACEHOLDER in text
+
+
+# ── api_guard: 요청 영수증/응답 요약 안전화 ─────────────────────────────────────
+def test_scrub_url_masks_path_and_query_secrets():
+    url = f"http://openapi.seoul.go.kr:8088/{_KEY}/json/SVC/1/1/?apikey={_KEY}&page=2"
+    out = scrub_url(url)
+    assert _KEY not in out and "page=2" in out
+
+
+def test_scrub_headers_and_params():
+    h = scrub_headers({"Authorization": "Bearer " + _KEY, "Accept": "application/json"})
+    assert h["Authorization"] == PLACEHOLDER and h["Accept"] == "application/json"
+    p = scrub_params({"api_key": _KEY, "page": 3})
+    assert p["api_key"] == PLACEHOLDER and p["page"] == 3
+
+
+def test_api_receipt_is_storable_without_secrets(_registered_key):
+    receipt = api_receipt(
+        method="get", url=f"http://openapi.seoul.go.kr:8088/{_KEY}/json/SVC/1/1/",
+        service="SVC", params={"api_key": _KEY, "page": 1},
+        headers={"Authorization": "Bearer " + _KEY},
+        status=200, ok=True, elapsed_ms=12.3)
+    dumped = json.dumps(receipt, ensure_ascii=False)     # 그대로 저장 가능해야 한다
+    assert _KEY not in dumped
+    assert receipt["method"] == "GET" and receipt["status"] == 200
+    assert receipt["kind"] == "api_receipt" and receipt["requested_at"]
+
+
+def test_response_summary_hash_and_masked_sample(_registered_key):
+    body = ('{"RESULT":"ok","echo_key":"' + _KEY + '"}').encode()
+    summary = response_summary(status=200, body=body, max_body=128)
+    assert summary["content_length"] == len(body)
+    assert len(summary["content_hash"]) == 64            # sha256 hex
+    assert _KEY not in json.dumps(summary)
+
+
+# ── events: 분석 가능(JSON 파싱)하면서 시크릿 없는 처리/에러 로그 ────────────────
+def _event_logger(name):
+    buf = io.StringIO()
+    h = logging.StreamHandler(buf)
+    lg = logging.getLogger(name)
+    lg.handlers = [h]
+    lg.propagate = False
+    lg.setLevel(logging.INFO)
+    return lg, buf
+
+
+def test_log_event_emits_parseable_masked_json(_registered_key):
+    lg, buf = _event_logger("t.sec.events")
+    record = log_event("bronze.page_fetched", logger=lg, where="ingest_one:t",
+                       page=3, rows=1000, url=f"/{_KEY}/json/S/1/1/")
+    line = buf.getvalue().strip()
+    parsed = json.loads(line)                            # 단일 라인 JSON = 분석 가능
+    assert parsed["event"] == "bronze.page_fetched" and parsed["page"] == 3
+    assert parsed["ts"] and parsed["level"] == "info" and parsed["where"] == "ingest_one:t"
+    assert _KEY not in line and record == parsed
+
+
+def test_log_exception_record_masked_and_transmittable(_registered_key):
+    lg, buf = _event_logger("t.sec.events.exc")
+    try:
+        raise RuntimeError(f"collect fail url: /{_KEY}/json/SVC/1/1/")
+    except RuntimeError as exc:
+        record = log_exception(exc, logger=lg, where="ingest_one:t", short="t")
+    dumped = json.dumps(record, ensure_ascii=False)      # 알림 채널로 그대로 전송 가능
+    assert _KEY not in dumped and _KEY not in buf.getvalue()
+    assert record["error_type"] == "RuntimeError" and record["short"] == "t"
+    assert any("RuntimeError" in ln for ln in record["traceback"])
+
+
+def test_event_record_reserved_keys_not_overridable():
+    # event/level/where 는 명명 파라미터라 kwargs 로 덮을 수 없다(TypeError).
+    # 자유 필드로 들어올 수 있는 예약 키(ts)만 검증한다.
+    record = event_record("x", level="info", where="w", ts="EVIL")
+    assert record["event"] == "x" and record["ts"] != "EVIL"

@@ -16,6 +16,7 @@ from common import paths, registry
 from common.schemas import COMMON_COLUMNS
 from common.settings import get_settings
 from common.storage import get_storage
+from security import assert_iso_date, assert_safe_segment   # 파티션 경로 주입 방어(경계 검증)
 from silver.validators import validate_normalized
 
 log = logging.getLogger(__name__)
@@ -31,6 +32,9 @@ def normalize_rows(rows: list[dict]) -> list[dict]:
 
 def build_silver(short: str, observed_date: str, bronze_key: str | None) -> dict:
     """bronze NDJSON 1파일(줄=원본 페이지)을 정규화해 silver parquet 1개로 적재."""
+    # silver 경로(<short>/observed_date=<...>)로 들어가는 두 세그먼트를 경계에서 검증(이중 방어).
+    assert_safe_segment(short, field="short")
+    assert_iso_date(observed_date)
     dataset = registry.by_short(short)
     settings = get_settings()
     storage = get_storage()

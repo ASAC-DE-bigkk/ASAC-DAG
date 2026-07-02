@@ -28,6 +28,10 @@ from common.env import load_commerce_env  # noqa: E402
 
 load_commerce_env()
 
+from security import install_security  # noqa: E402
+
+install_security()   # 로그·stdout·예외훅 시크릿 마스킹(스크립트도 엔트리포인트)
+
 from bronze import incremental  # noqa: E402
 from bronze.clients import parse_page  # noqa: E402
 from common import paths, registry  # noqa: E402

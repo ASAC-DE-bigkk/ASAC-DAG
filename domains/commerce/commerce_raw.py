@@ -39,11 +39,11 @@ from common.env import load_commerce_env  # noqa: E402
 
 load_commerce_env()
 
-# 보안: env 적재 직후 로그 시크릿 마스킹 설치(이후 모든 commerce 로그/예외에서 키 자동 마스킹).
+# 보안: env 적재 직후 원샷 설치 — 로그·stdout/stderr·미처리 예외훅 시크릿 마스킹 일괄 적용.
 # 종합검증/처리 로직: docs/security/security.md
-from security import assert_iso_date, install_log_redaction  # noqa: E402
+from security import assert_iso_date, install_security  # noqa: E402
 
-install_log_redaction()
+install_security()
 
 import pendulum
 from airflow.decorators import dag, task

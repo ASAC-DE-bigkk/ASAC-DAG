@@ -16,7 +16,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from security import redact   # 시크릿 마스킹(로그/예외 메시지 → 마커 저장 시 키 누출 차단)
+from security import netio, redact   # 시크릿 마스킹 + HTTP 정책 래퍼(timeout/TLS/예외 마스킹)
 
 log = logging.getLogger(__name__)
 
@@ -104,8 +104,9 @@ class SeoulOpenApiClient:
         last_exc: Exception | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
-                resp = self._session.get(self._url(service, start, end),
-                                         timeout=self._timeout)
+                # netio 래퍼: timeout 보장·TLS 검증 강제·예외 args 마스킹(같은 타입 재전파).
+                resp = netio.http_request("GET", self._url(service, start, end),
+                                          session=self._session, timeout=self._timeout)
                 resp.raise_for_status()
                 return parse_page(resp.content, service)
             except SeoulApiError:

@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from security.audit import (
-    Finding, SEVERITY_ORDER, check_log_redaction_runtime, check_redactor_selftest,
-    run_static_audit,
+    Finding, SEVERITY_ORDER, check_excepthook_redaction_runtime,
+    check_log_redaction_runtime, check_redactor_selftest,
+    check_stdout_redaction_runtime, run_static_audit,
 )
 from security.redaction import Redactor
 
@@ -66,6 +67,8 @@ def run_security_verification(*, root: Path | str = BUNDLE_ROOT,
     findings.append(check_redactor_selftest(redactor))
     if runtime_checks:
         findings.append(check_log_redaction_runtime())
+        findings.append(check_stdout_redaction_runtime())
+        findings.append(check_excepthook_redaction_runtime())
     return SecurityReport(findings)
 
 

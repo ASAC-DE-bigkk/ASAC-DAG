@@ -41,7 +41,7 @@
 | [docs/deploy-local.md](docs/operations/deploy-local.md) · [docs/deploy-dev.md](docs/operations/deploy-dev.md) · [docs/deploy-prod.md](docs/operations/deploy-prod.md) | 배포 |
 | [docs/architecture.md](docs/architecture/architecture.md) · [docs/operations.md](docs/operations/operations.md) | 아키텍처 · 운영 런북 |
 | [docs/recollect-and-alerts.md](docs/operations/recollect-and-alerts.md) | 재수집 DAG · 알림 인터페이스(비활성) · API별 진행 가시성 |
-| [docs/security/security.md](docs/security/security.md) | **보안 대응** — 시크릿 마스킹·입력검증·정적점검 + **단일 포인트 종합검증**(`python -m security`). 코드: [include/security/](include/security/) (stdlib·이식 가능) |
+| [docs/security/security.md](docs/security/security.md) | **통합 보안 플러그인** — `install_security()` 원샷(로그·stdout·예외훅 마스킹) + net/file/API/이벤트 가드 + **단일 포인트 종합검증**(`python -m security`). 코드: [include/security/](include/security/) (stdlib·이식 가능) |
 | [change-log.md](change-log.md) | 변경 이력(작성일·순서 내림차순) |
 
 ## 5. 보안 (수시 불러오기·적용·점검)
@@ -50,11 +50,13 @@
 
 | 자료 | 내용 |
 |---|---|
-| [docs/security/security.md](docs/security/security.md) | 위협 모델(상정한 공격/누출 경로) · 처리 로직 · 적용 지점 |
-| [docs/security/adoption.md](docs/security/adoption.md) | **Claude/Codex 적용·이식 가이드** — 3단계 · 트리거 · 복사-붙여넣기 프롬프트 |
+| [docs/security/security.md](docs/security/security.md) | 위협 모델(11개 누출/공격 경로) · 런타임 가드 · 가드 함수 · 로그 분석 경계 · 적용 지점 |
+| [docs/security/adoption.md](docs/security/adoption.md) | **적용·이식 가이드(받아쓰기 수준)** — 복사+한 줄 설치 · 트리거 · common 승격 계약 · 복사-붙여넣기 프롬프트 |
 
 - **불러오기**: 보안 관련 작업 전 `security.md` 를, 타 번들 이식 시 `adoption.md` 를 읽는다.
-- **적용**: 외부 예외/URL 로그·저장물(마커)·알림·사용자 입력 경로화 지점에 `redact()`/입력검증(§20 트리거).
+- **설치(원샷)**: 엔트리포인트마다 env 적재 직후 `install_security()` — 로그·stdout·예외훅 마스킹 일괄.
+- **적용**: HTTP(`netio`)·저장물(`redact`)·알림·입력 경로화(`assert_*`/`safe_*`)·API 기록(`api_receipt`)·
+  분석용 로그(`log_event`/`log_exception`) 지점에 가드 함수(§20 트리거).
 - **점검(단일 포인트)**: `PYTHONPATH=dags/domains/commerce/include python -m security` → 차단(CRITICAL/HIGH) 0.
 
 ## 핵심 한 줄 요약

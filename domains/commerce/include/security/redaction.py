@@ -130,6 +130,31 @@ class Redactor:
         return bool(self._literals)
 
 
+def scrub_exception(exc: BaseException, *, redactor: "Redactor | None" = None,
+                    max_depth: int = 8) -> BaseException:
+    """예외 **객체 자체**의 args 를 체인(__cause__/__context__)까지 따라가며 마스킹.
+
+    타입을 바꾸지 않고 같은 예외를 그대로 다시 던질 수 있게 한다(호출측 except 절 보존).
+    requests 예외처럼 메시지에 키 박힌 URL 이 들어가는 경우, 이 예외가 어디로 전파되든
+    (로그·마커·알림·상위 재포장) str(exc) 에 시크릿이 남지 않는다.
+    """
+    red = redactor or _default
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    depth = 0
+    while cur is not None and id(cur) not in seen and depth < max_depth:
+        seen.add(id(cur))
+        depth += 1
+        try:
+            cur.args = tuple(
+                red.redact(a) if isinstance(a, (str, dict, list, tuple)) else a
+                for a in cur.args)
+        except Exception:   # args 재할당 불가 예외(슬롯 등)는 건너뜀 — 로그 필터가 2차 방어
+            pass
+        cur = cur.__cause__ or cur.__context__
+    return exc
+
+
 # ── 모듈 전역 기본 redactor + 편의 함수 ─────────────────────────────────────────
 _default = Redactor()
 

@@ -146,8 +146,10 @@ def check_tls_verify(root: Path) -> Finding:
 
 
 # HTTP 호출 수신자(requests/세션/클라이언트)만 본다 → dict.get() 등 오탐 제거.
+# security.netio 래퍼(http_get/http_post/http_request)는 내부에서 timeout 을 강제하므로 제외.
 _HTTP_CALL_RE = re.compile(
-    r"\b(requests|[A-Za-z_]*session|[A-Za-z_]*client|http[A-Za-z_]*|urlopen)\b"
+    r"\b(requests|[A-Za-z_]*session|[A-Za-z_]*client|"
+    r"http(?!_get\b|_post\b|_request\b)[A-Za-z_]*|urlopen)\b"
     r"\s*\.?\s*(get|post|put|delete|patch|request|head|urlopen)\s*\(")
 
 
@@ -191,7 +193,23 @@ def check_log_redaction_runtime() -> Finding:
     from security.log_filter import is_log_redaction_installed
     ok = is_log_redaction_installed()
     return Finding("log_redaction_installed", "MEDIUM", ok,
-                   "로그 마스킹 필터 설치됨" if ok else "미설치 — install_log_redaction() 호출 필요(런타임)")
+                   "로그 마스킹 필터 설치됨" if ok else "미설치 — install_security() 호출 필요(런타임)")
+
+
+def check_stdout_redaction_runtime() -> Finding:
+    """런타임에 stdout/stderr 마스킹 프록시가 설치돼 있는지(print/서드파티 출력 경로)."""
+    from security.stdio_guard import is_stdout_redaction_installed
+    ok = is_stdout_redaction_installed()
+    return Finding("stdout_redaction_installed", "MEDIUM", ok,
+                   "stdout/stderr 마스킹 설치됨" if ok else "미설치 — install_security() 호출 필요(런타임)")
+
+
+def check_excepthook_redaction_runtime() -> Finding:
+    """런타임에 미처리 예외 훅 마스킹이 설치돼 있는지(sys/threading excepthook)."""
+    from security.stdio_guard import is_excepthook_redaction_installed
+    ok = is_excepthook_redaction_installed()
+    return Finding("excepthook_redaction_installed", "MEDIUM", ok,
+                   "예외 훅 마스킹 설치됨" if ok else "미설치 — install_security() 호출 필요(런타임)")
 
 
 def _grep(root: Path, rx: re.Pattern[str], *, only_ext: set[str] | None = None) -> list[str]:

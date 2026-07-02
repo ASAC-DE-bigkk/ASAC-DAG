@@ -5,6 +5,41 @@
 
 ---
 
+## 2026-07-03
+
+### 24. 통합 보안 플러그인化 — install_security() 원샷 + net/file/API/이벤트 가드 (feat/96)
+
+request:
+- 1차: `dags/domains/commerce` 안에서 대응 가능한 **모든 보안이 적용**되게 처리.
+- 2차: 전체 프로그램(모든 IT 프로젝트)에서 쓸 수 있는 **통합 보안처리 플러그인**으로 —
+  현 폴더 구조를 유지한 채, network IO·file IO·log·stdout·예외처리·API receipt/response 를
+  security 코드 **하나의 적용**으로 커버하도록 사전 대응(ready). 추후 common 폴더로 제공 시
+  다른 프로젝트는 **받아쓰기만 하면 되는 수준**으로.
+- 단, 로그 분석은 가능해야 함 — 취약점을 만들지 않는 경계에서 처리/에러 로그의
+  기록·해석·전송이 되게 구조화. 이식 방법과 제공 기능을 정리한 보안 문서 작성.
+- 브랜치: `feat/96-security-plugin`.
+
+response:
+- **플러그인 신규 모듈 6종** ([include/security/](include/security/), 전부 stdlib only·번들 비종속):
+  `bootstrap.py`(**`install_security()` 원샷** — env 시크릿 적재 + 로그/stdout·stderr/
+  sys·threading 예외훅 마스킹, idempotent·기동 비차단), `stdio_guard.py`(print·미처리
+  트레이스백 마스킹), `netio.py`(`http_request/get/post` — timeout 자동 주입·TLS 검증 비활성
+  차단·예외 args 스크럽 후 같은 타입 재전파), `fileio.py`(`safe_key`/`safe_join` 경로 주입
+  차단 + `write_json_redacted` at-rest 마스킹 저장), `api_guard.py`(`api_receipt`/
+  `response_summary`/`scrub_url·headers·params` — 저장 가능한 무시크릿 요청 영수증·응답 요약),
+  `events.py`(`log_event`/`log_exception` — **마스킹된 단일 라인 JSON** 처리/에러 로그, 반환
+  dict 는 알림 전송에도 안전 → 분석 가능성 유지). `redaction.py` 에 `scrub_exception`(예외
+  체인 args 마스킹) 추가, audit 에 런타임 점검 3종(log/stdout/excepthook 설치 여부) 등록.
+- **1차 wiring**: DAG(`commerce_raw.py`)·scripts 2종 → `install_security()`;
+  bronze `clients.py` HTTP 호출 → `netio.http_request`(정책 단일점);
+  `silver_tasks.build_silver` 경계에 `assert_safe_segment(short)`/`assert_iso_date` 추가.
+  기존 redact 지점(마커 error·notify·재시도 로그)은 유지(이중 방어).
+- **검증**: 신규 테스트 24케이스 포함 전 테스트 **106 통과**, `python -m security` 차단 0
+  (런타임 설치 3종은 CLI 단독 실행에서 warn = 정상, 문서화).
+- **문서**: [docs/security/security.md](docs/security/security.md)(위협 모델 11경로·모듈 표·
+  로그 분석 경계·검증), [docs/security/adoption.md](docs/security/adoption.md)(받아쓰기 이식
+  가이드 + common 승격 계약 + 에이전트 프롬프트), docs/security/README·CLAUDE.md §20·Share.md 갱신.
+
 ## 2026-07-02
 
 ### 23. DAG 명칭 변경 — commerce_localdata_{elt,recollect} → commerce_{collect,recollect}_raw
