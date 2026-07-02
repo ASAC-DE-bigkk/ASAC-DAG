@@ -1,6 +1,6 @@
 """Airflow DAG: population silver/gold 변환 (dbt).
 
-수집 DAG(``seoul_ppltn_collect``, 5분)가 적재한 bronze를 **15분마다** dbt로 silver/gold
+수집 DAG(``population_bronze``, 5분)가 적재한 bronze를 **15분마다** dbt로 silver/gold
 변환하고 테스트한다. 수집(5분)과 변환(15분)을 분리해, 5분마다 전체 재생성하는 낭비를
 피하면서 원천 갱신 주기(대략 5~15분)에 맞춘 신선도를 유지한다.
 
@@ -46,7 +46,7 @@ def _dbt(args: str) -> str:
 
 
 with DAG(
-    dag_id="seoul_ppltn_transform",
+    dag_id="population_transform",
     description="Transform population bronze -> silver/gold via dbt (every 15 min).",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
     schedule="*/15 * * * *",
