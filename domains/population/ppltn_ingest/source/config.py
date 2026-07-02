@@ -10,15 +10,15 @@ import os
 
 from ..common.config import load_env_file, pick
 
-# raw 원본 객체가 적재되는 bronze prefix (이슈 #16: bronze/<domain>).
-LANDING_ROOT = "bronze/population"
+# raw 원본 객체가 적재되는 raw prefix (raw ≠ bronze 테이블; feat/75 raw-prefix 정렬).
+LANDING_ROOT = "raw/population"
 
 # 추적 메타데이터 source_id -- raw path와 bronze row 양쪽에 쓰인다.
 SOURCE_ID = "seoul_ppltn"
 SOURCE_DOMAIN = "population"
 
 # 서울 열린데이터광장 실시간 도시데이터 API.
-SEOUL_API_KEY_ENV = "SEOUL_API_KEY"
+SEOUL_API_KEY_ENV = "SEOUL_API_KEY_PPLT"
 SEOUL_OPEN_API_BASE_URL = os.environ.get(
     "SEOUL_OPEN_API_BASE_URL",
     "http://openapi.seoul.go.kr:8088",

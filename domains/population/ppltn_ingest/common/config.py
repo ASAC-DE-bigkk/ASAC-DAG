@@ -135,6 +135,6 @@ def raw_object_key(root: str, source_id: str, ctx: RunContext, request_id: str, 
 
     ``<root>/<source_id>/load_date=<KST>/<ingest_ts>_<request_id>.<ext>``
 
-    예: ``bronze/population/seoul_ppltn/load_date=2026-07-01/20260701T090000Z_<uuid>.json``
+    예: ``raw/population/seoul_ppltn/load_date=2026-07-01/20260701T090000Z_<uuid>.json``
     """
     return f"{root}/{source_id}/load_date={ctx.load_date}/{ctx.ingest_ts}_{request_id}.{ext}"
