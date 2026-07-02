@@ -211,7 +211,7 @@ def ingest_sample_events(sample_path: str) -> int:
 
 
 with DAG(
-    dag_id="dbt_trino_iceberg_smoke",
+    dag_id="common_dbt_smoke",
     description="Loads sample events into R2/Iceberg bronze, then validates dbt silver and gold models.",
     start_date=datetime(2026, 1, 1),
     schedule=None,

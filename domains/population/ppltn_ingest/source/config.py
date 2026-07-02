@@ -18,7 +18,7 @@ SOURCE_ID = "seoul_ppltn"
 SOURCE_DOMAIN = "population"
 
 # 서울 열린데이터광장 실시간 도시데이터 API.
-SEOUL_API_KEY_ENV = "SEOUL_API_KEY"
+SEOUL_API_KEY_ENV = "SEOUL_API_KEY_PPLT"
 SEOUL_OPEN_API_BASE_URL = os.environ.get(
     "SEOUL_OPEN_API_BASE_URL",
     "http://openapi.seoul.go.kr:8088",

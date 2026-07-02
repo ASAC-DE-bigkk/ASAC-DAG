@@ -1,6 +1,6 @@
 # Airflow DAG 스캔에서 제외되는 경로 (import은 됨).
 # 정규식(기본). 이 디렉토리(domains/population) 기준 상대경로에 매칭.
-# DAG 엔트리 파일(seoul_ppltn_collect.py)만 스캔되고, 패키지는 import 전용이다.
+# DAG 엔트리 파일(population_bronze.py)만 스캔되고, 패키지는 import 전용이다.
 ppltn_ingest/
 scripts/
 _dryrun

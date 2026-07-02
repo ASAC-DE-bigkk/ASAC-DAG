@@ -31,13 +31,13 @@ silver  {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parqu
 ## 환경변수 (정상 동작 조건)
 
 commerce 가 읽는 모든 인자는 [docs/configuration.md](docs/configuration/configuration.md) 에 정리돼 있다.
-핵심은 **환경이 바뀌며 루트 `.env` 에서 빠진 값**(특히 `SEOUL_OPENAPI_KEY`)을 이 번들의
-`.env.commerce` 가 채운다는 것:
+인증키 `SEOUL_API_KEY_COMM` 은 **호스트 루트 `.env`** 에 있다(ASAC-DAG#70 에서 도메인 공통
+`SEOUL_API_KEY_<도메인>` 규칙으로 이관). 나머지 commerce 전용 값은 이 번들의 `.env.commerce` 가 채운다:
 
 ```bash
 cd dags/domains/commerce
 cp .env.commerce.example .env.commerce      # PowerShell: Copy-Item
-# SEOUL_OPENAPI_KEY 입력(필수). R2 쓰면 STORAGE_BACKEND=r2 + R2_* 확인.
+# 인증키는 루트 .env 의 SEOUL_API_KEY_COMM(필수). R2 쓰면 STORAGE_BACKEND=r2 + R2_* 확인.
 ```
 
 DAG 임포트 시 [include/common/env.py](include/common/env.py) 의 `load_commerce_env()` 가
@@ -46,7 +46,7 @@ DAG 임포트 시 [include/common/env.py](include/common/env.py) 의 `load_comme
 
 | 변수 | 기본 | 비고 |
 |---|---|---|
-| `SEOUL_OPENAPI_KEY` | (없음) | **필수** — 없으면 수집 불가 |
+| `SEOUL_API_KEY_COMM` | (없음) | **필수** — 루트 `.env` 에서 주입(#70). 없으면 수집 불가 |
 | `STORAGE_BACKEND` | `local` | `local` \| `r2` |
 | `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | `${R2_DEV_*}` | r2 일 때 — 루트 `.env` 값을 참조 |
 | `R2_BUCKET` | `${R2_DEV_BUCKET_NAME}` | 루트는 `R2_DEV_BUCKET_NAME`/`R2_BUCKET_NAME`, commerce 는 `R2_BUCKET` — 참조로 매핑 |
@@ -63,7 +63,7 @@ DAG 임포트 시 [include/common/env.py](include/common/env.py) 의 `load_comme
 ```bash
 docker compose up -d                # 루트의 docker-compose.yml (postgres/trino/airflow×4)
 # UI: http://localhost:30585
-# DAG: seoul_commerce_daily(전체 수집) · seoul_commerce_recollect(미완료만 6h 재수집) — UI 에서 토글 ON
+# DAG: commerce_localdata_elt(전체 수집) · commerce_localdata_recollect(미완료만 6h 재수집) — UI 에서 토글 ON
 # Grid/Graph 에서 ingest_one[<API>] 매핑으로 API별 성공/실패/대기 확인(map_index 라벨)
 ```
 
@@ -75,9 +75,9 @@ docker compose up -d                # 루트의 docker-compose.yml (postgres/tri
 ### backfill / 재수집
 
 ```bash
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_daily   # 매 실행이 전체 수집
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_daily -c '{"observed_date":"2026-06-01"}'
-docker compose exec airflow-scheduler airflow dags backfill seoul_commerce_daily -s 2026-06-01 -e 2026-06-07
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt   # 매 실행이 전체 수집
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt -c '{"observed_date":"2026-06-01"}'
+docker compose exec airflow-scheduler airflow dags backfill commerce_localdata_elt -s 2026-06-01 -e 2026-06-07
 ```
 
 ## 프로젝트 구조
@@ -91,7 +91,7 @@ docker compose exec airflow-scheduler airflow dags backfill seoul_commerce_daily
 dags/
 └─ domains/
    └─ commerce/                  # ★ 카테고리 자립 단위
-      ├─ seoul_commerce_dag.py     # DAG: seoul_commerce_daily · seoul_commerce_recollect (sys.path+env 부트스트랩)
+      ├─ seoul_commerce_dag.py     # DAG: commerce_localdata_elt · commerce_localdata_recollect (sys.path+env 부트스트랩)
       ├─ include/                 # PYTHONPATH 루트 (common/bronze/silver 가 top-level)
       │  ├─ common/               # settings · env · storage · paths · schemas · hashing · registry · notify(알림 IF)
       │  ├─ bronze/               # clients · validators · bronze_tasks(NDJSON+마커) · markers(재수집) · resolve

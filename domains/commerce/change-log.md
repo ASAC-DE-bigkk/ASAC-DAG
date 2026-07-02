@@ -5,6 +5,93 @@
 
 ---
 
+## 2026-07-02
+
+### 20. DAG 네이밍 통합 — seoul_commerce_daily/recollect → commerce_localdata_elt/recollect (feat/73-dag-naming)
+request:
+- 팀 공통 DAG 네이밍 규칙 `<domain>_<dataset>_<stage>` 확정(#73): stage 역할형(elt/recollect 등),
+  commerce dataset=localdata, 파일명=dag_id(밀접한 DAG 쌍은 공통 접두 파일명).
+response:
+- dag_id: `seoul_commerce_daily` → `commerce_localdata_elt`, `seoul_commerce_recollect` →
+  `commerce_localdata_recollect`. 파일 `seoul_commerce_dag.py` → `commerce_localdata.py`(두 DAG 공존).
+- 번들 docs/README의 dag_id 참조 일괄 갱신. 스토리지 경로·마커 계약은 dag_id와 무관하므로 변경 없음.
+- 옛 dag_id 실행 이력은 Airflow 메타DB에 보존(삭제 안 함), 신규 id로 새로 시작.
+
+### 19. 인증키 env-var 계약 변경 — SEOUL_OPENAPI_KEY → SEOUL_API_KEY_COMM, 루트 .env 로 이관 (feat/70-env-key-unification)
+request:
+- 도메인별 서울 API 키 환경변수를 `SEOUL_API_KEY_<도메인약어>` 규칙으로 통합(#70). commerce 는
+  `SEOUL_OPENAPI_KEY` → `SEOUL_API_KEY_COMM`.
+- commerce 인증키는 `.env.commerce` 가 아니라 **호스트 루트 `.env` 로 이관**한다(번들 자립 의도의
+  부분 폐기 — 사용자 승인). `SEOUL_OPENAPI_BASE_URL` 은 `settings.py` 기본값과 동일하므로
+  `.env.commerce` 에서 삭제.
+- 배경: 루트 `.env` 의 culture 키가 같은 이름(`SEOUL_OPENAPI_KEY`)이라 setdefault 로더 특성상
+  commerce 가 culture 키로 호출하던 충돌 해소.
+response:
+- `settings.py` 가 `SEOUL_API_KEY_COMM` 을 읽도록 변경(내부 필드명 `seoul_openapi_key` 유지).
+  `clients.py`/`resolve.py` 오류 메시지, `test_security.py`, 번들 docs/README/deploy 문서 일괄 반영.
+- `.env.commerce`/`.env.commerce.example` 에서 인증키·BASE_URL 제거 + 이관 안내 주석.
+  키 입력 위치 안내를 "루트 `.env`" 로 수정(configuration.md gap 표 포함).
+- 신규 이름은 `KEY` 포함 → security 자동 마스킹(`_SECRET_NAME_RE`) 유지 확인.
+
+### 18. 재수집 규칙 변경 — 동일자 성공분 제외·KST 일자 가드·한 파일 관리 (feat/59-recollect-rule-change)
+request:
+- **동일자 수동 재실행**: 같은 날짜에 수동 실행 이력이 있으면, 실행 전에 **이미 성공한 API 는 제외**하고
+  수집한다.
+- **recollect run_id 관리**: 실패분을 재수집할 때 (1) run_id 를 동일하게 맞춰 재수집하거나, (2) 기존 실패
+  파일을 삭제하고 별도 run_id 로 재수집하여 **하나의 파일로 관리**되게 한다.
+- **KST 일자변경 가드**: recollect 라도 **한국시간(UTC면 보정, KST면 그대로) 기준 일자가 바뀌면** 사실상
+  다른 일자 정보라서 그 정보는 재수집하지 않는다.
+- 브랜치 feat/59-recollect-rule-change (feat/58 기반).
+response:
+- **markers.py**: `run_date`(run_id→KST 날짜), `completed_shorts_on_date`,
+  `plan_excluding_same_day_completed`(동일 KST 일자 completed 제외),
+  `recollect_targets_same_day`(최근 run 의 incomplete 중 **KST 오늘과 같은 날짜만**, 날짜 바뀌면 빈 리스트),
+  `cleanup_incomplete`(성공 run 제외 **같은 KST 일자** 실패 파편 삭제 — option2 한 파일). `common/storage.py`
+  에 `delete` 추가(ABC/Local/R2).
+- **DAG 배선**: daily `plan_all_targets`→동일자 성공분 제외, recollect `find_incomplete_targets`→KST 가드,
+  `ingest_one`→성공 시 같은 일자 실패 파편 `cleanup_incomplete`(한 파일).
+- **검증**: 단위테스트 **6 통과**(run_date·동일자 제외·전날 미제외·KST 가드·cleanup 유지/타일자 보존). DAG 구문 OK.
+- **미검증(정직)**: end-to-end 는 실제 DAG 실행(Airflow) 필요 — 오프라인 단위테스트까지.
+
+### 17. bronze 증분화 코어 — 정렬·검증키·diff (feat/58-commerce-bronze-sort-diff)
+request:
+- bronze 수집이 매 실행 전체를 다시 받는 문제를 해소한다. 각 API 파일에서 UPDATEDT 존재를 먼저
+  확인하고(모두 있으면) **UPDATEDT 내림차순 row 정렬**(날짜가 숫자가 아니면 숫자키로 치환). 정렬은
+  **전량 RAM 금지 → 파일 단위 스트리밍**, 퀵정렬보다 낮은 Big-O 가 있으면 그 방식. 저장 포맷은
+  **row-NDJSON(UPDATEDT desc)로 전환**. **API 단위 해시 검증키**를 만들고, 수집 파일 삭제 로직은
+  재검증 통과 뒤 **맨 마지막(step4)**에만 적용. 브랜치 feat/58-commerce-bronze-sort-diff.
+- (합의 Q&A) **정렬 알고리즘** = 외부 병합 정렬(스트리밍·바운디드 RAM). **저장 포맷** = row-NDJSON(UPDATEDT desc).
+- (합의 Q&A — 증분 저장/비교기준 모델, 크리티컬) 구 데이터 소실·버전이력 유실 방지를 위해 **2계열**:
+  ① **save(증분 영구 저장)** — 첫 수집=full, 이후=신규/변경분만 누적(이력 보존, 삭제 안 함).
+  ② **diff-target(롤링 최신본)** — 다음날 비교 기준. 첫 수집 시 save 와 **같은 내용으로 따로 생성**.
+  매일: 오늘본 vs diff-target diff → 신규분을 save 로 증분 저장 → **diff-target 을 오늘본으로 교체(구 diff-target 삭제)**.
+response:
+- **-1단계 확인(실데이터)**: 39종 전부 UPDATEDT 100% `datetime` → 14자리 정수키로 정렬 가능 확인.
+- **include/bronze/incremental.py**: `external_merge_sort`(청크→임시파일→heapq 병합, 스트리밍·바운디드
+  RAM, O(n log n)), `verification_key`(정렬본 순서민감 sha256), `diff_new_rows`(정렬 병합 스트리밍 diff
+  — 같은 키는 정규화 문자열 직접비교로 hot loop 경량). **파일 브리지**: `sort_rows_to_file`(정렬→row-NDJSON+키),
+  `read_rows`, `build_increment`(첫수집=full / 동일=증분없음 / 상이=diff 신규분 — 모델 그대로 구현).
+- 단위테스트 **13 통과**(정렬·순서민감키·diff 4종 + 파일브리지 first/identical/changed + orchestration
+  first→identical→changed).
+- **DAG 통합**: `common/paths.py`에 diff-target 경로(`_diff_target/<short>.jsonl` + `.key` 사이드카).
+  `incremental_store`(스토리지 브리지: 전날 target 다운로드→비교→증분 업로드→target 롤링 교체).
+  `bronze_tasks._write_bronze`가 **status==ok 일 때만** 페이지→row 파싱→증분 저장(중간 중단은 미저장),
+  마커에 `verification_key/increment_mode/increment_count/sorted_row_count` 기록. page-NDJSON → row-NDJSON.
+- **step0**: `seed_diff_target`(1회성 diff-target/검증키 시드). 미실행이어도 첫 수집이 self-seed 하므로 선택.
+- **step4**: 본 모델은 raw 페이지가 휘발(메모리)이라 "수집 파일 삭제" 별도 대상 없음 → "미저장(status!=ok) +
+  재검증"으로 갈음(단위테스트로 first/identical/changed 재검증).
+- **docs**: [docs/pipeline/bronze/incremental-sort-diff.md](docs/pipeline/bronze/incremental-sort-diff.md)
+  (모델·정렬·검증키·diff·수집흐름·step0·검증). 단위테스트 **14 통과**.
+- **라이브 end-to-end 검증 완료(실 Seoul API, 격리 프리픽스 `_verify58`)**: run1=first(row-NDJSON 확인:
+  MGTNO 있음/LOCALDATA 봉투 아님) + diff-target 생성 → run2 동일 데이터=identical(증분 파일 미생성) →
+  변경분=changed(변경 업장1 + 신규행만 증분, diff-target 3행으로 롤링). **이력 보존 확인**: 이전 run 증분
+  유지 + 같은 업장(mgtno)의 **원본('태평')·변경('태평_CHG') 두 버전 공존 → 이력 추적 가능(True)**.
+  검증 후 `_verify58` 6객체 전량 삭제(실 bronze 무오염). **조치 필요 없음**(정상 동작).
+- **사이드 이펙트 분석/대응**: 기존 bronze=page-NDJSON, 신규=row-NDJSON → **형식 혼재**(이력 손실 아님 —
+  구 run 보존 + 신규 run 은 증분). 실운영 첫 수집은 `_diff_target` 미존재라 mode=first 로 전체 저장
+  (자가 시드; step0 로 사전 시드하면 첫 수집부터 diff). **다운스트림(dbt 로더) row-NDJSON 대응은 feat/58 밖**.
+- 커밋·푸시(feat/58). (부수) CLAUDE.md 영어 통일 + Change Log Rule 에 request:/response: 규격 명시(별도 커밋).
+
 ## 2026-06-30
 
 ### 16. 보안 대응 전용 패키지 + 단일 포인트 종합검증 도입 (`include/security/`)

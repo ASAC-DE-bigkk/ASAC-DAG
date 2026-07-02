@@ -17,7 +17,7 @@ cp .env.commerce.example .env.commerce
 (템플릿 기본값이 이미 `${R2_DEV_*}` 참조라 보통 그대로 두면 된다):
 
 ```bash
-SEOUL_OPENAPI_KEY=<발급키>
+# 인증키는 호스트 루트 .env 에: SEOUL_API_KEY_COMM=<발급키> (#70 이관)
 STORAGE_BACKEND=r2
 
 # R2 블록은 루트 .env 값을 불러옴(중복 입력 불필요). 템플릿 기본:
@@ -45,7 +45,7 @@ R2 백엔드는 `boto3`, silver 는 `pandas`/`pyarrow` 가 필요하다. 현재 
 
 ```bash
 docker compose up -d                       # 호스트 루트에서 (UI :30585)
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_daily
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt
 ```
 
 R2 적재 확인:

@@ -82,7 +82,7 @@ class SeoulOpenApiClient:
     def __init__(self, key: str, base_url: str, *, timeout: int = 30,
                  max_attempts: int = 3, backoff_seconds: float = 2.0) -> None:
         if not key:
-            raise SeoulAuthError("INFO-100", "SEOUL_OPENAPI_KEY 미설정", "<config>")
+            raise SeoulAuthError("INFO-100", "SEOUL_API_KEY_COMM 미설정", "<config>")
         import requests  # 지연 임포트
 
         self._key = key

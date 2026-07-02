@@ -12,7 +12,7 @@
         notify_exception(exc, where="ingest_one:general_restaurant")  # 기본은 no-op
         raise
 
-시크릿(SEOUL_OPENAPI_KEY/R2 토큰)은 메시지에 넣지 않는다 — 호출측에서 마스킹/제외(CLAUDE.md §2.5).
+시크릿(SEOUL_API_KEY_COMM/R2 토큰)은 메시지에 넣지 않는다 — 호출측에서 마스킹/제외(CLAUDE.md §2.5).
 """
 from __future__ import annotations
 

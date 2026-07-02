@@ -1,9 +1,10 @@
 # Paths excluded from Airflow DAG-file scanning (still importable as packages).
 # Syntax: regexp (default). One pattern per line, matched against the path
 # relative to this directory (domains/culture). Only the DAG entry file
-# (culture_bronze_ingest.py) should be scanned for a DAG object.
+# (culture_bronze.py) should be scanned for a DAG object.
 culture_ingest/
 scripts/
+docs/
 _dryrun
 tests/
 docs/

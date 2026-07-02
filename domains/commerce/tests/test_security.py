@@ -79,7 +79,7 @@ def test_redact_recurses_dict_and_list():
 # ── secret 수집(이름 기준 + deny + 길이 + placeholder) ───────────────────────────
 def test_collect_secret_values_rules():
     env = {
-        "SEOUL_OPENAPI_KEY": _KEY,                  # 수집
+        "SEOUL_API_KEY_COMM": _KEY,                  # 수집
         "R2_SECRET_ACCESS_KEY": "secretvalue123456",  # 수집
         "R2_ACCESS_KEY_ID": "accesskeyid123456",    # 수집
         "SEOUL_OPENAPI_BASE_URL": "http://x/y",     # deny(_URL)
@@ -179,7 +179,7 @@ def test_verification_with_runtime_passes_after_install():
 # ── end-to-end: bronze 마커(at-rest)로 키가 새지 않음 ───────────────────────────
 def test_bronze_marker_error_is_redacted(tmp_path, monkeypatch):
     """네트워크 예외 메시지에 키가 박혀도 bronze 마커 JSON 에 평문 키가 남지 않아야 한다."""
-    monkeypatch.setenv("SEOUL_OPENAPI_KEY", _KEY)
+    monkeypatch.setenv("SEOUL_API_KEY_COMM", _KEY)
     monkeypatch.setenv("STORAGE_BACKEND", "local")
     monkeypatch.setenv("LOCAL_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("COMMERCE_STORAGE_PREFIX", "")

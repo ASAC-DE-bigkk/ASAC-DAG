@@ -200,7 +200,7 @@ def verify_kma_bronze_runtime(
     if expected_raw_objects is None and expected_rows and raw_object_key and int(row[1]) != 1:
         raise RuntimeError(f"KMA bronze verification failed: raw_object_count={row[1]}")
     print(
-        "kma_vilage_fcst_bronze "
+        "weather_vilage_fcst_bronze "
         f"row_count={row[0]} raw_object_count={row[1]} last_collected_at={row[2]}"
     )
     return row_count

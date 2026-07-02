@@ -69,7 +69,7 @@ def get_settings() -> Settings:
         r2_access_key_id=os.getenv("R2_ACCESS_KEY_ID", ""),
         r2_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY", ""),
         r2_region=os.getenv("R2_REGION", "auto"),
-        seoul_openapi_key=os.getenv("SEOUL_OPENAPI_KEY", ""),
+        seoul_openapi_key=os.getenv("SEOUL_API_KEY_COMM", ""),
         seoul_openapi_base_url=os.getenv(
             "SEOUL_OPENAPI_BASE_URL", "http://openapi.seoul.go.kr:8088"
         ),
