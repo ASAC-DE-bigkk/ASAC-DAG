@@ -50,6 +50,9 @@ _STRUCTURAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      r"\1" + PLACEHOLDER),
     # AWS 스타일 액세스 키 ID
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), PLACEHOLDER),
+    # URL userinfo 자격증명(scheme://<userinfo>@host)의 userinfo 전체 → 통째 마스킹.
+    # `user:pass` 뿐 아니라 **토큰 단독**(user 없는 https://TOKEN@host)도 가린다.
+    (re.compile(r"(?<=://)[^/@\s]{1,256}(?=@)"), PLACEHOLDER),
     # 이름있는 시크릿 할당/쿼리: secret=…, token=…, api_key=…, access_key_id=…, password=…
     # 선행 \b 를 두지 않는다 → aws_secret_access_key 처럼 _ 로 이어붙은 이름도 잡는다.
     # (이름 직후의 =/: 앵커가 secretary= 같은 부분일치 오탐을 막는다.)
@@ -128,6 +131,27 @@ class Redactor:
 
     def has_literals(self) -> bool:
         return bool(self._literals)
+
+
+# 로그 인젝션(CWE-117) 무력화 — CR/LF/탭은 가시 이스케이프로, 나머지 제어문자(C0/C1/DEL,
+# ANSI ESC 포함)와 U+2028/U+2029(라인 분리자)는 \uXXXX 로 치환한다.
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def sanitize_log_value(value: object, *, max_len: int = 2000) -> str:
+    """외부 입력을 **자유형 로그**에 넣기 전 제어문자 무력화(위조 로그라인·ANSI 공격 차단).
+
+    개행/CR/탭 → 리터럴 이스케이프(`\\n`/`\\r`/`\\t`), 그 외 제어문자 → `\\uXXXX`,
+    max_len 초과분은 `…(+N)` 로 절단. events.py 의 JSON 경로는 json.dumps 가 이미
+    무력화하므로 불필요 — 이 헬퍼는 `log.info("user=%s", user)` 류 직접 로깅용이다.
+    """
+    text = value if isinstance(value, str) else str(value)
+    text = (text.replace("\\", "\\\\").replace("\r", "\\r")
+                .replace("\n", "\\n").replace("\t", "\\t"))
+    text = _CTRL_RE.sub(lambda m: f"\\u{ord(m.group(0)):04x}", text)
+    if len(text) > max_len:
+        text = text[:max_len] + f"…(+{len(text) - max_len})"
+    return text
 
 
 def scrub_exception(exc: BaseException, *, redactor: "Redactor | None" = None,

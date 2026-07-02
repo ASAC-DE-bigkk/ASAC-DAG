@@ -25,7 +25,12 @@ from __future__ import annotations
 from security.api_guard import (
     api_receipt, response_summary, scrub_headers, scrub_params, scrub_url,
 )
+from security.archive import UnsafeArchiveError, safe_extract_tar, safe_extract_zip
 from security.bootstrap import install_security, is_security_installed, security_status
+from security.crypto import (
+    constant_time_equals, generate_hex_token, generate_token, hash_password,
+    needs_rehash, verify_password,
+)
 from security.events import event_record, exception_record, log_event, log_exception
 from security.fileio import safe_join, safe_key, write_json_redacted, write_text_redacted
 from security.inputs import (
@@ -35,11 +40,12 @@ from security.log_filter import (
     SecretRedactingFilter, install_log_redaction, is_log_redaction_installed,
 )
 from security.netio import (
-    InsecureRequestBlocked, http_get, http_post, http_request, safe_url,
+    InsecureRequestBlocked, ResponseTooLarge, UnsafeURLBlocked, assert_url_allowed,
+    http_get, http_post, http_request, is_url_allowed, safe_url,
 )
 from security.redaction import (
     PLACEHOLDER, Redactor, get_default_redactor, redact, refresh_env_secrets,
-    register_secret, scrub_exception,
+    register_secret, sanitize_log_value, scrub_exception,
 )
 from security.stdio_guard import (
     install_excepthook_redaction, install_stdout_redaction,
@@ -52,23 +58,29 @@ from security.verify import (
 __all__ = [
     # 부트스트랩(원샷)
     "install_security", "security_status", "is_security_installed",
-    # 마스킹
+    # 마스킹 · 로그 인젝션 무력화
     "redact", "scrub_exception", "register_secret", "refresh_env_secrets",
-    "Redactor", "PLACEHOLDER", "get_default_redactor",
+    "sanitize_log_value", "Redactor", "PLACEHOLDER", "get_default_redactor",
     # 로깅/스트림/훅 가드
     "install_log_redaction", "SecretRedactingFilter", "is_log_redaction_installed",
     "install_stdout_redaction", "is_stdout_redaction_installed",
     "install_excepthook_redaction", "is_excepthook_redaction_installed",
     # 입력검증
     "assert_safe_segment", "assert_iso_date", "is_safe_segment", "is_iso_date",
-    # network IO
-    "http_request", "http_get", "http_post", "safe_url", "InsecureRequestBlocked",
-    # file IO
+    # network IO (+SSRF 가드 · 응답 상한)
+    "http_request", "http_get", "http_post", "safe_url",
+    "assert_url_allowed", "is_url_allowed",
+    "InsecureRequestBlocked", "UnsafeURLBlocked", "ResponseTooLarge",
+    # file IO · 아카이브
     "safe_key", "safe_join", "write_json_redacted", "write_text_redacted",
+    "safe_extract_zip", "safe_extract_tar", "UnsafeArchiveError",
     # API 가드
     "api_receipt", "response_summary", "scrub_url", "scrub_headers", "scrub_params",
     # 이벤트(분석 가능 로그)
     "log_event", "log_exception", "event_record", "exception_record",
+    # 암호 유틸(CSPRNG/상수시간/비밀번호)
+    "generate_token", "generate_hex_token", "constant_time_equals",
+    "hash_password", "verify_password", "needs_rehash",
     # 종합검증
     "run_security_verification", "assert_secure", "SecurityReport", "SecurityError",
 ]

@@ -30,13 +30,16 @@ log = logging.getLogger(__name__)
 
 
 def install_security(*, logs: bool = True, stdio: bool = True, excepthooks: bool = True,
-                     refresh_env: bool = True, extra_secrets: Iterable[str] = ()) -> dict:
+                     refresh_env: bool = True, extra_secrets: Iterable[str] = (),
+                     neutralize_log_controls: bool = False) -> dict:
     """런타임 보안 가드 일괄 설치. 설치 상태 dict 반환(진단용 — 시크릿 값은 없음).
 
     Args:
         logs / stdio / excepthooks: 개별 가드 on/off(기본 전부 on).
         refresh_env: env 의 시크릿 값(이름 규칙)을 기본 redactor 에 (재)등록.
         extra_secrets: 이름 규칙 밖의 시크릿 값 추가 등록(예: 파일에서 읽은 토큰).
+        neutralize_log_controls: 로그 msg/args 의 제어문자 무력화(CWE-117, opt-in —
+            여러 줄 메시지가 한 줄로 펴지므로 기본 off. 트레이스백(exc_text)은 보존).
     """
     status: dict = {}
     try:
@@ -45,7 +48,8 @@ def install_security(*, logs: bool = True, stdio: bool = True, excepthooks: bool
         for value in extra_secrets:
             register_secret(value)
         if logs:
-            install_log_redaction(refresh_env=False)   # env 는 위에서 이미 적재
+            install_log_redaction(refresh_env=False,   # env 는 위에서 이미 적재
+                                  neutralize_controls=neutralize_log_controls)
         if stdio:
             install_stdout_redaction()
         if excepthooks:

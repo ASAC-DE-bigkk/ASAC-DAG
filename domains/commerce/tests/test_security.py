@@ -449,3 +449,562 @@ def test_event_record_reserved_keys_not_overridable():
     # 자유 필드로 들어올 수 있는 예약 키(ts)만 검증한다.
     record = event_record("x", level="info", where="w", ts="EVIL")
     assert record["event"] == "x" and record["ts"] != "EVIL"
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 가이드라인 확장(feat/96 2차) — SSRF/응답상한 · crypto · archive · sanitize · 신규 audit
+# 위반 샘플은 전부 "조각 결합" 문자열로 만들어 tmp 파일에 기록한다(번들 자기감사 회피).
+# ════════════════════════════════════════════════════════════════════════════════
+from pathlib import Path  # noqa: E402
+
+from security import (  # noqa: E402
+    ResponseTooLarge, UnsafeArchiveError, UnsafeURLBlocked, assert_url_allowed,
+    constant_time_equals, generate_hex_token, generate_token, hash_password,
+    is_url_allowed, needs_rehash, safe_extract_tar, safe_extract_zip,
+    sanitize_log_value, verify_password,
+)
+
+
+# ── netio: SSRF 가드(assert_url_allowed) ────────────────────────────────────────
+@pytest.mark.parametrize("url", [
+    "file:///etc/passwd", "ftp://host/x", "gopher://host/x",       # 스킴
+    "https://" + "user:" + "pw12345@host/x",                       # userinfo
+    "http://127.0.0.1/x", "htt" + "p://10.0.0.5/x", "htt" + "p://192.168.1.1/x",
+    "htt" + "p://169.254.169.254/latest/meta-data/",               # AWS IMDS
+    "htt" + "p://100.100.100.200/latest/",                         # Alibaba IMDS
+    "http://[::1]/x", "http://[fe80::1]/x",
+    "http://[::ffff:169.254.169.254]/x",                           # v4-mapped 우회
+    "http://[fd00:ec2::254]/x",                                    # IMDSv6(fc00::/7)
+])
+def test_ssrf_guard_blocks(url):
+    with pytest.raises(UnsafeURLBlocked):
+        assert_url_allowed(url)
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.example.com/v1/x",          # 호스트명(DNS 미해석 모드)
+    "htt" + "p://93.184.216.34/x",           # 공인 IP 리터럴
+    "https://[2606:2800:220:1:248:1893:25c8:1946]/x",
+])
+def test_ssrf_guard_allows_public(url):
+    assert assert_url_allowed(url) == url
+    assert is_url_allowed(url)
+
+
+def test_ssrf_guard_allowed_hosts_restriction():
+    assert is_url_allowed("https://api.good.com/x", allowed_hosts={"api.good.com"})
+    assert not is_url_allowed("https://api.evil.com/x", allowed_hosts={"api.good.com"})
+
+
+def test_http_request_url_check_blocks_before_session_call():
+    sess = _FakeSess()
+    with pytest.raises(UnsafeURLBlocked):
+        http_request("GET", "htt" + "p://169.254.169.254/x", session=sess,
+                     timeout=1, url_check=True)
+    assert sess.kwargs == {}                       # 차단 시 요청 자체가 안 나감
+
+
+def test_http_request_url_check_defaults_redirects_off():
+    sess = _FakeSess()
+    http_request("GET", "htt" + "p://93.184.216.34/x", session=sess, timeout=1,
+                 url_check=True)
+    assert sess.kwargs.get("allow_redirects") is False
+
+
+# ── netio: 응답 크기 상한(max_response_bytes) ───────────────────────────────────
+class _FakeResp:
+    def __init__(self, chunks, headers=None):
+        self._chunks = list(chunks)
+        self.headers = headers or {}
+        self.closed = False
+
+    def iter_content(self, n):
+        return iter(self._chunks)
+
+    def close(self):
+        self.closed = True
+
+
+class _CapSess:
+    def __init__(self, resp):
+        self.resp = resp
+        self.kwargs = {}
+
+    def request(self, method, url, **kwargs):
+        self.kwargs = kwargs
+        return self.resp
+
+
+def test_response_cap_under_limit_assembles_content():
+    resp = _FakeResp([b"ab", b"cd"])
+    out = http_request("GET", "http://x/", session=_CapSess(resp),
+                       timeout=1, max_response_bytes=10)
+    assert out._content == b"abcd"
+
+
+def test_response_cap_streamed_body_exceeds():
+    resp = _FakeResp([b"x" * 100, b"y" * 100])
+    with pytest.raises(ResponseTooLarge):
+        http_request("GET", "http://x/", session=_CapSess(resp),
+                     timeout=1, max_response_bytes=150)
+    assert resp.closed
+
+
+def test_response_cap_declared_header_exceeds():
+    resp = _FakeResp([b""], headers={"Content-Length": "999999"})
+    with pytest.raises(ResponseTooLarge):
+        http_request("GET", "http://x/", session=_CapSess(resp),
+                     timeout=1, max_response_bytes=100)
+
+
+# ── crypto: CSPRNG 토큰 · 상수시간 비교 · PBKDF2 ────────────────────────────────
+def test_generate_tokens_unique_and_long():
+    a, b = generate_token(), generate_token()
+    assert a != b and len(a) >= 40                 # 32바이트 urlsafe ≈ 43자
+    assert len(generate_hex_token(16)) == 32
+
+
+def test_constant_time_equals():
+    assert constant_time_equals("abc", "abc") and constant_time_equals(b"x", b"x")
+    assert not constant_time_equals("abc", "abd")
+
+
+def test_password_hash_roundtrip_and_rehash():
+    encoded = hash_password("correct horse battery", iterations=210_000)
+    assert encoded.startswith("pbkdf2_sha256$210000$")
+    assert verify_password("correct horse battery", encoded)
+    assert not verify_password("wrong password", encoded)
+    assert not verify_password("correct horse battery", "garbage$string")
+    assert needs_rehash(encoded)                   # 210k < 기본 600k → 재해시 필요
+    assert not needs_rehash(encoded, min_iterations=210_000)
+    with pytest.raises(ValueError):
+        hash_password("x" * 8, iterations=1000)    # 조용한 약화 방지
+    with pytest.raises(ValueError):
+        hash_password("")
+
+
+# ── archive: zip-slip/zip-bomb/특수엔트리 차단 ──────────────────────────────────
+def _make_zip(path, entries):
+    import zipfile
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries:
+            zf.writestr(name, data)
+    return path
+
+
+def test_safe_extract_zip_ok(tmp_path):
+    src = _make_zip(tmp_path / "ok.zip", [("a.txt", b"hello"), ("d/b.txt", b"world")])
+    written = safe_extract_zip(src, tmp_path / "out")
+    assert sorted(p.name for p in written) == ["a.txt", "b.txt"]
+    assert (tmp_path / "out" / "d" / "b.txt").read_bytes() == b"world"
+
+
+@pytest.mark.parametrize("name", ["../evil.txt", "/abs.txt", "d/../../evil.txt"])
+def test_safe_extract_zip_blocks_traversal(tmp_path, name):
+    src = _make_zip(tmp_path / "bad.zip", [(name, b"x")])
+    with pytest.raises(UnsafeArchiveError):
+        safe_extract_zip(src, tmp_path / "out")
+    assert not (tmp_path.parent / "evil.txt").exists()
+
+
+def test_safe_extract_zip_caps(tmp_path):
+    src = _make_zip(tmp_path / "many.zip", [(f"f{i}.txt", b"x") for i in range(5)])
+    with pytest.raises(UnsafeArchiveError):
+        safe_extract_zip(src, tmp_path / "out", max_entries=3)
+    bomb = _make_zip(tmp_path / "bomb.zip", [("z.bin", b"\x00" * 200_000)])  # 고압축
+    with pytest.raises(UnsafeArchiveError):
+        safe_extract_zip(bomb, tmp_path / "out2", max_ratio=10.0)
+    big = _make_zip(tmp_path / "big.zip", [("b.bin", bytes(range(256)) * 100)])
+    with pytest.raises(UnsafeArchiveError):
+        safe_extract_zip(big, tmp_path / "out3", max_total_bytes=100)
+
+
+def _make_tar(path, entries, links=()):
+    import io as _io
+    import tarfile as _tar
+    with _tar.open(path, "w") as tf:
+        for name, data in entries:
+            info = _tar.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, _io.BytesIO(data))
+        for name, target in links:
+            info = _tar.TarInfo(name)
+            info.type = _tar.SYMTYPE
+            info.linkname = target
+            tf.addfile(info)
+    return path
+
+
+def test_safe_extract_tar_ok(tmp_path):
+    src = _make_tar(tmp_path / "ok.tar", [("a.txt", b"hi"), ("d/b.txt", b"yo")])
+    written = safe_extract_tar(src, tmp_path / "out")
+    assert (tmp_path / "out" / "a.txt").read_bytes() == b"hi"
+    assert len(written) == 2
+
+
+def test_safe_extract_tar_blocks_traversal_and_links(tmp_path):
+    bad = _make_tar(tmp_path / "bad.tar", [("../evil.txt", b"x")])
+    with pytest.raises(UnsafeArchiveError):
+        safe_extract_tar(bad, tmp_path / "out")
+    linky = _make_tar(tmp_path / "link.tar", [], links=[("l", "/etc/passwd")])
+    with pytest.raises(UnsafeArchiveError):
+        safe_extract_tar(linky, tmp_path / "out2")
+
+
+# ── sanitize_log_value + 로그 필터 opt-in(CWE-117) ──────────────────────────────
+def test_sanitize_log_value_neutralizes_controls():
+    forged = "user1\n2026-07-03 INFO fake-line \x1b[31mred\x07"
+    out = sanitize_log_value(forged)
+    assert "\n" not in out and "\x1b" not in out and "\x07" not in out
+    assert "\\n" in out and "\\u001b" in out
+    assert sanitize_log_value("a" * 3000, max_len=100).startswith("a" * 100)
+
+
+def test_log_filter_neutralize_controls_opt_in():
+    red = Redactor([_KEY])
+    buf = io.StringIO()
+    h = logging.StreamHandler(buf)
+    h.addFilter(SecretRedactingFilter(red, neutralize_controls=True))
+    lg = logging.getLogger("t.sec.ctl")
+    lg.handlers = [h]
+    lg.propagate = False
+    lg.setLevel(logging.INFO)
+    lg.warning("input=%s", f"x\nFAKE INFO line key={_KEY}")
+    line = buf.getvalue()
+    assert "\nFAKE" not in line and "\\nFAKE" in line and _KEY not in line
+
+
+def test_userinfo_password_masked_structurally():
+    red = Redactor()          # literal 등록 없이 structural 만으로
+    dsn = "postgres" + "://" + "writer:" + "supersecretdbpw@db.internal:5432/app"
+    out = red.redact_text(f"connect failed: {dsn}")
+    assert "supersecretdbpw" not in out and PLACEHOLDER in out
+    from security import scrub_url
+    assert "supersecretdbpw" not in scrub_url(dsn)
+
+
+# ── audit 신규/강화 점검 — tmp 루트에 위반 파일을 만들어 검증 ────────────────────
+def _mk_root(tmp_path, files):
+    root = tmp_path / "proj"
+    for rel, content in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    return root
+
+
+def test_check_credential_material_hits(tmp_path):
+    from security.audit import check_credential_material
+    pem = "-----BEGIN RSA " + "PRIVATE KEY-----"
+    vendor = "gh" + "p_" + "a" * 36
+    dsn = "https" + "://u:" + "supers3cretpw" + "@db.internal/x"
+    root = _mk_root(tmp_path, {
+        "bad1.py": f'k = "{pem}"\n',
+        "bad2.md": f"token {vendor}\n",
+        "bad3.py": f'dsn = "{dsn}"\n',
+        "ok.py": 'url = "https' + '://user:pw@example.com/x"  # example\n',
+    })
+    f = check_credential_material(root)
+    assert not f.ok and f.severity == "CRITICAL"
+    assert "bad1.py" in f.detail and "bad2.md" in f.detail and "bad3.py" in f.detail
+    assert "ok.py" not in f.detail                 # example 라인은 허용
+
+
+def test_check_trojan_source(tmp_path):
+    from security.audit import check_trojan_source
+    root = _mk_root(tmp_path, {
+        "bad.py": "x = 1  " + chr(0x202E) + "trick\n",
+        "zw.py": "y = 1" + chr(0x200B) + "\n",
+        "ok.py": "z = 1\n",
+        "allowed.yaml": "# rtl " + chr(0x202E) + " security: allow-bidi\n",
+    })
+    f = check_trojan_source(root)
+    assert not f.ok
+    assert "bad.py" in f.detail and "zw.py" in f.detail
+    assert "allowed.yaml" not in f.detail
+    root_ok = _mk_root(tmp_path / "ok2", {"fine.py": "a = 1\n"})
+    assert check_trojan_source(root_ok).ok
+
+
+def test_check_sql_injection(tmp_path):
+    from security.audit import check_sql_injection
+    fstr = 'cur.exe' + 'cute(f"SELECT * FROM {t}")'
+    fmt = 'cur.exe' + 'cute("SELECT {}".format(t))'
+    concat = 'cur.exe' + 'cute("SELECT " + t)'
+    param = 'cur.exe' + 'cute("SELECT * FROM t WHERE id=%s", (x,))'
+    allowed = 'cur.exe' + 'cute(f"SELECT * FROM {T}")  # security: allow-sql'
+    root = _mk_root(tmp_path, {"bad.py": f"{fstr}\n{fmt}\n{concat}\n",
+                               "ok.py": f"{param}\n{allowed}\n"})
+    f = check_sql_injection(root)
+    assert not f.ok and f.detail.count("bad.py") == 3 and "ok.py" not in f.detail
+
+
+def test_check_unsafe_extract(tmp_path):
+    from security.audit import check_unsafe_extract
+    bad = "import zipfile\nzf.extract" + "all(dest)\n"
+    good = "import tarfile\ntf.extract" + "all(dest, filter='data')\n"
+    nogate = "obj.extract" + "all()\n"             # 아카이브 모듈 미임포트 → 통과
+    root = _mk_root(tmp_path, {"bad.py": bad, "good.py": good, "other.py": nogate})
+    f = check_unsafe_extract(root)
+    assert not f.ok and "bad.py" in f.detail
+    assert "good.py" not in f.detail and "other.py" not in f.detail
+
+
+def test_check_insecure_file_ops(tmp_path):
+    from security.audit import check_insecure_file_ops
+    root = _mk_root(tmp_path, {
+        "bad.py": "p = tempfile.mk" + "temp()\nos.ch" + "mod(p, 0o7" + "77)\n",
+        "ok.py": "os.ch" + "mod(p, 0o600)\nd = tempfile.mkdtemp()\n",
+    })
+    f = check_insecure_file_ops(root)
+    assert not f.ok and f.detail.count("bad.py") == 2 and "ok.py" not in f.detail
+
+
+def test_check_weak_hash(tmp_path):
+    from security.audit import check_weak_hash
+    root = _mk_root(tmp_path, {
+        "bad.py": "h = hashlib.m" + "d5(data)\n",
+        "ok.py": ("h = hashlib.sha256(data)\n"
+                  "e = hashlib.m" + "d5(data, usedforsecurity=False)\n"),
+    })
+    f = check_weak_hash(root)
+    assert not f.ok and "bad.py" in f.detail and "ok.py" not in f.detail
+    assert f.severity == "MEDIUM"                  # advisory(비차단)
+
+
+def test_check_insecure_random(tmp_path):
+    from security.audit import check_insecure_random
+    bad = "token = random.cho" + "ice(alphabet)\n"
+    ok = "delay = random.unif" + "orm(0, 1)\n"     # 지터 — 시크릿 문맥 아님
+    root = _mk_root(tmp_path, {"bad.py": bad, "ok.py": ok})
+    f = check_insecure_random(root)
+    assert not f.ok and "bad.py" in f.detail and "ok.py" not in f.detail
+
+
+def test_check_web_misconfig(tmp_path):
+    from security.audit import check_web_misconfig
+    root = _mk_root(tmp_path, {
+        "bad.py": ("app.run(host='0.0." + "0.0', debug=" + "True)\n"
+                   "allow_orig" + "ins=['*']\n"),
+        "bad2.py": "allow_orig" + 'ins=["*"]\n',
+    })
+    f = check_web_misconfig(root)
+    assert not f.ok and "bad.py" in f.detail and "bad2.py" in f.detail
+
+
+def test_check_xml_and_cleartext_http(tmp_path, monkeypatch):
+    from security.audit import check_cleartext_http, check_xml_parsing
+    root = _mk_root(tmp_path, {
+        "x.py": "t = xml.etree.ElementTree.par" + "se(f)\n",
+        "h.py": 'u = "htt' + 'p://evil.internal/x"\n',
+        "ok.py": 'v = "htt' + 'p://openapi.seoul.go.kr:8088/x"\n',
+    })
+    fx = check_xml_parsing(root)
+    assert not fx.ok and fx.severity == "LOW" and "x.py" in fx.detail
+    fh = check_cleartext_http(root)
+    assert not fh.ok and "evil.internal" in fh.detail and "seoul" not in fh.detail
+    monkeypatch.setenv("SECURITY_HTTP_ALLOW_HOSTS", "evil.internal")
+    assert check_cleartext_http(root).ok           # 환경변수 허용 목록 확장
+
+
+def test_check_requirements_hygiene(tmp_path):
+    from security.audit import check_requirements_hygiene
+    root = _mk_root(tmp_path, {
+        "requirements.txt": "requests\n",                       # 버전 무제한
+        "requirements-dev.txt": "--index-url htt" + "p://mirror/simple\npkg>=1.0\n",
+        "sub/requirements-ok.txt": "requests>=2.0\n# comment\n",
+    })
+    f = check_requirements_hygiene(root)
+    assert not f.ok
+    assert "unpinned" in f.detail and "plain-http index" in f.detail
+    assert "requirements-ok" not in f.detail
+
+
+def test_check_tls_and_yaml_and_dangerous_extended(tmp_path):
+    from security.audit import check_dangerous_calls, check_tls_verify, check_unsafe_yaml
+    root = _mk_root(tmp_path, {
+        "tls.py": ("ctx = ssl._create_unverified" + "_context()\n"
+                   "ctx.check_hostname = " + "False\nssl.CERT_" + "NONE\n"),
+        "y.py": ("a = yaml.unsafe" + "_load(x)\n"
+                 "b = yaml.lo" + "ad(x, Loader=yaml.Load" + "er)\n"
+                 "c = yaml.lo" + "ad(x, Loader=yaml.SafeLoader)\n"),
+        "d.py": "os.po" + "pen('ls')\nmarshal.lo" + "ads(b)\n",
+    })
+    ft = check_tls_verify(root)
+    assert not ft.ok and ft.detail.count("tls.py") == 3
+    fy = check_unsafe_yaml(root)
+    assert not fy.ok and fy.detail.count("y.py") == 2      # SafeLoader 는 미검출
+    fd = check_dangerous_calls(root)
+    assert not fd.ok and fd.detail.count("d.py") == 2
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 적대적 검증 회귀(feat/96 검증 워크플로 확인 16건) — 각 수정이 유지되는지 잠근다.
+# ════════════════════════════════════════════════════════════════════════════════
+import security.netio as _netio  # noqa: E402
+from security import needs_rehash as _needs_rehash  # noqa: E402
+
+
+# [#1] SSRF: url_check 는 호스트명도 DNS 해석해 검사(IP 리터럴만 막던 우회 차단)
+def test_ssrf_hostname_resolved_and_blocked(monkeypatch):
+    def fake_getaddrinfo(host, *a, **k):
+        return [(2, 1, 6, "", ("169.254.169.254", 0))]      # 메타데이터로 해석되는 호스트
+    monkeypatch.setattr(_netio.socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(UnsafeURLBlocked):
+        assert_url_allowed("htt" + "p://metadata.evil.example/latest/", resolve_dns=True)
+    sess = _FakeSess()
+    with pytest.raises(UnsafeURLBlocked):
+        http_request("GET", "htt" + "p://metadata.evil.example/x", session=sess, timeout=1,
+                     url_check=True)          # 기본 resolve_dns=True → 세션 호출 전 차단
+    assert sess.kwargs == {}
+
+
+def test_ssrf_hostname_resolved_public_allowed(monkeypatch):
+    monkeypatch.setattr(_netio.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    assert assert_url_allowed("https://good.example/x", resolve_dns=True).endswith("/x")
+
+
+# [#6] 응답 상한: 호출자가 stream=False 를 줘도 강제로 True 로 덮어 상한 유효
+def test_response_cap_forces_stream_true():
+    resp = _FakeResp([b"x" * 200])
+    sess = _CapSess(resp)
+    with pytest.raises(ResponseTooLarge):
+        http_request("GET", "http://x/", session=sess, timeout=1,
+                     max_response_bytes=50, stream=False)
+    assert sess.kwargs.get("stream") is True
+
+
+# [#7] crypto: 손상된 저장값(iterations<=0)은 예외가 아니라 깨끗한 거부
+@pytest.mark.parametrize("encoded", [
+    "pbkdf2_sha256$0$c2FsdA==$aGFzaA==", "pbkdf2_sha256$-5$c2FsdA==$aGFzaA==",
+    "pbkdf2_sha256$notint$x$y", "garbage", "", "a$b$c",
+])
+def test_verify_password_never_crashes(encoded):
+    assert verify_password("whatever", encoded) is False
+
+
+# [#13] crypto: NFKC 정규화로 호환 유니코드 비밀번호 동치 처리
+def test_password_unicode_nfkc_equivalence():
+    import unicodedata
+    raw = "ﬁreﬂy"                                    # U+FB01(ﬁ), U+FB02(ﬂ) 합자
+    nfkc = unicodedata.normalize("NFKC", raw)        # → "firefly"
+    assert raw != nfkc
+    encoded = hash_password(raw, iterations=210_000)
+    assert verify_password(nfkc, encoded)            # 정규화 동치 → 검증 성공
+
+
+# [#8] archive: tar 스트리밍 상한(선언 크기 신뢰 안 함) + 링크 거부(재확인)
+def test_safe_extract_tar_streaming_total_cap(tmp_path):
+    big = _make_tar(tmp_path / "big.tar", [("a.bin", b"x" * 500), ("b.bin", b"y" * 500)])
+    with pytest.raises(UnsafeArchiveError):
+        safe_extract_tar(big, tmp_path / "out", max_total_bytes=600)
+
+
+def test_safe_extract_tar_compressed_input_cap(tmp_path):
+    import tarfile as _tar, io as _io
+    p = tmp_path / "z.tar.gz"
+    with _tar.open(p, "w:gz") as tf:
+        data = b"A" * 200_000
+        info = _tar.TarInfo("big.bin"); info.size = len(data)
+        tf.addfile(info, _io.BytesIO(data))
+    with pytest.raises(UnsafeArchiveError):           # 압축 입력 상한으로 폭탄 차단
+        safe_extract_tar(p, tmp_path / "out", max_total_bytes=1000, max_compressed_bytes=500)
+
+
+# [#5] log_filter: 포맷 문자열의 %-지정자를 훼손하지 않는다(secret=%s 로그가 유실되지 않음)
+def test_log_filter_preserves_percent_format_with_secret_name(_registered_key):
+    red = Redactor([_KEY])
+    lg, buf = _logger_with_filter("t.sec.pct", red)
+    lg.warning("secret=%s done", _KEY)               # 포맷문자열에 'secret=' + 인자에 키
+    out = buf.getvalue()
+    assert _KEY not in out and "done" in out          # 라인 유실 없이 정상 렌더 + 마스킹
+
+
+# [#12] log_filter: 로거+핸들러 이중 부착 시에도 sanitize 백슬래시 중복 이스케이프 없음
+def test_log_filter_idempotent_no_double_escape():
+    red = Redactor()
+    flt = SecretRedactingFilter(red, neutralize_controls=True)
+    rec = logging.LogRecord("n", logging.INFO, __file__, 1, r"path C:\a\b", None, None)
+    flt.filter(rec); flt.filter(rec)                  # 두 번 통과(로거+핸들러 흉내)
+    assert rec.msg.count("\\\\") == 2                 # 백슬래시 2개 → 각 1회만 이스케이프
+
+
+# [#16] redaction: userinfo 토큰 단독(비밀번호 없는 https://TOKEN@host)도 마스킹
+def test_userinfo_token_only_masked():
+    red = Redactor()
+    url = "https" + "://" + "ghp_tokenonlyabc123" + "@github.com/x"
+    out = red.redact_text(url)
+    assert "ghp_tokenonlyabc123" not in out and PLACEHOLDER in out
+
+
+# [#2] audit: shell 옵션 활성이 중첩 괄호/멀티라인에 있어도 탐지
+def test_check_dangerous_calls_shell_true_variants(tmp_path):
+    from security.audit import check_dangerous_calls
+    nested = "subprocess.Popen(shlex.split(cmd), shell" + "=True)\n"
+    multiline = "subprocess.run(\n    cmd,\n    shell" + "=True,\n)\n"
+    root = _mk_root(tmp_path, {"a.py": nested, "b.py": multiline, "ok.py": "x = 1\n"})
+    f = check_dangerous_calls(root)
+    assert not f.ok and "a.py" in f.detail and "b.py" in f.detail
+
+
+# [#3] audit: 내부 따옴표/삼중따옴표 f-string SQL 도 탐지
+def test_check_sql_injection_inner_quote_and_triple(tmp_path):
+    from security.audit import check_sql_injection
+    inner = 'cur.exe' + 'cute(f"UPDATE t SET a=\'x\' WHERE id={v}")\n'
+    triple = 'cur.exe' + 'cute(f"""SELECT * FROM {t}""")\n'
+    root = _mk_root(tmp_path, {"a.py": inner, "b.py": triple})
+    f = check_sql_injection(root)
+    assert not f.ok and "a.py" in f.detail and "b.py" in f.detail
+
+
+# [#4] audit: 진짜 시크릿이 '<'/'example' 과 한 줄을 공유해도 탐지
+def test_check_credential_material_line_sharing(tmp_path):
+    from security.audit import check_credential_material
+    vendor = "gh" + "p_" + "b" * 36
+    root = _mk_root(tmp_path, {
+        "a.py": f'tok = "{vendor}"  # <production>\n',       # '<' 있어도 잡아야
+        "b.py": f'tok = "{vendor}"  # see example above\n',  # 'example' 있어도 잡아야
+    })
+    f = check_credential_material(root)
+    assert not f.ok and "a.py" in f.detail and "b.py" in f.detail
+
+
+# [#9] audit: 'filter' 단어가 주석에 있어도 filter= 인자가 아니면 탐지
+def test_check_unsafe_extract_requires_filter_kwarg(tmp_path):
+    from security.audit import check_unsafe_extract
+    commented = "import tarfile\ntf.extract" + "all(dest)  # TODO add filter later\n"
+    real = "import tarfile\ntf.extract" + "all(dest, filter='data')\n"
+    root = _mk_root(tmp_path, {"a.py": commented, "b.py": real})
+    f = check_unsafe_extract(root)
+    assert not f.ok and "a.py" in f.detail and "b.py" not in f.detail
+
+
+# [#10] audit: 위치 인자 로더(yaml.lo ad 에 yaml.Loader 를 위치로) 도 탐지
+def test_check_unsafe_yaml_positional_loader(tmp_path):
+    from security.audit import check_unsafe_yaml
+    pos = "a = yaml.lo" + "ad(x, yaml.Loader)\n"
+    kw = "b = yaml.lo" + "ad(x, Loader=yaml.UnsafeLoader)\n"
+    safe = "c = yaml.lo" + "ad(x, Loader=yaml.SafeLoader)\n"
+    root = _mk_root(tmp_path, {"a.py": pos, "b.py": kw, "safe.py": safe})
+    f = check_unsafe_yaml(root)
+    assert not f.ok and "a.py" in f.detail and "b.py" in f.detail and "safe.py" not in f.detail
+
+
+# [#11] audit: 환경 마커의 연산자를 버전 고정으로 오인하지 않음
+def test_check_requirements_env_marker(tmp_path):
+    from security.audit import check_requirements_hygiene
+    root = _mk_root(tmp_path, {
+        "requirements.txt": "requests; python_version>='3.8'\n",   # 마커만 → 여전히 unpinned
+        "requirements-ok.txt": "requests>=2.0; python_version>='3.8'\n",
+    })
+    f = check_requirements_hygiene(root)
+    assert not f.ok and "unpinned" in f.detail and "requirements-ok" not in f.detail
+
+
+# [#14] audit: hashlib.new 의 대문자 다이제스트명도 탐지
+def test_check_weak_hash_uppercase_new(tmp_path):
+    from security.audit import check_weak_hash
+    root = _mk_root(tmp_path, {"a.py": 'h = hashlib.ne' + 'w("MD5", data)\n'})
+    f = check_weak_hash(root)
+    assert not f.ok and "a.py" in f.detail

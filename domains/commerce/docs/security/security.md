@@ -6,29 +6,46 @@ commerce 번들의 **보안 대응 전용 서브시스템** 문서. 코드는 �
 [adoption.md](adoption.md) — 받는 쪽은 **복사 + `install_security()` 한 줄**이면 된다.
 
 > 한 줄 요약: **엔트리포인트에서 `install_security()` 한 번**으로 로그·stdout/stderr·미처리
-> 예외훅의 시크릿이 자동 마스킹되고, network IO/file IO/API 기록/저장(at-rest)/알림용
-> **가드 함수**가 준비(ready)되며, 이 모두를 `run_security_verification()` **한 곳**에서 점검한다.
-> 로그는 계속 **분석 가능**하다 — 값은 남기고 시크릿만 가린다(§5).
+> 예외훅의 시크릿이 자동 마스킹되고, network IO(+SSRF)/file IO/아카이브/암호/API 기록/
+> 저장(at-rest)/알림용 **가드 함수**가 준비(ready)되며, 이 모두를 `run_security_verification()`
+> **한 곳**에서 점검한다. 로그는 계속 **분석 가능**하다 — 값은 남기고 시크릿만 가린다(§5).
+>
+> 최신 가이드라인 반영(2026-07, 2차 확장): **OWASP Top 10:2025**(A03 공급망·A10 예외처리
+> 신설, SSRF→A01 흡수), **CWE Top 25 2025**(SQLi #2·경로탐색 #6·자원무제한 #25 신규),
+> **ASVS 5.0.0**, **PEP 706/Trojan Source(CVE-2021-42574)/SSRF·비밀번호 저장 치트시트**.
 
 ---
 
 ## 1. 위협 모델 — 상정한 누출/공격 경로와 대응
 
-| # | 경로 | 위협 | 대응 | 심각도 |
-|---|---|---|---|---|
-| 1 | **로그**(logging) | `requests` 예외·URL 에 인증키가 박혀 평문 로그로 노출 | `install_security()` → 로그 필터(전 핸들러) + 호출측 `redact()` | High |
-| 2 | **stdout/stderr** | `print()`/서드파티 직접 출력 → Airflow 가 task 로그로 흡수 | `install_security()` → stdout/stderr 마스킹 프록시 | High |
-| 3 | **미처리 예외** | uncaught traceback 이 stderr 로 평문 출력 | `install_security()` → sys/threading excepthook 마스킹 | High |
-| 4 | **저장(at-rest)** — 마커/상태 JSON | 네트워크 실패 시 `error` 필드에 키 박힌 URL 이 **영구 저장** | 저장 전 `redact()` (clients 예외 스크럽과 이중) + `write_json_redacted()` | **Critical** |
-| 5 | **network IO** | timeout 누락(자원고갈)·TLS 검증 비활성·예외 메시지 누출 | `netio.http_request()` — timeout 주입·verify 비활성 차단·예외 args 스크럽 | High |
-| 6 | **file IO** — 경로 주입 | 입력이 `../`·절대경로로 파티션/키 경로 조작 | `assert_iso_date()`/`assert_safe_segment()` + `safe_key()`/`safe_join()` | High |
-| 7 | **API 기록** — 요청/응답 | 호출 URL·헤더·파라미터·응답 원문에 인증정보 포함 | `api_receipt()`/`response_summary()`/`scrub_url·headers·params()` | High |
-| 8 | **알림 채널**(webhook/email) | 외부 전송 메시지/컨텍스트에 시크릿 | `redact(message)`/`redact(context)`; `log_exception()` 반환 dict 는 전송-안전 | High |
-| 9 | **커밋된 파일** | `.env` 추적·소스 하드코딩 키·예시에 실제 값 | audit: `env_gitignored`·`no_hardcoded_secrets`·`env_example_clean` | Critical/High |
-| 10 | **역직렬화/코드주입** | `yaml.load`(Loader 없음)·`eval`·`exec`·`pickle`·`shell=True` | audit: `safe_yaml_load`·`no_dangerous_calls` | High |
-| 11 | **자격증명 취급** | R2/API 키가 로그·경로·페이로드로 흘러감 | env 이름 규칙 자동 수집(literal 마스킹) + structural 패턴 | High |
+시크릿 누출(#1–11)은 1차, 코드/입력/전송/공급망 취약점(#12–22)은 2차 확장(feat/96)이다.
 
-근거 원칙: CLAUDE.md §2.5(자격증명을 bronze·로그·경로·config·vector 메타에 저장 금지), §20.
+| # | 경로 | 위협 | 대응 | 가이드라인 |
+|---|---|---|---|---|
+| 1 | **로그**(logging) | 예외·URL 에 인증키가 박혀 평문 로그로 노출 | `install_security()` → 로그 필터(전 핸들러) + `redact()` | CWE-532 |
+| 2 | **stdout/stderr** | `print()`/서드파티 직접 출력 → task 로그로 흡수 | `install_security()` → stdout/stderr 마스킹 프록시 | CWE-532 |
+| 3 | **미처리 예외** | uncaught traceback 이 stderr 로 평문 출력 | `install_security()` → sys/threading excepthook 마스킹 | CWE-209 |
+| 4 | **저장(at-rest)** | 실패 `error` 필드에 키 박힌 URL 이 **영구 저장** | 저장 전 `redact()` + `write_json_redacted()` | **CWE-312** |
+| 5 | **network IO** | timeout 누락·TLS 검증 비활성·예외 메시지 누출 | `netio.http_request()`(timeout·verify 강제·예외 스크럽) | CWE-295/400 |
+| 6 | **file IO** — 경로 주입 | 입력이 `../`·절대경로로 파티션/키 경로 조작 | `assert_*`/`safe_key()`/`safe_join()` | CWE-22 (#6) |
+| 7 | **API 기록** | 호출 URL·헤더·파라미터·응답 원문에 인증정보 | `api_receipt()`/`response_summary()`/`scrub_*()` | CWE-201 |
+| 8 | **알림 채널** | 외부 전송 메시지/컨텍스트에 시크릿 | `redact()` · `log_exception()` 반환 dict | CWE-201 |
+| 9 | **커밋된 파일** | `.env` 추적·하드코딩 키·예시에 실제 값 | audit: `env_gitignored`·`no_hardcoded_secrets`·`env_example_clean` | CWE-798 |
+| 10 | **역직렬화/코드주입** | `yaml.load`/`eval`/`exec`/`pickle`/`marshal`/`os.popen`/`shell=True` | audit: `safe_yaml_load`·`no_dangerous_calls`(확장) | CWE-502/94/78 |
+| 11 | **자격증명 취급** | R2/API 키가 로그·경로·페이로드로 흘러감 | env 이름 규칙 자동 수집 + structural 패턴 | CWE-522 |
+| 12 | **SSRF** | 사용자 URL 로 사설/메타데이터(IMDS) 요청 유도 | `assert_url_allowed()`(명시 CIDR 차단, IPv4/6·IMDS) + `http_request(url_check=True)` | CWE-918 · A01:2025 |
+| 13 | **자원 고갈** | 거대 응답·압축폭탄으로 메모리/디스크 고갈 | `http_request(max_response_bytes=)` · `safe_extract_*`(엔트리/총량/압축비 상한) | CWE-770(#25)/409 |
+| 14 | **경로 탈출(아카이브)** | zip-slip/심링크로 dest 밖에 쓰기 | `safe_extract_zip/tar`(멤버 검증 + realpath 봉쇄 + PEP 706 filter) | CWE-22 · CVE-2007-4559 |
+| 15 | **SQL 주입** | 문자열 조립 SQL 을 `execute()` 에 전달 | audit: `no_sql_injection`(f-string/%/format/+ 탐지) | CWE-89(#2) |
+| 16 | **커밋 자격증명 원문** | PEM 개인키·벤더 토큰(ghp_/xox…)·URL 비밀번호 | audit: `no_credential_material`(CRITICAL) | CWE-798/321 |
+| 17 | **Trojan Source** | bidi/zero-width 문자로 코드 로직 위장 | audit: `no_trojan_source`(chr 조립 스캔) | CVE-2021-42574 |
+| 18 | **약한 암호** | 보안 용도 md5/sha1·`random` 으로 토큰 생성 | audit: `no_weak_hash`·`no_insecure_random` + `crypto`(secrets/PBKDF2) | CWE-327/330 |
+| 19 | **비밀번호 저장** | 평문/약한 해시로 비밀번호 저장 | `crypto.hash_password()`(PBKDF2-HMAC-SHA256 600k, 자기서술) | ASVS V6/V11 |
+| 20 | **로그 인젝션** | 개행/ANSI 로 위조 로그라인·터미널 공격 | `sanitize_log_value()` + 필터 `neutralize_controls`(opt-in) | CWE-117 |
+| 21 | **취약 파일 조작** | `tempfile.mktemp`(레이스)·world-writable chmod | audit: `no_insecure_file_ops` | CWE-377/732 |
+| 22 | **공급망/전송/설정** | 버전 무제한 deps·평문 http·XXE·debug/CORS 오설정 | audit: `requirements_hygiene`·`cleartext_http`·`xml_parsing`·`web_misconfig`(advisory) | A03:2025/CWE-319/611 |
+
+근거 원칙: CLAUDE.md §2.5, §20. 상세 매핑은 §11(가이드라인 대응표).
 
 ---
 
@@ -37,15 +54,17 @@ commerce 번들의 **보안 대응 전용 서브시스템** 문서. 코드는 �
 | 모듈 | 역할 |
 |---|---|
 | [bootstrap.py](../../include/security/bootstrap.py) | **원샷 설치** — `install_security()`(로그+stdout+예외훅+env 시크릿), `security_status()`, `is_security_installed()` |
-| [redaction.py](../../include/security/redaction.py) | 마스킹 엔진 — `Redactor`(literal+structural), `redact()`, `scrub_exception()`(예외 체인 args 마스킹), `register_secret()`, `refresh_env_secrets()` |
-| [log_filter.py](../../include/security/log_filter.py) | logging 마스킹 — `SecretRedactingFilter`, `install_log_redaction()` |
+| [redaction.py](../../include/security/redaction.py) | 마스킹 엔진 — `Redactor`(literal+structural, **URL userinfo 포함**), `redact()`, `scrub_exception()`, **`sanitize_log_value()`(로그 인젝션 무력화)**, `register_secret()`, `refresh_env_secrets()` |
+| [log_filter.py](../../include/security/log_filter.py) | logging 마스킹 — `SecretRedactingFilter`(+`neutralize_controls` opt-in), `install_log_redaction()` |
 | [stdio_guard.py](../../include/security/stdio_guard.py) | stdout/stderr 마스킹 프록시 + sys/threading **excepthook** 마스킹 |
-| [netio.py](../../include/security/netio.py) | **network IO 가드** — `http_request/get/post`(timeout 주입·TLS 검증 강제·예외 스크럽), `safe_url()` |
+| [netio.py](../../include/security/netio.py) | **network IO 가드** — `http_request/get/post`(timeout·TLS·예외 스크럽), **`assert_url_allowed()`(SSRF)**, **`max_response_bytes`(응답 상한)**, `safe_url()` |
 | [fileio.py](../../include/security/fileio.py) | **file IO 가드** — `safe_key()`/`safe_join()`(경로 주입 차단), `write_json_redacted()`/`write_text_redacted()`(at-rest 마스킹) |
+| [archive.py](../../include/security/archive.py) | **아카이브 안전 추출** — `safe_extract_zip()`/`safe_extract_tar()`(zip-slip·압축폭탄·심링크 차단, PEP 706) |
+| [crypto.py](../../include/security/crypto.py) | **암호 유틸** — `generate_token()`(CSPRNG), `constant_time_equals()`, `hash_password()`/`verify_password()`/`needs_rehash()`(PBKDF2 600k) |
 | [api_guard.py](../../include/security/api_guard.py) | **API 요청/응답 가드** — `api_receipt()`, `response_summary()`, `scrub_url/headers/params()` |
 | [events.py](../../include/security/events.py) | **분석 가능 구조화 로깅** — `log_event()`/`log_exception()`(마스킹된 단일 라인 JSON, §5) |
 | [inputs.py](../../include/security/inputs.py) | 입력 검증 — `assert_iso_date`/`assert_safe_segment`/`is_*` |
-| [audit.py](../../include/security/audit.py) | 정적 점검 7종 + 런타임 점검 4종(`Finding`) |
+| [audit.py](../../include/security/audit.py) | 정적 점검 **18종** + 런타임 점검 4종(`Finding`) |
 | [verify.py](../../include/security/verify.py) | **단일 포인트** — `run_security_verification()`/`assert_secure()`/`SecurityReport` |
 | [\_\_main\_\_.py](../../include/security/__main__.py) | CLI — `python -m security`(exit code = 차단 이슈 유무) |
 
@@ -148,11 +167,15 @@ report = run_security_verification()      # SecurityReport(findings=[...])
 assert_secure()                           # 차단 이슈 있으면 SecurityError
 ```
 
-점검 목록: 정적 7종(`no_hardcoded_secrets`·`env_example_clean` Critical / `env_gitignored`·
-`safe_yaml_load`·`no_dangerous_calls`·`tls_verify` High / `http_timeouts` Medium) +
-런타임 4종(`redactor_selftest` High / `log_redaction_installed`·`stdout_redaction_installed`·
+점검 목록: **정적 18종** — Critical: `no_hardcoded_secrets`·`no_credential_material`·
+`env_example_clean` / High: `env_gitignored`·`safe_yaml_load`·`no_dangerous_calls`·`tls_verify`·
+`no_trojan_source`·`no_sql_injection`·`no_unsafe_extract`·`no_insecure_file_ops`·
+`no_insecure_random` / Medium: `http_timeouts`·`no_weak_hash`·`no_web_misconfig`·
+`cleartext_http_advisory`·`requirements_hygiene` / Low: `xml_parsing_advisory` — 및 **런타임 4종**
+(`redactor_selftest` High / `log_redaction_installed`·`stdout_redaction_installed`·
 `excepthook_redaction_installed` Medium). 런타임 설치 3종은 **CLI 단독 실행에서 warn 이 정상**
-(엔트리포인트에서 install 되므로) — 프로세스 안 점검은 `security_status()`.
+(엔트리포인트에서 install 되므로) — 프로세스 안 점검은 `security_status()`. 의도적 예외 표식:
+`# security: allow-sql`·`# security: allow-bidi`·`usedforsecurity=False`.
 
 ---
 

@@ -7,6 +7,37 @@
 
 ## 2026-07-03
 
+### 25. 보안 플러그인 커버리지 확장 — SSRF·아카이브·암호·정적점검 11종 + 적대적 검증 (feat/96)
+
+request:
+- 추가 개발된 보안 모듈의 커버 영역 **외의 다른 취약점**도 커버할 수 있게, **최신 보안
+  가이드라인**을 이용해 추가 대응 모듈 구성.
+- 사용법 문서와 **적용 기술 목록·해설 문서**를 security 문서로 남길 것. 커밋·push.
+
+response:
+- **가이드라인 리서치**(다중 에이전트 웹 조사): OWASP Top 10:2025(A03 공급망·A10 예외처리
+  신설, SSRF→A01), CWE Top 25 2025(SQLi #2·경로탐색 #6·자원무제한 #25 신규), ASVS 5.0.0,
+  PEP 706·Trojan Source(CVE-2021-42574)·SSRF/비밀번호 저장 치트시트 확보 → SEC-01~20 계획.
+- **신규 모듈 2종**: `crypto.py`(CSPRNG 토큰·상수시간 비교·PBKDF2-HMAC-SHA256 600k 비밀번호
+  해시, NFKC 정규화·자기서술 인코딩·needs_rehash), `archive.py`(zip-slip·압축폭탄·심링크 차단
+  안전 추출, PEP 706 filter, 스트리밍 바이트 재검증).
+- **기존 모듈 확장**: `netio`(SSRF 가드 `assert_url_allowed` — 명시 CIDR 차단 IPv4/6·IMDS,
+  호스트명 DNS 해석; 응답 크기 상한 `max_response_bytes`), `redaction`(URL userinfo 마스킹·
+  `sanitize_log_value` 로그 인젝션 무력화), `log_filter`(`neutralize_controls` opt-in).
+- **정적 점검 7→18종**: credential_material(PEM/벤더 토큰/URL 비번, CRITICAL)·trojan_source·
+  sql_injection·unsafe_extract·insecure_file_ops·weak_hash·insecure_random·web_misconfig·
+  xml_parsing·cleartext_http·requirements_hygiene 신설 + tls/yaml/dangerous 강화. 런타임 점검 4종.
+- **적대적 검증**(다중 에이전트, 차원별 리뷰→독립 검증): 확인된 **16개 결함 전부 수정** —
+  SSRF 호스트명 우회(resolve_dns 기본 True), 로그 포맷문자열 %-지정자 훼손(렌더 후 마스킹),
+  tar 압축폭탄(next() 스트리밍+압축입력 상한), 정적 점검 우회(shell=True 멀티라인·SQL 내부
+  따옴표·yaml 위치 로더·자격증명 라인공유·filter 부분일치·requirements 환경마커·weak_hash
+  대문자·userinfo 토큰단독·verify_password 크래시·NFKC 누락 등).
+- **검증**: 회귀 테스트 20건 추가 → **전 테스트 174 통과**, `python -m security` 차단 0
+  (자기매칭 방지: 패턴은 조각 결합/chr()/이스케이프로 작성).
+- **문서**: [docs/security/usage.md](docs/security/usage.md)(사용법) ·
+  [docs/security/techniques.md](docs/security/techniques.md)(적용 기술 목록+해설·가이드라인 매핑)
+  신규, security.md 위협 모델 22경로로 확장, README·CLAUDE §20·Share.md 갱신.
+
 ### 24. 통합 보안 플러그인化 — install_security() 원샷 + net/file/API/이벤트 가드 (feat/96)
 
 request:

@@ -50,7 +50,9 @@
 
 | 자료 | 내용 |
 |---|---|
-| [docs/security/security.md](docs/security/security.md) | 위협 모델(11개 누출/공격 경로) · 런타임 가드 · 가드 함수 · 로그 분석 경계 · 적용 지점 |
+| [docs/security/security.md](docs/security/security.md) | 위협 모델(22경로, OWASP 2025·CWE 2025 매핑) · 런타임 가드 · 가드 함수(net+SSRF/file/archive/crypto/API/이벤트) · 로그 분석 경계 · 적용 지점 |
+| [docs/security/usage.md](docs/security/usage.md) | **사용법** — 상황별 호출 예제 |
+| [docs/security/techniques.md](docs/security/techniques.md) | **적용 기술 목록 + 해설** — 취약점 클래스별 방어 원리·근거·한계 |
 | [docs/security/adoption.md](docs/security/adoption.md) | **적용·이식 가이드(받아쓰기 수준)** — 복사+한 줄 설치 · 트리거 · common 승격 계약 · 복사-붙여넣기 프롬프트 |
 
 - **불러오기**: 보안 관련 작업 전 `security.md` 를, 타 번들 이식 시 `adoption.md` 를 읽는다.

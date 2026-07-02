@@ -899,14 +899,18 @@ pipeline contract ([docs/common_info.md](docs/pipeline/common_info.md)), operati
 
 
 This bundle has a **portable security plugin** that blocks secret leakage (logs, stdout/stderr,
-uncaught exceptions, at-rest artifacts, notifications), input injection, and common vulnerable
-patterns. Code: [include/security/](include/security/) (stdlib only, portable). Threat model /
-logic: [docs/security/security.md](docs/security/security.md). Porting to other bundles/projects:
-[docs/security/adoption.md](docs/security/adoption.md). These three are part of the CLAUDE-chain (§19),
+uncaught exceptions, at-rest artifacts, notifications), input injection, SSRF, archive extraction
+attacks, weak crypto, and common vulnerable patterns — grounded in OWASP Top 10:2025 / CWE Top 25
+2025 / ASVS 5.0. Code: [include/security/](include/security/) (stdlib only, portable). Threat model /
+logic: [docs/security/security.md](docs/security/security.md). Usage recipes:
+[docs/security/usage.md](docs/security/usage.md). Applied-technique explainer:
+[docs/security/techniques.md](docs/security/techniques.md). Porting to other bundles/projects:
+[docs/security/adoption.md](docs/security/adoption.md). These are part of the CLAUDE-chain (§19),
 so they travel across sessions.
 
 
-**Recall**: before any security-adjacent work, read [docs/security/security.md](docs/security/security.md).
+**Recall**: before any security-adjacent work, read [docs/security/security.md](docs/security/security.md);
+for how to call a specific guard, [docs/security/usage.md](docs/security/usage.md).
 When porting to another bundle/project, follow [docs/security/adoption.md](docs/security/adoption.md)
 (includes a copy-paste prompt). Adoption is drop-in: copy the folder + one line of bootstrap.
 
@@ -918,6 +922,15 @@ When porting to another bundle/project, follow [docs/security/adoption.md](docs/
   env (installs log + stdout/stderr + excepthook redaction and registers env secrets).
 - **HTTP calls** → use `netio.http_request/http_get/http_post` (timeout injected, TLS-verify-off
   blocked, exception args scrubbed); at minimum always set `timeout=`.
+- **HTTP to a user/external-supplied URL (SSRF)** → `http_request(url_check=True)` or
+  `assert_url_allowed()` (blocks private/metadata IPs, resolves hostnames); cap huge responses
+  with `max_response_bytes=`.
+- **Extracting a zip/tar** → `safe_extract_zip()` / `safe_extract_tar()` (never bare
+  `extractall()`; blocks zip-slip, decompression bombs, symlink members).
+- **Tokens / password storage / secret comparison** → `generate_token()` (never `random`),
+  `hash_password()`/`verify_password()`/`needs_rehash()` (PBKDF2 600k), `constant_time_equals()`.
+- **Free-form logging of external input** → `sanitize_log_value()` (or `install_security(
+  neutralize_log_controls=True)`) to neutralize CRLF/ANSI log injection.
 - External API/network exceptions or URLs written to **logs** → `redact()` (mandatory if the exception
   reaches a stored artifact). Re-raising/wrapping exceptions → `scrub_exception(exc)`.
 - error/metadata **stored to storage/marker/DB** → `redact()` before storing (block at-rest leakage);
