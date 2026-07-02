@@ -7,7 +7,7 @@
 
 ## 1. 목적
 
-`culture_bronze_ingest`(@daily)는 매 자정 12개 데이터셋을 소스 API에서 받아
+`culture_bronze`(@daily, 구명 `culture_bronze_ingest` — PR #73에서 리네임)는 매 자정 12개 데이터셋을 소스 API에서 받아
 **R2에 raw XML/JSON 객체로 적재**한다(스케줄 기본값 `write_iceberg=False`).
 현재 성공/실패는 **Airflow UI로만** 확인 가능해, 자정에 조용히 실패하거나 계약
 위반이 나도 능동적으로 알 방법이 없다. 배치 완료 시 Discord 채널로 **데이터셋별
@@ -26,7 +26,7 @@ commerce의 예외 알림(`notify_exception`, noop, 미와이어링)과 달리, 
 | Iceberg **bronze/silver/gold** | dbt(ASAC-DBT) + R2 Data Catalog | **이 DAG 소관 아님** |
 | DAG가 옵션으로 켤 수 있는 Iceberg 적재 | `write_iceberg` (기본 **False**) | 스케줄 실행에선 꺼짐 → `iceberg_rows=0` |
 
-→ 알림 문구는 **정확히 "raw 적재"** 로 쓴다. (DAG 이름 `culture_bronze_ingest`,
+→ 알림 문구는 **정확히 "raw 적재"** 로 쓴다. (DAG 이름 `culture_bronze`,
 `LANDING_ROOT="bronze/culture"`, `run_report["layer"]="bronze"` 의 bronze→raw 정리는
 **이 작업 범위 밖**. 특히 R2 prefix 변경은 cross-domain 컨벤션이라 **멘토 게이트**.)
 
