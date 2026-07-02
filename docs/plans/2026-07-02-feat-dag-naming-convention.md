@@ -29,9 +29,12 @@ dag_id = <domain>_<dataset>_<stage>
 ```
 
 - **domain**: `dags/domains/` 폴더명과 동일 (commerce · culture · population · traffic · transit · weather). 도메인 무관 공통 DAG는 `common`.
-- **dataset**: 도메인 안에 **복수 파이프라인이 있을 때만** 사용(단일이거나 도메인 전체를 한 DAG가 커버하면 생략). 모든 이름이 서울 데이터이므로 `seoul_` 접두는 중복 → 제거.
-- **stage(역할형)**: `bronze` 수집만 / `transform` dbt 변환(silver+gold 등 복수 레이어 포함)
-  / `elt` 수집+변환 일괄 / `recollect` 재수집 보조 / `smoke` 스모크 테스트
+- **dataset**: **생략 가능(옵션)** — 도메인 전체를 한 DAG가 커버해 혼동이 없으면 생략할 수 있고,
+  데이터셋 확장 가능성이 있는 도메인은 명시를 권장한다(예: traffic_incident, weather_vilage_fcst).
+  모든 이름이 서울 데이터이므로 `seoul_` 접두는 중복 → 제거. (2026-07-02 재검토에서 옵션으로 확정)
+- **stage(역할형)**: `bronze` 수집만(웨어하우스 bronze 적재 포함 — 변환은 dbt 몫이면 bronze)
+  / `transform` dbt 변환(silver+gold 등 복수 레이어 포함) / `elt` **DAG 안에서** 수집+변환 일괄
+  / `recollect` 재수집 보조 / `smoke` 스모크 테스트
 
 ### 적용 매핑 (확정)
 
@@ -43,7 +46,7 @@ dag_id = <domain>_<dataset>_<stage>
 | `seoul_ppltn_collect` | `population_bronze` | 단일 파이프라인 → dataset 생략 |
 | `seoul_ppltn_transform` | `population_transform` | dbt silver+gold 모두 생성 → 역할형 transform |
 | `seoul_traffic_incident_bronze` | `traffic_incident_bronze` | |
-| `transit_bus_elt` 외 2 | (유지 — 규칙 부합) | 파일명만 `transit_*_elt.py`로 rename |
+| `transit_bus_elt` 외 2 | `transit_bus_bronze` 외 2 | **재검토 결정**: 실동작이 bronze 한정(R2 랜딩+Iceberg bronze, 변환은 ASAC-DBT)이므로 `elt` → `bronze`. elt는 commerce처럼 DAG 안 일괄 변환에만 사용 |
 | `kma_vilage_fcst_bronze` | `weather_vilage_fcst_bronze` | `vilage` 철자는 KMA API 명칭 그대로 유지 |
 | `dbt_trino_iceberg_smoke` | `common_dbt_smoke` | 공통 DAG는 `common` 접두 |
 
@@ -68,3 +71,13 @@ dag_id = <domain>_<dataset>_<stage>
 3. commerce dataset = **localdata** (소스 API 명칭 기준)
 4. 스모크 DAG는 **common_dbt_smoke**로 rename (예외 없음)
 5. 옛 DAG 실행 이력은 옛 dag_id로 메타DB에 보존(삭제하지 않음) — 신규 id는 새로 시작
+
+## 재검토 결정 (2026-07-02 2차)
+
+1. **transit `elt` → `bronze`**: transit DAG는 docstring에 "Bronze 한정, silver/gold/dbt는
+   ASAC-DBT 별도"로 의도가 명시돼 있음 — 역할형 규칙의 elt(일괄)와 의미 충돌하여 bronze로 재변경.
+   같은 접미사가 두 의미(EL만 vs 일괄)로 혼용되는 것을 차단.
+2. **dataset 생략은 옵션**: 의무 아님. 확장 가능성 있으면 명시 권장 — 현행 매핑
+   (population 생략 / traffic·weather·commerce 명시) 그대로 유지.
+3. **저장 계약(Iceberg 테이블명·R2 경로) 네이밍은 별도 이슈로 분리** — 데이터 마이그레이션
+   비용 평가와 함께 추후 논의. dag_id 규칙과 저장 명칭은 독립 계약.

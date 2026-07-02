@@ -67,4 +67,5 @@
 | 2026-07-02 | 공통 패키지 위치를 `dags/common/`으로 확정 | 도메인(`dags/domains/`)과 대칭 구조, Airflow dags 경로에서 직접 import 가능 |
 | 2026-07-02 | 계획 문서를 단일 파일에 누적하지 않고 `docs/plans/YYYY-MM-DD-<slug>.md`로 작업별 분리 | 계획이 계속 쌓이면 단일 문서는 비대해짐. 날짜로 시간순 정렬 + slug로 feat 식별, 브랜치명과 대응 |
 | 2026-07-02 | 서울 API 키는 `SEOUL_API_KEY_<도메인약어>` 규칙으로 루트 `.env`에서 일원 관리, commerce 키도 `.env.commerce`에서 루트로 이관 | 이름 충돌(commerce/culture 동명 키)로 commerce가 culture 키로 호출하던 버그 해소. 번들 자립 의도(#70, commerce change-log #19)는 인증키에 한해 부분 폐기 — 사용자 승인 |
-| 2026-07-02 | DAG 네이밍 규칙 `<domain>_<dataset>_<stage>` 확정 (#73) — stage는 역할형(bronze/transform/elt/recollect/smoke), 단일 파이프라인은 dataset 생략, 공통 DAG는 `common` 접두, 파일명=dag_id | 접두(`seoul_`/도메인/소스)·단계 표기 혼재 해소. 옛 dag_id 실행 이력은 메타DB에 보존 |
+| 2026-07-02 | DAG 네이밍 규칙 `<domain>_<dataset>_<stage>` 확정 (#73) — stage는 역할형(bronze/transform/elt/recollect/smoke), dataset 생략은 옵션(확장 가능성 있으면 명시 권장), 공통 DAG는 `common` 접두, 파일명=dag_id | 접두(`seoul_`/도메인/소스)·단계 표기 혼재 해소. 옛 dag_id 실행 이력은 메타DB에 보존 |
+| 2026-07-02 | (재검토) transit `*_elt` → `*_bronze` 재변경 — elt는 DAG 안 일괄 변환에만 사용. 저장 계약(테이블·경로) 네이밍은 별도 이슈로 분리 | transit 실동작은 bronze 한정(변환은 ASAC-DBT 몫, docstring에 의도 명시) — 같은 접미사의 이중 의미(EL만 vs 일괄) 차단 |
