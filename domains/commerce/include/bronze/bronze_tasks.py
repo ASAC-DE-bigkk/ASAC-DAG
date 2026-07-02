@@ -1,7 +1,7 @@
 """bronze 수집 — 데이터셋 1개를 끝까지 순회해 **run_id 폴더에 API당 1파일**로 적재.
 
 저장(이 run_id 폴더 안에서만):
-  - 원본: {prefix}/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<ts>/<short>.jsonl  (페이지별 원본 응답을 줄단위 NDJSON)
+  - 원본: {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<ts>/<short>.jsonl  (페이지별 원본 응답을 줄단위 NDJSON)
   - 마커: .../run_id=<ts>/_markers/<short>.completed | .incomplete  (API별 결과 + 리니지 JSON)
   (연/월/일은 run_id 날짜에서 파생 — paths.bronze_run_dir)
 

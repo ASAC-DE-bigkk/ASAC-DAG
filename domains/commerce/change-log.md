@@ -7,6 +7,17 @@
 
 ## 2026-07-02
 
+### 21. 저장 레이아웃 변경 — R2 원본 경로 bronze/commerce → raw/commerce (feat/75-r2-raw-prefix)
+request:
+- 팀 결정(#75): R2 오브젝트 원본 경로는 `raw/` 채택, Iceberg 테이블명·dag_id의 `bronze` 명칭은 유지
+  (용어: raw=R2 랜딩 원본, bronze=Iceberg 웨어하우스 원본층).
+- 기존 `bronze/commerce/` 데이터는 commerce 담당이 `raw/commerce/`로 이관 — 코드는 경로만 수정.
+response:
+- `paths.py`: `BRONZE_LAYER = "bronze/commerce"` → `RAW_LAYER = "raw/commerce"` (상수명 포함).
+  마커 조회(markers.py)·diff-target 경로가 이 상수에서 파생되므로 **데이터 이관 완료 후 배포 필수** —
+  이관 전 배포 시 과거 run 미인식 → 전량 재수집·동일자 제외 계약 공백 발생.
+- 번들 docs의 경로 표기 일괄 갱신. CLAUDE.md §2.3 일반 패턴은 팀 독트린 문서라 보류(후속 논의).
+
 ### 20. DAG 네이밍 통합 — seoul_commerce_daily/recollect → commerce_localdata_elt/recollect (feat/73-dag-naming)
 request:
 - 팀 공통 DAG 네이밍 규칙 `<domain>_<dataset>_<stage>` 확정(#73): stage 역할형(elt/recollect 등),
