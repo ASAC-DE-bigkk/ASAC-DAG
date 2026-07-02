@@ -6,6 +6,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -16,31 +17,41 @@ IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger(__name__)
 
-WEATHER_TABLE = "bronze_kma_vilage_fcst"
 TRAFFIC_TABLE = "bronze_seoul_traffic_incident"
 TRAFFIC_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
+WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "TRAFFIC_DISCORD_WEBHOOK_URL")
+SCHEDULE_ENV = "ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE"
+GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 
 
 @dataclass(frozen=True)
-class ReportConfig:
+class TrafficReportConfig:
     catalog: str
     schema: str
     lookback_hours: int
-    expected_kma_grids: int
-    weather_freshness_minutes: int
-    traffic_freshness_minutes: int
+    freshness_minutes: int
 
 
-def is_dev_target() -> bool:
-    return os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod")) == "dev"
+def is_dev_target(env: Mapping[str, str] = os.environ) -> bool:
+    return env.get("ASK_SEOUL_TARGET", env.get("DBT_TARGET", "prod")) == "dev"
 
 
-def report_dag_schedule() -> str | None:
-    if "ASK_SEOUL_REPORT_DAG_SCHEDULE" in os.environ:
-        return os.environ["ASK_SEOUL_REPORT_DAG_SCHEDULE"] or None
-    if not is_dev_target():
+def discord_webhook_url(env: Mapping[str, str] = os.environ) -> str | None:
+    for key in WEBHOOK_ENVS:
+        value = (env.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def report_dag_schedule(env: Mapping[str, str] = os.environ) -> str | None:
+    if SCHEDULE_ENV in env:
+        return env[SCHEDULE_ENV] or None
+    if GLOBAL_SCHEDULE_ENV in env:
+        return env[GLOBAL_SCHEDULE_ENV] or None
+    if not is_dev_target(env):
         return None
-    if not os.environ.get("ASK_SEOUL_DISCORD_WEBHOOK_URL"):
+    if not discord_webhook_url(env):
         return None
     return "0 9 * * *"
 
@@ -51,24 +62,22 @@ def sql_identifier(value: str) -> str:
     return value
 
 
-def trino_catalog() -> str:
-    if is_dev_target():
-        return os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-    return os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
+def trino_catalog(env: Mapping[str, str] = os.environ) -> str:
+    if is_dev_target(env):
+        return env.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    return env.get("TRINO_ICEBERG_CATALOG", "iceberg")
 
 
-def ask_seoul_schema() -> str:
-    return os.environ.get("ASK_SEOUL_SCHEMA", "ask_seoul")
+def ask_seoul_schema(env: Mapping[str, str] = os.environ) -> str:
+    return env.get("ASK_SEOUL_SCHEMA", "ask_seoul")
 
 
-def report_config() -> ReportConfig:
-    return ReportConfig(
-        catalog=sql_identifier(trino_catalog()),
-        schema=sql_identifier(ask_seoul_schema()),
-        lookback_hours=int(os.environ.get("ASK_SEOUL_REPORT_LOOKBACK_HOURS", "24")),
-        expected_kma_grids=int(os.environ.get("ASK_SEOUL_REPORT_EXPECTED_KMA_GRIDS", "80")),
-        weather_freshness_minutes=int(os.environ.get("ASK_SEOUL_REPORT_WEATHER_FRESHNESS_MINUTES", "240")),
-        traffic_freshness_minutes=int(os.environ.get("ASK_SEOUL_REPORT_TRAFFIC_FRESHNESS_MINUTES", "15")),
+def report_config(env: Mapping[str, str] = os.environ) -> TrafficReportConfig:
+    return TrafficReportConfig(
+        catalog=sql_identifier(trino_catalog(env)),
+        schema=sql_identifier(ask_seoul_schema(env)),
+        lookback_hours=int(env.get("ASK_SEOUL_REPORT_LOOKBACK_HOURS", "24")),
+        freshness_minutes=int(env.get("ASK_SEOUL_REPORT_TRAFFIC_FRESHNESS_MINUTES", "15")),
     )
 
 
@@ -94,7 +103,7 @@ def _fetch_one(cursor, sql: str) -> tuple[Any, ...]:
     return tuple(row)
 
 
-def _qualified(config: ReportConfig, table: str) -> str:
+def _qualified(config: TrafficReportConfig, table: str) -> str:
     return f"{config.catalog}.{config.schema}.{table}"
 
 
@@ -108,57 +117,7 @@ def _age_minutes(collected_at: Any, detected_at: datetime) -> int | None:
     return int((detected_at.astimezone(collected_at.tzinfo) - collected_at).total_seconds() // 60)
 
 
-def collect_weather_summary(cursor, config: ReportConfig, detected_at: datetime) -> dict[str, Any]:
-    table = _qualified(config, WEATHER_TABLE)
-    row = _fetch_one(
-        cursor,
-        f"""
-        SELECT
-            base_date,
-            base_time,
-            count(DISTINCT concat(cast(nx AS varchar), ':', cast(ny AS varchar))) AS grid_count,
-            count(DISTINCT raw_object_key) AS raw_object_count,
-            count(*) AS row_count,
-            max(collected_at) AS last_collected_at
-        FROM {table}
-        WHERE source_id = 'kma_vilage_fcst'
-          AND collected_at >= current_timestamp - INTERVAL '{config.lookback_hours}' HOUR
-        GROUP BY base_date, base_time
-        ORDER BY base_date DESC, base_time DESC
-        LIMIT 1
-        """,
-    )
-    if not row:
-        return {
-            "status": "FAIL",
-            "reason": "no_weather_rows",
-            "table": table,
-            "grid_count": 0,
-            "expected_grid_count": config.expected_kma_grids,
-        }
-
-    base_date, base_time, grid_count, raw_object_count, row_count, last_collected_at = row
-    freshness_minutes = _age_minutes(last_collected_at, detected_at)
-    coverage_ok = int(grid_count) >= config.expected_kma_grids
-    freshness_ok = freshness_minutes is not None and freshness_minutes <= config.weather_freshness_minutes
-    return {
-        "status": "PASS" if coverage_ok and freshness_ok else "FAIL",
-        "table": table,
-        "base_date": base_date,
-        "base_time": base_time,
-        "grid_count": int(grid_count),
-        "expected_grid_count": config.expected_kma_grids,
-        "raw_object_count": int(raw_object_count),
-        "row_count": int(row_count),
-        "last_collected_at": str(last_collected_at),
-        "freshness_minutes": freshness_minutes,
-        "freshness_slo_minutes": config.weather_freshness_minutes,
-        "coverage_ok": coverage_ok,
-        "freshness_ok": freshness_ok,
-    }
-
-
-def collect_traffic_summary(cursor, config: ReportConfig, detected_at: datetime) -> dict[str, Any]:
+def collect_traffic_summary(cursor, config: TrafficReportConfig, detected_at: datetime) -> dict[str, Any]:
     audit_table = _qualified(config, TRAFFIC_AUDIT_TABLE)
     row = _fetch_one(
         cursor,
@@ -191,8 +150,10 @@ def collect_traffic_summary(cursor, config: ReportConfig, detected_at: datetime)
     max_end_index = int(max_end_index or 0)
     zero_row_success_count = int(zero_row_success_count or 0)
     freshness_minutes = _age_minutes(last_collected_at, detected_at)
-    freshness_ok = freshness_minutes is not None and freshness_minutes <= config.traffic_freshness_minutes
-    coverage_ok = request_count > 0 and (list_total_count == 0 or parsed_row_count >= list_total_count or max_end_index >= list_total_count)
+    freshness_ok = freshness_minutes is not None and freshness_minutes <= config.freshness_minutes
+    coverage_ok = request_count > 0 and (
+        list_total_count == 0 or parsed_row_count >= list_total_count or max_end_index >= list_total_count
+    )
     return {
         "status": "PASS" if coverage_ok and freshness_ok else "FAIL",
         "table": _qualified(config, TRAFFIC_TABLE),
@@ -204,25 +165,16 @@ def collect_traffic_summary(cursor, config: ReportConfig, detected_at: datetime)
         "zero_row_success_count": zero_row_success_count,
         "last_collected_at": str(last_collected_at),
         "freshness_minutes": freshness_minutes,
-        "freshness_slo_minutes": config.traffic_freshness_minutes,
+        "freshness_slo_minutes": config.freshness_minutes,
         "coverage_ok": coverage_ok,
         "freshness_ok": freshness_ok,
     }
 
 
-def build_reliability_report(cursor=None, detected_at: datetime | None = None) -> dict[str, Any]:
+def build_traffic_reliability_report(cursor=None, detected_at: datetime | None = None) -> dict[str, Any]:
     config = report_config()
     cursor = cursor or trino_cursor()
     detected_at = detected_at or datetime.now(KST)
-    try:
-        weather = collect_weather_summary(cursor, config, detected_at)
-    except Exception as exc:
-        weather = {
-            "status": "FAIL",
-            "reason": "weather_query_failed",
-            "error": str(exc),
-            "table": _qualified(config, WEATHER_TABLE),
-        }
     try:
         traffic = collect_traffic_summary(cursor, config, detected_at)
     except Exception as exc:
@@ -233,22 +185,16 @@ def build_reliability_report(cursor=None, detected_at: datetime | None = None) -
             "table": _qualified(config, TRAFFIC_TABLE),
             "audit_table": _qualified(config, TRAFFIC_AUDIT_TABLE),
         }
-    failures = []
-    for domain, summary in (("weather", weather), ("traffic", traffic)):
-        if summary["status"] != "PASS":
-            failures.append(domain)
+
     return {
-        "report_name": "weather_traffic_bronze_reliability",
+        "report_name": "traffic_bronze_reliability",
         "detected_at": detected_at.isoformat(),
         "catalog": config.catalog,
         "schema": config.schema,
         "lookback_hours": config.lookback_hours,
-        "status": "PASS" if not failures else "FAIL",
-        "failures": failures,
-        "weather": weather,
+        "status": traffic["status"],
         "traffic": traffic,
         "blast_radius": [
-            _qualified(config, WEATHER_TABLE),
             _qualified(config, TRAFFIC_TABLE),
             _qualified(config, TRAFFIC_AUDIT_TABLE),
         ],
@@ -265,23 +211,12 @@ def _format_minutes(value: int | None) -> str:
     return f"{value}m"
 
 
-def format_discord_message(report: dict[str, Any]) -> str:
-    weather = report["weather"]
+def format_traffic_discord_message(report: dict[str, Any]) -> str:
     traffic = report["traffic"]
     lines = [
-        f"**서울 도시 데이터 Bronze 신뢰성 리포트: {report['status']}**",
+        f"**서울시 돌발정보 Bronze 신뢰성 리포트: {report['status']}**",
         f"- detected_at: `{report['detected_at']}`",
         f"- catalog/schema: `{report['catalog']}.{report['schema']}`",
-        "",
-        "**Weather / KMA**",
-        (
-            f"- status={weather['status']} freshness={_format_minutes(weather.get('freshness_minutes'))}"
-            f"/{weather.get('freshness_slo_minutes', 'n/a')}m "
-            f"coverage={weather.get('grid_count', 0)}/{weather.get('expected_grid_count', 0)} grids "
-            f"rows={weather.get('row_count', 0)} raw_objects={weather.get('raw_object_count', 0)} "
-            f"base={weather.get('base_date', '-')}{weather.get('base_time', '')} "
-            f"reason={weather.get('reason', '-')}"
-        ),
         "",
         "**Traffic / TOPIS AccInfo**",
         (
@@ -294,8 +229,6 @@ def format_discord_message(report: dict[str, Any]) -> str:
         ),
         "",
         "**Checks**",
-        f"- weather_coverage={_format_bool(bool(weather.get('coverage_ok')))}",
-        f"- weather_freshness={_format_bool(bool(weather.get('freshness_ok')))}",
         f"- traffic_coverage={_format_bool(bool(traffic.get('coverage_ok')))}",
         f"- traffic_freshness={_format_bool(bool(traffic.get('freshness_ok')))}",
         "",
@@ -308,31 +241,31 @@ def format_discord_message(report: dict[str, Any]) -> str:
     return message
 
 
-def discord_webhook_url() -> str | None:
-    return os.environ.get("ASK_SEOUL_DISCORD_WEBHOOK_URL")
-
-
 def send_discord_message(message: str, webhook_url: str | None = None) -> bool:
     webhook_url = webhook_url or discord_webhook_url()
     if not webhook_url:
-        LOGGER.info("ASK_SEOUL_DISCORD_WEBHOOK_URL is not configured; skip Discord notification.")
+        LOGGER.info("Discord webhook is not configured; skip traffic report notification.")
         return False
     payload = json.dumps({"content": message}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         webhook_url,
         data=payload,
-        headers={"Content-Type": "application/json", "User-Agent": "ask-seoul-reliability-report/1.0"},
+        headers={"Content-Type": "application/json", "User-Agent": "ask-seoul-traffic-report/1.0"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             if response.status >= 400:
-                LOGGER.warning("Discord notification failed: status=%s", response.status)
+                LOGGER.warning("Traffic report Discord notification failed: status=%s", response.status)
                 return False
     except urllib.error.HTTPError as exc:
-        LOGGER.warning("Discord notification failed: status=%s error_type=%s", exc.code, type(exc).__name__)
+        LOGGER.warning(
+            "Traffic report Discord notification failed: status=%s error_type=%s",
+            exc.code,
+            type(exc).__name__,
+        )
         return False
     except Exception as exc:
-        LOGGER.warning("Discord notification failed: error_type=%s", type(exc).__name__)
+        LOGGER.warning("Traffic report Discord notification failed: error_type=%s", type(exc).__name__)
         return False
     return True

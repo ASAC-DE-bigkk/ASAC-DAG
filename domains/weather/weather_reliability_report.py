@@ -10,18 +10,18 @@ DAG_DIR = os.path.dirname(os.path.abspath(__file__))
 if DAG_DIR not in sys.path:
     sys.path.insert(0, DAG_DIR)
 
-from reliability_report.report import (  # noqa: E402
+from weather_ingest.reliability_report import (  # noqa: E402
     KST,
-    build_reliability_report,
-    format_discord_message,
+    build_weather_reliability_report,
+    format_weather_discord_message,
     report_dag_schedule,
     send_discord_message,
 )
 
 
 def collect_and_notify(**context) -> dict:
-    report = build_reliability_report()
-    message = format_discord_message(report)
+    report = build_weather_reliability_report()
+    message = format_weather_discord_message(report)
     sent = send_discord_message(message)
     print(message)
     report["discord_sent"] = sent
@@ -30,16 +30,16 @@ def collect_and_notify(**context) -> dict:
 
 
 with DAG(
-    dag_id="weather_traffic_bronze_reliability_report",
-    description="Daily weather/traffic Bronze freshness, coverage, and Discord reliability report.",
+    dag_id="weather_bronze_reliability_report",
+    description="Daily weather Bronze freshness, coverage, and Discord reliability report.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=report_dag_schedule(),
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=2)},
-    tags=["ask_seoul", "observability", "weather", "traffic", "discord"],
+    tags=["ask_seoul", "weather", "bronze", "reliability", "discord"],
 ) as dag:
     send_report = PythonOperator(
-        task_id="send_weather_traffic_reliability_report",
+        task_id="send_weather_bronze_reliability_report",
         python_callable=collect_and_notify,
     )
