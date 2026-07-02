@@ -4,7 +4,7 @@
 원본 응답을 R2 ``bronze/population/`` 아래 아카이브하고 Iceberg bronze 테이블에
 **원본 payload + 메타데이터**로 적재한다(필드 분해는 silver/dbt 몫; ``ppltn_ingest`` 참고).
 
-시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가 ``SEOUL_API_KEY``,
+시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가 ``SEOUL_API_KEY_PPLT``,
 ``R2_DEV_*`` 주입) -- 값은 여기 없다. dev/prod는 카탈로그(iceberg_dev/iceberg)와
 버킷(seoul-dev/seoul)으로 가른다.
 
