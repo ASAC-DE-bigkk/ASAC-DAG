@@ -18,9 +18,9 @@
 스토리지 백엔드가 자동 부착. 자세히: [../architecture/storage.md](../architecture/storage.md).
 
 ```text
-{prefix}/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
-{prefix}/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커(리니지 JSON)
-{prefix}/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
+{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
+{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커(리니지 JSON)
+{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
 ```
 
 - `<short>` = API 축약단어 = 데이터셋 `slug`(예: `general_restaurant`, `lodging`, `beauty_shop`).

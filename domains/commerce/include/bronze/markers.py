@@ -14,7 +14,7 @@ _RUN_MARKER = "run_id="
 
 
 def list_run_ids(storage: Storage, prefix: str = "") -> list[str]:
-    """bronze/commerce 아래의 모든 run_id 를 시간순(오름차순)으로."""
+    """raw/commerce 아래의 모든 run_id 를 시간순(오름차순)으로."""
     root = paths.bronze_root(prefix=prefix)
     run_ids: set[str] = set()
     for key in storage.list_keys(root):

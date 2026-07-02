@@ -5,7 +5,7 @@ JSON 파일로, Iceberg bronze에는 payload 컬럼으로 각각 남긴다. R2 r
 (replay)와 리니지를 위한 불변 원천이다.
 
 경로 규칙은 ``common/config.raw_object_key`` (이슈 #16):
-``bronze/<domain>/<source_id>/load_date=.../<ingest_ts>_<request_id>.json``
+``raw/<domain>/<source_id>/load_date=.../<ingest_ts>_<request_id>.json``
 """
 
 from __future__ import annotations

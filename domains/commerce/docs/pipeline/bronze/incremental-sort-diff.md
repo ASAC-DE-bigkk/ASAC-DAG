@@ -12,7 +12,7 @@
 | 계열 | 위치 | 내용 |
 |---|---|---|
 | **save(증분 영구)** | `…/run_id=<ts>/<short>.jsonl` (run 폴더) | 첫 수집=전체, 이후=신규/변경분만. **삭제 안 함**(이력 보존) |
-| **diff-target(롤링 최신본)** | `bronze/commerce/_diff_target/<short>.jsonl` (+ `.key` 사이드카) | 다음날 비교 기준. 매일 오늘본으로 **교체** |
+| **diff-target(롤링 최신본)** | `raw/commerce/_diff_target/<short>.jsonl` (+ `.key` 사이드카) | 다음날 비교 기준. 매일 오늘본으로 **교체** |
 
 - 첫 수집: save(run 폴더) 와 diff-target 을 **같은 내용(전체 정렬본)**으로 생성.
 - 이후: 오늘 vs diff-target diff → **신규분만 save 로 증분 저장** → diff-target 을 오늘본으로 교체(구본 대체).

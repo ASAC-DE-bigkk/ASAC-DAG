@@ -55,7 +55,7 @@ def _land_objects(dataset: str, raws: list, run_id: str) -> None:
     """bronze: 노선별 XML 원본을 page-NNNN.xml 로 적재 (원본 보존, silver 변환 없음)."""
     routes = [r["route"] for r in raws]
     res = land(
-        stage="bronze", domain=DOMAIN, source=SOURCE, dataset=dataset,
+        stage="raw", domain=DOMAIN, source=SOURCE, dataset=dataset,
         pages=[r["raw"] for r in raws],
         endpoint=raws[0]["endpoint"] if raws else "", kind=dataset,
         rows=sum(max(r["rows"], 0) for r in raws), run_id=run_id,

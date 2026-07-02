@@ -1,6 +1,6 @@
 # 서울 API 키 환경변수 이름 통합
 
-- 상태: 진행 중 (구현 완료 — PR/머지 대기)
+- 상태: 완료 (PR #72 머지, 2026-07-02)
 - 작성일: 2026-07-02
 - 이슈: [#70](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/70) / 브랜치: `feat/70-env-key-unification`
 - 담당 항목: 사용자 이슈 초안 1번 + 2번

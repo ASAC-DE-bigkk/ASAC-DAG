@@ -43,7 +43,7 @@
 | `slo_passed` | `실패 0 && 위반 0` |
 | `datasets[]` | 데이터셋별 summary 전체 |
 
-적재 위치: `bronze/culture/_reports/load_date=…/ingest_ts=…/run_report.json` → [storage.md](storage.md).
+적재 위치: `raw/culture/_reports/load_date=…/ingest_ts=…/run_report.json` → [storage.md](storage.md).
 
 ## 실패 모드 & 대응
 

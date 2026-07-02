@@ -51,7 +51,7 @@ def test_zero_row_insert_writes_request_audit_without_incident_rows():
         request_id="request-1",
         start_index=1,
         end_index=1000,
-        raw_object_key="bronze/traffic/accinfo/request-1.xml",
+        raw_object_key="raw/traffic/accinfo/request-1.xml",
         raw_hash="abc123",
         http_status=200,
         collected_at=datetime(2026, 7, 1, 0, 15, tzinfo=timezone.utc),
@@ -71,7 +71,7 @@ def test_zero_row_insert_writes_request_audit_without_incident_rows():
         "DELETE FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident WHERE"
     )
     assert f"'{SOURCE_ID}'" in audit_sql
-    assert "'bronze/traffic/accinfo/request-1.xml'" in audit_sql
+    assert "'raw/traffic/accinfo/request-1.xml'" in audit_sql
     assert "'scheduled__2026-07-01T09:15:00+09:00'" in audit_sql
 
 
@@ -87,7 +87,7 @@ def test_reported_total_with_no_parsed_rows_fails():
             request_id="request-1",
             start_index=1,
             end_index=1000,
-            raw_object_key="bronze/traffic/accinfo/request-1.xml",
+            raw_object_key="raw/traffic/accinfo/request-1.xml",
             raw_hash="abc123",
             http_status=200,
             collected_at=datetime(2026, 7, 1, 0, 15, tzinfo=timezone.utc),
@@ -104,7 +104,7 @@ def test_verify_zero_rows_requires_request_audit(monkeypatch):
     )
 
     row_count = bronze.verify_seoul_traffic_bronze_runtime(
-        raw_object_key="bronze/traffic/accinfo/request-1.xml",
+        raw_object_key="raw/traffic/accinfo/request-1.xml",
         dag_run_id="scheduled__2026-07-01T09:15:00+09:00",
         expected_rows=0,
     )
@@ -126,8 +126,8 @@ def test_verify_multiple_raw_objects(monkeypatch):
 
     row_count = bronze.verify_seoul_traffic_bronze_runtime(
         raw_object_keys=[
-            "bronze/traffic/accinfo/request-1.xml",
-            "bronze/traffic/accinfo/request-2.xml",
+            "raw/traffic/accinfo/request-1.xml",
+            "raw/traffic/accinfo/request-2.xml",
         ],
         dag_run_id="scheduled__2026-07-01T09:15:00+09:00",
         expected_rows=3,

@@ -1,7 +1,7 @@
 """Airflow DAG: culture 도메인 bronze(원본) 적재 -> R2.
 
 일배치. 채택한 culture 데이터셋을 KOPIS / 서울 열린데이터에서 받아 원본 API 응답을
-R2 ``bronze/culture/`` 아래에 적재한다(``culture_ingest`` 참고). 데이터셋마다
+R2 ``raw/culture/`` 아래에 적재한다(``culture_ingest`` 참고). 데이터셋마다
 매핑 태스크 1개라서, 한 데이터셋 실패가 격리되고 재시도 가능하며 그리드에서 바로 보인다.
 
 시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가
@@ -223,7 +223,7 @@ def _report(**context) -> None:
 
 with DAG(
     dag_id="culture_bronze",
-    description="Land culture domain raw source data (KOPIS + Seoul OA) to R2 bronze/culture.",
+    description="Land culture domain raw source data (KOPIS + Seoul OA) to R2 raw/culture.",
     start_date=pendulum.datetime(2026, 6, 1, tz=KST),
     schedule="@daily",
     catchup=False,

@@ -91,7 +91,7 @@ cp .env.commerce.example .env.commerce     # PowerShell: Copy-Item
 |---|---|---|---|
 | `STORAGE_BACKEND` | `local` | 아니오 | `local`(컨테이너 볼륨) \| `r2`(Cloudflare R2) |
 | `LOCAL_DATA_ROOT` | `/opt/airflow/data` | local 시 | 로컬 백엔드 루트 |
-| `COMMERCE_STORAGE_PREFIX` | (없음) | 아니오 | bucket 아래 공통 접두(예: `dev/<id>`) → `{prefix}/bronze/commerce/…`. 비우면 접두 없음 |
+| `COMMERCE_STORAGE_PREFIX` | (없음) | 아니오 | bucket 아래 공통 접두(예: `dev/<id>`) → `{prefix}/raw/commerce/…`. 비우면 접두 없음 |
 | `SCHEMA_VERSION` | `v1` | 아니오 | bronze 마커(리니지) JSON 의 schema_version |
 
 ### 2.3 Cloudflare R2 (`STORAGE_BACKEND=r2` 일 때만)

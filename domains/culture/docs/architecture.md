@@ -45,7 +45,7 @@ plan ──▶ ingest_dataset (12개 동적 매핑 · 병렬) ──▶ report (
 소스 API (KOPIS XML / 서울 JSON)
   │  clients.KopisClient / SeoulClient   — 원본 bytes만 받음(파싱 X)
   ▼
-landing.write_page()      ─▶ R2 raw: bronze/culture/<source>/<dataset>/load_date=/ingest_ts=/page-NNNN.{xml,json}
+landing.write_page()      ─▶ R2 raw: raw/culture/<source>/<dataset>/load_date=/ingest_ts=/page-NNNN.{xml,json}
 landing.write_manifest()  ─▶ 같은 prefix에 _manifest.json (엔드포인트·행수·요청 파라미터·checks)
   │
   ├─ checks.evaluate_landing()   — 완전성·드리프트·freshness (계약 v0)
@@ -70,7 +70,7 @@ raw와 bronze Iceberg를 둘 다 남기는 이유: raw는 재처리용 **원본 
 | [`culture_ingest/common/landing.py`](../culture_ingest/common/landing.py) | R2/로컬 싱크, 페이지·`_manifest.json` 기록, 결과 `DatasetResult`. |
 | [`culture_ingest/common/checks.py`](../culture_ingest/common/checks.py) | 수집 계약 v0 검증(완전성·드리프트·freshness). → [reliability.md](reliability.md) |
 | [`culture_ingest/common/warehouse.py`](../culture_ingest/common/warehouse.py) | bronze Iceberg 테이블 생성/적재(`BronzeWarehouse`, Trino HTTP). → [storage.md](storage.md) |
-| [`culture_ingest/source/config.py`](../culture_ingest/source/config.py) | 적재 루트 `bronze/culture`, 소스 API 키 로딩. |
+| [`culture_ingest/source/config.py`](../culture_ingest/source/config.py) | 적재 루트 `raw/culture`, 소스 API 키 로딩. |
 | [`culture_ingest/source/clients.py`](../culture_ingest/source/clients.py) | KOPIS(XML)·서울(JSON) HTTP 클라이언트. 원본 bytes만 받음. |
 | [`culture_ingest/source/datasets.py`](../culture_ingest/source/datasets.py) | 12데이터셋 레지스트리(단일 진실 원천 — 데이터셋 추가 = 여기 한 줄). → [sources.md](sources.md) |
 | [`culture_ingest/source/ingest.py`](../culture_ingest/source/ingest.py) | 적재 오케스트레이션(`run_batch`/`ingest_one`), run 리포트 빌드. |

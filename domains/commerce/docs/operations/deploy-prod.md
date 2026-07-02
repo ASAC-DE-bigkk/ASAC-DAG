@@ -63,6 +63,6 @@ R2 적재 확인은 [deploy-dev.md](deploy-dev.md) §3 과 동일(버킷만 prod
 - **metadata DB(Postgres)**: Airflow 상태/이력. 정기 `pg_dump` 또는 관리형 백업.
 - **bronze(R2)**: 소스 truth. R2 버전닝/수명주기 정책 검토. bronze 가 살아있으면 silver 는
   **언제든 재처리로 복구** 가능([operations.md](operations.md)).
-- 마커/run_id 폴더도 같은 R2(prod 버킷)의 `bronze/commerce/` 아래에 있어 bronze 와 함께 보존된다.
+- 마커/run_id 폴더도 같은 R2(prod 버킷)의 `raw/commerce/` 아래에 있어 bronze 와 함께 보존된다.
 
 > serving DB 가 없으므로 별도 서빙 백업 대상은 없다. 상태는 run_id 폴더의 마커.

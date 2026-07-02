@@ -1,4 +1,4 @@
-"""서울 지하철 ELT (transit 도메인) — 수집 → R2 bronze 객체(원본) → Iceberg bronze(Trino).
+"""서울 지하철 ELT (transit 도메인) — 수집 → R2 raw 객체(원본) → Iceberg bronze(Trino).
 
 sample(common_dbt_smoke) 패턴을 따른다:
   - 클래식 DAG + PythonOperator(ingest)
@@ -69,7 +69,7 @@ def _land_objects(dataset: str, raws: list, run_id: str) -> None:
     rows_cap = raws[0]["request_params"]["rows"] if raws else None
     # bronze: target별 원본 API 응답을 페이지로 (page-0001=target1, …)
     res_b = land(
-        stage="bronze", domain=DOMAIN, source=SOURCE, dataset=dataset,
+        stage="raw", domain=DOMAIN, source=SOURCE, dataset=dataset,
         pages=[json.dumps(r["raw"], ensure_ascii=False) for r in raws],
         endpoint=raws[0]["endpoint"] if raws else "", kind=dataset,
         rows=sum(r["rows"] for r in raws), run_id=run_id,
