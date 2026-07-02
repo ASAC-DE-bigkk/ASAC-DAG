@@ -1,8 +1,9 @@
 """Airflow DAG: population silver/gold 변환 (dbt).
 
-수집 DAG(``population_bronze``, 5분)가 적재한 bronze를 **15분마다** dbt로 silver/gold
-변환하고 테스트한다. 수집(5분)과 변환(15분)을 분리해, 5분마다 전체 재생성하는 낭비를
-피하면서 원천 갱신 주기(대략 5~15분)에 맞춘 신선도를 유지한다.
+수집 DAG(``population_bronze``, 5분)가 적재한 bronze를 **5분마다** dbt로 silver/gold
+변환하고 테스트한다. silver가 incremental(merge)이라 매 run은 최근 수집분만 처리하고
+(전체 재스캔 없음), gold는 silver를 소비하는 얇은 파생이라 table 재생성으로 둔다.
+silver와 gold는 dbt가 ref() 의존성 순서로 한 run에서 함께 빌드한다.
 
 dbt 프로젝트는 compose가 마운트한 ``/opt/airflow/dbt/domains/population``을 쓴다
 (ASAC-DBT 레포). dbt 실행 바이너리는 이미지의 전용 venv(``/home/airflow/dbt-venv``).
@@ -47,16 +48,22 @@ def _dbt(args: str) -> str:
 
 with DAG(
     dag_id="population_transform",
-    description="Transform population bronze -> silver/gold via dbt (every 15 min).",
+    description="Transform population bronze -> silver/gold via dbt (every 5 min).",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
-    schedule="*/15 * * * *",
+    schedule="*/5 * * * *",
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=2)},
     params=DEFAULT_PARAMS,
     tags=["transform", "population", "silver", "gold", "dbt"],
 ) as dag:
-    # silver/gold 모델 빌드 (table 재생성).
+    # 참조 데이터(121장소 좌표/영역 seed) 적재 -- 121행이라 매 run 갱신해도 싸고 멱등.
+    seed_refs = BashOperator(
+        task_id="dbt_seed",
+        bash_command=_dbt("seed"),
+    )
+
+    # silver(incremental merge) + gold(table 재생성, seed 조인) 빌드.
     run_models = BashOperator(
         task_id="dbt_run",
         bash_command=_dbt("run --select silver_seoul_ppltn gold_seoul_ppltn_by_time"),
@@ -68,4 +75,4 @@ with DAG(
         bash_command=_dbt("test"),
     )
 
-    run_models >> test_models
+    seed_refs >> run_models >> test_models
