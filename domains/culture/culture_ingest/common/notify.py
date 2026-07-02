@@ -54,3 +54,117 @@ def notifier_from_env(env: dict | None = None) -> Notifier:
     env = os.environ if env is None else env
     url = (env.get(WEBHOOK_ENV) or "").strip()
     return DiscordWebhookNotifier(url) if url else NoopNotifier()
+
+
+def _kst_hms(ingest_ts: str) -> str:
+    try:
+        dt = datetime.strptime(ingest_ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        return dt.astimezone(KST).strftime("%H:%M:%S")
+    except (ValueError, TypeError):
+        return "--"
+
+
+def _dur_str(seconds: float) -> str:
+    total = int(seconds)
+    m, s = divmod(total, 60)
+    return f"{m}m{s:02d}s" if m else f"{s}s"
+
+
+def _run_duration(ingest_ts: str, finish_tss: list[str]) -> str:
+    if not finish_tss:
+        return "--"
+    try:
+        t0 = datetime.strptime(ingest_ts, "%Y%m%dT%H%M%SZ")
+        t1 = datetime.strptime(max(finish_tss), "%Y%m%dT%H%M%SZ")
+        return _dur_str((t1 - t0).total_seconds())
+    except (ValueError, TypeError):
+        return "--"
+
+
+def _title_of(name: str) -> str:
+    return BY_NAME[name].title if name in BY_NAME else name
+
+
+def _fmt_int(v) -> str:
+    return "--" if v in (None, "") else f"{int(v):,}"
+
+
+def _status(s: dict) -> str:
+    err = s.get("error") or ""
+    if err and "skipped" not in err:
+        return "FAIL"
+    if "skipped" in err:
+        return "skip"
+    checks = s.get("checks") or {}
+    ib = s.get("iceberg_rows", 0)
+    mismatch = bool(ib) and ib != s.get("rows", 0)
+    if checks.get("passed") is False or mismatch:
+        return "WARN"
+    return "ok"
+
+
+def _table(datasets: list[dict]) -> str:
+    lines = [f"{'st':<4}  {'rows':>6}  {'pages':>6}  {'done':<8}  {'sec':>5}  dataset"]
+    for s in datasets:
+        done = _kst_hms(s["finished_ts"]) if s.get("finished_ts") else "--"
+        dur = s.get("duration_sec") or 0
+        sec = f"{float(dur):.1f}" if dur else "--"
+        lines.append(
+            f"{_status(s):<4}  {_fmt_int(s.get('rows')):>6}  {_fmt_int(s.get('pages')):>6}  "
+            f"{done:<8}  {sec:>5}  {_title_of(s['name'])} · {s['name']}"
+        )
+    return "\n".join(lines)
+
+
+def _issue_lines(report: dict, datasets: list[dict]) -> list[str]:
+    out = []
+    for f in report.get("failed_datasets", []):
+        out.append(f"❌ FAIL — {_title_of(f['dataset'])}({f['dataset']}): {str(f.get('error',''))[:200]}")
+    for v in report.get("violations", []):
+        out.append(f"⚠️ 위반 — {_title_of(v['dataset'])}({v['dataset']}): {v['violation']}")
+    for s in datasets:
+        ib = s.get("iceberg_rows", 0)
+        if ib and ib != s.get("rows", 0):
+            out.append(f"⚠️ Iceberg 불일치 — {_title_of(s['name'])}({s['name']}): "
+                       f"raw {_fmt_int(s.get('rows'))} ≠ iceberg {_fmt_int(ib)}")
+    return out
+
+
+def build_report_payload(report: dict) -> dict:
+    datasets = report.get("datasets", [])
+    cov = report.get("coverage", {})
+    passed = report.get("slo_passed", False)
+
+    start = _kst_hms(report.get("ingest_ts", ""))
+    finish_tss = [s["finished_ts"] for s in datasets if s.get("finished_ts")]
+    finish = _kst_hms(max(finish_tss)) if finish_tss else "--"
+    dur = _run_duration(report.get("ingest_ts", ""), finish_tss)
+
+    line1 = f"수집 {start} → 완료 {finish} KST · 소요 {dur}"
+    parts = [
+        f"커버리지 {cov.get('landed', 0)}/{cov.get('expected', 0)}",
+        f"landed {cov.get('landed', 0)}",
+        f"skipped {cov.get('skipped', 0)}",
+        f"failed {cov.get('failed', 0)}",
+        f"records {int(report.get('total_rows', 0)):,}",
+    ]
+    ib_total = report.get("total_iceberg_rows", 0)
+    if ib_total:
+        parts.append(f"Iceberg {int(ib_total):,}")
+    fresh = (report.get("freshness") or {}).get("max_age_hours")
+    if fresh is not None:
+        parts.append(f"freshness {fresh}h")
+
+    desc = f"{line1}\n{' · '.join(parts)}\n```\n{_table(datasets)}\n```"
+    issues = _issue_lines(report, datasets)
+    if issues:
+        desc += "\n" + "\n".join(issues)
+
+    return {
+        "embeds": [{
+            "title": f"culture raw 적재 리포트 · {report.get('load_date', '')} (KST)",
+            "color": COLOR_PASS if passed else COLOR_FAIL,
+            "description": desc[:4096],
+            "footer": {"text": f"run_id={report.get('run_id', '')} · @daily"},
+        }]
+    }
