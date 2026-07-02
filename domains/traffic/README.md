@@ -10,11 +10,13 @@ row와 metadata를 적재하는 것이다.
 | 파일 | 역할 |
 |---|---|
 | `traffic_incident_bronze.py` | Airflow DAG 엔트리포인트. 5분 dev schedule과 task 순서만 잡고 세부 로직은 domain package에 위임한다. |
+| `traffic_reliability_report.py` | 매일 09:00 KST 기준 traffic Bronze request audit freshness/coverage를 조회하고 Discord로 알리는 read-only 리포트 DAG다. |
 | `traffic_ingest/acc_info.py` | TOPIS AccInfo 요청 URL, raw object key, XML 응답 파싱, redacted request metadata를 담당한다. |
 | `traffic_ingest/bronze.py` | Iceberg bronze table DDL, schema evolution, insert, runtime verify SQL을 담당한다. |
+| `traffic_ingest/reliability_report.py` | 리포트 DAG의 Trino query, 메시지 포맷, Discord 전송(no-op/best-effort)을 담당한다. |
 | `traffic_ingest/common/runtime.py` | traffic 도메인 내부에서만 쓰는 env, HTTP, R2, Trino, SQL literal helper다. |
 | `docs/source.md` | TOPIS AccInfo API 소스 정보, 시간 의미, raw object key, bronze 컬럼 의미를 정리한다. |
-| `.airflowignore` | `traffic_ingest/`, `docs/`를 DAG 파일 스캔에서 제외하고 import 대상으로만 둔다. |
+| `.airflowignore` | `traffic_ingest/`, `docs/`, `tests/`를 DAG 파일 스캔에서 제외하고 import 대상으로만 둔다. |
 
 ## 실행 흐름
 
@@ -34,6 +36,17 @@ traffic은 실시간성 있는 변수로 쓸 수 있어 dev에서는 커버리�
 기본 첫 호출 범위는 `SEOUL_ACC_INFO_START_INDEX=1`, `SEOUL_ACC_INFO_END_INDEX=1000`이다.
 첫 응답의 `list_total_count`가 1000을 초과하면 같은 page size로 뒤 range를 이어서 호출한다.
 전체 parsed row 수가 `list_total_count`보다 작으면 partial 수집으로 보고 DAG를 실패시킨다.
+
+## 운영 리포트와 Discord 알림
+
+`traffic_bronze_reliability_report`는 request audit table을 read-only로 조회해 최근 수집 freshness,
+request 수, parsed row 수, `list_total_count` 대비 coverage, 정상 zero-row 응답 수를 Discord에 보고한다.
+실제 전송은 `ASK_SEOUL_DISCORD_WEBHOOK_URL` 또는 `TRAFFIC_DISCORD_WEBHOOK_URL`이 있을 때만 활성화된다.
+
+기본 스케줄은 dev target에서 webhook env가 있을 때 `0 9 * * *`다. `ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE`
+또는 공통 `ASK_SEOUL_REPORT_DAG_SCHEDULE`로 override할 수 있고, 빈 문자열이면 schedule을 끈다.
+webhook 미설정이나 Discord 전송 실패는 no-op/best-effort로 처리하며, 수집/검증 판정을 덮어쓰지 않는다.
+webhook URL은 코드, 로그, 리포트 메시지에 원문으로 남기지 않는다.
 
 ## Bronze metadata 결정 이유
 
@@ -72,13 +85,16 @@ traffic 데이터는 시간 의미가 섞이기 쉬워서 bronze에 원문을 �
 domains/traffic/
   .airflowignore
   traffic_incident_bronze.py
+  traffic_reliability_report.py
   traffic_ingest/
     common/
       runtime.py
     acc_info.py
     bronze.py
+    reliability_report.py
   docs/
     source.md
+  tests/
 ```
 
 `traffic_ingest/common`은 최상위 공통 프레임워크가 아니다. traffic 도메인 내부에서 반복되는
