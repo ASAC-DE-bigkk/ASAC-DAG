@@ -61,7 +61,7 @@ except Exception as exc:
 ```
 
 - 기본 `NoopNotifier` 는 **전송하지 않고 로그만** 남긴다 → 지금 호출해도 안전(무동작).
-- `notify_exception` 은 트레이스백을 메시지에 담되, **시크릿(SEOUL_OPENAPI_KEY/R2 토큰)은 넣지
+- `notify_exception` 은 트레이스백을 메시지에 담되, **시크릿(SEOUL_API_KEY_COMM/R2 토큰)은 넣지
   않는다**(CLAUDE.md §2.5). 전송 실패는 삼켜서 본 파이프라인을 막지 않는다.
 - 와이어링 시점: ingest/silver 태스크의 `except` 에 `notify_exception(...)` 추가 + 부트스트랩에서
   `set_notifier(...)`. (이번엔 의도적으로 미적용.)

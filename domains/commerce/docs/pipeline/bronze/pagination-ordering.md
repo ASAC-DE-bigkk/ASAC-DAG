@@ -97,14 +97,14 @@ curl -s "http://openapi.seoul.go.kr:8088/sample/json/LOCALDATA_072404/1/10/"
   못했다. 또한 sample 5행이 큐레이션 표본일 가능성이 있어, "전체 결과셋의 1~5위"라고 단정하긴
   어렵다. 확정된 사실은 **(1) 위치 기반·안정 페이징, (2) 표본 행이 어떤 컬럼으로도 정렬돼
   있지 않음** 두 가지다.
-- **실키(SEOUL_OPENAPI_KEY) 확보 시** 아래로 페이지 경계까지 재검증할 것:
+- **실키(SEOUL_API_KEY_COMM) 확보 시** 아래로 페이지 경계까지 재검증할 것:
 
 ```bash
-# .env.commerce 에 SEOUL_OPENAPI_KEY 설정 후 (configuration.md 참고)
+# .env.commerce 에 SEOUL_API_KEY_COMM 설정 후 (configuration.md 참고)
 PYTHONPATH=dags/domains/commerce/include python - <<'PY'
 import json, urllib.request, os
 from common.env import load_commerce_env; load_commerce_env()
-KEY=os.environ["SEOUL_OPENAPI_KEY"]; BASE="http://openapi.seoul.go.kr:8088"; SVC="LOCALDATA_072404"
+KEY=os.environ["SEOUL_API_KEY_COMM"]; BASE="http://openapi.seoul.go.kr:8088"; SVC="LOCALDATA_072404"
 def page(s,e):
     raw=urllib.request.urlopen(f"{BASE}/{KEY}/json/{SVC}/{s}/{e}/",timeout=60).read()
     b=json.loads(raw); b=b[list(b)[0]]; return [r["MGTNO"] for r in b.get("row",[])]

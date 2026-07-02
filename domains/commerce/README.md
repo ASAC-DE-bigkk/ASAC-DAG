@@ -31,13 +31,13 @@ silver  {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parqu
 ## 환경변수 (정상 동작 조건)
 
 commerce 가 읽는 모든 인자는 [docs/configuration.md](docs/configuration/configuration.md) 에 정리돼 있다.
-핵심은 **환경이 바뀌며 루트 `.env` 에서 빠진 값**(특히 `SEOUL_OPENAPI_KEY`)을 이 번들의
-`.env.commerce` 가 채운다는 것:
+인증키 `SEOUL_API_KEY_COMM` 은 **호스트 루트 `.env`** 에 있다(ASAC-DAG#70 에서 도메인 공통
+`SEOUL_API_KEY_<도메인>` 규칙으로 이관). 나머지 commerce 전용 값은 이 번들의 `.env.commerce` 가 채운다:
 
 ```bash
 cd dags/domains/commerce
 cp .env.commerce.example .env.commerce      # PowerShell: Copy-Item
-# SEOUL_OPENAPI_KEY 입력(필수). R2 쓰면 STORAGE_BACKEND=r2 + R2_* 확인.
+# 인증키는 루트 .env 의 SEOUL_API_KEY_COMM(필수). R2 쓰면 STORAGE_BACKEND=r2 + R2_* 확인.
 ```
 
 DAG 임포트 시 [include/common/env.py](include/common/env.py) 의 `load_commerce_env()` 가
@@ -46,7 +46,7 @@ DAG 임포트 시 [include/common/env.py](include/common/env.py) 의 `load_comme
 
 | 변수 | 기본 | 비고 |
 |---|---|---|
-| `SEOUL_OPENAPI_KEY` | (없음) | **필수** — 없으면 수집 불가 |
+| `SEOUL_API_KEY_COMM` | (없음) | **필수** — 루트 `.env` 에서 주입(#70). 없으면 수집 불가 |
 | `STORAGE_BACKEND` | `local` | `local` \| `r2` |
 | `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | `${R2_DEV_*}` | r2 일 때 — 루트 `.env` 값을 참조 |
 | `R2_BUCKET` | `${R2_DEV_BUCKET_NAME}` | 루트는 `R2_DEV_BUCKET_NAME`/`R2_BUCKET_NAME`, commerce 는 `R2_BUCKET` — 참조로 매핑 |
