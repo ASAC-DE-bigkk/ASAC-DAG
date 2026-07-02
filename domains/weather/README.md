@@ -10,12 +10,14 @@ bronze 테이블에 조회 가능한 row와 metadata를 적재하는 것이다.
 | 파일 | 역할 |
 |---|---|
 | `weather_vilage_fcst_bronze.py` | Airflow DAG 엔트리포인트. task 순서와 실행 흐름만 잡고 세부 로직은 domain package에 위임한다. |
+| `weather_reliability_report.py` | 매일 09:00 KST 기준 weather Bronze freshness/coverage를 조회하고 Discord로 알리는 read-only 리포트 DAG다. |
 | `weather_ingest/kma.py` | KMA 요청 URL, 발표 시각 계산, raw object key, 응답 파싱, redacted request metadata를 담당한다. |
 | `weather_ingest/bronze.py` | Iceberg bronze table DDL, schema evolution, insert, runtime verify SQL을 담당한다. |
+| `weather_ingest/reliability_report.py` | 리포트 DAG의 Trino query, 메시지 포맷, Discord 전송(no-op/best-effort)을 담당한다. |
 | `weather_ingest/common/runtime.py` | weather 도메인 내부에서만 쓰는 env, HTTP, R2, Trino, SQL literal helper다. |
 | `config/seoul_kma_grids.csv` | 서울 bounding box를 보수적으로 덮는 KMA `nx, ny` 80개 목록이다. |
 | `docs/source.md` | KMA API 소스 정보, 시간 의미, raw object key, bronze 컬럼 의미를 정리한다. |
-| `.airflowignore` | `weather_ingest/`, `docs/`, `config/`를 DAG 파일 스캔에서 제외하고 import/자료 대상으로만 둔다. |
+| `.airflowignore` | `weather_ingest/`, `docs/`, `config/`, `tests/`를 DAG 파일 스캔에서 제외하고 import/자료 대상으로만 둔다. |
 
 ## 실행 흐름
 
@@ -33,6 +35,17 @@ raw와 bronze를 둘 다 남기는 이유는 역할이 다르기 때문이다.
 
 - raw object는 외부 API 응답 원본을 재처리할 수 있게 보존한다.
 - bronze table은 Trino/dbt가 SQL로 읽을 수 있도록 원본에서 필요한 row와 수집 metadata를 Parquet 기반 Iceberg 테이블로 만든다.
+
+## 운영 리포트와 Discord 알림
+
+`weather_bronze_reliability_report`는 Bronze table을 read-only로 조회해 최신 KMA 발표시각의
+서울 grid coverage, row/raw object 수, freshness를 Discord에 보고한다. 실제 전송은
+`ASK_SEOUL_DISCORD_WEBHOOK_URL` 또는 `WEATHER_DISCORD_WEBHOOK_URL`이 있을 때만 활성화된다.
+
+기본 스케줄은 dev target에서 webhook env가 있을 때 `0 9 * * *`다. `ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE`
+또는 공통 `ASK_SEOUL_REPORT_DAG_SCHEDULE`로 override할 수 있고, 빈 문자열이면 schedule을 끈다.
+webhook 미설정이나 Discord 전송 실패는 no-op/best-effort로 처리하며, 수집/검증 판정을 덮어쓰지 않는다.
+webhook URL은 코드, 로그, 리포트 메시지에 원문으로 남기지 않는다.
 
 ## Bronze metadata 결정 이유
 
@@ -72,6 +85,7 @@ dedup 기준, Gold feature mart는 ASAC-DBT에서 공통 계약을 정한 뒤 �
 domains/weather/
   .airflowignore
   weather_vilage_fcst_bronze.py
+  weather_reliability_report.py
   config/
     seoul_kma_grids.csv
   weather_ingest/
@@ -79,8 +93,10 @@ domains/weather/
       runtime.py
     kma.py
     bronze.py
+    reliability_report.py
   docs/
     source.md
+  tests/
 ```
 
 `weather_ingest/common`은 최상위 공통 프레임워크가 아니다. weather 도메인 내부에서 반복되는
