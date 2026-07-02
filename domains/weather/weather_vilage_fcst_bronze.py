@@ -12,7 +12,17 @@ from airflow.providers.standard.operators.python import PythonOperator
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
 if DAG_DIR not in sys.path:
     sys.path.insert(0, DAG_DIR)
+DOMAINS_DIR = os.path.dirname(DAG_DIR)
+if DOMAINS_DIR not in sys.path:
+    sys.path.insert(0, DOMAINS_DIR)
 
+from _shared.bronze_run_manifest import (  # noqa: E402
+    STATUS_FAILED,
+    STATUS_STARTED,
+    STATUS_SUCCESS,
+    failure_reason_from_context,
+    record_bronze_run_event,
+)
 from weather_ingest.bronze import (  # noqa: E402
     create_kma_bronze_table,
     insert_kma_bronze_rows,
@@ -41,6 +51,7 @@ WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
+DAG_ID = "weather_vilage_fcst_bronze"
 
 
 def discord_report_date(context) -> str:
@@ -149,6 +160,7 @@ def ingest_kma_vilage_fcst(**context) -> dict:
     cursor, catalog, schema = trino_cursor()
     qualified_table = create_kma_bronze_table(cursor, catalog, schema)
     inserted = 0
+    expected_rows = 0
     raw_object_keys = []
     for grid in grids:
         collected_at = datetime.now(timezone.utc)
@@ -158,6 +170,7 @@ def ingest_kma_vilage_fcst(**context) -> dict:
         url = build_kma_url(base_date=base_date, base_time=base_time, nx=nx, ny=ny)
         http_status, raw_bytes = fetch_url(url, "ask-seoul-kma-bronze/1.0")
         metadata, rows = parse_kma_response(raw_bytes)
+        expected_rows += int(metadata.get("total_count") or len(rows))
         raw_hash = sha256_hex(raw_bytes)
         raw_object_key = build_raw_object_key(
             collected_at=collected_at,
@@ -196,45 +209,104 @@ def ingest_kma_vilage_fcst(**context) -> dict:
         "source_id": SOURCE_ID,
         "raw_object_keys": raw_object_keys,
         "inserted": inserted,
+        "expected_rows": expected_rows,
         "grid_count": len(grids),
         "base_date": base_date,
         "base_time": base_time,
     }
 
 
+def record_kma_run_started(**context) -> str:
+    cursor, catalog, schema = trino_cursor()
+    return record_bronze_run_event(
+        cursor,
+        catalog,
+        schema,
+        source_id=SOURCE_ID,
+        dag_id=DAG_ID,
+        dag_run_id=context["run_id"],
+        status=STATUS_STARTED,
+        expected_raw_objects=len(load_kma_grids()),
+    )
+
+
+def record_kma_run_failed(context) -> None:
+    try:
+        cursor, catalog, schema = trino_cursor()
+        record_bronze_run_event(
+            cursor,
+            catalog,
+            schema,
+            source_id=SOURCE_ID,
+            dag_id=DAG_ID,
+            dag_run_id=context["run_id"],
+            status=STATUS_FAILED,
+            failure_reason=failure_reason_from_context(context),
+        )
+    except Exception as exc:
+        print(f"Failed to record KMA run manifest failure: {type(exc).__name__}")
+
+
+def record_and_notify_kma_run_failed(context) -> None:
+    record_kma_run_failed(context)
+    notify_weather_bronze_failure(context)
+
+
 def verify_kma_bronze_runtime(**context) -> int:
     ingest_result = context["ti"].xcom_pull(task_ids="ingest_kma_vilage_fcst") or {}
-    return verify_kma_bronze_rows(
+    verified_rows = verify_kma_bronze_rows(
         raw_object_keys=ingest_result["raw_object_keys"],
         dag_run_id=context["run_id"],
         expected_rows=int(ingest_result["inserted"]),
         expected_raw_objects=int(ingest_result["grid_count"]),
     )
+    cursor, catalog, schema = trino_cursor()
+    record_bronze_run_event(
+        cursor,
+        catalog,
+        schema,
+        source_id=SOURCE_ID,
+        dag_id=DAG_ID,
+        dag_run_id=context["run_id"],
+        status=STATUS_SUCCESS,
+        is_publishable=True,
+        expected_rows=int(ingest_result["expected_rows"]),
+        actual_rows=verified_rows,
+        expected_raw_objects=int(ingest_result["grid_count"]),
+        actual_raw_objects=len(ingest_result["raw_object_keys"]),
+    )
+    return verified_rows
 
 
 with DAG(
-    dag_id="weather_vilage_fcst_bronze",
+    dag_id=DAG_ID,
     description="Loads KMA getVilageFcst raw JSON into R2 and validates the Iceberg bronze runtime.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=kma_dag_schedule(),
     catchup=False,
     max_active_runs=1,
+    on_failure_callback=record_kma_run_failed,
     tags=["ask_seoul", "kma", "bronze", "r2", "iceberg"],
 ) as dag:
+    start_manifest = PythonOperator(
+        task_id="record_kma_run_started",
+        python_callable=record_kma_run_started,
+    )
+
     ingest_kma = PythonOperator(
         task_id="ingest_kma_vilage_fcst",
         python_callable=ingest_kma_vilage_fcst,
-        on_failure_callback=notify_weather_bronze_failure,
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
+        on_failure_callback=record_and_notify_kma_run_failed,
     )
 
     verify_bronze = PythonOperator(
         task_id="verify_kma_bronze_runtime",
         python_callable=verify_kma_bronze_runtime,
         on_success_callback=notify_weather_bronze_success,
-        on_failure_callback=notify_weather_bronze_failure,
+        on_failure_callback=record_and_notify_kma_run_failed,
     )
 
-    ingest_kma >> verify_bronze
+    start_manifest >> ingest_kma >> verify_bronze
