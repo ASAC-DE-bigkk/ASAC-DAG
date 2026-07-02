@@ -6,7 +6,7 @@
 `UPDATEDT` 제공 여부·저장/상태 관리 계약을 정리한다.
 
 - 코드(자립 패키지): [dags/domains/commerce/include/](../../include/) (`common`·`bronze`·`silver`)
-- DAG: `commerce_localdata_elt` — [dags/domains/commerce/seoul_commerce_dag.py](../../seoul_commerce_dag.py)
+- DAG: `commerce_collect_raw` — [dags/domains/commerce/commerce_raw.py](../../commerce_raw.py)
 - 데이터셋 레지스트리(단일 진실 공급원): [dags/domains/commerce/config/dataset_registry.yaml](../../config/dataset_registry.yaml)
 - 실행 인자/환경변수(SEOUL_API_KEY_COMM 등): [configuration.md](../configuration/configuration.md)
 
@@ -18,9 +18,9 @@
 스토리지 백엔드가 자동 부착. 자세히: [../architecture/storage.md](../architecture/storage.md).
 
 ```text
-{prefix}/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
-{prefix}/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커(리니지 JSON)
-{prefix}/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
+{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
+{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커(리니지 JSON)
+{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
 ```
 
 - `<short>` = API 축약단어 = 데이터셋 `slug`(예: `general_restaurant`, `lodging`, `beauty_shop`).
@@ -142,12 +142,12 @@ DB·외부 매니페스트 없음 — 상태/이력은 **각 `run_id` 폴더의 
 
 ```bash
 # 1) 평소 스케줄/수동 실행이 곧 전체 수집(= 자동 재수집). 별도 force 불필요.
-airflow dags trigger commerce_localdata_elt
+airflow dags trigger commerce_collect_raw
 
 # 2) 특정 논리일로(silver 파티션 override)
-airflow dags trigger commerce_localdata_elt -c '{"observed_date": "2026-06-01"}'
+airflow dags trigger commerce_collect_raw -c '{"observed_date": "2026-06-01"}'
 #    날짜 범위:
-airflow dags backfill commerce_localdata_elt -s 2026-06-01 -e 2026-06-07
+airflow dags backfill commerce_collect_raw -s 2026-06-01 -e 2026-06-07
 ```
 
 > 인허가는 스냅샷 데이터라 과거일 backfill 도 "현재 전체 스냅샷"을 그 논리일 파티션(silver)으로

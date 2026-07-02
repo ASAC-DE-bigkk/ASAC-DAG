@@ -16,7 +16,7 @@ Airflow 카테고리 번들이다. **서빙 DB·외부 매니페스트 없이** 
 ## 데이터 흐름
 
 ```text
-bronze  {prefix}/bronze/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl   # API당 1파일(원본 페이지 NDJSON)
+bronze  {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl   # API당 1파일(원본 페이지 NDJSON)
 state   .../run_id=<...>/_markers/<short>.completed|.incomplete + _RUN.*                        # 수집 결과 마커(DB·매니페스트 대체)
 silver  {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet  # 공통 19컬럼 정규화 (로직만 보존·DAG 미와이어링)
 ```
@@ -63,7 +63,7 @@ DAG 임포트 시 [include/common/env.py](include/common/env.py) 의 `load_comme
 ```bash
 docker compose up -d                # 루트의 docker-compose.yml (postgres/trino/airflow×4)
 # UI: http://localhost:30585
-# DAG: commerce_localdata_elt(전체 수집) · commerce_localdata_recollect(미완료만 6h 재수집) — UI 에서 토글 ON
+# DAG: commerce_collect_raw(전체 수집) · commerce_recollect_raw(미완료만 6h 재수집) — UI 에서 토글 ON
 # Grid/Graph 에서 ingest_one[<API>] 매핑으로 API별 성공/실패/대기 확인(map_index 라벨)
 ```
 
@@ -75,9 +75,9 @@ docker compose up -d                # 루트의 docker-compose.yml (postgres/tri
 ### backfill / 재수집
 
 ```bash
-docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt   # 매 실행이 전체 수집
-docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt -c '{"observed_date":"2026-06-01"}'
-docker compose exec airflow-scheduler airflow dags backfill commerce_localdata_elt -s 2026-06-01 -e 2026-06-07
+docker compose exec airflow-scheduler airflow dags trigger commerce_collect_raw   # 매 실행이 전체 수집
+docker compose exec airflow-scheduler airflow dags trigger commerce_collect_raw -c '{"observed_date":"2026-06-01"}'
+docker compose exec airflow-scheduler airflow dags backfill commerce_collect_raw -s 2026-06-01 -e 2026-06-07
 ```
 
 ## 프로젝트 구조
@@ -91,7 +91,7 @@ docker compose exec airflow-scheduler airflow dags backfill commerce_localdata_e
 dags/
 └─ domains/
    └─ commerce/                  # ★ 카테고리 자립 단위
-      ├─ seoul_commerce_dag.py     # DAG: commerce_localdata_elt · commerce_localdata_recollect (sys.path+env 부트스트랩)
+      ├─ commerce_raw.py     # DAG: commerce_collect_raw · commerce_recollect_raw (sys.path+env 부트스트랩)
       ├─ include/                 # PYTHONPATH 루트 (common/bronze/silver 가 top-level)
       │  ├─ common/               # settings · env · storage · paths · schemas · hashing · registry · notify(알림 IF)
       │  ├─ bronze/               # clients · validators · bronze_tasks(NDJSON+마커) · markers(재수집) · resolve

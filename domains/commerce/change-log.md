@@ -7,6 +7,83 @@
 
 ## 2026-07-02
 
+### 23. DAG 명칭 변경 — commerce_localdata_{elt,recollect} → commerce_{collect,recollect}_raw
+
+request:
+- `commerce_localdata_elt` → `commerce_collect_raw`, `commerce_localdata_recollect` →
+  `commerce_recollect_raw` 로 DAG 명칭 변경.
+
+response:
+- **DAG 파일**: dag_id·TaskFlow 함수명·하단 호출·docstring 의 이름 갱신. 파일명도 정합화 —
+  `commerce_localdata.py` → **`commerce_raw.py`**(git mv; 두 raw 수집 DAG 공용, feat/73 선례
+  "파일=dag 네이밍" 준수).
+- **문서/코드**: 번들 문서 전반의 dag_id 참조 일괄 치환 + 기존 stale 파일 참조
+  (`seoul_commerce_dag.py`)를 `commerce_raw.py` 로 정정, `markers.py` docstring 반영.
+  change-log 과거 이력은 불변 유지.
+- **검증**: 전 테스트 **82 통과**, 보안 게이트 PASS. 컨테이너 `dags reserialize` 후 신규 dag_id 2개가
+  `commerce_raw.py` 에서 **import 오류 없이 등록** 확인. 옛 `commerce_localdata_*` 는 파일 삭제로
+  메타DB 고아 등록으로 남음(실행 이력 보존, UI 에서 removed 표시 — `airflow dags delete` 는 선택).
+
+### 22. 증분 저장 흐름 확정 — 랜딩→비교(조기중단)→증분→diff 이동(수집일 태깅)
+
+request:
+- R2 배치 점검 결과 `run_id=07-01` 이 full 을 그대로 들고 있는 어긋남 지적("위치가 정 반대").
+  확정 흐름: 최초 run(06-30)은 비교 대상이 없으니 full 적재 + 그 내용이 diff 폴더에 복사(정렬본+해시).
+  이후 run 은 ① API 결과를 run 경로에 **먼저 저장** → ② 정렬 → ③ diff 폴더 파일과 비교하며
+  **다른 내용만 별도 위치에 저장**(정렬돼 있으므로 **같은 정보가 위치하면 비교 중단**) →
+  ④ 구 diff 삭제 후 **오늘본을 run 경로에서 diff 로 이동**, **완료(이동됨)/중단(안 옮겨짐)을
+  파일명의 수집일(연/월/일)로 구분**.
+- (합의 Q&A) 증분 위치 = run 폴더 안(`run_id=X/<short>.jsonl`), full 랜딩 = `run_id=X/_full/`.
+  이력 재정리 = run_id=07-01 full 을 06-30 대비 증분으로 교체(권장안 채택).
+
+response:
+- **paths.py**: `bronze_full_landing_key`(`_full/` 랜딩), diff-target 키를 **수집일 태깅**
+  (`_diff_target/<short>.<YYYY-MM-DD>.jsonl` + 같은 이름 `.key`)으로 변경, `run_collect_date`·
+  `diff_target_prefix`(발견용 접두) 추가.
+- **incremental.py**: `diff_new_rows(stop_on_aligned_match=)` — 정렬 프런티어에서 같은 정보(키+내용)
+  첫 일치 시 **비교 중단**(전제: 내용 변경 시 UPDATEDT 갱신). `find_diff_target` — `<short>.` 접두
+  나열로 최신 날짜 diff 발견(구형 무날짜 인식). `incremental_store` 재작성: ①landing 업로드(수집분
+  보존 우선) → ②비교 → ③증분만 run 폴더 저장(첫 수집=full) → ④새 날짜 diff copy→구 날짜 삭제→
+  landing 삭제(**이동**; 새 파일 먼저 만들어 중단 시 자가 복구, 동일자 재실행 자기삭제 가드).
+  identical 이어도 ④ 수행(diff 파일명 날짜=최신 완료 수집일).
+- **bronze_tasks.py**: 수집일(run_id 파생, 비형식이면 observed_date 폴백)·prev 발견 배선, 마커에
+  `diff_target_key` 추가. **storage.py**: `copy()` 재추가(ABC read+write, R2 `copy_object` 서버사이드).
+- **이력 재정리**: `scripts/retrofit_run_increment.py` — run_id=07-01 full 을 06-30 대비 증분으로
+  교체 + 구형 무날짜 diff 파일을 `<short>.2026-07-01.*` 로 리네임(dry-run 기본·`--apply`).
+  `scripts/seed_diff_target.py` 도 수집일 태깅으로 갱신.
+- **검증**: 단위테스트 확장(조기중단 소비량·발견 최신날짜/구형·랜딩 이동·동일자 재실행 가드·시드→
+  identical) 포함 **전 82 통과**. 설계 문서 §1/3/4 갱신. 보안 게이트 PASS.
+- **R2 재정리 실행 완료(실측)**: run_id=07-01 데이터 **1,248MB(39 full) → 0.48MB(증분 23파일)**
+  — 무변경 16종은 파일 삭제(identical=마커만), 변경 23종만 증분(예: general_restaurant 534,748행→
+  280행/293KB, bakery 12행 — 사전 실증치와 일치). `_diff_target` **78/78 전부 날짜 태깅**
+  (`<short>.2026-07-01.*`, 무날짜 잔존 0). run_id=06-30 full(최초)·`_backup` 무손상.
+  총 용량 5,195MB → **3,947MB**(약 1.25GB 회수).
+
+### 21. 원천 레이어 리네임 bronze/commerce → raw/commerce + 레이어 접두 .env 관리
+
+request:
+- R2 데이터가 이미 `bronze/commerce/` → `raw/commerce/` 로 이동된 상태(`move_bronze_to_raw` 실행 —
+  실측: bronze/commerce=0객체, raw/commerce=314객체[run 스냅샷·`_diff_target`·`_backup`])인데 **코드는
+  아직 `bronze/commerce`** 를 써서 DAG 이 이동 데이터·시드 diff-target 을 못 읽는 어긋남 발생.
+- (결정) **raw/commerce 로 통일**하고, 레이어 접두 값을 **.env 로 관리**하도록 변경.
+
+response:
+- **paths.py**: `BRONZE_LAYER="bronze/commerce"` → `RAW_LAYER=os.getenv("COMMERCE_RAW_LAYER","raw/commerce")`,
+  `SILVER_LAYER=os.getenv("COMMERCE_SILVER_LAYER","silver/commerce")`. 모든 경로 함수가 `RAW_LAYER` 사용.
+  기본값 = 목표 경로라 env 미설정이어도 raw/commerce. (함수명 `bronze_*` 는 대규모 리팩터 회피 위해
+  유지 — 경로 문자열만 raw 로 전환.)
+- **.env.commerce(.example)**: `COMMERCE_RAW_LAYER=raw/commerce` · `COMMERCE_SILVER_LAYER=silver/commerce`
+  추가(관련 값 .env 관리), 경로 주석 raw/commerce 로 갱신.
+- **문서 7종**: `bronze/commerce` 경로 리터럴 → `raw/commerce`(README·storage·common_info·configuration·
+  recollect·incremental-sort-diff·deploy-prod). change-log 과거 이력은 불변 유지.
+- **scripts 정리**: 1회성 다 쓴 것 삭제(`prune_duplicate_runs`·`backup_diff_target`·`move_bronze_to_raw`
+  — 뒤 둘은 없어진 `storage.copy` 의존), 재사용 가치 있는 `seed_diff_target.py`(step0)만 존치.
+  `.airflowignore` 에 `scripts/**` 추가(파서 제외).
+- **검증**: 전 테스트 **79 통과**(경로 단정 raw/commerce 로 갱신), 보안 게이트 PASS. 기능 확인 —
+  `paths.bronze_diff_target_key`=`raw/commerce/_diff_target/…` 가 R2 이동본과 정합(실존 확인),
+  `COMMERCE_RAW_LAYER` override 반영 확인 → **DAG 이 이동 데이터·시드 diff-target 을 그대로 사용.**
+- **후속(선택)**: 함수/변수명·docstring·문서의 conceptual "bronze" 용어를 raw 로 통일(대규모 리네임은 별도).
+
 ### 20. DAG 네이밍 통합 — seoul_commerce_daily/recollect → commerce_localdata_elt/recollect (feat/73-dag-naming)
 request:
 - 팀 공통 DAG 네이밍 규칙 `<domain>_<dataset>_<stage>` 확정(#73): stage 역할형(elt/recollect 등),

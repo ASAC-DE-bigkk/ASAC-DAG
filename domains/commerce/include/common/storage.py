@@ -30,6 +30,13 @@ class Storage(ABC):
     def delete(self, key: str) -> None: ...   # feat/59: 실패 파편 정리(한 파일 관리)
 
     # ── helpers ──
+    def copy(self, src_key: str, dst_key: str) -> None:
+        """src → dst 복사(기본은 read+write). R2 는 서버사이드 copy 로 오버라이드.
+
+        diff-target 롤링의 '이동'(copy → 원본 delete)에 사용 — 데이터를 로컬로 내리지 않는다.
+        """
+        self.write_bytes(dst_key, self.read_bytes(src_key))
+
     def write_text(self, key: str, text: str) -> None:
         self.write_bytes(key, text.encode("utf-8"))
 
@@ -123,6 +130,11 @@ class R2Storage(Storage):
 
     def delete(self, key: str) -> None:
         self._s3.delete_object(Bucket=self.bucket, Key=key)
+
+    def copy(self, src_key: str, dst_key: str) -> None:
+        # 서버사이드 복사(로컬 전송 없음) — diff-target 롤링 '이동'용.
+        self._s3.copy_object(Bucket=self.bucket, Key=dst_key,
+                             CopySource={"Bucket": self.bucket, "Key": src_key})
 
 
 def get_storage() -> Storage:

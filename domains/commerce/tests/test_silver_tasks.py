@@ -46,7 +46,7 @@ def test_build_silver_reads_ndjson_and_writes_parquet(tmp_path, monkeypatch):
         return json.dumps({ds.service_name: {
             "list_total_count": 4, "RESULT": {"CODE": "INFO-000", "MESSAGE": "ok"},
             "row": [_row(), _row()]}})
-    bronze_key = "bronze/commerce/run_id=R/food_cold_storage.jsonl"
+    bronze_key = "raw/commerce/run_id=R/food_cold_storage.jsonl"
     get_storage().write_bytes(bronze_key, (page() + "\n" + page() + "\n").encode("utf-8"))
 
     res = silver_tasks.build_silver("food_cold_storage", "2026-06-29", bronze_key)

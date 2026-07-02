@@ -5,17 +5,22 @@
 배선: [../../../include/bronze/bronze_tasks.py](../../../include/bronze/bronze_tasks.py) ·
 경로: [../../../include/common/paths.py](../../../include/common/paths.py).
 
-## 1. 저장 모델 (save 증분 + diff-target 롤링)
+## 1. 저장 모델 (랜딩 → 증분 → diff 이동, 수집일 태깅)
 
-구 데이터 소실·버전이력 유실을 막기 위해 **2계열**로 저장한다:
+구 데이터 소실·버전이력 유실을 막으면서 full 은 **한 벌만** 유지한다:
 
 | 계열 | 위치 | 내용 |
 |---|---|---|
+| **landing(임시)** | `…/run_id=<ts>/_full/<short>.jsonl` | 오늘 정렬 full 의 랜딩 — 비교/이동 **전에 먼저 저장**(중단돼도 수집분 보존). 완료 시 diff 로 **이동**되어 사라짐(잔존 = 그 run 중단의 증거) |
 | **save(증분 영구)** | `…/run_id=<ts>/<short>.jsonl` (run 폴더) | 첫 수집=전체, 이후=신규/변경분만. **삭제 안 함**(이력 보존) |
-| **diff-target(롤링 최신본)** | `bronze/commerce/_diff_target/<short>.jsonl` (+ `.key` 사이드카) | 다음날 비교 기준. 매일 오늘본으로 **교체** |
+| **diff-target(최신 full)** | `raw/commerce/_diff_target/<short>.<수집일>.jsonl` (+ 같은 이름 `.key`) | 다음 수집의 비교 기준(정렬 full). landing 에서 **이동**해 옴. **파일명 수집일(YYYY-MM-DD)로 완료/중단 구분** — 교체 시 구 날짜 파일 삭제 |
 
-- 첫 수집: save(run 폴더) 와 diff-target 을 **같은 내용(전체 정렬본)**으로 생성.
-- 이후: 오늘 vs diff-target diff → **신규분만 save 로 증분 저장** → diff-target 을 오늘본으로 교체(구본 대체).
+- 첫 수집: landing → save(run 폴더, full)와 diff-target 에 **같은 내용(전체 정렬본)** 반영.
+- 이후 매 수집: ① landing 저장 → ② diff-target 과 비교(§3) → ③ **다른 내용만 save 로 증분 저장**
+  → ④ 구 날짜 diff 삭제 + landing 을 오늘 수집일 태깅으로 diff 에 **이동**.
+  identical(검증키 동일)이어도 ④는 수행 — diff 파일명 날짜 = **최신 완료 수집일**.
+- 실패 복구: ① 후 중단 = landing 잔존(수집분 보존) + 구 diff 유지 → 재실행 시 구 diff 와 재비교.
+  ④ 도중 중단 = 신·구 날짜 diff 잠시 공존 → 발견(`find_diff_target`)이 최신 날짜를 선택(자가 복구).
 - 저장 포맷: **row-NDJSON**(줄당 레코드 1개, UPDATEDT desc 정렬). (기존 page-NDJSON 에서 전환.)
 
 ## 2. 정렬 (외부 병합 정렬, 스트리밍)
@@ -28,18 +33,22 @@
 ## 3. 검증키 & diff
 
 - **검증키**(`verification_key`) = 정렬본 row 정규화(JSON key정렬) 문자열들을 순서대로 이어 sha256(순서 민감).
-  오늘 키 == diff-target 키 → **동일**(증분 없음, 마커만).
+  오늘 키 == diff-target 키 → **동일**(증분 없음, 마커만 — 단 diff 파일명 날짜는 오늘로 롤링).
 - **diff**(`diff_new_rows`) = 오늘·전날 둘 다 같은 키로 정렬 → **스트리밍 병합**으로 신규/변경 row만 방출.
   같은 정렬키 위치는 정규화 문자열 **직접 비교**(hot loop 에 해시 안 씀).
+- **비교 조기 중단**(`stop_on_aligned_match`): UPDATEDT desc 정렬이라 신규/변경 row 는 항상 위쪽에
+  온다 → 정렬 프런티어에서 **같은 정보(키+내용)가 처음 일치하는 순간 비교를 중단**(이하 동일 간주).
+  전제: 내용이 바뀌면 UPDATEDT 가 갱신된다(LOCALDATA 계약). UPDATEDT 갱신 없는 내용 변경은 이
+  모드에서 감지되지 않음 — 파일 단위 동일/상이는 검증키가 판정.
 
 ## 4. 수집 흐름 (bronze_tasks)
 
 - **수집 완료(status==ok)일 때만** 처리: 수집 페이지 → row 파싱 → `incremental_store`
-  (전날 diff-target 다운로드 → `build_increment` → 증분 업로드 + diff-target 교체 + 키 사이드카).
-- **중간 중단(status!=ok)은 저장하지 않는다**(부분 결과 미저장). 마커에
-  `verification_key/increment_mode/increment_count/sorted_row_count` 기록.
-- raw 페이지는 휘발(메모리) — 영속물은 save 증분 + diff-target 뿐이라 **별도 "수집 파일 삭제" 대상 없음**
-  (§4 삭제-맨나중 요구는 본 모델에선 "미저장 + 재검증"으로 갈음).
+  (landing 저장 → 이전 diff 발견/다운로드 → 비교(조기 중단) → 증분 업로드 → diff 이동+키 사이드카).
+- **중간 중단(status!=ok)은 증분/이동을 수행하지 않는다** — 구 날짜 diff 가 그대로 남아
+  파일명 날짜로 "그 API 는 오늘 완료 안 됨"이 식별된다. 마커에
+  `verification_key/increment_mode/increment_count/sorted_row_count/diff_target_key` 기록.
+- 이전 diff 발견은 `find_diff_target`(`<short>.` 접두 나열 → 최신 날짜 선택, 구형 무날짜도 인식).
 
 ## 5. step0 (1회성 시드)
 

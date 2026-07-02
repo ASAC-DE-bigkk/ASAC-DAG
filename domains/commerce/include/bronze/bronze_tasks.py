@@ -47,21 +47,30 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
     short = dataset.short
     object_key = None
     incr: dict | None = None
-    # 수집 **완료(status==ok)** 일 때만 증분 저장(정렬·검증키·diff). status!=ok(중간 중단)은
-    # 남기지 않는다(§중간 끊기면 미저장). raw 페이지는 휘발 — save 증분 + diff-target 만 영속.
+    # 수집 **완료(status==ok)** 일 때만 증분 처리(랜딩→정렬→비교→증분→diff 이동).
+    # status!=ok(중간 중단)은 증분/이동을 수행하지 않는다 — 랜딩/구 diff 는 그대로 남아
+    # 파일명 날짜(구 날짜 잔존=중단)로 구분된다.
     if status == "ok" and raw_pages:
         def _rows():
             for p in raw_pages:
                 for row in parse_page(p, dataset.service_name).rows:
                     yield row
+        collect_date = paths.run_collect_date(bronze_run_id) or base["observed_date"]
+        prev_target, prev_keyfile = incremental.find_diff_target(
+            storage, dir_prefix=paths.diff_target_prefix(prefix=prefix, short=short))
         tmp = tempfile.mkdtemp(prefix=f"bronze-{short}-")
         try:
             incr = incremental.incremental_store(
-                storage,
-                increment_key=paths.bronze_object_key(prefix=prefix, run_id=bronze_run_id, short=short),
-                target_key=paths.bronze_diff_target_key(prefix=prefix, short=short),
-                target_key_file=paths.bronze_diff_target_keyfile(prefix=prefix, short=short),
-                rows=_rows(), tmp_dir=tmp)
+                storage, rows=_rows(), tmp_dir=tmp,
+                landing_key=paths.bronze_full_landing_key(
+                    prefix=prefix, run_id=bronze_run_id, short=short),
+                increment_key=paths.bronze_object_key(
+                    prefix=prefix, run_id=bronze_run_id, short=short),
+                target_key=paths.bronze_diff_target_key(
+                    prefix=prefix, short=short, collect_date=collect_date),
+                target_key_file=paths.bronze_diff_target_keyfile(
+                    prefix=prefix, short=short, collect_date=collect_date),
+                prev_target_key=prev_target, prev_target_keyfile=prev_keyfile)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         object_key = incr.get("increment_key")   # 증분 파일 키(동일=None: 마커만)
@@ -83,9 +92,10 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
         "list_total_count": list_total_count, "complete": complete,
         "bronze_key": object_key, "pages": page_metas,
     }
-    if incr:                                   # 증분 리니지: 검증키·모드·증분수·정렬행수
+    if incr:                                   # 증분 리니지: 검증키·모드·증분수·정렬행수·diff 위치
         marker.update({"verification_key": incr["key"], "increment_mode": incr["mode"],
-                       "increment_count": incr["increment_count"], "sorted_row_count": incr["count"]})
+                       "increment_count": incr["increment_count"], "sorted_row_count": incr["count"],
+                       "diff_target_key": incr["target_key"]})
     error = redact(error) if error else error   # 저장 전 시크릿 마스킹(§2.5)
     if error:
         marker["error"] = error

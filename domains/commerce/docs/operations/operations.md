@@ -2,22 +2,22 @@
 
 commerce 배치 운영 절차. 호스트 스택은 단일 `docker-compose.yml`(`elt-infra`, LocalExecutor,
 루트 `.env`)이므로 별도 env/프로젝트 셀렉터 없이 `docker compose exec airflow-scheduler ...`
-형태를 쓴다. DAG: `commerce_localdata_elt`.
+형태를 쓴다. DAG: `commerce_collect_raw`.
 
 ## 백필 / 재수집
 
 ```bash
 # 전체 재수집 = 그냥 한 번 더 실행(매 실행이 전체 수집). 별도 force 불필요.
 docker compose exec airflow-scheduler \
-  airflow dags trigger commerce_localdata_elt
+  airflow dags trigger commerce_collect_raw
 
 # 특정 논리일(silver 파티션 override)
 docker compose exec airflow-scheduler \
-  airflow dags trigger commerce_localdata_elt -c '{"observed_date": "2026-06-01"}'
+  airflow dags trigger commerce_collect_raw -c '{"observed_date": "2026-06-01"}'
 
 # 날짜 범위
 docker compose exec airflow-scheduler \
-  airflow dags backfill commerce_localdata_elt -s 2026-06-01 -e 2026-06-07
+  airflow dags backfill commerce_collect_raw -s 2026-06-01 -e 2026-06-07
 ```
 
 - **매 실행이 곧 전체 수집**(스킵 없음). `incomplete` 로 끝난 API 는 다음 실행에서 자연히 다시 받는다
@@ -51,11 +51,11 @@ bronze 원본이 `run_id` 폴더에 보존돼 있으므로 옛 원본으로 silv
 ```bash
 # 실패 태스크 로그
 docker compose exec airflow-scheduler \
-  airflow tasks logs commerce_localdata_elt ingest_one <run_id>
+  airflow tasks logs commerce_collect_raw ingest_one <run_id>
 
 # 특정 태스크만 재시도(상태 클리어 → 자동 재실행)
 docker compose exec airflow-scheduler \
-  airflow tasks clear commerce_localdata_elt -t ingest_one -s 2026-06-01 -e 2026-06-01
+  airflow tasks clear commerce_collect_raw -t ingest_one -s 2026-06-01 -e 2026-06-01
 ```
 
 - 태스크는 `retries=2`로 자동 재시도. Dynamic Task Mapping 으로 데이터셋 단위 실패 격리.
@@ -72,7 +72,7 @@ docker compose exec airflow-scheduler \
 | 수집 신선도 | 최신 `run_id=...` 폴더 + `_markers/_RUN.*`(`observed_date`/`rows`) 확인 |
 | 수집 메트릭 | `finalize_run` 로그·`_RUN.completed\|.incomplete`(`datasets_ok`/`incomplete_shorts`/`rows`) |
 | **API별 job 진행** | Airflow **Grid/Graph** 에서 `ingest_one[<short>]` 매핑 인스턴스로 성공/실패/대기 확인(API 이름 라벨) → [recollect-and-alerts.md](recollect-and-alerts.md) §3 |
-| 미완료 재수집 | `commerce_localdata_recollect`(6h)가 미완료 API만 자동 보강 → [recollect-and-alerts.md](recollect-and-alerts.md) §1 |
+| 미완료 재수집 | `commerce_recollect_raw`(6h)가 미완료 API만 자동 보강 → [recollect-and-alerts.md](recollect-and-alerts.md) §1 |
 
 ## service_name 검증
 

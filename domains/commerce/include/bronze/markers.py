@@ -1,6 +1,6 @@
 """run_id 폴더의 마커 조회 — 최신 실행/미완료(미수집) 항목 탐색.
 
-재수집 파이프라인(commerce_localdata_recollect)이 쓴다: 가장 최근 run 의 마커를 읽어
+재수집 파이프라인(commerce_recollect_raw)이 쓴다: 가장 최근 run 의 마커를 읽어
 `completed` 가 아닌(=incomplete/미시도) 수집 대상을 골라낸다.
 
 run_id 형식 `YYYY-MM-DD_HHMMSS_mmm` 은 사전식 정렬 = 시간순이라, 최신 = 마지막.

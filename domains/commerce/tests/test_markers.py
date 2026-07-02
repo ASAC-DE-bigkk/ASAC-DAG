@@ -20,6 +20,10 @@ class FakeStorage(Storage):
     def list_keys(self, prefix):
         return sorted(k for k in self.keys if k.startswith(prefix))
 
+    def delete(self, key):
+        if key in self.keys:
+            self.keys.remove(key)
+
 
 def test_list_and_latest_run_id_chronological():
     st = FakeStorage([

@@ -2,15 +2,15 @@
 
 bronze 저장 구조(run_id 폴더 + 마커)를 기반으로 한 운영 보조 3종.
 
-## 1. 재수집 파이프라인 (`commerce_localdata_recollect`)
+## 1. 재수집 파이프라인 (`commerce_recollect_raw`)
 
-매 실행 전체 수집하는 `commerce_localdata_elt` 와 별개로, **미완료(incomplete/미시도)인 API만
+매 실행 전체 수집하는 `commerce_collect_raw` 와 별개로, **미완료(incomplete/미시도)인 API만
 주기적으로 다시 수집**하는 안전망 DAG.
 
 - 스케줄: `0 */6 * * *`(6시간마다). 수동 트리거도 가능. `max_active_runs=1`.
 - 흐름: `find_incomplete_targets` → `ingest_one.expand` → `finalize_run`. (bronze 전용 — silver 분리)
 - **대상 선정**([../../include/bronze/markers.py](../../include/bronze/markers.py)):
-  1. `latest_run_id` — `bronze/commerce/` 아래 가장 최근 `run_id` 폴더(사전식=시간순).
+  1. `latest_run_id` — `raw/commerce/` 아래 가장 최근 `run_id` 폴더(사전식=시간순).
   2. `incomplete_targets` — 수집 대상 중 그 run 에서 **`<short>.completed` 마커가 없는** API
      (= incomplete 이거나 미시도). 이력이 없으면(첫 실행) 전체.
 - **당일 수집 대상이 없으면 수집 진행 안 함**: 대상이 빈 리스트면 `ingest_one` 이 0개로 매핑돼
@@ -29,7 +29,7 @@ bronze 저장 구조(run_id 폴더 + 마커)를 기반으로 한 운영 보조 3
 
 ```bash
 # 수동 재수집(미완료만)
-docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_recollect
+docker compose exec airflow-scheduler airflow dags trigger commerce_recollect_raw
 ```
 
 > daily 가 전체를 매번 받으므로 엄밀히는 재수집도 daily 가 흡수한다. recollect 는 **부분 실패를
@@ -70,7 +70,7 @@ except Exception as exc:
 
 `ingest_one` 은 Dynamic Task Mapping 으로 **API당 1개 태스크 인스턴스**이고,
 `map_index_template="{{ short }}"` 로 각 인스턴스를 **API(short) 이름으로 라벨링**한다
-([../../seoul_commerce_dag.py](../../seoul_commerce_dag.py)).
+([../../commerce_raw.py](../../commerce_raw.py)).
 
 → Airflow **Grid/Graph** 에서 한 실행의 내부 job 을 **API별로** 성공/실패/실행중/대기로 확인:
 
