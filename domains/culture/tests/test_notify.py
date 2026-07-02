@@ -66,8 +66,9 @@ def test_payload_fail_case_is_red_with_issue_lines():
     p = notify.build_report_payload(_sample_report(False))
     emb = p["embeds"][0]
     assert emb["color"] == notify.COLOR_FAIL
-    assert "❌ FAIL" in emb["description"]
+    assert "❌" in emb["description"]
     assert "seoul_sejong" in emb["description"]
+    assert "HTTP 500" in emb["description"]   # 실패 이유가 그 줄에 인라인
     assert len(emb["description"]) <= 4096
 
 
@@ -76,29 +77,31 @@ def test_payload_hides_iceberg_when_zero():
     assert "Iceberg" not in p["embeds"][0]["description"]
 
 
-def test_table_shows_zero_duration_not_dash_but_dash_when_missing():
-    ds_zero = {"name": "kopis_performance", "rows": 100, "pages": 1, "error": "",
-               "checks": {"passed": True, "violations": []}, "iceberg_rows": 0,
-               "duration_sec": 0.0, "finished_ts": "20260701T000010Z"}
-    ds_missing = {"name": "seoul_sejong", "rows": 50, "pages": 1, "error": "",
-                  "checks": {"passed": True, "violations": []}, "iceberg_rows": 0,
-                  "finished_ts": "20260701T000011Z"}
-    report = {"load_date": "2026-07-02", "ingest_ts": "20260701T000007Z",
-              "run_id": "scheduled__x", "slo_passed": True,
-              "coverage": {"expected": 2, "landed": 2, "skipped": 0, "failed": 0, "coverage_pct": 100.0},
-              "total_rows": 150, "total_iceberg_rows": 0,
-              "freshness": {"max_age_hours": 0.3}, "violations": [], "failed_datasets": [],
-              "datasets": [ds_zero, ds_missing]}
-
-    p = notify.build_report_payload(report)
+def test_dataset_line_has_korean_name_slug_and_rows():
+    p = notify.build_report_payload(_sample_report(True))
     desc = p["embeds"][0]["description"]
-    lines = desc.split("\n")
+    line = next(l for l in desc.split("\n") if "kopis_performance" in l)
+    assert "공연목록" in line              # 한글 서비스명
+    assert "`kopis_performance`" in line   # 영어 slug (인라인 코드 = 코드 점프용)
+    assert "1,204행" in line              # rows
+    assert "(pblprfr)" not in line         # 괄호(엔드포인트) 노이즈 제거됨
 
-    zero_line = next(l for l in lines if "kopis_performance" in l)
-    missing_line = next(l for l in lines if "seoul_sejong" in l)
 
-    assert zero_line.split()[4] == "0.0"
-    assert missing_line.split()[4] == "--"
+def test_warn_line_includes_violation_reason():
+    ds_warn = {"name": "seoul_sema_exhibition", "rows": 18, "pages": 1, "error": "",
+               "checks": {"passed": False, "violations": ["completeness"]},
+               "iceberg_rows": 0, "duration_sec": 0.4, "finished_ts": "20260701T000010Z"}
+    report = {"load_date": "2026-07-02", "ingest_ts": "20260701T000007Z", "run_id": "x",
+              "slo_passed": False,
+              "coverage": {"expected": 1, "landed": 1, "skipped": 0, "failed": 0, "coverage_pct": 100.0},
+              "total_rows": 18, "total_iceberg_rows": 0, "freshness": {"max_age_hours": 0.3},
+              "violations": [{"dataset": "seoul_sema_exhibition", "violation": "완전성 미달(<20)"}],
+              "failed_datasets": [], "datasets": [ds_warn]}
+    line = next(l for l in notify.build_report_payload(report)["embeds"][0]["description"].split("\n")
+                if "seoul_sema_exhibition" in l)
+    assert line.startswith("⚠️")
+    assert "완전성 미달(<20)" in line
+    assert "18행" in line
 
 
 def test_discord_send_does_not_log_url_on_failure(monkeypatch, caplog):

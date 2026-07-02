@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -105,31 +106,35 @@ def _status(s: dict) -> str:
     return "ok"
 
 
-def _table(datasets: list[dict]) -> str:
-    lines = [f"{'st':<4}  {'rows':>6}  {'pages':>6}  {'done':<8}  {'sec':>5}  dataset"]
-    for s in datasets:
-        done = _kst_hms(s["finished_ts"]) if s.get("finished_ts") else "--"
-        dur = s.get("duration_sec")
-        sec = f"{float(dur):.1f}" if dur is not None else "--"
-        lines.append(
-            f"{_status(s):<4}  {_fmt_int(s.get('rows')):>6}  {_fmt_int(s.get('pages')):>6}  "
-            f"{done:<8}  {sec:>5}  {_title_of(s['name'])} · {s['name']}"
-        )
-    return "\n".join(lines)
+def _display_name(name: str) -> str:
+    # 한글 서비스명에서 엔드포인트/OA번호 괄호를 떼어 짧게. 예: "공연목록(pblprfr)" -> "공연목록"
+    return re.sub(r"\s*\([^)]*\)", "", _title_of(name)).strip()
 
 
-def _issue_lines(report: dict, datasets: list[dict]) -> list[str]:
-    out = []
-    for f in report.get("failed_datasets", []):
-        out.append(f"❌ FAIL — {_title_of(f['dataset'])}({f['dataset']}): {str(f.get('error',''))[:200]}")
-    for v in report.get("violations", []):
-        out.append(f"⚠️ 위반 — {_title_of(v['dataset'])}({v['dataset']}): {v['violation']}")
-    for s in datasets:
+_EMOJI = {"ok": "✅", "WARN": "⚠️", "FAIL": "❌", "skip": "⏭️"}
+
+
+def _dataset_line(s: dict, viol_by_ds: dict, err_by_ds: dict) -> str:
+    """데이터셋 1개 = 한 줄. 한글명 + `slug`(코드 점프용) + rows, 문제면 이유까지.
+
+    코드블록/컬럼정렬 대신 플레인 텍스트 한 줄이라, 좁은 화면에서 접혀도 안 깨진다.
+    """
+    name = s["name"]
+    st = _status(s)
+    head = f"{_EMOJI.get(st, '•')} {_display_name(name)} `{name}`"
+    if st == "FAIL":
+        reason = err_by_ds.get(name) or s.get("error") or "실패"
+        return f"{head} — 실패: {str(reason)[:120]}"
+    if st == "skip":
+        return f"{head} — 건너뜀"
+    line = f"{head} · {_fmt_int(s.get('rows'))}행"
+    if st == "WARN":
         ib = s.get("iceberg_rows", 0)
-        if ib and ib != s.get("rows", 0):
-            out.append(f"⚠️ Iceberg 불일치 — {_title_of(s['name'])}({s['name']}): "
-                       f"raw {_fmt_int(s.get('rows'))} ≠ iceberg {_fmt_int(ib)}")
-    return out
+        reason = viol_by_ds.get(name)
+        if not reason and ib and ib != s.get("rows", 0):
+            reason = f"Iceberg 불일치 {_fmt_int(s.get('rows'))} ≠ {_fmt_int(ib)}"
+        line += f" — {reason or '경고'}"
+    return line
 
 
 def build_report_payload(report: dict) -> dict:
@@ -137,18 +142,15 @@ def build_report_payload(report: dict) -> dict:
     cov = report.get("coverage", {})
     passed = report.get("slo_passed", False)
 
-    start = _kst_hms(report.get("ingest_ts", ""))
     finish_tss = [s["finished_ts"] for s in datasets if s.get("finished_ts")]
+    start = _kst_hms(report.get("ingest_ts", ""))
     finish = _kst_hms(max(finish_tss)) if finish_tss else "--"
     dur = _run_duration(report.get("ingest_ts", ""), finish_tss)
 
-    line1 = f"수집 {start} → 완료 {finish} KST · 소요 {dur}"
     parts = [
         f"커버리지 {cov.get('landed', 0)}/{cov.get('expected', 0)}",
-        f"landed {cov.get('landed', 0)}",
-        f"skipped {cov.get('skipped', 0)}",
-        f"failed {cov.get('failed', 0)}",
-        f"records {int(report.get('total_rows', 0)):,}",
+        f"{int(report.get('total_rows', 0)):,}행",
+        f"소요 {dur}",
     ]
     ib_total = report.get("total_iceberg_rows", 0)
     if ib_total:
@@ -157,16 +159,19 @@ def build_report_payload(report: dict) -> dict:
     if fresh is not None:
         parts.append(f"freshness {fresh}h")
 
-    desc = f"{line1}\n{' · '.join(parts)}\n```\n{_table(datasets)}\n```"
-    issues = _issue_lines(report, datasets)
-    if issues:
-        desc += "\n" + "\n".join(issues)
+    viol_by_ds = {v["dataset"]: v["violation"] for v in report.get("violations", [])}
+    err_by_ds = {f["dataset"]: f["error"] for f in report.get("failed_datasets", [])}
+    lines = [_dataset_line(s, viol_by_ds, err_by_ds) for s in datasets]
+
+    desc = " · ".join(parts) + "\n\n" + "\n".join(lines)
 
     return {
         "embeds": [{
             "title": f"culture raw 적재 리포트 · {report.get('load_date', '')} (KST)",
             "color": COLOR_PASS if passed else COLOR_FAIL,
             "description": desc[:4096],
-            "footer": {"text": f"run_id={report.get('run_id', '')} · @daily"},
+            "footer": {
+                "text": f"수집 {start} → 완료 {finish} KST · run_id={report.get('run_id', '')} · @daily"
+            },
         }]
     }
