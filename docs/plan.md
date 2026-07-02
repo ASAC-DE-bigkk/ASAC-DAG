@@ -53,10 +53,14 @@
 
 - [x] Step 0 — 스캐폴딩: `dags/common/`, `dags/docs/`, 본 계획 문서 생성
 - [ ] Step 0.5 — 계약(contract) 통일 (코드 통합 전 선행):
-  - [ ] 서울 API 키 환경변수 이름 통합 → [plans/2026-07-02-feat-env-key-unification.md](plans/2026-07-02-feat-env-key-unification.md)
-  - [ ] DAG 네이밍 규칙 정의·적용 → [plans/2026-07-02-feat-dag-naming-convention.md](plans/2026-07-02-feat-dag-naming-convention.md)
+  - [x] 서울 API 키 환경변수 이름 통합 → [plans/2026-07-02-feat-env-key-unification.md](plans/2026-07-02-feat-env-key-unification.md) (PR #72 리뷰 중)
+  - [x] DAG 네이밍 규칙 정의·적용 → [plans/2026-07-02-feat-dag-naming-convention.md](plans/2026-07-02-feat-dag-naming-convention.md) (PR #74 리뷰 중)
+  - [ ] 저장 계약(테이블·경로) 네이밍 → 이슈 #75 (조사·합의 대기)
+  - [ ] 환경변수 관리 Infisical 전환 → [plans/2026-07-02-feat-infisical-secrets.md](plans/2026-07-02-feat-infisical-secrets.md) (기획 초안)
 - [ ] Step 1 — 관심사별 상세 비교 분석 (도메인별 구현 차이·의도 파악)
-- [ ] Step 2 — 통합 우선순위 및 인터페이스 합의 (TBD)
+- [ ] Step 2 — 통합 우선순위 및 인터페이스 합의:
+  - [ ] 공통 HTTP 클라이언트 기획 → [plans/2026-07-02-feat-common-http-client.md](plans/2026-07-02-feat-common-http-client.md)
+  - [ ] 공통 에러 모듈 기획 (RFC 9457 + R2) → [plans/2026-07-02-feat-common-error-module.md](plans/2026-07-02-feat-common-error-module.md)
 - [ ] Step 3 — 관심사 단위 통합 + 도메인별 전환 (TBD)
 - [ ] Step 4 — 중복 코드 제거 및 문서화 (TBD)
 
