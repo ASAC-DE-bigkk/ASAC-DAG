@@ -1,7 +1,7 @@
 """Airflow DAG: population 도메인 bronze(원본) 적재.
 
 서울시 실시간 도시데이터 인구혼잡도(citydata_ppltn) 121개 장소를 5분마다 수집해,
-원본 응답을 R2 ``bronze/population/`` 아래 아카이브하고 Iceberg bronze 테이블에
+원본 응답을 R2 ``raw/population/`` 아래 아카이브하고 Iceberg bronze 테이블에
 **원본 payload + 메타데이터**로 적재한다(필드 분해는 silver/dbt 몫; ``ppltn_ingest`` 참고).
 
 시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가 ``SEOUL_API_KEY_PPLT``,
