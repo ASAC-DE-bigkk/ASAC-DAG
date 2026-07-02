@@ -3,7 +3,7 @@
 `transit_bus_elt` DAG 가 수집하는 **서울 TOPIS 버스 실시간 API** 와 필드를 정리한다.
 지하철과 달리 **응답이 XML → 원본 그대로 보존**(파싱=silver/dbt). 필드는 실호출 기준(2026-06-30).
 
-- 인증키: `PUBLIC_DATA_API_DE` (공공데이터포털 Decoding) — **URL 인코딩 필수**
+- 인증키: `PUBLIC_DATA_API_KEY_BUS` (공공데이터포털 Decoding) — **URL 인코딩 필수**
 - 수집 코드: [`seoul_transit/bus.py`](../seoul_transit/bus.py) · [`api.py`](../seoul_transit/api.py)
 
 ## 사용 API (정식 명칭, ws.bus.go.kr)
@@ -25,7 +25,7 @@
 | `bus_arrival` | 도착 | 간선 146·361·472·143·100 (=`100100025,100100454,100100075,100100022,100100549`) | `BUS_ROUTES` |
 | `bus_position` | 위치 | 〃 | 〃 |
 
-- **호출량**: 5노선 × 2API = **10콜/런**. `*/20`(72런/일) → **720콜/일**. 버스 키는 `SEOUL_API` 와 **별도 쿼터**.
+- **호출량**: 5노선 × 2API = **10콜/런**. `*/20`(72런/일) → **720콜/일**. 버스 키는 `SEOUL_API_KEY_TRAN` 와 **별도 쿼터**.
 - 전 노선은 호출량 큼 → 핵심 노선만. `BUS_ROUTES` 로 조정, busRouteId 는 노선목록 API 로 확보.
 
 ---
