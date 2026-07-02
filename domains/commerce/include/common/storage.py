@@ -26,6 +26,9 @@ class Storage(ABC):
     @abstractmethod
     def list_keys(self, prefix: str) -> list[str]: ...
 
+    @abstractmethod
+    def delete(self, key: str) -> None: ...   # feat/59: 실패 파편 정리(한 파일 관리)
+
     # ── helpers ──
     def write_text(self, key: str, text: str) -> None:
         self.write_bytes(key, text.encode("utf-8"))
@@ -71,6 +74,9 @@ class LocalStorage(Storage):
         return sorted(str(p.relative_to(self.root)).replace("\\", "/")
                       for p in base.rglob("*") if p.is_file())
 
+    def delete(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
+
 
 class R2Storage(Storage):
     """Cloudflare R2(S3 호환) — **boto3**(호스트 이미지에 기본 포함). 객체키는 <key>(버킷 분리).
@@ -114,6 +120,9 @@ class R2Storage(Storage):
                 Bucket=self.bucket, Prefix=prefix):
             keys.extend(obj["Key"] for obj in page.get("Contents", []))
         return sorted(keys)
+
+    def delete(self, key: str) -> None:
+        self._s3.delete_object(Bucket=self.bucket, Key=key)
 
 
 def get_storage() -> Storage:

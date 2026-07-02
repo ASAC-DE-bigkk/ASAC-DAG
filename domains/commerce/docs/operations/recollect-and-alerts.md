@@ -17,6 +17,16 @@ bronze 저장 구조(run_id 폴더 + 마커)를 기반으로 한 운영 보조 3
   아무것도 호출하지 않고, `finalize_run` 이 `_RUN` 마커도 쓰지 않아 **run 폴더가 생기지 않는다**.
 - 재수집분은 **새 `run_id` 폴더**에 그 API들만 적재(기존 run 폴더는 불변).
 
+### 1-a. 재수집 규칙 (feat/59)
+
+- **동일자 수동 재실행 → 성공분 제외**: daily 를 같은 KST 날짜에 (수동) 다시 실행하면, 그날 이미
+  `completed` 인 API 는 다시 수집하지 않는다(`plan_excluding_same_day_completed`).
+- **KST 일자변경 가드**: recollect 는 최근 run 의 incomplete 중 **run 의 KST 날짜가 오늘과 같은** 것만
+  대상으로 한다(`recollect_targets_same_day`). 한국시간 기준 일자가 바뀌면(최근 run 이 이전 날) 그 정보는
+  **다른 일자**라 재수집하지 않는다 — 새 일자 수집이 처리.
+- **한 파일 관리(option 2)**: 재수집이 성공하면, **같은 KST 일자**의 이전 실패 run 파편(파일·incomplete
+  마커)을 `cleanup_incomplete` 로 삭제해 API당 하나로 유지한다(다른 일자는 건드리지 않음).
+
 ```bash
 # 수동 재수집(미완료만)
 docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_recollect

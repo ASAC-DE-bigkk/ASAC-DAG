@@ -7,6 +7,26 @@
 
 ## 2026-07-02
 
+### 18. 재수집 규칙 변경 — 동일자 성공분 제외·KST 일자 가드·한 파일 관리 (feat/59-recollect-rule-change)
+request:
+- **동일자 수동 재실행**: 같은 날짜에 수동 실행 이력이 있으면, 실행 전에 **이미 성공한 API 는 제외**하고
+  수집한다.
+- **recollect run_id 관리**: 실패분을 재수집할 때 (1) run_id 를 동일하게 맞춰 재수집하거나, (2) 기존 실패
+  파일을 삭제하고 별도 run_id 로 재수집하여 **하나의 파일로 관리**되게 한다.
+- **KST 일자변경 가드**: recollect 라도 **한국시간(UTC면 보정, KST면 그대로) 기준 일자가 바뀌면** 사실상
+  다른 일자 정보라서 그 정보는 재수집하지 않는다.
+- 브랜치 feat/59-recollect-rule-change (feat/58 기반).
+response:
+- **markers.py**: `run_date`(run_id→KST 날짜), `completed_shorts_on_date`,
+  `plan_excluding_same_day_completed`(동일 KST 일자 completed 제외),
+  `recollect_targets_same_day`(최근 run 의 incomplete 중 **KST 오늘과 같은 날짜만**, 날짜 바뀌면 빈 리스트),
+  `cleanup_incomplete`(성공 run 제외 **같은 KST 일자** 실패 파편 삭제 — option2 한 파일). `common/storage.py`
+  에 `delete` 추가(ABC/Local/R2).
+- **DAG 배선**: daily `plan_all_targets`→동일자 성공분 제외, recollect `find_incomplete_targets`→KST 가드,
+  `ingest_one`→성공 시 같은 일자 실패 파편 `cleanup_incomplete`(한 파일).
+- **검증**: 단위테스트 **6 통과**(run_date·동일자 제외·전날 미제외·KST 가드·cleanup 유지/타일자 보존). DAG 구문 OK.
+- **미검증(정직)**: end-to-end 는 실제 DAG 실행(Airflow) 필요 — 오프라인 단위테스트까지.
+
 ### 17. bronze 증분화 코어 — 정렬·검증키·diff (feat/58-commerce-bronze-sort-diff)
 request:
 - bronze 수집이 매 실행 전체를 다시 받는 문제를 해소한다. 각 API 파일에서 UPDATEDT 존재를 먼저
