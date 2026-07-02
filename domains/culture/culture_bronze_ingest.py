@@ -42,6 +42,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
     ingest_one,
     write_run_report,
 )
+from culture_ingest.common.notify import build_report_payload, notifier_from_env  # noqa: E402
 
 KST = "Asia/Seoul"
 
@@ -204,6 +205,12 @@ def _report(**context) -> None:
         print(f"[culture bronze] run report -> {key}")
     except Exception as exc:  # noqa: BLE001 -- 리포트 적재 실패가 run 판정을 가리지 않게
         print(f"[culture bronze] run report 적재 실패(무시): {exc}")
+
+    # Discord 완료 알림(best-effort) — URL 없으면 no-op. 알림 실패는 삼킨다(파이프라인 보호).
+    try:
+        notifier_from_env().send(build_report_payload(report))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[culture raw] discord 알림 실패(무시): {type(exc).__name__}")
 
     # 런타임 신뢰성 게이트(opt-in): fail_on_violation=True일 때만 위반 시 run 실패.
     # 기본은 surface 전용 — 계약 v0가 안정화되기 전 거짓 경보를 피한다.
