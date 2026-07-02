@@ -16,6 +16,8 @@ import logging
 import time
 from dataclasses import dataclass
 
+from security import redact   # 시크릿 마스킹(로그/예외 메시지 → 마커 저장 시 키 누출 차단)
+
 log = logging.getLogger(__name__)
 
 CODE_OK = "INFO-000"
@@ -80,7 +82,7 @@ class SeoulOpenApiClient:
     def __init__(self, key: str, base_url: str, *, timeout: int = 30,
                  max_attempts: int = 3, backoff_seconds: float = 2.0) -> None:
         if not key:
-            raise SeoulAuthError("INFO-100", "SEOUL_OPENAPI_KEY 미설정", "<config>")
+            raise SeoulAuthError("INFO-100", "SEOUL_API_KEY_COMM 미설정", "<config>")
         import requests  # 지연 임포트
 
         self._key = key
@@ -110,8 +112,12 @@ class SeoulOpenApiClient:
                 raise  # API 레벨 오류는 재시도 안 함
             except (requests.RequestException, ValueError) as exc:
                 last_exc = exc
+                # requests 예외 메시지엔 인증키가 박힌 URL 이 들어갈 수 있어 마스킹 후 기록.
                 log.warning("fetch attempt %d/%d failed for %s: %s", attempt,
-                            self._max_attempts, self._safe_url(service, start, end), exc)
+                            self._max_attempts, self._safe_url(service, start, end),
+                            redact(str(exc)))
                 if attempt < self._max_attempts:
                     time.sleep(self._backoff * attempt)
-        raise SeoulApiError("ERROR-NETWORK", f"max retries exceeded: {last_exc}", service)
+        # 이 메시지는 bronze 마커(error 필드)로 영구 저장되므로 반드시 마스킹한다.
+        raise SeoulApiError("ERROR-NETWORK",
+                            f"max retries exceeded: {redact(str(last_exc))}", service)

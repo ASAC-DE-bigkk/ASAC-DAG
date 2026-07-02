@@ -77,7 +77,7 @@ calls(dataset) = ceil(list_total_count / SEOUL_PAGE_SIZE)   # SEOUL_PAGE_SIZE = 
 1회 전체 수집     1,361 회
 ```
 
-- 39종 모두 `daily` 라 **`seoul_commerce_daily` 1회 = 1,361 회**. `monthly`/`irregular` 주기는
+- 39종 모두 `daily` 라 **`commerce_localdata_elt` 1회 = 1,361 회**. `monthly`/`irregular` 주기는
   인허가 대상이 0종이라 **DAG 비활성**(인허가 외 2종 격리: [../non-license-datasets.md](../non-license-datasets.md)).
 - 인허가는 과거 시점 스냅샷이 없어 **매 `observed_date` 마다 전체 재수집** →
   일 단위로 약 **1,361 회/일**, 월 약 **~40,830 회/월**.
@@ -98,12 +98,12 @@ calls(dataset) = ceil(list_total_count / SEOUL_PAGE_SIZE)   # SEOUL_PAGE_SIZE = 
 ## 재산정 (건수 변동 시)
 
 ```bash
-# .env.commerce 에 SEOUL_OPENAPI_KEY 설정 후 (configuration.md)
+# .env.commerce 에 SEOUL_API_KEY_COMM 설정 후 (configuration.md)
 PYTHONPATH=dags/domains/commerce/include python - <<'PY'
 import json, math, urllib.request, os
 from common.env import load_commerce_env; load_commerce_env()
 from common import registry
-KEY=os.environ["SEOUL_OPENAPI_KEY"]; BASE="http://openapi.seoul.go.kr:8088"
+KEY=os.environ["SEOUL_API_KEY_COMM"]; BASE="http://openapi.seoul.go.kr:8088"
 tot=0
 for d in registry.enabled_for_schedule("daily"):
     raw=urllib.request.urlopen(f"{BASE}/{KEY}/json/{d.service_name}/1/1/",timeout=30).read()

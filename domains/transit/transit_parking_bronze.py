@@ -126,7 +126,7 @@ def ingest_parking() -> dict:
 
 
 with DAG(
-    dag_id="transit_parking_elt",
+    dag_id="transit_parking_bronze",
     description="서울 공영주차 실시간 점유(GetParkingInfo) → R2 객체 + Iceberg bronze. silver 는 ASAC-DBT.",
     start_date=datetime(2026, 1, 1),
     schedule=config.schedule_for("parking", "*/20 * * * *"),

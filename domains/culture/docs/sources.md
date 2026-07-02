@@ -56,7 +56,7 @@ culture가 채택한 **12개 데이터셋**(KOPIS 6 + 서울 열린데이터 6).
 
 ### 서울 열린데이터광장 (JSON)
 
-- **Base**: `http://openapi.seoul.go.kr:8088` · URL 형식 `/{SEOUL_OPENAPI_KEY}/json/{service}/{start}/{end}/`.
+- **Base**: `http://openapi.seoul.go.kr:8088` · URL 형식 `/{SEOUL_API_KEY_CULT}/json/{service}/{start}/{end}/`.
 - **결과 코드**: `RESULT.CODE`가 `INFO-000`(정상)·`INFO-200`(데이터 없음, 정상 종료로 간주)만 통과,
   그 외는 `SeoulError`.
 - **1000행 윈도우 페이징** — 한 요청은 최대 1000행. 첫 윈도우 응답의 `list_total_count`로 전체

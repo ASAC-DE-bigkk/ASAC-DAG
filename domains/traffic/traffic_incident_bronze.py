@@ -34,7 +34,7 @@ from traffic_ingest.common.runtime import (  # noqa: E402
 def traffic_dag_schedule() -> str | None:
     if "ASK_SEOUL_TRAFFIC_DAG_SCHEDULE" in os.environ:
         return os.environ["ASK_SEOUL_TRAFFIC_DAG_SCHEDULE"] or None
-    return "* * * * *" if is_dev_target() else None
+    return "*/5 * * * *" if is_dev_target() else None
 
 
 def ingest_seoul_traffic_incident(**context) -> dict:
@@ -94,7 +94,7 @@ def verify_seoul_traffic_bronze_runtime(**context) -> int:
 
 
 with DAG(
-    dag_id="seoul_traffic_incident_bronze",
+    dag_id="traffic_incident_bronze",
     description="Loads Seoul TOPIS AccInfo XML into R2 and validates the Iceberg bronze runtime.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=traffic_dag_schedule(),

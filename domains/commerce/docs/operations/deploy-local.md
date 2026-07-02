@@ -18,7 +18,7 @@ cd dags/domains/commerce
 Copy-Item .env.commerce.example .env.commerce
 ```
 
-- `SEOUL_OPENAPI_KEY` 입력(**필수**) — 없으면 `check_api_key` 게이트에서 전체 실패.
+- 루트 `.env` 에 `SEOUL_API_KEY_COMM` 입력(**필수**, #70 이관) — 없으면 `check_api_key` 게이트에서 전체 실패.
 - `STORAGE_BACKEND=local`(기본), `LOCAL_DATA_ROOT=/opt/airflow/data` 확인.
 - 전체 변수: [configuration.md](../configuration/configuration.md).
 
@@ -38,12 +38,12 @@ docker compose ps
 
 ## 3. 파이프라인 실행
 
-UI 에서 `seoul_commerce_daily` 토글 ON → ▶. 또는:
+UI 에서 `commerce_localdata_elt` 토글 ON → ▶. 또는:
 
 ```bash
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_daily
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt
 docker compose exec airflow-scheduler \
-  airflow dags trigger seoul_commerce_daily -c '{"observed_date":"2026-06-01"}'
+  airflow dags trigger commerce_localdata_elt -c '{"observed_date":"2026-06-01"}'
 ```
 
 ## 4. 산출물 확인
@@ -60,9 +60,10 @@ docker compose exec airflow-scheduler sh -lc 'find /opt/airflow/data -maxdepth 4
 
 ## 5. 의존성 주의 (silver)
 
-silver(parquet) 태스크는 `pandas`/`pyarrow` 가 필요하다. 호스트 이미지에 없으면
-`build_silver_one` 이 실패한다 → [requirements.txt](../../requirements.txt) 설치(호스트 변경, 합의 후).
-bronze 만 검증하려면 silver 실패는 무시 가능(bronze 결과는 run_id 폴더의 마커에 남는다).
+현재 DAG 라인은 **bronze 전용**이라 실행에 `pandas`/`pyarrow` 가 필요 없다. silver 가공 로직
+([../../include/silver/](../../include/silver/))은 보존되어 있으나 DAG 에 와이어링되어 있지 않다.
+silver 로직을 직접 돌리거나 향후 별도 DAG 로 붙일 때는 `pandas`/`pyarrow` 가 필요하므로
+[requirements.txt](../../requirements.txt) 설치(호스트 변경, 합의 후).
 
 ## 6. 정리
 
@@ -81,7 +82,7 @@ PYTHONPATH=dags/domains/commerce/include python -m pytest dags/domains/commerce/
 
 | 증상 | 원인/조치 |
 |---|---|
-| `check_api_key` 실패 | `.env.commerce` 의 `SEOUL_OPENAPI_KEY` 미설정/오타 |
+| `check_api_key` 실패 | 루트 `.env` 의 `SEOUL_API_KEY_COMM` 미설정/오타(#70 이관) |
 | DAG 안 보임 | `docker compose logs airflow-dag-processor` 에서 import 에러 확인 |
-| `build_silver_one` 실패 | 이미지에 `pandas`/`pyarrow` 없음 → requirements 설치 |
+| silver 로직 실행 시 import 에러 | 이미지에 `pandas`/`pyarrow` 없음 → requirements 설치(현 DAG 라인은 bronze 전용이라 불필요) |
 | 산출물이 사라짐 | local 볼륨 미마운트(위 §4 영속성) → r2 사용 |

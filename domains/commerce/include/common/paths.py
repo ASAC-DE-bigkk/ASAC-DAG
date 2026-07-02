@@ -18,6 +18,7 @@ import re
 BRONZE_LAYER = "bronze/commerce"
 SILVER_LAYER = "silver/commerce"
 MARKERS_DIR = "_markers"
+DIFF_TARGET_DIR = "_diff_target"   # API별 롤링 diff-target(최신 정렬 전체본) — run_id 무관, 매일 교체
 # 마커 타입(API당 1개, 상호배타): 완료 / 미완료(부분·실패)
 MARKER_COMPLETED = "completed"
 MARKER_INCOMPLETE = "incomplete"
@@ -71,3 +72,13 @@ def bronze_run_marker_key(*, prefix: str = "", run_id: str, status: str) -> str:
 def silver_key(*, prefix: str = "", short: str, observed_date: str,
                filename: str = "part-000.parquet") -> str:
     return f"{_root(prefix, SILVER_LAYER)}/{short}/observed_date={observed_date}/{filename}"
+
+
+def bronze_diff_target_key(*, prefix: str = "", short: str, ext: str = "jsonl") -> str:
+    """API별 롤링 diff-target(최신 정렬 전체본). 다음날 비교 기준 — 매일 오늘본으로 교체."""
+    return f"{_root(prefix, BRONZE_LAYER)}/{DIFF_TARGET_DIR}/{short}.{ext}"
+
+
+def bronze_diff_target_keyfile(*, prefix: str = "", short: str) -> str:
+    """diff-target 의 검증키(sha256) 사이드카. 동일성 비교를 파일 재파싱 없이 하기 위함."""
+    return f"{_root(prefix, BRONZE_LAYER)}/{DIFF_TARGET_DIR}/{short}.key"

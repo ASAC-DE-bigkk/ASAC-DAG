@@ -4,7 +4,7 @@ culture bronze 수집이 **어떻게(오케스트레이션)** 돌고 **어디에
 
 ## 1. 오케스트레이션 전략 (Airflow 레벨)
 
-DAG [`culture_bronze_ingest`](../culture_bronze_ingest.py) (스케줄 `@daily`). 태스크 흐름:
+DAG [`culture_bronze`](../culture_bronze.py) (스케줄 `@daily`). 태스크 흐름:
 
 ```text
 plan ──▶ ingest_dataset (12개 동적 매핑 · 병렬) ──▶ report (all_done)
@@ -59,12 +59,12 @@ raw와 bronze Iceberg를 둘 다 남기는 이유: raw는 재처리용 **원본 
 
 ## 2. 코드 지도 (패키지·모듈)
 
-`culture_bronze_ingest.py`(DAG 엔트리)는 얇게 흐름만 잡고, 로직은 `culture_ingest/` 패키지에
+`culture_bronze.py`(DAG 엔트리)는 얇게 흐름만 잡고, 로직은 `culture_ingest/` 패키지에
 위임한다. **common**(도메인 무관 프레임워크) vs **source**(culture 전용)로 나뉜다.
 
 | 파일 | 역할 |
 |------|------|
-| [`culture_bronze_ingest.py`](../culture_bronze_ingest.py) | 일배치 DAG. `plan → ingest_dataset → report`. |
+| [`culture_bronze.py`](../culture_bronze.py) | 일배치 DAG. `plan → ingest_dataset → report`. |
 | [`culture_ingest/common/config.py`](../culture_ingest/common/config.py) | R2 접속정보(dev/prod), `.env` 파싱, `RunContext`, 키 prefix, `normalize_target`. |
 | [`culture_ingest/common/http.py`](../culture_ingest/common/http.py) | 429/5xx 재시도 `requests` 세션, 페이지 묶음 `Page`. |
 | [`culture_ingest/common/landing.py`](../culture_ingest/common/landing.py) | R2/로컬 싱크, 페이지·`_manifest.json` 기록, 결과 `DatasetResult`. |
@@ -72,7 +72,7 @@ raw와 bronze Iceberg를 둘 다 남기는 이유: raw는 재처리용 **원본 
 | [`culture_ingest/common/warehouse.py`](../culture_ingest/common/warehouse.py) | bronze Iceberg 테이블 생성/적재(`BronzeWarehouse`, Trino HTTP). → [storage.md](storage.md) |
 | [`culture_ingest/source/config.py`](../culture_ingest/source/config.py) | 적재 루트 `bronze/culture`, 소스 API 키 로딩. |
 | [`culture_ingest/source/clients.py`](../culture_ingest/source/clients.py) | KOPIS(XML)·서울(JSON) HTTP 클라이언트. 원본 bytes만 받음. |
-| [`culture_ingest/source/datasets.py`](../culture_ingest/source/datasets.py) | 12데이터셋 레지스트리(단일 진실 원천). → [sources.md](sources.md) |
+| [`culture_ingest/source/datasets.py`](../culture_ingest/source/datasets.py) | 12데이터셋 레지스트리(단일 진실 원천 — 데이터셋 추가 = 여기 한 줄). → [sources.md](sources.md) |
 | [`culture_ingest/source/ingest.py`](../culture_ingest/source/ingest.py) | 적재 오케스트레이션(`run_batch`/`ingest_one`), run 리포트 빌드. |
 | [`scripts/run_culture_ingest.py`](../scripts/run_culture_ingest.py) | Airflow 없이 로컬 실행 CLI. → [operations.md](operations.md) |
 

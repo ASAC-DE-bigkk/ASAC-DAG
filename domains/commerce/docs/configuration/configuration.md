@@ -24,7 +24,8 @@ DAG([../seoul_commerce_dag.py](../../seoul_commerce_dag.py))가 임포트될 때
 ```
 
 - `setdefault` 의미라 **배포 환경이 직접 준 값이 항상 우선**한다. commerce 전용으로 빠진
-  값(`SEOUL_OPENAPI_KEY`, `STORAGE_BACKEND` 등)만 `.env.commerce` 가 메운다.
+  값(`STORAGE_BACKEND` 등)만 `.env.commerce` 가 메운다. 인증키 `SEOUL_API_KEY_COMM` 은
+  **루트 `.env` 소관**(ASAC-DAG#70 이관) — `.env.commerce` 에 두지 않는다.
 - 파일이 없어도 조용히 통과(배포가 env 를 직접 주입하는 경우를 막지 않음).
 - 경로 override: `COMMERCE_ENV_FILE=/path/to/file`.
 - 값(시크릿)은 로그에 남기지 않는다 — 적용 **개수만** 기록(CLAUDE.md §2.5).
@@ -60,7 +61,7 @@ R2_SECRET_ACCESS_KEY=${R2_DEV_SECRET_ACCESS_KEY}
 ```bash
 cd dags/domains/commerce
 cp .env.commerce.example .env.commerce     # PowerShell: Copy-Item
-# SEOUL_OPENAPI_KEY 를 채운다(필수). R2 쓰면 R2_* 확인.
+# 인증키는 루트 .env 에 SEOUL_API_KEY_COMM 으로 채운다(필수, #70). R2 쓰면 R2_* 확인.
 ```
 
 `.env.commerce` 는 이 번들의 [.gitignore](../../.gitignore) 로 커밋 제외(시크릿),
@@ -78,7 +79,7 @@ cp .env.commerce.example .env.commerce     # PowerShell: Copy-Item
 
 | 변수 | 기본값 | 필수 | 설명 |
 |---|---|---|---|
-| `SEOUL_OPENAPI_KEY` | (없음) | **예** | 인증키. **환경이 바뀌며 루트 `.env` 에서 누락된 값** — 반드시 채워야 bronze 수집 가능. 로그/경로/메타에 노출 금지 |
+| `SEOUL_API_KEY_COMM` | (없음) | **예** | 인증키. **루트 `.env` 에서 주입**(ASAC-DAG#70 이관, `SEOUL_API_KEY_<도메인>` 규칙) — 반드시 채워야 bronze 수집 가능. 로그/경로/메타에 노출 금지 |
 | `SEOUL_OPENAPI_BASE_URL` | `http://openapi.seoul.go.kr:8088` | 아니오 | API 베이스 URL |
 | `SEOUL_PAGE_SIZE` | `1000` | 아니오 | 1회 조회 건수(서울 상한 1000으로 캡) |
 | `SEOUL_MAX_PAGES` | (없음)=무제한 | 아니오 | **비우면/미설정=무제한**(끝까지 순회). 일반 API 는 호출 횟수 제한 없음. `>0`=부분 수집(개발용), `0`·음수도 무제한 |
@@ -120,7 +121,7 @@ cp .env.commerce.example .env.commerce     # PowerShell: Copy-Item
 
 | commerce 가 읽는 키 | 루트 `.env` 상태 | `.env.commerce` 가 메움 |
 |---|---|---|
-| `SEOUL_OPENAPI_KEY` | **없음** | ✅ (값은 직접 입력) |
+| `SEOUL_API_KEY_COMM` | **있음**(#70 에서 이관, 값 직접 입력) | — (루트 소관) |
 | `STORAGE_BACKEND` | 없음 | ✅ `local` |
 | `R2_BUCKET` | `R2_DEV_BUCKET_NAME`/`R2_BUCKET_NAME` 으로 이름 다름 | ✅ `${R2_DEV_BUCKET_NAME}` 참조로 이름 매핑 |
 | `SCHEMA_VERSION`/`LOCAL_DATA_ROOT`/`SEOUL_*`/`R2_REGION` | 없음 | ✅ 리터럴 |
@@ -154,7 +155,7 @@ PYTHONPATH=dags/domains/commerce/include \
 
 # 2) 인증키/서비스명 검증(컨테이너)
 docker compose exec airflow-scheduler \
-  python -m bronze.resolve verify        # SEOUL_OPENAPI_KEY 적재 후 39종 점검
+  python -m bronze.resolve verify        # SEOUL_API_KEY_COMM 적재 후 39종 점검
 
 # 3) 단위 테스트(Docker 불필요)
 PYTHONPATH=dags/domains/commerce/include python -m pytest dags/domains/commerce/tests -q

@@ -14,7 +14,7 @@ from culture_ingest.common.config import load_env_file, pick
 LANDING_ROOT = "bronze/culture"
 
 KOPIS_KEY_ENV = "KOPIS_SERVICE_KEY"   # KOPIS 인증키 환경변수 이름
-SEOUL_KEY_ENV = "SEOUL_OPENAPI_KEY"   # 서울 열린데이터 인증키 환경변수 이름
+SEOUL_KEY_ENV = "SEOUL_API_KEY_CULT"   # 서울 열린데이터 인증키 환경변수 이름
 
 
 @dataclass(frozen=True)

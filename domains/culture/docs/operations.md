@@ -3,7 +3,7 @@
 ## 시크릿 (env)
 
 DAG는 키를 **환경변수에서만** 읽는다. `docker-compose`가 `sample/.env`를 (`env_file:`로) 모든
-Airflow 컨테이너에 주입: `KOPIS_SERVICE_KEY`, `SEOUL_OPENAPI_KEY`, `R2_DEV_*`.
+Airflow 컨테이너에 주입: `KOPIS_SERVICE_KEY`, `SEOUL_API_KEY_CULT`, `R2_DEV_*`.
 **키는 절대 커밋하지 않는다** — `.env`는 상위 레포에서 gitignore.
 
 ## 로컬 실행 (CLI · Airflow 없이)

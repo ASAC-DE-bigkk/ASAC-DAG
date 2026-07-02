@@ -7,16 +7,17 @@
 This file governs the **commerce** category bundle at `dags/domains/commerce/`.
 
 
-- **작업 경계**: commerce 관련 모든 변경은 **`dags/domains/commerce/` 안에서만** 한다.
-  코드(`include/`), 설정(`config/`), 테스트(`tests/`), 문서(`docs/`), 규약(이 파일·`Share.md`),
-  런타임 인자(`.env.commerce`)가 전부 이 폴더에 자립한다.
-- **밖을 건드리지 말 것**: `dags/` 는 git 서브모듈(ASAC-DAG)이다. 루트 `.env` ·
-  `docker-compose.yml` · `Dockerfile.airflow` · 루트 `.gitignore` 는 **호스트 프로젝트(번들 밖)**
-  에 속하므로 임의로 수정하지 않는다. commerce 에 필요한 환경변수는 루트 `.env` 에 추가하지
-  말고 **이 번들의 `.env.commerce`** 로 공급한다(주입 방식은 [docs/configuration.md](docs/configuration/configuration.md)).
-- 호스트 이미지/컴포즈 변경이 꼭 필요하면(예: 새 파이썬 패키지 설치·데이터 볼륨 추가) **먼저
-  알리고 합의**한 뒤 진행한다 — 번들 밖이기 때문. (R2=boto3·silver=pandas/pyarrow 는 이미 포함이라
-  추가 설치 불필요. 그래서 R2 는 s3fs 가 아니라 boto3 로 구현했다.)
+- **Work boundary**: make all commerce-related changes **only inside `dags/domains/commerce/`**.
+  Code (`include/`), config (`config/`), tests (`tests/`), docs (`docs/`), conventions (this file /
+  `Share.md`), and runtime args (`.env.commerce`) are all self-contained in this folder.
+- **Do not touch outside the bundle**: `dags/` is a git submodule (ASAC-DAG). The root `.env`,
+  `docker-compose.yml`, `Dockerfile.airflow`, and root `.gitignore` belong to the **host project
+  (outside the bundle)**, so do not modify them ad hoc. Supply commerce env vars not by adding them
+  to the root `.env` but via **this bundle's `.env.commerce`** (injection: [docs/configuration.md](docs/configuration/configuration.md)).
+- If a host image/compose change is truly required (e.g., installing a new Python package or adding a
+  data volume), **announce and agree first**, then proceed — it is outside the bundle. (R2=boto3 and
+  silver=pandas/pyarrow are already included, so no extra install is needed; that is why R2 is
+  implemented with boto3, not s3fs.)
 
 
 ## 0. Primary Operating Rule
@@ -701,19 +702,19 @@ For most responses:
 
 
 ```markdown
-## 결론
+## Conclusion
 
 
-## 권장 구조
+## Recommended structure
 
 
-## 구현 방향
+## Implementation direction
 
 
-## 주의할 점
+## Cautions
 
 
-## 다음 작업
+## Next steps
 ```
 
 
@@ -721,22 +722,22 @@ For code-heavy tasks:
 
 
 ```markdown
-## 결론
+## Conclusion
 
 
-## 파일 구조
+## File structure
 
 
-## 코드
+## Code
 
 
-## 실행 방법
+## How to run
 
 
-## 검증 방법
+## How to verify
 
 
-## 보강 필요점
+## Gaps to address
 ```
 
 
@@ -744,7 +745,7 @@ For review tasks:
 
 
 ```markdown
-## 결론
+## Conclusion
 
 
 ## Critical
@@ -756,7 +757,7 @@ For review tasks:
 ## Minor
 
 
-## 수정안
+## Fix
 ```
 
 
@@ -812,6 +813,9 @@ Before finalizing, check:
 - Is backfill considered where relevant?
 - Is failure/retry behavior considered?
 - Is the response useful to a working developer?
+- **Security (§20)**: if you added/changed code where secrets could leak to logs, exceptions, stored
+  artifacts (at-rest), or alerts, did you apply `redact()` / input validation? Before finishing, does
+  `python -m security` report zero blocking (CRITICAL/HIGH) findings?
 
 
 If not, revise before responding.
@@ -835,19 +839,25 @@ Continuation / porting guarantee: **everything an agent needs to continue is und
 the runtime env file `.env.commerce`, and the change log `change-log.md`. When `dags/` is moved
 into another Airflow project, read `dags/domains/<category>/CLAUDE.md` then `Share.md` to resume.
 Keep all CLAUDE-chain links (CLAUDE.md → Share.md → project_setting/configuration/common_info/
-README/**change-log**) **inside the bundle** — never point the continuation path at host-project
-files, since those do not travel with `dags/`.
+README/**change-log**/**security**) **inside the bundle** — never point the continuation path at
+host-project files, since those do not travel with `dags/`.
 
 
-### Change Log Rule (대단위 변경 기록)
+### Change Log Rule (record large changes)
 
 When you make a **large/structural change** — storage layout, data/marker contract, schema,
 naming/rename, a new DAG or pipeline, env-var contract, registry isolation, etc. (not trivial
-edits) — **append one entry to [change-log.md](change-log.md)** (bundle root):
+edits) — **append one entry to [change-log.md](change-log.md)** (bundle root).
 
-- Date-then-order **descending** (latest on top); one consolidated entry per logical change,
-  written as the **final reflected state** (fold superseded intermediate steps).
-- Include: what changed · why · affected files.
+**Entry format (standardized — apply to every new entry):**
+
+- Start with the work **date** as `## YYYY-MM-DD` (sections **descending**, latest on top) and a
+  short **summary title** as `### N. <title>`.
+- The body is split into two labeled parts:
+  - `request:` — what the **user requested or decided** (their asks, confirmed choices, Q&A answers).
+  - `response:` — a summary of **what you (the assistant) did** (implementation, verification, files).
+- One consolidated entry per logical change, written as the **final reflected state** (fold superseded
+  intermediate steps). Leave older entries untouched; apply this format going forward.
 - **Path discovery**: `change-log.md` is indexed in [Share.md](Share.md) §4 and
   [docs/README.md](docs/README.md) so the path is always reachable from the doc chain — follow
   that index, don't hardcode guesses. Keep those two index entries valid if the file moves.
@@ -881,7 +891,51 @@ Rules to follow when adding or editing pipeline code:
 
 When asked to share context, point to [Share.md](Share.md) — it links the heritage
 spec, the runtime-args contract ([docs/configuration.md](docs/configuration/configuration.md)), the
-pipeline contract ([docs/common_info.md](docs/pipeline/common_info.md)), and operations docs.
+pipeline contract ([docs/common_info.md](docs/pipeline/common_info.md)), operations docs, and the
+**security gate** ([docs/security/security.md](docs/security/security.md), §20 below).
+
+
+## 20. Security Gate (recall · apply · check, ongoing)
+
+
+This bundle has a **security subsystem** that blocks secret leakage, input injection, and common
+vulnerable patterns. Code: [include/security/](include/security/) (stdlib, portable). Threat model /
+logic: [docs/security/security.md](docs/security/security.md). Porting to other bundles:
+[docs/security/adoption.md](docs/security/adoption.md). These three are part of the CLAUDE-chain (§19),
+so they travel across sessions.
+
+
+**Recall**: before any security-adjacent work, read [docs/security/security.md](docs/security/security.md).
+When porting to another bundle/project, follow [docs/security/adoption.md](docs/security/adoption.md)
+(includes a copy-paste prompt).
+
+
+**Apply (triggers)** — when you add/change code matching any of these, respond immediately:
+
+
+- External API/network exceptions or URLs written to **logs** → `redact()` (mandatory if the exception
+  reaches a stored artifact).
+- error/metadata **stored to storage/marker/DB** → `redact()` before storing (block at-rest leakage).
+- Sending to an external channel (**webhook/email/slack**) → `redact(message)` / `redact(context)`.
+- **User input** (params) used as a path/identifier → `assert_iso_date()` / `assert_safe_segment()`.
+- **New secret env var** → name it per the `KEY/SECRET/TOKEN/CREDENTIAL/ACCESS_KEY/…` convention (auto
+  masking) or call `register_secret()`.
+- **New DAG/entrypoint** → call `install_log_redaction()` once, right after loading env.
+- HTTP calls set `timeout=`; use yaml `safe_load`; never `eval/exec/pickle/shell=True/verify=False`.
+
+
+**Check (single point)**: always run before finishing; blocking (CRITICAL/HIGH) findings must be 0.
+
+
+```bash
+PYTHONPATH=dags/domains/commerce/include python -m security
+PYTHONPATH=dags/domains/commerce/include pytest dags/domains/commerce/tests/test_security.py -q
+```
+
+
+To add a new check, add `check_*(root) -> Finding` to [include/security/audit.py](include/security/audit.py)
+and register it in `STATIC_CHECKS`; it is then included in the combined verification automatically.
+This gate is also part of the §18 Final Quality Gate.
 
 
 

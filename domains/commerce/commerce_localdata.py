@@ -1,22 +1,23 @@
-"""seoul_commerce — 서울 인허가(commerce) 수집·가공 라인 (DB·외부 매니페스트 없음).
+"""seoul_commerce — 서울 인허가(commerce) **원본 수집(bronze) 라인** (DB·외부 매니페스트 없음).
+
+이 DAG 라인은 bronze(원본 수집)만 담당한다. silver 가공은 여기서 분리되어 있고
+가공 로직은 include/silver/ 에 그대로 보존되어 있다(별도 오케스트레이션 없음).
 
 DAG 2개(공통 태스크 공유):
-  - **seoul_commerce_daily**     : 수집 대상 전체를 매 실행 수집(@daily).
-  - **seoul_commerce_recollect** : 최근 run 에서 미완료(incomplete/미시도)인 API만 재수집(주기적).
+  - **commerce_localdata_elt**     : 수집 대상 전체를 매 실행 수집(@daily).
+  - **commerce_localdata_recollect** : 최근 run 에서 미완료(incomplete/미시도)인 API만 재수집(주기적).
                                    재수집 대상이 없으면 수집 진행 안 함(빈 매핑 → run 폴더 미생성).
 
   resolve_observed_date ─┐
   make_bronze_run_id ────┤
   check_api_key (gate) ──┤
-  (plan_all|find_incomplete) ─┴─> ingest_one.expand ─┬─> build_silver_one.expand
-                                                      └─> finalize_run ─> (_RUN 마커/metrics)
+  (plan_all|find_incomplete) ─┴─> ingest_one.expand ──> finalize_run ─> (_RUN 마커/metrics)
 
-- **API 단위 진행 가시성**: `ingest_one`/`build_silver_one` 은 Dynamic Task Mapping + 각 매핑
-  인스턴스를 **API(short) 이름으로 라벨링**(`map_index_template`) → Airflow Grid/Graph 에서
+- **API 단위 진행 가시성**: `ingest_one` 은 Dynamic Task Mapping + 각 매핑 인스턴스를
+  **API(short) 이름으로 라벨링**(`map_index_template`) → Airflow Grid/Graph 에서
   성공/실패/대기 job 을 API 별로 확인. 결과 요약은 run 폴더의 마커(`_markers/*`)에도 남는다.
 - bronze: 1회 page_size(≤1000)씩 끝까지 순회 + 완전성 점검. **DAG 실행 1회 = run_id 폴더 1개**,
   API당 1파일(NDJSON) + API별 마커(completed|incomplete). 상태는 그 마커가 전부.
-- silver: bronze NDJSON → 공통 19컬럼 정규화(parquet). 중복 제거는 silver 가 MGTNO 로.
 - 데이터셋 간 실패 격리: ingest 가 비인증 오류를 status=failed(=incomplete 마커)로 반환.
 
 코드: dags/domains/commerce/include/ · 레지스트리: config/dataset_registry.yaml
@@ -38,6 +39,12 @@ from common.env import load_commerce_env  # noqa: E402
 
 load_commerce_env()
 
+# 보안: env 적재 직후 로그 시크릿 마스킹 설치(이후 모든 commerce 로그/예외에서 키 자동 마스킹).
+# 종합검증/처리 로직: docs/security/security.md
+from security import assert_iso_date, install_log_redaction  # noqa: E402
+
+install_log_redaction()
+
 import pendulum
 from airflow.decorators import dag, task
 from airflow.models.param import Param
@@ -52,7 +59,6 @@ from bronze import bronze_tasks, markers
 from common import paths, registry
 from common.settings import get_settings
 from common.storage import get_storage
-from silver import silver_tasks
 
 log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
@@ -96,6 +102,8 @@ def _run_ds(ctx) -> str:
 @task
 def resolve_observed_date(**ctx) -> str:
     override = (ctx["params"].get("observed_date") or "").strip()
+    if override:
+        assert_iso_date(override)   # 경로 주입 방지 + 계약(YYYY-MM-DD). 잘못된 입력은 즉시 실패.
     observed_date = override or _run_ds(ctx)
     log.info("observed_date=%s (collectible=%d, pending=%d)",
              observed_date, len(COLLECTIBLE_SHORTS), len(PENDING))
@@ -120,36 +128,49 @@ def check_api_key() -> dict:
 
 @task
 def plan_all_targets() -> list[str]:
-    """daily: 수집 대상 전체(중복 제거는 silver)."""
-    log.info("plan(daily): 수집 대상 %d종", len(COLLECTIBLE_SHORTS))
-    return list(COLLECTIBLE_SHORTS)
+    """daily: 수집 대상 전체. 단, **동일 KST 일자에 이미 completed 인 API 는 제외**(feat/59).
+
+    같은 날 (수동) 재실행 시 이미 성공한 API 는 다시 수집하지 않는다.
+    """
+    settings = get_settings()
+    storage = get_storage()
+    kst_today = datetime.now(KST).strftime("%Y-%m-%d")
+    targets = markers.plan_excluding_same_day_completed(
+        storage, settings.storage_prefix, kst_today, list(COLLECTIBLE_SHORTS))
+    log.info("plan(daily, kst=%s): 대상 %d/%d종 (동일자 성공분 제외)",
+             kst_today, len(targets), len(COLLECTIBLE_SHORTS))
+    return targets
 
 
 @task
 def find_incomplete_targets() -> list[str]:
-    """recollect: 최근 run 에서 completed 가 아닌(미완료/미시도) API만. 없으면 빈 리스트 → 수집 안 함."""
+    """recollect: 최근 run 의 incomplete 중 **KST 날짜가 오늘과 같은** 것만(feat/59).
+
+    KST 일자가 바뀌면 그 정보는 다른 일자라 재수집하지 않는다(빈 리스트) — 새 일자 수집이 처리.
+    """
     settings = get_settings()
     storage = get_storage()
-    latest = markers.latest_run_id(storage, settings.storage_prefix)
-    targets = markers.incomplete_targets(storage, settings.storage_prefix, latest, COLLECTIBLE_SHORTS)
-    log.info("recollect: latest_run=%s, 재수집 대상=%d %s", latest, len(targets), targets)
+    kst_today = datetime.now(KST).strftime("%Y-%m-%d")
+    targets = markers.recollect_targets_same_day(
+        storage, settings.storage_prefix, COLLECTIBLE_SHORTS, kst_today)
+    log.info("recollect(kst=%s): 재수집 대상=%d %s", kst_today, len(targets), targets)
     return targets
 
 
 @task(map_index_template="{{ short }}")          # Airflow Grid/Graph 에 API(short)로 라벨
 def ingest_one(short: str, observed_date: str, bronze_run_id: str, **ctx) -> dict:
     get_current_context()["short"] = short        # 매핑 인스턴스 라벨 = API 이름
-    return bronze_tasks.fetch_dataset_to_bronze(
+    summary = bronze_tasks.fetch_dataset_to_bronze(
         registry.by_short(short), observed_date, ctx["run_id"], bronze_run_id)
-
-
-@task(map_index_template="{{ short }}")
-def build_silver_one(summary: dict) -> dict:
-    get_current_context()["short"] = summary.get("short", "?")
-    if summary.get("status") != "ok" or not summary.get("bronze_key"):
-        return {"short": summary.get("short"), "skipped": True, "reason": summary.get("status")}
-    return silver_tasks.build_silver(
-        summary["short"], summary["observed_date"], summary["bronze_key"])
+    if summary.get("status") == "ok":             # feat/59: 성공 시 같은 KST 일자 실패 파편 정리(한 파일)
+        try:
+            removed = markers.cleanup_incomplete(
+                get_storage(), get_settings().storage_prefix, short, keep_run_id=bronze_run_id)
+            if removed:
+                log.info("%s: 이전 실패 파편 %d개 정리(한 파일 관리)", short, len(removed))
+        except Exception as exc:                  # 정리 실패가 수집을 막지 않게
+            log.warning("%s: cleanup_incomplete 실패(무시): %s", short, exc)
+    return summary
 
 
 @task(trigger_rule=TriggerRule.ALL_DONE)
@@ -180,33 +201,32 @@ def finalize_run(bronze_run_id: str, observed_date: str, summaries: list[dict]) 
 
 
 def _wire(targets):
-    """공통 흐름: targets(list[str]) → ingest → silver / finalize."""
+    """공통 흐름(bronze 전용): targets(list[str]) → ingest → finalize."""
     observed_date = resolve_observed_date()
     bronze_run_id = make_bronze_run_id()
     gate = check_api_key()
     bronze = ingest_one.partial(
         observed_date=observed_date, bronze_run_id=bronze_run_id).expand(short=targets)
     gate >> bronze
-    build_silver_one.expand(summary=bronze)
     finalize_run(bronze_run_id, observed_date, bronze)
 
 
-@dag(dag_id="seoul_commerce_daily", schedule="@daily",
+@dag(dag_id="commerce_localdata_elt", schedule="@daily",
      start_date=pendulum.datetime(2024, 1, 1, tz="Asia/Seoul"), catchup=False,
      max_active_runs=1, default_args=_DEFAULT_ARGS, tags=["seoul", "commerce", "daily"],
      doc_md=__doc__, params=_PARAMS)
-def seoul_commerce_daily():
+def commerce_localdata_elt():
     _wire(plan_all_targets())
 
 
-@dag(dag_id="seoul_commerce_recollect", schedule="0 */6 * * *",
+@dag(dag_id="commerce_localdata_recollect", schedule="0 */6 * * *",
      start_date=pendulum.datetime(2024, 1, 1, tz="Asia/Seoul"), catchup=False,
      max_active_runs=1, default_args=_DEFAULT_ARGS, tags=["seoul", "commerce", "recollect"],
      doc_md=__doc__, params=_PARAMS)
-def seoul_commerce_recollect():
+def commerce_localdata_recollect():
     # 최근 run 의 미완료 API만 재수집. 대상 없으면 빈 매핑 → 수집 진행 안 함.
     _wire(find_incomplete_targets())
 
 
-seoul_commerce_daily()
-seoul_commerce_recollect()
+commerce_localdata_elt()
+commerce_localdata_recollect()

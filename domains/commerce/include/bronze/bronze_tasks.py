@@ -16,16 +16,20 @@ serving DB·외부 매니페스트 없음 — 상태는 run_id 폴더의 마커�
 from __future__ import annotations
 
 import logging
+import shutil
+import tempfile
 import time
 from datetime import datetime, timezone
 
-from bronze.clients import SeoulAuthError, SeoulOpenApiClient
+from bronze.clients import SeoulAuthError, SeoulOpenApiClient, parse_page
+from bronze import incremental
 from bronze.validators import assess_completeness
 from common import paths
 from common.hashing import sha256_hex
 from common.schemas import DOMAIN, SOURCE_SYSTEM, Dataset
 from common.settings import get_settings
 from common.storage import Storage, get_storage
+from security import redact   # 마커(error)·요약에 저장되는 메시지의 시크릿 마스킹(이중 방어)
 
 log = logging.getLogger(__name__)
 
@@ -42,10 +46,25 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
     """원본 NDJSON 1파일 + API별 마커(completed|incomplete) 적재 → summary 반환."""
     short = dataset.short
     object_key = None
-    if raw_pages:                          # 빈 데이터셋(0건)이면 파일을 만들지 않는다
-        object_key = paths.bronze_object_key(prefix=prefix, run_id=bronze_run_id, short=short)
-        body = b"\n".join(p.rstrip(b"\r\n") for p in raw_pages) + b"\n"
-        storage.write_bytes(object_key, body)   # 줄당 원본 응답(가공 없음)
+    incr: dict | None = None
+    # 수집 **완료(status==ok)** 일 때만 증분 저장(정렬·검증키·diff). status!=ok(중간 중단)은
+    # 남기지 않는다(§중간 끊기면 미저장). raw 페이지는 휘발 — save 증분 + diff-target 만 영속.
+    if status == "ok" and raw_pages:
+        def _rows():
+            for p in raw_pages:
+                for row in parse_page(p, dataset.service_name).rows:
+                    yield row
+        tmp = tempfile.mkdtemp(prefix=f"bronze-{short}-")
+        try:
+            incr = incremental.incremental_store(
+                storage,
+                increment_key=paths.bronze_object_key(prefix=prefix, run_id=bronze_run_id, short=short),
+                target_key=paths.bronze_diff_target_key(prefix=prefix, short=short),
+                target_key_file=paths.bronze_diff_target_keyfile(prefix=prefix, short=short),
+                rows=_rows(), tmp_dir=tmp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        object_key = incr.get("increment_key")   # 증분 파일 키(동일=None: 마커만)
 
     marker_type = paths.MARKER_COMPLETED if status == "ok" else paths.MARKER_INCOMPLETE
     marker_key = paths.bronze_marker_key(prefix=prefix, run_id=bronze_run_id,
@@ -64,17 +83,23 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
         "list_total_count": list_total_count, "complete": complete,
         "bronze_key": object_key, "pages": page_metas,
     }
+    if incr:                                   # 증분 리니지: 검증키·모드·증분수·정렬행수
+        marker.update({"verification_key": incr["key"], "increment_mode": incr["mode"],
+                       "increment_count": incr["increment_count"], "sorted_row_count": incr["count"]})
+    error = redact(error) if error else error   # 저장 전 시크릿 마스킹(§2.5)
     if error:
         marker["error"] = error
     storage.write_json(marker_key, marker)     # 인증키 제외 리니지(§2.1)
 
-    log.info("%s: bronze %s pages=%d rows=%d/%d -> %s (marker=%s)",
-             short, status, len(raw_pages), rows_total, list_total_count or "?",
-             object_key or "(빈 데이터셋)", marker_type)
+    log.info("%s: bronze %s rows=%d/%d incr=%s -> %s (marker=%s)",
+             short, status, rows_total, list_total_count or "?",
+             (incr or {}).get("mode", "-"), object_key or "(증분없음/미저장)", marker_type)
     return {**base, "status": status, "collected_at": marker["collected_at"],
             "pages_written": len(raw_pages), "rows_total": rows_total,
             "list_total_count": list_total_count, "complete": complete,
             "bronze_key": object_key, "marker_key": marker_key,
+            **({"verification_key": incr["key"], "increment_mode": incr["mode"],
+                "increment_count": incr["increment_count"]} if incr else {}),
             **({"error": error} if error else {})}
 
 
@@ -146,7 +171,7 @@ def fetch_dataset_to_bronze(dataset: Dataset, observed_date: str, run_id: str,
     except SeoulAuthError:
         raise  # 인증 오류 → 전체 빠른 실패
     except Exception as exc:  # 데이터셋 단위 실패 격리 → incomplete 마커로 재수집 유도
-        log.warning("%s: 수집 중단(오류): %s", short, exc)
+        log.warning("%s: 수집 중단(오류): %s", short, redact(str(exc)))
         return _write_bronze(storage, prefix=prefix, bronze_run_id=bronze_run_id, dataset=dataset,
                              raw_pages=raw_pages, page_metas=page_metas, base=base, status="failed",
                              rows_total=rows_total, list_total_count=total_count or 0,
