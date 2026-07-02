@@ -223,6 +223,20 @@ def ingest_dataset(
 
 # --- run 리포트 (정량 측정: 커버리지·완전성·freshness, 계획안 Slide 6②·7) --------
 
+def normalize_mapped_results(pulled) -> list[dict]:
+    """매핑 태스크 XCom pull 결과를 항상 ``list[dict]`` 로 정규화한다(#87).
+
+    Airflow 3에서 매핑 인스턴스가 1개면 ``xcom_pull(task_ids=...)`` 이 리스트가
+    아니라 dict 하나를 줄 수 있다. 그대로 순회하면 dict 키(문자열)가 summary
+    행세를 해 report 가 TypeError 로 죽는다. None 원소(실패 인스턴스)는 걸러낸다.
+    """
+    if not pulled:
+        return []
+    if isinstance(pulled, dict):
+        return [pulled]
+    return [r for r in pulled if r]
+
+
 def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int) -> dict:
     """데이터셋별 요약을 모아 run 단위 신뢰성 리포트를 만든다.
 
