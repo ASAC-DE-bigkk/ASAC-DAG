@@ -38,6 +38,7 @@ from traffic_ingest.bronze import (  # noqa: E402
     verify_seoul_traffic_bronze_runtime as verify_seoul_traffic_bronze_rows,
 )
 from traffic_ingest.common.runtime import (  # noqa: E402
+    download_raw_object,
     fetch_url,
     is_dev_target,
     sha256_hex,
@@ -70,8 +71,10 @@ def short_text(value: object, limit: int = 130) -> str:
 
 
 def stage_name(task_id: str) -> str:
-    if "ingest" in task_id:
+    if "land" in task_id or "ingest" in task_id:
         return "API 수집/R2 적재"
+    if "load" in task_id:
+        return "Bronze 적재"
     if "verify" in task_id:
         return "Bronze 검증"
     return "알 수 없음"
@@ -104,7 +107,7 @@ def send_traffic_discord(title: str, description: str, color: int, footer: str) 
 
 def notify_traffic_bronze_success(context) -> None:
     ti = context["ti"]
-    ingest_result = ti.xcom_pull(task_ids="ingest_seoul_traffic_incident") or {}
+    ingest_result = ti.xcom_pull(task_ids="load_seoul_traffic_bronze") or {}
     inserted = int(ingest_result.get("inserted", 0))
     total_count = ingest_result.get("list_total_count", "N/A")
     raw_keys = ingest_result.get("raw_object_keys") or []
@@ -159,17 +162,13 @@ def traffic_dag_schedule() -> str | None:
     return "*/5 * * * *" if is_dev_target() else None
 
 
-def ingest_seoul_traffic_incident(**context) -> dict:
+def land_seoul_traffic_raw(**context) -> dict:
     start_index = int(os.environ.get("SEOUL_ACC_INFO_START_INDEX", "1"))
     end_index = int(os.environ.get("SEOUL_ACC_INFO_END_INDEX", "1000"))
     page_size = int(os.environ.get("SEOUL_ACC_INFO_PAGE_SIZE", str(end_index - start_index + 1)))
 
-    cursor, catalog, schema = trino_cursor()
-    qualified_table = create_seoul_traffic_bronze_table(cursor, catalog, schema)
-
-    inserted = 0
     parsed_rows = 0
-    raw_object_keys = []
+    raw_objects = []
     page_ranges = [(start_index, end_index)]
     page_summaries = []
     list_total_count = 0
@@ -197,23 +196,18 @@ def ingest_seoul_traffic_incident(**context) -> dict:
             content_type="application/xml; charset=utf-8",
             log_label="Seoul traffic raw payload",
         )
-        page_inserted = insert_seoul_traffic_bronze_rows(
-            cursor=cursor,
-            qualified_table=qualified_table,
-            rows=rows,
-            metadata=metadata,
-            request_id=request_id,
-            start_index=page_start,
-            end_index=page_end,
-            raw_object_key=raw_object_key,
-            raw_hash=raw_hash,
-            http_status=http_status,
-            collected_at=collected_at,
-            dag_run_id=context["run_id"],
+        raw_objects.append(
+            {
+                "request_id": request_id,
+                "raw_object_key": raw_object_key,
+                "raw_hash": raw_hash,
+                "http_status": http_status,
+                "collected_at": collected_at.isoformat(),
+                "start_index": page_start,
+                "end_index": page_end,
+            }
         )
-        inserted += page_inserted
         parsed_rows += len(rows)
-        raw_object_keys.append(raw_object_key)
         list_total_count = max(list_total_count, metadata_total_count(metadata))
         page_summaries.append(
             {
@@ -241,8 +235,63 @@ def ingest_seoul_traffic_incident(**context) -> dict:
             f"requested_end_index={max(end for _, end in page_ranges)}"
         )
 
+    print(f"Landed {len(raw_objects)} Seoul traffic raw objects from {len(page_ranges)} pages")
+    return {
+        "source_id": SOURCE_ID,
+        "raw_objects": raw_objects,
+        "raw_object_keys": [item["raw_object_key"] for item in raw_objects],
+        "result_code": result_code,
+        "list_total_count": list_total_count,
+        "page_count": len(page_ranges),
+        "requested_end_index": max(end for _, end in page_ranges),
+        "pages": page_summaries,
+    }
+
+
+def load_seoul_traffic_bronze(**context) -> dict:
+    raw_result = context["ti"].xcom_pull(task_ids="land_seoul_traffic_raw") or {}
+    raw_objects = raw_result.get("raw_objects") or []
+    if not raw_objects:
+        raise RuntimeError("Seoul traffic raw landing result is empty; cannot load bronze rows.")
+    cursor, catalog, schema = trino_cursor()
+    qualified_table = create_seoul_traffic_bronze_table(cursor, catalog, schema)
+
+    inserted = 0
+    parsed_rows = 0
+    raw_object_keys = []
+    result_code = raw_result.get("result_code") or "N/A"
+    list_total_count = int(raw_result.get("list_total_count", 0))
+    for raw_object in raw_objects:
+        raw_bytes = download_raw_object(raw_object["raw_object_key"], "Seoul traffic raw payload")
+        metadata, rows = parse_seoul_acc_info_response(raw_bytes)
+        result_code = metadata.get("result_code") or result_code
+        parsed_rows += len(rows)
+        collected_at = datetime.fromisoformat(raw_object["collected_at"])
+        inserted += insert_seoul_traffic_bronze_rows(
+            cursor=cursor,
+            qualified_table=qualified_table,
+            rows=rows,
+            metadata=metadata,
+            request_id=raw_object["request_id"],
+            start_index=int(raw_object["start_index"]),
+            end_index=int(raw_object["end_index"]),
+            raw_object_key=raw_object["raw_object_key"],
+            raw_hash=raw_object["raw_hash"],
+            http_status=int(raw_object["http_status"]),
+            collected_at=collected_at,
+            dag_run_id=context["run_id"],
+        )
+        raw_object_keys.append(raw_object["raw_object_key"])
+
+    if parsed_rows < list_total_count:
+        raise RuntimeError(
+            "Seoul traffic bronze load incomplete: "
+            f"list_total_count={list_total_count}, parsed_rows={parsed_rows}, "
+            f"requested_end_index={raw_result.get('requested_end_index', 'N/A')}"
+        )
+
     print(
-        f"Inserted {inserted} Seoul traffic rows from {len(page_ranges)} pages "
+        f"Inserted {inserted} Seoul traffic rows from {len(raw_objects)} raw objects "
         f"into {qualified_table}"
     )
     return {
@@ -251,9 +300,9 @@ def ingest_seoul_traffic_incident(**context) -> dict:
         "inserted": inserted,
         "result_code": result_code,
         "list_total_count": list_total_count,
-        "page_count": len(page_ranges),
-        "requested_end_index": max(end for _, end in page_ranges),
-        "pages": page_summaries,
+        "page_count": int(raw_result.get("page_count", len(raw_objects))),
+        "requested_end_index": raw_result.get("requested_end_index"),
+        "pages": raw_result.get("pages") or [],
     }
 
 
@@ -293,7 +342,7 @@ def record_and_notify_seoul_traffic_run_failed(context) -> None:
 
 
 def verify_seoul_traffic_bronze_runtime(**context) -> int:
-    ingest_result = context["ti"].xcom_pull(task_ids="ingest_seoul_traffic_incident") or {}
+    ingest_result = context["ti"].xcom_pull(task_ids="load_seoul_traffic_bronze") or {}
     verified_rows = verify_seoul_traffic_bronze_rows(
         raw_object_keys=ingest_result["raw_object_keys"],
         dag_run_id=context["run_id"],
@@ -333,9 +382,18 @@ with DAG(
         python_callable=record_seoul_traffic_run_started,
     )
 
-    ingest_traffic = PythonOperator(
-        task_id="ingest_seoul_traffic_incident",
-        python_callable=ingest_seoul_traffic_incident,
+    land_raw = PythonOperator(
+        task_id="land_seoul_traffic_raw",
+        python_callable=land_seoul_traffic_raw,
+        retries=3,
+        retry_delay=timedelta(minutes=1),
+        retry_exponential_backoff=True,
+        on_failure_callback=record_and_notify_seoul_traffic_run_failed,
+    )
+
+    load_bronze = PythonOperator(
+        task_id="load_seoul_traffic_bronze",
+        python_callable=load_seoul_traffic_bronze,
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
@@ -349,4 +407,4 @@ with DAG(
         on_failure_callback=record_and_notify_seoul_traffic_run_failed,
     )
 
-    start_manifest >> ingest_traffic >> verify_bronze
+    start_manifest >> land_raw >> load_bronze >> verify_bronze

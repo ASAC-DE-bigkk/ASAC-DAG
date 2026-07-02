@@ -105,6 +105,22 @@ def upload_raw_object(
     return object_key
 
 
+def download_raw_object(object_key: str, log_label: str) -> bytes:
+    import boto3
+
+    bucket_name = r2_env("R2_BUCKET_NAME")
+    response = boto3.client(
+        "s3",
+        endpoint_url=r2_env("R2_ENDPOINT"),
+        aws_access_key_id=r2_env("R2_ACCESS_KEY_ID"),
+        aws_secret_access_key=r2_env("R2_SECRET_ACCESS_KEY"),
+        region_name="auto",
+    ).get_object(Bucket=bucket_name, Key=object_key)
+    raw_bytes = response["Body"].read()
+    print(f"Downloaded {log_label} from R2: {object_key}")
+    return raw_bytes
+
+
 def trino_cursor():
     import trino.dbapi
 
