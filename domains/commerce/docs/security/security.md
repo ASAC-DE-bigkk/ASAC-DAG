@@ -79,7 +79,7 @@ redact("url: /<KEY>/json/SVC/1/1/")   # → "url: /***REDACTED***/json/SVC/1/1/"
 > 진짜 위험한 곳(예외→마커 저장)은 호출측 `redact()` 로 한 번 더 가린다(§3.1, 위협 #2).
 
 DAG 는 임포트 시 `load_commerce_env()` 직후 `install_log_redaction()` 을 1회 호출한다
-([../../seoul_commerce_dag.py](../../seoul_commerce_dag.py)).
+([../../commerce_raw.py](../../commerce_raw.py)).
 
 ### 3.3 입력 검증(경로 주입 차단)
 
@@ -123,7 +123,7 @@ assert_secure()                           # 차단 이슈 있으면 SecurityErro
 
 | 위치 | 적용 |
 |---|---|
-| [seoul_commerce_dag.py](../../seoul_commerce_dag.py) | env 적재 직후 `install_log_redaction()`; `resolve_observed_date` 에 `assert_iso_date()` |
+| [commerce_raw.py](../../commerce_raw.py) | env 적재 직후 `install_log_redaction()`; `resolve_observed_date` 에 `assert_iso_date()` |
 | [include/bronze/clients.py](../../include/bronze/clients.py) | 네트워크 예외 메시지·재시도 경고 로그를 `redact()`(마커 저장 메시지의 키 차단) |
 | [include/bronze/bronze_tasks.py](../../include/bronze/bronze_tasks.py) | 마커 `error` 필드·실패 로그를 저장/출력 전 `redact()`(이중 방어) |
 | [include/common/notify.py](../../include/common/notify.py) | 알림 message·context 를 전송 전 `redact()` |

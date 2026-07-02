@@ -36,5 +36,5 @@ docs/
 └─ security/       security.md · adoption.md
 ```
 
-코드: [../include/](../include/) (`common`·`bronze`·`silver`) · DAG [../seoul_commerce_dag.py](../seoul_commerce_dag.py) ·
+코드: [../include/](../include/) (`common`·`bronze`·`silver`) · DAG [../commerce_raw.py](../commerce_raw.py) ·
 레지스트리 [../config/dataset_registry.yaml](../config/dataset_registry.yaml).

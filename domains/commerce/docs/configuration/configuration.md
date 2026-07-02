@@ -12,7 +12,7 @@ commerce 가 **현재 프로젝트에서 정상 동작하기 위해 필요한 �
 
 ## 1. 어떻게 주입되는가 (`.env.commerce` + 로더)
 
-DAG([../seoul_commerce_dag.py](../../seoul_commerce_dag.py))가 임포트될 때
+DAG([../commerce_raw.py](../../commerce_raw.py))가 임포트될 때
 [include/common/env.py](../../include/common/env.py) 의 `load_commerce_env()` 가
 이 폴더의 `.env.commerce` 를 읽어 `os.environ` 에 채운다.
 

@@ -77,7 +77,7 @@ calls(dataset) = ceil(list_total_count / SEOUL_PAGE_SIZE)   # SEOUL_PAGE_SIZE = 
 1회 전체 수집     1,361 회
 ```
 
-- 39종 모두 `daily` 라 **`commerce_localdata_elt` 1회 = 1,361 회**. `monthly`/`irregular` 주기는
+- 39종 모두 `daily` 라 **`commerce_collect_raw` 1회 = 1,361 회**. `monthly`/`irregular` 주기는
   인허가 대상이 0종이라 **DAG 비활성**(인허가 외 2종 격리: [../non-license-datasets.md](../non-license-datasets.md)).
 - 인허가는 과거 시점 스냅샷이 없어 **매 `observed_date` 마다 전체 재수집** →
   일 단위로 약 **1,361 회/일**, 월 약 **~40,830 회/월**.
