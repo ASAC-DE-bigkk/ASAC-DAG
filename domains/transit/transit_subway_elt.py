@@ -1,6 +1,6 @@
 """서울 지하철 ELT (transit 도메인) — 수집 → R2 bronze 객체(원본) → Iceberg bronze(Trino).
 
-sample(dbt_trino_iceberg_smoke) 패턴을 따른다:
+sample(common_dbt_smoke) 패턴을 따른다:
   - 클래식 DAG + PythonOperator(ingest)
   - bronze 는 Trino INSERT 로 적재
 차이: 소스가 고정 CSV 가 아니라 실시간 API(seoul_transit collector).

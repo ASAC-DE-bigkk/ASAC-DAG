@@ -1,6 +1,6 @@
 """서울 버스 ELT (transit 도메인) — TOPIS 버스 도착/위치 → XML 원본 R2 적재 + Iceberg bronze.
 
-지하철(seoul_subway_elt)과 같은 도메인/패턴이나 차이:
+지하철(transit_subway_elt)과 같은 도메인/패턴이나 차이:
   - 소스 = 서울 TOPIS 버스(ws.bus.go.kr), 키 = PUBLIC_DATA_API_KEY_BUS(URL 인코딩 필요)
   - 응답이 XML → 원본 그대로 보존(R2 ext=xml, Iceberg raw=XML varchar). 파싱은 silver(dbt).
   - 단위 = 노선(busRouteId). 이 DAG = Bronze 한정.
