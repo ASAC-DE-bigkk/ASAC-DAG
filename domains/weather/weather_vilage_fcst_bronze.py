@@ -93,7 +93,7 @@ def send_weather_discord(title: str, description: str, color: int, footer: str) 
     }
     request = urllib.request.Request(
         webhook_url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": "ask-seoul-airflow/1.0"},
         method="POST",
     )
@@ -107,6 +107,7 @@ def notify_weather_bronze_success(context) -> None:
     ti = context["ti"]
     ingest_result = ti.xcom_pull(task_ids="ingest_kma_vilage_fcst") or {}
     raw_keys = ingest_result.get("raw_object_keys") or []
+    api_call_count = ingest_result.get("api_call_count", len(raw_keys))
     run_id = context["run_id"]
     send_weather_discord(
         f"기상청 단기예보 수집 리포트 - {discord_report_date(context)} (target={target_name()})",
@@ -114,7 +115,9 @@ def notify_weather_bronze_success(context) -> None:
             [
                 "✅ 수집 상태: 성공",
                 f"✅ 예보 발표시각: {ingest_result.get('base_date', 'N/A')} {ingest_result.get('base_time', 'N/A')}",
-                f"✅ 서울 격자 커버리지: {ingest_result.get('grid_count', 'N/A')}개 grid / raw {len(raw_keys)}개",
+                f"✅ API 호출건수: {api_call_count}회",
+                f"✅ 서울 격자 커버리지: {ingest_result.get('grid_count', 'N/A')}개 grid",
+                f"✅ raw JSON: {len(raw_keys)}개",
                 f"✅ Bronze 적재: {int(ingest_result.get('inserted', 0)):,}행",
                 "",
                 f"테이블: `bronze_kma_vilage_fcst`",
@@ -211,6 +214,7 @@ def ingest_kma_vilage_fcst(**context) -> dict:
         "inserted": inserted,
         "expected_rows": expected_rows,
         "grid_count": len(grids),
+        "api_call_count": len(raw_object_keys),
         "base_date": base_date,
         "base_time": base_time,
     }
