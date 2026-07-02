@@ -20,7 +20,7 @@ row와 metadata를 적재하는 것이다.
 
 ```text
 Airflow DAG
-  -> Seoul TOPIS AccInfo XML 호출
+  -> Seoul TOPIS AccInfo XML 호출 (`list_total_count` 기준 필요한 page 추가 호출)
   -> 응답 XML 성공 여부 검증
   -> R2 raw object로 원본 bytes 저장
   -> Trino SQL로 Iceberg bronze table 생성/insert
@@ -30,6 +30,10 @@ Airflow DAG
 traffic은 실시간성 있는 변수로 쓸 수 있어 dev에서는 커버리지를 넓게 보기 위해 기본
 5분 스케줄을 둔다. 단, prod에서는 명시적으로 `ASK_SEOUL_TRAFFIC_DAG_SCHEDULE`을
 넣지 않으면 자동 스케줄을 만들지 않는다.
+
+기본 첫 호출 범위는 `SEOUL_ACC_INFO_START_INDEX=1`, `SEOUL_ACC_INFO_END_INDEX=1000`이다.
+첫 응답의 `list_total_count`가 1000을 초과하면 같은 page size로 뒤 range를 이어서 호출한다.
+전체 parsed row 수가 `list_total_count`보다 작으면 partial 수집으로 보고 DAG를 실패시킨다.
 
 ## Bronze metadata 결정 이유
 

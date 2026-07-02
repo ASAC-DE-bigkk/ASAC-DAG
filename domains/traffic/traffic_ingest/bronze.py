@@ -306,13 +306,18 @@ def insert_seoul_traffic_bronze_rows(
 
 def verify_seoul_traffic_bronze_runtime(
     raw_object_key: str | None = None,
+    raw_object_keys: list[str] | None = None,
     dag_run_id: str | None = None,
     expected_rows: int | None = None,
+    expected_raw_objects: int | None = None,
 ) -> int:
     cursor, catalog, schema = trino_cursor()
     qualified_table = f"{catalog}.{schema}.{BRONZE_TABLE}"
     filters = [f"source_id = {sql_string(SOURCE_ID)}"]
-    if raw_object_key:
+    if raw_object_keys:
+        raw_key_values = ", ".join(sql_string(key) for key in raw_object_keys)
+        filters.append(f"raw_object_key IN ({raw_key_values})")
+    elif raw_object_key:
         filters.append(f"raw_object_key = {sql_string(raw_object_key)}")
     if dag_run_id:
         filters.append(f"dag_run_id = {sql_string(dag_run_id)}")
@@ -333,11 +338,18 @@ def verify_seoul_traffic_bronze_runtime(
             "Seoul traffic bronze verification failed: "
             f"expected_rows={expected_rows}, actual_rows={table_rows}"
         )
-    if expected_rows == 0 and raw_object_key:
+    if expected_raw_objects is not None and int(row[1]) != expected_raw_objects:
+        raise RuntimeError(
+            "Seoul traffic bronze verification failed: "
+            f"expected_raw_objects={expected_raw_objects}, actual_raw_objects={row[1]}"
+        )
+    audit_raw_object_keys = raw_object_keys or ([raw_object_key] if raw_object_key else [])
+    if expected_rows == 0 and audit_raw_object_keys:
         audit_table = request_audit_table_for(qualified_table)
+        audit_raw_key_values = ", ".join(sql_string(key) for key in audit_raw_object_keys)
         audit_filters = [
             f"source_id = {sql_string(SOURCE_ID)}",
-            f"raw_object_key = {sql_string(raw_object_key)}",
+            f"raw_object_key IN ({audit_raw_key_values})",
         ]
         if dag_run_id:
             audit_filters.append(f"dag_run_id = {sql_string(dag_run_id)}")
@@ -349,12 +361,14 @@ def verify_seoul_traffic_bronze_runtime(
             """
         )
         audit_row = cursor.fetchone()
-        if int(audit_row[0]) != 1:
+        expected_audit_rows = expected_raw_objects or len(audit_raw_object_keys)
+        if int(audit_row[0]) != expected_audit_rows:
             raise RuntimeError(
                 "Seoul traffic bronze verification failed: "
-                f"expected_request_audit_rows=1, actual_request_audit_rows={audit_row[0]}"
+                f"expected_request_audit_rows={expected_audit_rows}, "
+                f"actual_request_audit_rows={audit_row[0]}"
             )
-    if expected_rows and int(row[1]) != 1:
+    if expected_rows and expected_raw_objects is None and int(row[1]) != 1:
         raise RuntimeError(f"Seoul traffic bronze verification failed: raw_object_count={row[1]}")
     print(
         "traffic_incident_bronze "
