@@ -5,6 +5,47 @@
 
 ---
 
+## 2026-07-02
+
+### 17. bronze 증분화 코어 — 정렬·검증키·diff (feat/58-commerce-bronze-sort-diff)
+request:
+- bronze 수집이 매 실행 전체를 다시 받는 문제를 해소한다. 각 API 파일에서 UPDATEDT 존재를 먼저
+  확인하고(모두 있으면) **UPDATEDT 내림차순 row 정렬**(날짜가 숫자가 아니면 숫자키로 치환). 정렬은
+  **전량 RAM 금지 → 파일 단위 스트리밍**, 퀵정렬보다 낮은 Big-O 가 있으면 그 방식. 저장 포맷은
+  **row-NDJSON(UPDATEDT desc)로 전환**. **API 단위 해시 검증키**를 만들고, 수집 파일 삭제 로직은
+  재검증 통과 뒤 **맨 마지막(step4)**에만 적용. 브랜치 feat/58-commerce-bronze-sort-diff.
+- (합의 Q&A) **정렬 알고리즘** = 외부 병합 정렬(스트리밍·바운디드 RAM). **저장 포맷** = row-NDJSON(UPDATEDT desc).
+- (합의 Q&A — 증분 저장/비교기준 모델, 크리티컬) 구 데이터 소실·버전이력 유실 방지를 위해 **2계열**:
+  ① **save(증분 영구 저장)** — 첫 수집=full, 이후=신규/변경분만 누적(이력 보존, 삭제 안 함).
+  ② **diff-target(롤링 최신본)** — 다음날 비교 기준. 첫 수집 시 save 와 **같은 내용으로 따로 생성**.
+  매일: 오늘본 vs diff-target diff → 신규분을 save 로 증분 저장 → **diff-target 을 오늘본으로 교체(구 diff-target 삭제)**.
+response:
+- **-1단계 확인(실데이터)**: 39종 전부 UPDATEDT 100% `datetime` → 14자리 정수키로 정렬 가능 확인.
+- **include/bronze/incremental.py**: `external_merge_sort`(청크→임시파일→heapq 병합, 스트리밍·바운디드
+  RAM, O(n log n)), `verification_key`(정렬본 순서민감 sha256), `diff_new_rows`(정렬 병합 스트리밍 diff
+  — 같은 키는 정규화 문자열 직접비교로 hot loop 경량). **파일 브리지**: `sort_rows_to_file`(정렬→row-NDJSON+키),
+  `read_rows`, `build_increment`(첫수집=full / 동일=증분없음 / 상이=diff 신규분 — 모델 그대로 구현).
+- 단위테스트 **13 통과**(정렬·순서민감키·diff 4종 + 파일브리지 first/identical/changed + orchestration
+  first→identical→changed).
+- **DAG 통합**: `common/paths.py`에 diff-target 경로(`_diff_target/<short>.jsonl` + `.key` 사이드카).
+  `incremental_store`(스토리지 브리지: 전날 target 다운로드→비교→증분 업로드→target 롤링 교체).
+  `bronze_tasks._write_bronze`가 **status==ok 일 때만** 페이지→row 파싱→증분 저장(중간 중단은 미저장),
+  마커에 `verification_key/increment_mode/increment_count/sorted_row_count` 기록. page-NDJSON → row-NDJSON.
+- **step0**: `seed_diff_target`(1회성 diff-target/검증키 시드). 미실행이어도 첫 수집이 self-seed 하므로 선택.
+- **step4**: 본 모델은 raw 페이지가 휘발(메모리)이라 "수집 파일 삭제" 별도 대상 없음 → "미저장(status!=ok) +
+  재검증"으로 갈음(단위테스트로 first/identical/changed 재검증).
+- **docs**: [docs/pipeline/bronze/incremental-sort-diff.md](docs/pipeline/bronze/incremental-sort-diff.md)
+  (모델·정렬·검증키·diff·수집흐름·step0·검증). 단위테스트 **14 통과**.
+- **라이브 end-to-end 검증 완료(실 Seoul API, 격리 프리픽스 `_verify58`)**: run1=first(row-NDJSON 확인:
+  MGTNO 있음/LOCALDATA 봉투 아님) + diff-target 생성 → run2 동일 데이터=identical(증분 파일 미생성) →
+  변경분=changed(변경 업장1 + 신규행만 증분, diff-target 3행으로 롤링). **이력 보존 확인**: 이전 run 증분
+  유지 + 같은 업장(mgtno)의 **원본('태평')·변경('태평_CHG') 두 버전 공존 → 이력 추적 가능(True)**.
+  검증 후 `_verify58` 6객체 전량 삭제(실 bronze 무오염). **조치 필요 없음**(정상 동작).
+- **사이드 이펙트 분석/대응**: 기존 bronze=page-NDJSON, 신규=row-NDJSON → **형식 혼재**(이력 손실 아님 —
+  구 run 보존 + 신규 run 은 증분). 실운영 첫 수집은 `_diff_target` 미존재라 mode=first 로 전체 저장
+  (자가 시드; step0 로 사전 시드하면 첫 수집부터 diff). **다운스트림(dbt 로더) row-NDJSON 대응은 feat/58 밖**.
+- 커밋·푸시(feat/58). (부수) CLAUDE.md 영어 통일 + Change Log Rule 에 request:/response: 규격 명시(별도 커밋).
+
 ## 2026-06-30
 
 ### 16. 보안 대응 전용 패키지 + 단일 포인트 종합검증 도입 (`include/security/`)
