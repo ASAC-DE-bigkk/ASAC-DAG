@@ -5,3 +5,5 @@
 culture_ingest/
 scripts/
 _dryrun
+tests/
+docs/
