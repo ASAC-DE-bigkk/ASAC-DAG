@@ -60,7 +60,10 @@ commerce 전용 값은 `.env.commerce`에 유지(번들 자립 구조 자체는 
    - [x] 수정된 전 파이썬 파일 `py_compile` 통과, 옛 이름 잔존 0건 (change-log 이력 제외)
    - [x] traffic/weather 테스트 통과. commerce `test_markers`/`test_bronze_tasks` 8건 실패는
      **선행 feat/59에서 이미 깨져 있던 것**(테스트 더블 `delete` 미구현) — 본 작업과 무관, dev에서 재현 확인
-   - [ ] 컨테이너 재기동 후 각 DAG 1회 트리거로 인증 성공 확인 (특히 commerce — 충돌 해소로 **이제야 자기 키를 쓰게 됨**)
+   - [x] 컨테이너 재기동 후 실동작 확인 (2026-07-02): DAG import 에러 0건, 키 영향
+     DAG 6개(population/traffic/subway/parking/bus/culture) 수동 트리거 **전부 success**,
+     commerce 는 `bronze.resolve verify` **39/39 인증 성공** — 충돌 해소로 자기 키 사용 확인.
+     테스트 후 전 DAG paused 원복
 
 ## 리스크 · 열어둔 질문
 
