@@ -47,6 +47,13 @@ dag_id = <domain>_<dataset>_<stage>
 | `kma_vilage_fcst_bronze` | `weather_vilage_fcst_bronze` | `vilage` 철자는 KMA API 명칭 그대로 유지 |
 | `dbt_trino_iceberg_smoke` | `common_dbt_smoke` | 공통 DAG는 `common` 접두 |
 
+## 검증 결과 (2026-07-02, 로컬 컨테이너)
+
+- [x] 신규 dag_id 11개 전부 파싱 성공, import 에러 0건
+- [x] 옛 dag_id는 비활성 레코드로만 잔존(파일 없음 — 실행 불가, 이력 보존 결정과 일치)
+- [x] 대표 실행 검증: `population_bronze` 수동 트리거 success (테스트 후 paused 원복)
+- [x] 저장 계약 불변 확인: traffic Iceberg 테이블명(`bronze_seoul_traffic_incident`)·R2 경로는 dag_id와 무관하므로 유지
+
 ## 리스크
 
 - **dag_id 변경 = Airflow 메타DB 기준 신규 DAG**: 실행 이력·스케줄 상태가 옛 id에 남고,
