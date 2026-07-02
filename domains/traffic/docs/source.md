@@ -8,11 +8,11 @@
 | 작업 API | `AccInfo` |
 | 기본 endpoint | `http://openapi.seoul.go.kr:8088/{KEY}/xml/AccInfo/{start}/{end}/` |
 | 응답 형식 | XML |
-| 인증 env | `SEOUL_OPEN_API_KEY` |
+| 인증 env | `SEOUL_API_KEY_TRIC` |
 | Airflow DAG | `seoul_traffic_incident_bronze` |
 | Bronze table | `iceberg_dev.<ASK_SEOUL_SCHEMA>.bronze_seoul_traffic_incident` |
 
-`SEOUL_OPEN_API_KEY`는 URL에는 들어가지만 raw object key, request metadata, 로그, 문서에
+`SEOUL_API_KEY_TRIC`는 URL에는 들어가지만 raw object key, request metadata, 로그, 문서에
 원문으로 남기지 않는다.
 
 ## 요청 파라미터

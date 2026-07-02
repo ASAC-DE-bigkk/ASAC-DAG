@@ -52,7 +52,7 @@ import은 됩니다 — DAG가 자기 디렉토리(`domains/culture/`)를 `sys.p
 
 DAG는 키를 **환경변수에서만** 읽습니다. `docker-compose`가 `sample/.env`를
 (`env_file:`로) 모든 Airflow 컨테이너에 주입하므로 `KOPIS_SERVICE_KEY`,
-`SEOUL_OPENAPI_KEY`, `R2_DEV_*`가 `os.environ`으로 들어옵니다.
+`SEOUL_API_KEY_CULT`, `R2_DEV_*`가 `os.environ`으로 들어옵니다.
 **키는 절대 커밋하지 않습니다** — `.env`는 `sample` 상위 레포에서 gitignore 처리됩니다.
 
 ## R2 적재 경로 (bronze 원본)

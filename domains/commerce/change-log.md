@@ -7,6 +7,22 @@
 
 ## 2026-07-02
 
+### 19. 인증키 env-var 계약 변경 — SEOUL_OPENAPI_KEY → SEOUL_API_KEY_COMM, 루트 .env 로 이관 (feat/70-env-key-unification)
+request:
+- 도메인별 서울 API 키 환경변수를 `SEOUL_API_KEY_<도메인약어>` 규칙으로 통합(#70). commerce 는
+  `SEOUL_OPENAPI_KEY` → `SEOUL_API_KEY_COMM`.
+- commerce 인증키는 `.env.commerce` 가 아니라 **호스트 루트 `.env` 로 이관**한다(번들 자립 의도의
+  부분 폐기 — 사용자 승인). `SEOUL_OPENAPI_BASE_URL` 은 `settings.py` 기본값과 동일하므로
+  `.env.commerce` 에서 삭제.
+- 배경: 루트 `.env` 의 culture 키가 같은 이름(`SEOUL_OPENAPI_KEY`)이라 setdefault 로더 특성상
+  commerce 가 culture 키로 호출하던 충돌 해소.
+response:
+- `settings.py` 가 `SEOUL_API_KEY_COMM` 을 읽도록 변경(내부 필드명 `seoul_openapi_key` 유지).
+  `clients.py`/`resolve.py` 오류 메시지, `test_security.py`, 번들 docs/README/deploy 문서 일괄 반영.
+- `.env.commerce`/`.env.commerce.example` 에서 인증키·BASE_URL 제거 + 이관 안내 주석.
+  키 입력 위치 안내를 "루트 `.env`" 로 수정(configuration.md gap 표 포함).
+- 신규 이름은 `KEY` 포함 → security 자동 마스킹(`_SECRET_NAME_RE`) 유지 확인.
+
 ### 18. 재수집 규칙 변경 — 동일자 성공분 제외·KST 일자 가드·한 파일 관리 (feat/59-recollect-rule-change)
 request:
 - **동일자 수동 재실행**: 같은 날짜에 수동 실행 이력이 있으면, 실행 전에 **이미 성공한 API 는 제외**하고

@@ -22,7 +22,7 @@ chmod 600 .env.commerce
 ```
 
 ```bash
-SEOUL_OPENAPI_KEY=<발급키>
+# 인증키는 호스트 루트 .env 에: SEOUL_API_KEY_COMM=<발급키> (#70 이관)
 STORAGE_BACKEND=r2
 
 # R2 블록: 루트 .env 의 prod 키를 참조(권장) — 템플릿의 ${R2_DEV_*} 를 prod 키로 바꾼다:
@@ -53,7 +53,7 @@ R2 적재 확인은 [deploy-dev.md](deploy-dev.md) §3 과 동일(버킷만 prod
 
 ## 4. 보안 체크리스트
 
-- [ ] `SEOUL_OPENAPI_KEY`·`R2_*` 는 로그/경로/커밋에 노출 금지(CLAUDE.md §2.5)
+- [ ] `SEOUL_API_KEY_COMM`·`R2_*` 는 로그/경로/커밋에 노출 금지(CLAUDE.md §2.5)
 - [ ] `.env.commerce` 는 `600`, 가능하면 시크릿 매니저 주입
 - [ ] R2 토큰은 prod 버킷 한정·최소 권한
 - [ ] webserver(UI) 직접 노출 금지 — 앞단 TLS 리버스 프록시(호스트 정책)

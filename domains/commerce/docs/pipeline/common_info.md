@@ -8,7 +8,7 @@
 - 코드(자립 패키지): [dags/domains/commerce/include/](../../include/) (`common`·`bronze`·`silver`)
 - DAG: `seoul_commerce_daily` — [dags/domains/commerce/seoul_commerce_dag.py](../../seoul_commerce_dag.py)
 - 데이터셋 레지스트리(단일 진실 공급원): [dags/domains/commerce/config/dataset_registry.yaml](../../config/dataset_registry.yaml)
-- 실행 인자/환경변수(SEOUL_OPENAPI_KEY 등): [configuration.md](../configuration/configuration.md)
+- 실행 인자/환경변수(SEOUL_API_KEY_COMM 등): [configuration.md](../configuration/configuration.md)
 
 ---
 
@@ -78,11 +78,11 @@
 - 증분/변경 감지 로직은 이 셋을 키로 설계한다.
 
 검증 재현(`bronze.resolve` 는 실행 시 `.env.commerce` 를 자동 적재하므로, 거기에
-`SEOUL_OPENAPI_KEY` 가 있으면 아래 인라인 지정은 생략 가능):
+`SEOUL_API_KEY_COMM` 가 있으면 아래 인라인 지정은 생략 가능):
 
 ```bash
 # 도메인 대표 코드의 응답 컬럼 교집합 + UPDATEDT 존재 확인
-SEOUL_OPENAPI_KEY=... python -m bronze.resolve probe 072404 072208 010101 020301 030601
+SEOUL_API_KEY_COMM=... python -m bronze.resolve probe 072404 072208 010101 020301 030601
 # 또는 .env.commerce 설정 후:  python -m bronze.resolve probe 072404 ...
 ```
 
@@ -255,17 +255,17 @@ airflow dags backfill seoul_commerce_daily -s 2026-06-01 -e 2026-06-07
    (예: `https://data.seoul.go.kr/dataList/OA-16484/A/1/datasetView.do` → 약국).
 2. 후보 코드 정체 확인:
    ```bash
-   SEOUL_OPENAPI_KEY=... python -m bronze.resolve probe 0xxxxx
+   SEOUL_API_KEY_COMM=... python -m bronze.resolve probe 0xxxxx
    ```
 3. `dags/domains/commerce/config/dataset_registry.yaml` 의 해당 항목 `service_name:` 에 입력.
 4. 실호출 검증:
    ```bash
-   SEOUL_OPENAPI_KEY=... python -m bronze.resolve verify
+   SEOUL_API_KEY_COMM=... python -m bronze.resolve verify
    ```
 5. 이 문서 §5 표 재생성(같은 소스라 registry 만 고치면 됨).
 
 식품군 추가 탐색 예:
 
 ```bash
-SEOUL_OPENAPI_KEY=... python -m bronze.resolve scan --prefix 07 --mid 22 24 --last 0 30
+SEOUL_API_KEY_COMM=... python -m bronze.resolve scan --prefix 07 --mid 22 24 --last 0 30
 ```

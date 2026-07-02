@@ -19,7 +19,7 @@
 
 | 자료 | 내용 |
 |---|---|
-| [docs/configuration.md](docs/configuration/configuration.md) | **필요한 환경변수 전체 + `.env.commerce` 주입 방식** — 환경이 바뀌며 빠진 값(SEOUL_OPENAPI_KEY 등) 정리 |
+| [docs/configuration.md](docs/configuration/configuration.md) | **필요한 환경변수 전체 + `.env.commerce` 주입 방식** — 환경이 바뀌며 빠진 값(SEOUL_API_KEY_COMM 등) 정리 |
 | [.env.commerce.example](.env.commerce.example) | 환경변수 템플릿(실파일 `.env.commerce` 는 gitignore) |
 | [include/common/env.py](include/common/env.py) · [include/common/settings.py](include/common/settings.py) | env 로더 · 설정 dataclass |
 

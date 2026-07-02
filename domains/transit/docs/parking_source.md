@@ -3,7 +3,7 @@
 `transit_parking_elt` DAG 가 수집하는 **서울 공영주차 실시간 API** 와 필드를 정리한다.
 필드는 실호출 기준(2026-06-30, 123개 주차장).
 
-- 인증키: `SEOUL_API` (지하철과 공유)
+- 인증키: `SEOUL_API_KEY_TRAN` (지하철과 공유)
 - 수집 코드: [`seoul_transit/parking.py`](../seoul_transit/parking.py) · [`api.py`](../seoul_transit/api.py)
 
 ## 사용 API
@@ -17,7 +17,7 @@
 
 ## 수집 스코프 & 호출 예산
 
-- `GetParkingInfo` **1콜/런**(전체 123개 반환). `*/20` → 72콜/일. `SEOUL_API` 공유(지하철과 별도 DAG).
+- `GetParkingInfo` **1콜/런**(전체 123개 반환). `*/20` → 72콜/일. `SEOUL_API_KEY_TRAN` 공유(지하철과 별도 DAG).
 - `source=seoul_parking`, dataset=`parking`, `PARKING_ROWS`(기본 1000) — N 충분히 크게.
 
 ---

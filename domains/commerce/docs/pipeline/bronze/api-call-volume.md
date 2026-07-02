@@ -98,12 +98,12 @@ calls(dataset) = ceil(list_total_count / SEOUL_PAGE_SIZE)   # SEOUL_PAGE_SIZE = 
 ## 재산정 (건수 변동 시)
 
 ```bash
-# .env.commerce 에 SEOUL_OPENAPI_KEY 설정 후 (configuration.md)
+# .env.commerce 에 SEOUL_API_KEY_COMM 설정 후 (configuration.md)
 PYTHONPATH=dags/domains/commerce/include python - <<'PY'
 import json, math, urllib.request, os
 from common.env import load_commerce_env; load_commerce_env()
 from common import registry
-KEY=os.environ["SEOUL_OPENAPI_KEY"]; BASE="http://openapi.seoul.go.kr:8088"
+KEY=os.environ["SEOUL_API_KEY_COMM"]; BASE="http://openapi.seoul.go.kr:8088"
 tot=0
 for d in registry.enabled_for_schedule("daily"):
     raw=urllib.request.urlopen(f"{BASE}/{KEY}/json/{d.service_name}/1/1/",timeout=30).read()

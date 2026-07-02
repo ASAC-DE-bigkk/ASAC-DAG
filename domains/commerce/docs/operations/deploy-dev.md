@@ -17,7 +17,7 @@ cp .env.commerce.example .env.commerce
 (템플릿 기본값이 이미 `${R2_DEV_*}` 참조라 보통 그대로 두면 된다):
 
 ```bash
-SEOUL_OPENAPI_KEY=<발급키>
+# 인증키는 호스트 루트 .env 에: SEOUL_API_KEY_COMM=<발급키> (#70 이관)
 STORAGE_BACKEND=r2
 
 # R2 블록은 루트 .env 값을 불러옴(중복 입력 불필요). 템플릿 기본:

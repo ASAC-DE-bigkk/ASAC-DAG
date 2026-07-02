@@ -25,7 +25,7 @@ from common.settings import get_settings
 def _client() -> SeoulOpenApiClient:
     s = get_settings()
     if not s.seoul_openapi_key:
-        print("SEOUL_OPENAPI_KEY 미설정", file=sys.stderr)
+        print("SEOUL_API_KEY_COMM 미설정", file=sys.stderr)
         raise SystemExit(2)
     return SeoulOpenApiClient(key=s.seoul_openapi_key, base_url=s.seoul_openapi_base_url)
 
@@ -96,7 +96,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    load_commerce_env()  # .env.commerce 의 SEOUL_OPENAPI_KEY 등을 적재(없으면 통과)
+    load_commerce_env()  # .env.commerce 의 SEOUL_API_KEY_COMM 등을 적재(없으면 통과)
     p = argparse.ArgumentParser(description="LOCALDATA service_name 해석 도우미")
     sub = p.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("scan")

@@ -38,7 +38,7 @@ BUS_ROUTES = [s.strip() for s in os.environ.get(
 PARKING_ROWS = int(os.environ.get("PARKING_ROWS", "1000"))
 
 
-def load_key(var: str = "SEOUL_API") -> str:
+def load_key(var: str = "SEOUL_API_KEY_TRAN") -> str:
     """API 인증키를 환경변수에서 로드 (compose env_file 로 주입)."""
     value = os.environ.get(var)
     if not value:
@@ -46,7 +46,7 @@ def load_key(var: str = "SEOUL_API") -> str:
     return value
 
 
-def load_bus_key(var: str = "PUBLIC_DATA_API_DE") -> str:
+def load_bus_key(var: str = "PUBLIC_DATA_API_KEY_BUS") -> str:
     """버스(공공데이터포털 Decoding) 키 → URL 인코딩해서 반환.
 
     Decoding 키(`/`·`==` 포함)는 그대로 쓰면 ACCESS DENIED → quote 필수.

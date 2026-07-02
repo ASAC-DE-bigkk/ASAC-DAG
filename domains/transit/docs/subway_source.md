@@ -3,7 +3,7 @@
 `transit_subway_elt` DAG 가 수집하는 **2개 서울 열린데이터 실시간 API** 와 그 필드를 정리한다.
 silver/gold 설계·도메인 통합 시 레퍼런스. 필드는 **실제 적재된 bronze raw 샘플**에서 추출(2026-06-30).
 
-- 인증키: `SEOUL_API` (서울 열린데이터광장, 실시간 권한)
+- 인증키: `SEOUL_API_KEY_TRAN` (서울 열린데이터광장, 실시간 권한)
 - 수집 코드: [`seoul_transit/subway.py`](../seoul_transit/subway.py) · [`api.py`](../seoul_transit/api.py)
 
 ## 사용 API (정식 명칭)

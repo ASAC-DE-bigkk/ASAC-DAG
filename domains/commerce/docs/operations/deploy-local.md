@@ -18,7 +18,7 @@ cd dags/domains/commerce
 Copy-Item .env.commerce.example .env.commerce
 ```
 
-- `SEOUL_OPENAPI_KEY` 입력(**필수**) — 없으면 `check_api_key` 게이트에서 전체 실패.
+- 루트 `.env` 에 `SEOUL_API_KEY_COMM` 입력(**필수**, #70 이관) — 없으면 `check_api_key` 게이트에서 전체 실패.
 - `STORAGE_BACKEND=local`(기본), `LOCAL_DATA_ROOT=/opt/airflow/data` 확인.
 - 전체 변수: [configuration.md](../configuration/configuration.md).
 
@@ -82,7 +82,7 @@ PYTHONPATH=dags/domains/commerce/include python -m pytest dags/domains/commerce/
 
 | 증상 | 원인/조치 |
 |---|---|
-| `check_api_key` 실패 | `.env.commerce` 의 `SEOUL_OPENAPI_KEY` 미설정/오타 |
+| `check_api_key` 실패 | 루트 `.env` 의 `SEOUL_API_KEY_COMM` 미설정/오타(#70 이관) |
 | DAG 안 보임 | `docker compose logs airflow-dag-processor` 에서 import 에러 확인 |
 | silver 로직 실행 시 import 에러 | 이미지에 `pandas`/`pyarrow` 없음 → requirements 설치(현 DAG 라인은 bronze 전용이라 불필요) |
 | 산출물이 사라짐 | local 볼륨 미마운트(위 §4 영속성) → r2 사용 |

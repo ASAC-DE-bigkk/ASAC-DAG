@@ -83,7 +83,7 @@ silver/commerce/general_restaurant/observed_date=2026-06-30/part-000.parquet
 
 - 페이지별 `content_hash` 는 마커의 `pages[]` 에 보존(원본 NDJSON 줄과 1:1).
 - 소스 네이티브 ID(`MGTNO` 등)는 정규화 레코드에 그대로 보존한다(내부 ID로 대체 금지).
-- 인증키(`SEOUL_OPENAPI_KEY`)는 `source_uri`/로그에서 `***` 로 마스킹된다(CLAUDE.md §2.5).
+- 인증키(`SEOUL_API_KEY_COMM`)는 `source_uri`/로그에서 `***` 로 마스킹된다(CLAUDE.md §2.5).
 
 ## Cloudflare R2 설정 (`STORAGE_BACKEND=r2`)
 
