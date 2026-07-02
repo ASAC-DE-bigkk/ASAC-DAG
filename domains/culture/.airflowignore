@@ -4,4 +4,7 @@
 # (culture_bronze.py) should be scanned for a DAG object.
 culture_ingest/
 scripts/
+docs/
 _dryrun
+tests/
+docs/

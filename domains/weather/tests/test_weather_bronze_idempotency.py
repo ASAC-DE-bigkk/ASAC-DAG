@@ -2,6 +2,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -59,3 +61,39 @@ def test_kma_insert_replaces_same_retry_scope_before_append():
     assert "nx = 60" in delete_sql
     assert "ny = 127" in delete_sql
     assert insert_sql.startswith("INSERT INTO iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst")
+
+
+def test_kma_insert_fails_before_delete_when_response_is_partial():
+    cursor = RecordingCursor()
+
+    with pytest.raises(RuntimeError, match="total_count=2, parsed row_count=1"):
+        insert_kma_bronze_rows(
+            cursor=cursor,
+            qualified_table="iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst",
+            rows=[
+                {
+                    "baseDate": "20260701",
+                    "baseTime": "0800",
+                    "nx": "60",
+                    "ny": "127",
+                    "category": "TMP",
+                    "fcstDate": "20260701",
+                    "fcstTime": "0900",
+                    "fcstValue": "25",
+                }
+            ],
+            metadata={"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 2, "row_count": 1},
+            request_id="request-1",
+            place_id="seoul-test-grid",
+            base_date="20260701",
+            base_time="0800",
+            nx=60,
+            ny=127,
+            raw_object_key="raw/weather/kma/request-1.json",
+            raw_hash="abc123",
+            http_status=200,
+            collected_at=datetime(2026, 7, 1, 0, 20, tzinfo=timezone.utc),
+            dag_run_id="scheduled__2026-07-01T08:20:00+09:00",
+        )
+
+    assert cursor.statements == []
