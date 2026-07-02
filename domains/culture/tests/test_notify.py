@@ -74,3 +74,28 @@ def test_payload_fail_case_is_red_with_issue_lines():
 def test_payload_hides_iceberg_when_zero():
     p = notify.build_report_payload(_sample_report(True))
     assert "Iceberg" not in p["embeds"][0]["description"]
+
+
+def test_table_shows_zero_duration_not_dash_but_dash_when_missing():
+    ds_zero = {"name": "kopis_performance", "rows": 100, "pages": 1, "error": "",
+               "checks": {"passed": True, "violations": []}, "iceberg_rows": 0,
+               "duration_sec": 0.0, "finished_ts": "20260701T000010Z"}
+    ds_missing = {"name": "seoul_sejong", "rows": 50, "pages": 1, "error": "",
+                  "checks": {"passed": True, "violations": []}, "iceberg_rows": 0,
+                  "finished_ts": "20260701T000011Z"}
+    report = {"load_date": "2026-07-02", "ingest_ts": "20260701T000007Z",
+              "run_id": "scheduled__x", "slo_passed": True,
+              "coverage": {"expected": 2, "landed": 2, "skipped": 0, "failed": 0, "coverage_pct": 100.0},
+              "total_rows": 150, "total_iceberg_rows": 0,
+              "freshness": {"max_age_hours": 0.3}, "violations": [], "failed_datasets": [],
+              "datasets": [ds_zero, ds_missing]}
+
+    p = notify.build_report_payload(report)
+    desc = p["embeds"][0]["description"]
+    lines = desc.split("\n")
+
+    zero_line = next(l for l in lines if "kopis_performance" in l)
+    missing_line = next(l for l in lines if "seoul_sejong" in l)
+
+    assert zero_line.split()[4] == "0.0"
+    assert missing_line.split()[4] == "--"

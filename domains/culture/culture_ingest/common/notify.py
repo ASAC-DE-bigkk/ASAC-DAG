@@ -107,8 +107,8 @@ def _table(datasets: list[dict]) -> str:
     lines = [f"{'st':<4}  {'rows':>6}  {'pages':>6}  {'done':<8}  {'sec':>5}  dataset"]
     for s in datasets:
         done = _kst_hms(s["finished_ts"]) if s.get("finished_ts") else "--"
-        dur = s.get("duration_sec") or 0
-        sec = f"{float(dur):.1f}" if dur else "--"
+        dur = s.get("duration_sec")
+        sec = f"{float(dur):.1f}" if dur is not None else "--"
         lines.append(
             f"{_status(s):<4}  {_fmt_int(s.get('rows')):>6}  {_fmt_int(s.get('pages')):>6}  "
             f"{done:<8}  {sec:>5}  {_title_of(s['name'])} · {s['name']}"
