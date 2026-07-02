@@ -6,7 +6,7 @@ from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from reliability_report import report  # noqa: E402
+from traffic_ingest import reliability_report as report  # noqa: E402
 
 
 class RecordingCursor:
@@ -21,70 +21,35 @@ class RecordingCursor:
         return self.rows.pop(0)
 
 
-class FailingCursor:
-    def __init__(self):
-        self.calls = 0
-
-    def execute(self, sql):
-        self.calls += 1
-        if self.calls == 1:
-            raise RuntimeError("weather table missing")
-
-    def fetchone(self):
-        return (1, 25, 25, 1000, 0, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc))
-
-
-def test_build_reliability_report_passes_for_fresh_complete_data(monkeypatch):
+def test_build_traffic_report_passes_for_fresh_complete_data(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
     cursor = RecordingCursor(
         rows=[
-            ("20260702", "0800", 80, 80, 6400, datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
             (1, 25, 25, 1000, 0, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc)),
         ]
     )
 
-    result = report.build_reliability_report(
+    result = report.build_traffic_reliability_report(
         cursor=cursor,
         detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
     )
 
     assert result["status"] == "PASS"
-    assert result["weather"]["grid_count"] == 80
     assert result["traffic"]["parsed_row_count"] == 25
-    assert "bronze_kma_vilage_fcst" in result["blast_radius"][0]
+    assert "bronze_seoul_traffic_incident_request_audit" in result["blast_radius"][1]
     assert "current_timestamp - INTERVAL '24' HOUR" in cursor.statements[0]
 
 
-def test_report_fails_when_weather_grid_coverage_is_incomplete(monkeypatch):
+def test_traffic_report_fails_when_total_exceeds_requested_range(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     cursor = RecordingCursor(
         rows=[
-            ("20260702", "0800", 79, 79, 6320, datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
-            (1, 0, 0, 1000, 1, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc)),
-        ]
-    )
-
-    result = report.build_reliability_report(
-        cursor=cursor,
-        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
-    )
-
-    assert result["status"] == "FAIL"
-    assert result["weather"]["coverage_ok"] is False
-    assert result["traffic"]["status"] == "PASS"
-
-
-def test_report_fails_when_traffic_total_exceeds_requested_range(monkeypatch):
-    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
-    cursor = RecordingCursor(
-        rows=[
-            ("20260702", "0800", 80, 80, 6400, datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
             (1, 1000, 1500, 1000, 0, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc)),
         ]
     )
 
-    result = report.build_reliability_report(
+    result = report.build_traffic_reliability_report(
         cursor=cursor,
         detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
     )
@@ -93,9 +58,11 @@ def test_report_fails_when_traffic_total_exceeds_requested_range(monkeypatch):
     assert result["traffic"]["coverage_ok"] is False
 
 
-def test_report_dag_schedule_requires_dev_target_and_webhook(monkeypatch):
+def test_traffic_report_schedule_requires_dev_target_and_webhook(monkeypatch):
+    monkeypatch.delenv("ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE", raising=False)
     monkeypatch.delenv("ASK_SEOUL_REPORT_DAG_SCHEDULE", raising=False)
     monkeypatch.delenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("TRAFFIC_DISCORD_WEBHOOK_URL", raising=False)
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     assert report.report_dag_schedule() is None
 
@@ -106,33 +73,26 @@ def test_report_dag_schedule_requires_dev_target_and_webhook(monkeypatch):
     assert report.report_dag_schedule() is None
 
 
-def test_format_discord_message_does_not_include_webhook(monkeypatch):
+def test_traffic_message_does_not_include_webhook(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/secret-token")
     cursor = RecordingCursor(
         rows=[
-            ("20260702", "0800", 80, 80, 6400, datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
             (1, 25, 25, 1000, 0, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc)),
         ]
     )
-    result = report.build_reliability_report(
+    result = report.build_traffic_reliability_report(
         cursor=cursor,
         detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
     )
 
-    message = report.format_discord_message(result)
+    message = report.format_traffic_discord_message(result)
 
     assert "secret-token" not in message
-    assert "서울 도시 데이터 Bronze 신뢰성 리포트" in message
+    assert "서울시 돌발정보 Bronze 신뢰성 리포트" in message
 
 
-def test_send_discord_message_skips_when_webhook_missing(monkeypatch):
-    monkeypatch.delenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", raising=False)
-
-    assert report.send_discord_message("hello") is False
-
-
-def test_send_discord_message_posts_payload(monkeypatch):
+def test_traffic_send_discord_posts_payload(monkeypatch):
     calls = []
 
     class Response:
@@ -154,11 +114,11 @@ def test_send_discord_message_posts_payload(monkeypatch):
     request, timeout = calls[0]
     assert request.data == b'{"content": "hello"}'
     assert request.get_method() == "POST"
-    assert request.headers["User-agent"] == "ask-seoul-reliability-report/1.0"
+    assert request.headers["User-agent"] == "ask-seoul-traffic-report/1.0"
     assert timeout == 10
 
 
-def test_send_discord_message_swallows_failure_without_logging_webhook(monkeypatch, caplog):
+def test_traffic_send_discord_swallows_failure_without_logging_webhook(monkeypatch, caplog):
     secret_url = "https://discord.com/api/webhooks/123/SECRET_TOKEN"
 
     def fake_urlopen(request, timeout):
@@ -169,16 +129,3 @@ def test_send_discord_message_swallows_failure_without_logging_webhook(monkeypat
     assert report.send_discord_message("hello", webhook_url=secret_url) is False
     assert "SECRET_TOKEN" not in caplog.text
     assert secret_url not in caplog.text
-
-
-def test_query_failure_is_reported_instead_of_aborting(monkeypatch):
-    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
-
-    result = report.build_reliability_report(
-        cursor=FailingCursor(),
-        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
-    )
-
-    assert result["status"] == "FAIL"
-    assert result["weather"]["reason"] == "weather_query_failed"
-    assert result["traffic"]["status"] == "PASS"

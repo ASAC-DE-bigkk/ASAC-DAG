@@ -1,3 +1,0 @@
-# Airflow 3.x uses glob syntax for DAG ignore files.
-reliability_report/**
-tests/**
