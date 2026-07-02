@@ -41,7 +41,7 @@ def test_kma_insert_replaces_same_retry_scope_before_append():
         base_time="0800",
         nx=60,
         ny=127,
-        raw_object_key="bronze/weather/kma/request-1.json",
+        raw_object_key="raw/weather/kma/request-1.json",
         raw_hash="abc123",
         http_status=200,
         collected_at=datetime(2026, 7, 1, 0, 20, tzinfo=timezone.utc),
