@@ -55,7 +55,7 @@
 - [ ] Step 0.5 — 계약(contract) 통일 (코드 통합 전 선행):
   - [x] 서울 API 키 환경변수 이름 통합 → [plans/2026-07-02-feat-env-key-unification.md](plans/2026-07-02-feat-env-key-unification.md) (PR #72 리뷰 중)
   - [x] DAG 네이밍 규칙 정의·적용 → [plans/2026-07-02-feat-dag-naming-convention.md](plans/2026-07-02-feat-dag-naming-convention.md) (PR #74 리뷰 중)
-  - [ ] 저장 계약(테이블·경로) 네이밍 → 이슈 #75 (조사·합의 대기)
+  - [ ] 저장 계약 — R2 원본 `raw/` 전환 → [plans/2026-07-02-feat-r2-raw-prefix.md](plans/2026-07-02-feat-r2-raw-prefix.md) (#75 합의, commerce 마이그레이션 방식 대기)
   - [ ] 환경변수 관리 Infisical 전환 → [plans/2026-07-02-feat-infisical-secrets.md](plans/2026-07-02-feat-infisical-secrets.md) (기획 초안)
 - [ ] Step 1 — 관심사별 상세 비교 분석 (도메인별 구현 차이·의도 파악)
 - [ ] Step 2 — 통합 우선순위 및 인터페이스 합의:
@@ -73,3 +73,4 @@
 | 2026-07-02 | 서울 API 키는 `SEOUL_API_KEY_<도메인약어>` 규칙으로 루트 `.env`에서 일원 관리, commerce 키도 `.env.commerce`에서 루트로 이관 | 이름 충돌(commerce/culture 동명 키)로 commerce가 culture 키로 호출하던 버그 해소. 번들 자립 의도(#70, commerce change-log #19)는 인증키에 한해 부분 폐기 — 사용자 승인 |
 | 2026-07-02 | DAG 네이밍 규칙 `<domain>_<dataset>_<stage>` 확정 (#73) — stage는 역할형(bronze/transform/elt/recollect/smoke), dataset 생략은 옵션(확장 가능성 있으면 명시 권장), 공통 DAG는 `common` 접두, 파일명=dag_id | 접두(`seoul_`/도메인/소스)·단계 표기 혼재 해소. 옛 dag_id 실행 이력은 메타DB에 보존 |
 | 2026-07-02 | (재검토) transit `*_elt` → `*_bronze` 재변경 — elt는 DAG 안 일괄 변환에만 사용. 저장 계약(테이블·경로) 네이밍은 별도 이슈로 분리 | transit 실동작은 bronze 한정(변환은 ASAC-DBT 몫, docstring에 의도 명시) — 같은 접미사의 이중 의미(EL만 vs 일괄) 차단 |
+| 2026-07-02 | (#75 합의) R2 오브젝트 원본 경로는 `raw/` 채택, dag_id·Iceberg 테이블명의 `bronze`는 유지 | 용어 구분 확정: raw=R2 랜딩 원본, bronze=Iceberg 웨어하우스 원본층. PR #74 리뷰(@yooseongjin527) 제안 수용 |
