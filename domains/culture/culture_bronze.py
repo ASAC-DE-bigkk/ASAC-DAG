@@ -40,6 +40,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     build_run_report,
     ingest_one,
+    normalize_mapped_results,
     write_run_report,
 )
 from culture_ingest.common.notify import build_report_payload, notifier_from_env  # noqa: E402
@@ -171,7 +172,8 @@ def _report(**context) -> None:
         ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
         run_id=context["dag_run"].run_id,
     )
-    summaries = [r for r in (context["ti"].xcom_pull(task_ids="ingest_dataset") or []) if r]
+    # 매핑 인스턴스 1개면 pull 이 dict 하나를 줄 수 있어 정규화 필수(#87).
+    summaries = normalize_mapped_results(context["ti"].xcom_pull(task_ids="ingest_dataset"))
     # 기대 커버리지 = plan이 계획한 데이터셋 수(성공 summary 수가 아님). 하드 실패한
     # ingest_dataset 매핑 인스턴스는 예외를 던져 XCom에 결과를 안 남기므로, summaries만
     # 세면 실패가 분모에서도 사라져 coverage가 늘 ~100%로 보인다(#39).
