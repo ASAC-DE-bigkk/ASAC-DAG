@@ -4,8 +4,8 @@
 가공 로직은 include/silver/ 에 그대로 보존되어 있다(별도 오케스트레이션 없음).
 
 DAG 2개(공통 태스크 공유):
-  - **seoul_commerce_daily**     : 수집 대상 전체를 매 실행 수집(@daily).
-  - **seoul_commerce_recollect** : 최근 run 에서 미완료(incomplete/미시도)인 API만 재수집(주기적).
+  - **commerce_localdata_elt**     : 수집 대상 전체를 매 실행 수집(@daily).
+  - **commerce_localdata_recollect** : 최근 run 에서 미완료(incomplete/미시도)인 API만 재수집(주기적).
                                    재수집 대상이 없으면 수집 진행 안 함(빈 매핑 → run 폴더 미생성).
 
   resolve_observed_date ─┐
@@ -211,22 +211,22 @@ def _wire(targets):
     finalize_run(bronze_run_id, observed_date, bronze)
 
 
-@dag(dag_id="seoul_commerce_daily", schedule="@daily",
+@dag(dag_id="commerce_localdata_elt", schedule="@daily",
      start_date=pendulum.datetime(2024, 1, 1, tz="Asia/Seoul"), catchup=False,
      max_active_runs=1, default_args=_DEFAULT_ARGS, tags=["seoul", "commerce", "daily"],
      doc_md=__doc__, params=_PARAMS)
-def seoul_commerce_daily():
+def commerce_localdata_elt():
     _wire(plan_all_targets())
 
 
-@dag(dag_id="seoul_commerce_recollect", schedule="0 */6 * * *",
+@dag(dag_id="commerce_localdata_recollect", schedule="0 */6 * * *",
      start_date=pendulum.datetime(2024, 1, 1, tz="Asia/Seoul"), catchup=False,
      max_active_runs=1, default_args=_DEFAULT_ARGS, tags=["seoul", "commerce", "recollect"],
      doc_md=__doc__, params=_PARAMS)
-def seoul_commerce_recollect():
+def commerce_localdata_recollect():
     # 최근 run 의 미완료 API만 재수집. 대상 없으면 빈 매핑 → 수집 진행 안 함.
     _wire(find_incomplete_targets())
 
 
-seoul_commerce_daily()
-seoul_commerce_recollect()
+commerce_localdata_elt()
+commerce_localdata_recollect()

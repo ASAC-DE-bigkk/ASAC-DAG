@@ -94,7 +94,7 @@ def verify_seoul_traffic_bronze_runtime(**context) -> int:
 
 
 with DAG(
-    dag_id="seoul_traffic_incident_bronze",
+    dag_id="traffic_incident_bronze",
     description="Loads Seoul TOPIS AccInfo XML into R2 and validates the Iceberg bronze runtime.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=traffic_dag_schedule(),

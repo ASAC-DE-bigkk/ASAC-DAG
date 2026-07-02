@@ -2,9 +2,9 @@
 
 bronze 저장 구조(run_id 폴더 + 마커)를 기반으로 한 운영 보조 3종.
 
-## 1. 재수집 파이프라인 (`seoul_commerce_recollect`)
+## 1. 재수집 파이프라인 (`commerce_localdata_recollect`)
 
-매 실행 전체 수집하는 `seoul_commerce_daily` 와 별개로, **미완료(incomplete/미시도)인 API만
+매 실행 전체 수집하는 `commerce_localdata_elt` 와 별개로, **미완료(incomplete/미시도)인 API만
 주기적으로 다시 수집**하는 안전망 DAG.
 
 - 스케줄: `0 */6 * * *`(6시간마다). 수동 트리거도 가능. `max_active_runs=1`.
@@ -29,7 +29,7 @@ bronze 저장 구조(run_id 폴더 + 마커)를 기반으로 한 운영 보조 3
 
 ```bash
 # 수동 재수집(미완료만)
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_recollect
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_recollect
 ```
 
 > daily 가 전체를 매번 받으므로 엄밀히는 재수집도 daily 가 흡수한다. recollect 는 **부분 실패를

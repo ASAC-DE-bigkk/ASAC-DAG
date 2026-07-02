@@ -357,7 +357,7 @@ def verify_seoul_traffic_bronze_runtime(
     if expected_rows and int(row[1]) != 1:
         raise RuntimeError(f"Seoul traffic bronze verification failed: raw_object_count={row[1]}")
     print(
-        "seoul_traffic_incident_bronze "
+        "traffic_incident_bronze "
         f"table_rows={row[0]} raw_object_count={row[1]} last_collected_at={row[2]}"
     )
     return table_rows

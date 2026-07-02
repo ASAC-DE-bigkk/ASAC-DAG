@@ -45,7 +45,7 @@ R2 백엔드는 `boto3`, silver 는 `pandas`/`pyarrow` 가 필요하다. 현재 
 
 ```bash
 docker compose up -d                       # 호스트 루트에서 (UI :30585)
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_daily
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt
 ```
 
 R2 적재 확인:

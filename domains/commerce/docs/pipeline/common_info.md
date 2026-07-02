@@ -6,7 +6,7 @@
 `UPDATEDT` 제공 여부·저장/상태 관리 계약을 정리한다.
 
 - 코드(자립 패키지): [dags/domains/commerce/include/](../../include/) (`common`·`bronze`·`silver`)
-- DAG: `seoul_commerce_daily` — [dags/domains/commerce/seoul_commerce_dag.py](../../seoul_commerce_dag.py)
+- DAG: `commerce_localdata_elt` — [dags/domains/commerce/seoul_commerce_dag.py](../../seoul_commerce_dag.py)
 - 데이터셋 레지스트리(단일 진실 공급원): [dags/domains/commerce/config/dataset_registry.yaml](../../config/dataset_registry.yaml)
 - 실행 인자/환경변수(SEOUL_API_KEY_COMM 등): [configuration.md](../configuration/configuration.md)
 
@@ -142,12 +142,12 @@ DB·외부 매니페스트 없음 — 상태/이력은 **각 `run_id` 폴더의 
 
 ```bash
 # 1) 평소 스케줄/수동 실행이 곧 전체 수집(= 자동 재수집). 별도 force 불필요.
-airflow dags trigger seoul_commerce_daily
+airflow dags trigger commerce_localdata_elt
 
 # 2) 특정 논리일로(silver 파티션 override)
-airflow dags trigger seoul_commerce_daily -c '{"observed_date": "2026-06-01"}'
+airflow dags trigger commerce_localdata_elt -c '{"observed_date": "2026-06-01"}'
 #    날짜 범위:
-airflow dags backfill seoul_commerce_daily -s 2026-06-01 -e 2026-06-07
+airflow dags backfill commerce_localdata_elt -s 2026-06-01 -e 2026-06-07
 ```
 
 > 인허가는 스냅샷 데이터라 과거일 backfill 도 "현재 전체 스냅샷"을 그 논리일 파티션(silver)으로

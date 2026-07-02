@@ -46,7 +46,7 @@ R2_REGION=auto
 
 ```bash
 docker compose up -d
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_daily   # 매 실행이 전체 수집
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt   # 매 실행이 전체 수집
 ```
 
 R2 적재 확인은 [deploy-dev.md](deploy-dev.md) §3 과 동일(버킷만 prod).

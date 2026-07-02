@@ -10,7 +10,7 @@ Cloudflare R2의 `bronze/population/` 경로에 원본으로 적재하고, Icebe
 
 ```
 domains/population/
-├─ seoul_ppltn_collect.py         # ⭐ Airflow DAG 엔트리 (여기서 유일하게 스캔되는 파일)
+├─ population_bronze.py         # ⭐ Airflow DAG 엔트리 (여기서 유일하게 스캔되는 파일)
 ├─ ppltn_ingest/                  # import 전용 패키지 (DAG 스캔 제외, import만)
 │  ├─ common/                     #   도메인 무관 얇은 helper (이슈 #16)
 │  │  ├─ config.py                #     R2/env(dev·prod)·RunContext·redact_secret·raw 경로 규칙
@@ -32,7 +32,7 @@ domains/population/
 ```
 
 Airflow는 dags 폴더를 재귀적으로 스캔하므로 이 DAG는
-`domains/population/seoul_ppltn_collect.py`에서 자동 인식됩니다. `ppltn_ingest/`와
+`domains/population/population_bronze.py`에서 자동 인식됩니다. `ppltn_ingest/`와
 `scripts/`는 `.airflowignore`로 **DAG 스캔에서는 제외**되지만 import은 됩니다 — DAG가
 자기 디렉토리를 `sys.path`에 넣고 `ppltn_ingest.*`를 불러옵니다.
 

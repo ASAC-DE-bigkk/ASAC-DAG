@@ -18,7 +18,7 @@ commerce 라인은 **서울 지방행정 인허가데이터 표준(LOCALDATA)** 
 
 - `monthly`/`irregular` 주기에는 인허가 대상이 **0종**만 남아, 해당 DAG(`seoul_commerce_monthly`·
   `seoul_commerce_irregular`)를 **비활성화**했다([../../seoul_commerce_dag.py](../../seoul_commerce_dag.py)
-  의 `SCHEDULES` = `daily` 만). 현재 생성되는 DAG 는 **`seoul_commerce_daily` 1개**.
+  의 `SCHEDULES` = `daily` 만). 현재 생성되는 DAG 는 **`commerce_localdata_elt` 1개**.
 - 인허가 레지스트리 집계: **41 → 39종**(전부 daily) = **39종 전 종 수집(미해석 0)**.
 
 ## 재활성(필요 시)

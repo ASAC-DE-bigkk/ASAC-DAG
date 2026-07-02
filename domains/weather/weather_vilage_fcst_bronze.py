@@ -110,7 +110,7 @@ def verify_kma_bronze_runtime(**context) -> int:
 
 
 with DAG(
-    dag_id="kma_vilage_fcst_bronze",
+    dag_id="weather_vilage_fcst_bronze",
     description="Loads KMA getVilageFcst raw JSON into R2 and validates the Iceberg bronze runtime.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=kma_dag_schedule(),

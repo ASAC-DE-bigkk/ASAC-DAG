@@ -1,6 +1,6 @@
 # transit 도메인 — 버스 실시간 데이터 소스 (data dictionary)
 
-`transit_bus_elt` DAG 가 수집하는 **서울 TOPIS 버스 실시간 API** 와 필드를 정리한다.
+`transit_bus_bronze` DAG 가 수집하는 **서울 TOPIS 버스 실시간 API** 와 필드를 정리한다.
 지하철과 달리 **응답이 XML → 원본 그대로 보존**(파싱=silver/dbt). 필드는 실호출 기준(2026-06-30).
 
 - 인증키: `PUBLIC_DATA_API_KEY_BUS` (공공데이터포털 Decoding) — **URL 인코딩 필수**

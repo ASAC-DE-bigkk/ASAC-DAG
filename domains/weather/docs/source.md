@@ -9,7 +9,7 @@
 | 기본 endpoint | `https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst` |
 | 응답 형식 | JSON |
 | 인증 env | `KMA_SERVICE_KEY` |
-| Airflow DAG | `kma_vilage_fcst_bronze` |
+| Airflow DAG | `weather_vilage_fcst_bronze` |
 | Bronze table | `iceberg_dev.<ASK_SEOUL_SCHEMA>.bronze_kma_vilage_fcst` |
 
 `KMA_SERVICE_KEY`는 URL에는 들어가지만 raw object key, request metadata, 로그, 문서에 원문으로 남기지 않는다.

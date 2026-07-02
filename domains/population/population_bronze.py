@@ -101,7 +101,7 @@ def _report(**context) -> None:
 
 
 with DAG(
-    dag_id="seoul_ppltn_collect",
+    dag_id="population_bronze",
     description="Collect Seoul citydata_ppltn (121 areas) raw payload to R2 + Iceberg bronze.",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
     schedule="*/5 * * * *",

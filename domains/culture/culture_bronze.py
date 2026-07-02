@@ -215,7 +215,7 @@ def _report(**context) -> None:
 
 
 with DAG(
-    dag_id="culture_bronze_ingest",
+    dag_id="culture_bronze",
     description="Land culture domain raw source data (KOPIS + Seoul OA) to R2 bronze/culture.",
     start_date=pendulum.datetime(2026, 6, 1, tz=KST),
     schedule="@daily",

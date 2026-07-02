@@ -1,6 +1,6 @@
 """서울 지하철 ELT (transit 도메인) — 수집 → R2 bronze 객체(원본) → Iceberg bronze(Trino).
 
-sample(dbt_trino_iceberg_smoke) 패턴을 따른다:
+sample(common_dbt_smoke) 패턴을 따른다:
   - 클래식 DAG + PythonOperator(ingest)
   - bronze 는 Trino INSERT 로 적재
 차이: 소스가 고정 CSV 가 아니라 실시간 API(seoul_transit collector).
@@ -152,7 +152,7 @@ def ingest_subway() -> dict:
 
 
 with DAG(
-    dag_id="transit_subway_elt",
+    dag_id="transit_subway_bronze",
     description="지하철 실시간 → R2 raw 랜딩 → Iceberg bronze(Trino). silver/gold 는 ASAC-DBT.",
     start_date=datetime(2026, 1, 1),
     schedule=config.schedule_for("subway", "*/20 * * * *"),
