@@ -7,6 +7,16 @@
 
 ## 2026-07-02
 
+### 20. DAG 네이밍 통합 — seoul_commerce_daily/recollect → commerce_localdata_elt/recollect (feat/73-dag-naming)
+request:
+- 팀 공통 DAG 네이밍 규칙 `<domain>_<dataset>_<stage>` 확정(#73): stage 역할형(elt/recollect 등),
+  commerce dataset=localdata, 파일명=dag_id(밀접한 DAG 쌍은 공통 접두 파일명).
+response:
+- dag_id: `seoul_commerce_daily` → `commerce_localdata_elt`, `seoul_commerce_recollect` →
+  `commerce_localdata_recollect`. 파일 `seoul_commerce_dag.py` → `commerce_localdata.py`(두 DAG 공존).
+- 번들 docs/README의 dag_id 참조 일괄 갱신. 스토리지 경로·마커 계약은 dag_id와 무관하므로 변경 없음.
+- 옛 dag_id 실행 이력은 Airflow 메타DB에 보존(삭제 안 함), 신규 id로 새로 시작.
+
 ### 19. 인증키 env-var 계약 변경 — SEOUL_OPENAPI_KEY → SEOUL_API_KEY_COMM, 루트 .env 로 이관 (feat/70-env-key-unification)
 request:
 - 도메인별 서울 API 키 환경변수를 `SEOUL_API_KEY_<도메인약어>` 규칙으로 통합(#70). commerce 는

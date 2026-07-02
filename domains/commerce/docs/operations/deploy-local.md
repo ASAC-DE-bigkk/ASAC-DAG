@@ -38,12 +38,12 @@ docker compose ps
 
 ## 3. 파이프라인 실행
 
-UI 에서 `seoul_commerce_daily` 토글 ON → ▶. 또는:
+UI 에서 `commerce_localdata_elt` 토글 ON → ▶. 또는:
 
 ```bash
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_daily
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt
 docker compose exec airflow-scheduler \
-  airflow dags trigger seoul_commerce_daily -c '{"observed_date":"2026-06-01"}'
+  airflow dags trigger commerce_localdata_elt -c '{"observed_date":"2026-06-01"}'
 ```
 
 ## 4. 산출물 확인

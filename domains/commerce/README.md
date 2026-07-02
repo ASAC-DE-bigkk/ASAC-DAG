@@ -63,7 +63,7 @@ DAG 임포트 시 [include/common/env.py](include/common/env.py) 의 `load_comme
 ```bash
 docker compose up -d                # 루트의 docker-compose.yml (postgres/trino/airflow×4)
 # UI: http://localhost:30585
-# DAG: seoul_commerce_daily(전체 수집) · seoul_commerce_recollect(미완료만 6h 재수집) — UI 에서 토글 ON
+# DAG: commerce_localdata_elt(전체 수집) · commerce_localdata_recollect(미완료만 6h 재수집) — UI 에서 토글 ON
 # Grid/Graph 에서 ingest_one[<API>] 매핑으로 API별 성공/실패/대기 확인(map_index 라벨)
 ```
 
@@ -75,9 +75,9 @@ docker compose up -d                # 루트의 docker-compose.yml (postgres/tri
 ### backfill / 재수집
 
 ```bash
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_daily   # 매 실행이 전체 수집
-docker compose exec airflow-scheduler airflow dags trigger seoul_commerce_daily -c '{"observed_date":"2026-06-01"}'
-docker compose exec airflow-scheduler airflow dags backfill seoul_commerce_daily -s 2026-06-01 -e 2026-06-07
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt   # 매 실행이 전체 수집
+docker compose exec airflow-scheduler airflow dags trigger commerce_localdata_elt -c '{"observed_date":"2026-06-01"}'
+docker compose exec airflow-scheduler airflow dags backfill commerce_localdata_elt -s 2026-06-01 -e 2026-06-07
 ```
 
 ## 프로젝트 구조
@@ -91,7 +91,7 @@ docker compose exec airflow-scheduler airflow dags backfill seoul_commerce_daily
 dags/
 └─ domains/
    └─ commerce/                  # ★ 카테고리 자립 단위
-      ├─ seoul_commerce_dag.py     # DAG: seoul_commerce_daily · seoul_commerce_recollect (sys.path+env 부트스트랩)
+      ├─ seoul_commerce_dag.py     # DAG: commerce_localdata_elt · commerce_localdata_recollect (sys.path+env 부트스트랩)
       ├─ include/                 # PYTHONPATH 루트 (common/bronze/silver 가 top-level)
       │  ├─ common/               # settings · env · storage · paths · schemas · hashing · registry · notify(알림 IF)
       │  ├─ bronze/               # clients · validators · bronze_tasks(NDJSON+마커) · markers(재수집) · resolve
