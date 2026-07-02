@@ -1,5 +1,8 @@
+import json
+import logging
 import os
 import sys
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +32,110 @@ from traffic_ingest.common.runtime import (  # noqa: E402
     trino_cursor,
     upload_raw_object,
 )
+
+
+TRAFFIC_DISCORD_WEBHOOK_ENV = "TRAFFIC_DISCORD_WEBHOOK_URL"
+DISCORD_GREEN = 3066993
+DISCORD_RED = 15158332
+LOGGER = logging.getLogger(__name__)
+
+
+def discord_report_date(context) -> str:
+    logical_date = context.get("logical_date")
+    if logical_date:
+        return logical_date.astimezone(KST).strftime("%Y-%m-%d")
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+def target_name() -> str:
+    return os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
+
+
+def short_text(value: object, limit: int = 130) -> str:
+    text = str(value or "N/A")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def stage_name(task_id: str) -> str:
+    if "ingest" in task_id:
+        return "API 수집/R2 적재"
+    if "verify" in task_id:
+        return "Bronze 검증"
+    return "알 수 없음"
+
+
+def send_traffic_discord(title: str, description: str, color: int, footer: str) -> None:
+    webhook_url = (os.environ.get(TRAFFIC_DISCORD_WEBHOOK_ENV) or "").strip()
+    if not webhook_url:
+        LOGGER.info("[traffic notify:noop] %s (webhook url not configured)", title)
+        return
+    payload = {
+        "embeds": [{
+            "title": title,
+            "description": description[:4096],
+            "color": color,
+            "footer": {"text": footer[:2048]},
+        }]
+    }
+    request = urllib.request.Request(
+        webhook_url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(request, timeout=10).close()
+    except Exception as exc:
+        LOGGER.warning("[traffic notify] Discord send failed: %s", type(exc).__name__)
+
+
+def notify_traffic_bronze_success(context) -> None:
+    ti = context["ti"]
+    ingest_result = ti.xcom_pull(task_ids="ingest_seoul_traffic_incident") or {}
+    inserted = int(ingest_result.get("inserted", 0))
+    total_count = ingest_result.get("list_total_count", "N/A")
+    incident_line = "현재 돌발정보: 0건 (정상 응답)" if inserted == 0 else f"현재 돌발정보: {inserted:,}건"
+    run_id = context["run_id"]
+    send_traffic_discord(
+        f"서울시 돌발정보 수집 리포트 - {discord_report_date(context)} (target={target_name()})",
+        "\n".join(
+            [
+                "✅ 수집 상태: 성공",
+                f"✅ TOPIS 응답: {ingest_result.get('result_code', 'N/A')}",
+                f"✅ {incident_line}",
+                f"✅ API 전체 건수: {total_count}건",
+                f"✅ raw XML: {1 if ingest_result.get('raw_object_key') else 0}개",
+                f"✅ Bronze 적재: {inserted:,}행",
+                "",
+                f"테이블: `bronze_seoul_traffic_incident`",
+                f"raw 샘플: `{short_text(ingest_result.get('raw_object_key', 'N/A'))}`",
+            ]
+        ),
+        DISCORD_GREEN,
+        f"dag_id={context['dag'].dag_id} · run_id={short_text(run_id, 180)}",
+    )
+
+
+def notify_traffic_bronze_failure(context) -> None:
+    ti = context.get("ti") or context.get("task_instance")
+    task_id = getattr(ti, "task_id", "N/A")
+    exc = context.get("exception")
+    run_id = context.get("run_id", "N/A")
+    send_traffic_discord(
+        f"서울시 돌발정보 수집 실패 - {discord_report_date(context)} (target={target_name()})",
+        "\n".join(
+            [
+                "❌ 수집 상태: 실패",
+                f"❌ 실패 단계: {stage_name(task_id)}",
+                f"❌ 실패 task: `{task_id}`",
+                f"❌ 오류 유형: `{type(exc).__name__ if exc else 'N/A'}`",
+                "",
+                f"Airflow 로그: {getattr(ti, 'log_url', 'N/A')}",
+            ]
+        ),
+        DISCORD_RED,
+        f"dag_id={context['dag'].dag_id} · run_id={short_text(run_id, 180)}",
+    )
 
 
 def traffic_dag_schedule() -> str | None:
@@ -81,6 +188,8 @@ def ingest_seoul_traffic_incident(**context) -> dict:
         "source_id": SOURCE_ID,
         "raw_object_key": raw_object_key,
         "inserted": inserted,
+        "result_code": metadata.get("result_code"),
+        "list_total_count": metadata.get("list_total_count"),
     }
 
 
@@ -105,6 +214,7 @@ with DAG(
     ingest_traffic = PythonOperator(
         task_id="ingest_seoul_traffic_incident",
         python_callable=ingest_seoul_traffic_incident,
+        on_failure_callback=notify_traffic_bronze_failure,
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
@@ -113,6 +223,8 @@ with DAG(
     verify_bronze = PythonOperator(
         task_id="verify_seoul_traffic_bronze_runtime",
         python_callable=verify_seoul_traffic_bronze_runtime,
+        on_success_callback=notify_traffic_bronze_success,
+        on_failure_callback=notify_traffic_bronze_failure,
     )
 
     ingest_traffic >> verify_bronze
