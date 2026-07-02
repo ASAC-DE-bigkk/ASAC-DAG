@@ -46,8 +46,10 @@ class DiscordWebhookNotifier(Notifier):
     def send(self, payload: dict) -> None:
         try:
             requests.post(self._url, json=payload, timeout=self._timeout)
-        except Exception:  # noqa: BLE001 -- best-effort. URL 로그 금지.
-            log.exception("[notify] Discord 전송 실패(무시)")
+        except Exception as exc:  # noqa: BLE001 -- best-effort.
+            # 예외 타입 이름만 남긴다 — requests 예외 문자열/traceback 에 웹훅 URL 이
+            # 섞여 로그로 새는 것을 막는다(설계 §7: URL 로그 금지).
+            log.warning("[notify] Discord 전송 실패(무시): %s", type(exc).__name__)
 
 
 def notifier_from_env(env: dict | None = None) -> Notifier:

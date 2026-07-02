@@ -99,3 +99,19 @@ def test_table_shows_zero_duration_not_dash_but_dash_when_missing():
 
     assert zero_line.split()[4] == "0.0"
     assert missing_line.split()[4] == "--"
+
+
+def test_discord_send_does_not_log_url_on_failure(monkeypatch, caplog):
+    import logging
+
+    secret_url = "https://discord.com/api/webhooks/999/SUPERSECRETTOKEN"
+
+    def boom(*a, **k):  # requests 예외 문자열에 URL 이 섞이는 상황을 재현
+        raise RuntimeError(f"ConnectionError: failed to reach {secret_url}")
+
+    monkeypatch.setattr(notify.requests, "post", boom)
+    with caplog.at_level(logging.WARNING):
+        notify.DiscordWebhookNotifier(secret_url).send({"embeds": []})  # 예외 없어야 함
+    # 웹훅 URL/토큰이 로그로 새면 안 된다(설계 §7).
+    assert "SUPERSECRETTOKEN" not in caplog.text
+    assert secret_url not in caplog.text
