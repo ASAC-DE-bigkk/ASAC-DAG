@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import requests
 
@@ -100,6 +102,7 @@ def ingest_dataset(
     """
     prefix = landing.prefix_for(ds.source, ds.name)
     result = DatasetResult(name=ds.name, source=ds.source, endpoint=ds.endpoint, prefix=prefix)
+    t0 = time.monotonic()
     sample_body: bytes | None = None  # 첫 페이지 = 드리프트(관측 스키마) 점검용 샘플
     # Iceberg 적재 시에만 페이지 본문을 모은다(아니면 메모리 낭비 없이 카운트만).
     landed_pages: list[tuple[str, str, bytes]] = []  # (page_no, raw_object_key, body)
@@ -212,6 +215,9 @@ def ingest_dataset(
             print(f"  [iceberg] {ds.name}: {result.iceberg_rows} rows -> {warehouse.qualified(ds.name)}")
     except Exception as exc:  # noqa: BLE001 -- 데이터셋별로 잡아 두고 배치는 계속 진행
         result.error = f"{type(exc).__name__}: {exc}"
+    finally:
+        result.duration_sec = round(time.monotonic() - t0, 1)
+        result.finished_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return result
 
 
