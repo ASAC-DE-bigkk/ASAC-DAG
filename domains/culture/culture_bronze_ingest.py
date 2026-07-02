@@ -5,7 +5,7 @@ R2 ``bronze/culture/`` 아래에 적재한다(``culture_ingest`` 참고). 데이
 매핑 태스크 1개라서, 한 데이터셋 실패가 격리되고 재시도 가능하며 그리드에서 바로 보인다.
 
 시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가
-``KOPIS_SERVICE_KEY``, ``SEOUL_OPENAPI_KEY``, ``R2_DEV_*``를 주입) -- 값은 여기 없다.
+``KOPIS_SERVICE_KEY``, ``SEOUL_API_KEY_CULT``, ``R2_DEV_*``를 주입) -- 값은 여기 없다.
 
 파라미터 (트리거 시 덮어쓰기 가능):
   target          "dev" | "prod"            (기본 dev -> 버킷 seoul-dev)
