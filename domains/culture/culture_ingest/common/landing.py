@@ -5,7 +5,7 @@
     <root>/<source>/<dataset>/load_date=<KST>/ingest_ts=<UTC>/page-NNNN.<ext>
     <root>/<source>/<dataset>/load_date=.../ingest_ts=.../_manifest.json
 
-``root``는 도메인이 넘겨준다(예: ``bronze/culture``). 매니페스트는 엔드포인트,
+``root``는 도메인이 넘겨준다(예: ``raw/culture``). 매니페스트는 엔드포인트,
 파라미터, 페이지/행 수, 타임스탬프를 기록해 두므로, 후속 bronze 적재와 리니지가
 실행을 다시 추론하지 않고도 재구성될 수 있다.
 """
