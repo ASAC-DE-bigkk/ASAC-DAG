@@ -86,6 +86,8 @@ class DatasetResult:
     error: str = ""
     checks: dict = field(default_factory=dict)  # 수집 검증 결과 (common.checks.evaluate_landing)
     iceberg_rows: int = 0  # bronze Iceberg 테이블에 적재된 행 수 (write_iceberg 시)
+    duration_sec: float = 0.0  # 이 데이터셋 적재 소요(초)
+    finished_ts: str = ""  # 이 데이터셋 적재 완료 시각 (UTC YYYYMMDDTHHMMSSZ)
 
     @property
     def ok(self) -> bool:
@@ -104,6 +106,8 @@ class DatasetResult:
             "error": self.error,
             "checks": self.checks,
             "iceberg_rows": self.iceberg_rows,
+            "duration_sec": self.duration_sec,
+            "finished_ts": self.finished_ts,
         }
 
 
