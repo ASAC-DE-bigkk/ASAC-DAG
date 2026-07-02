@@ -83,7 +83,7 @@ def send_weather_discord(title: str, description: str, color: int, footer: str) 
     request = urllib.request.Request(
         webhook_url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": "ask-seoul-airflow/1.0"},
         method="POST",
     )
     try:
