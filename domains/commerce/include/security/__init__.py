@@ -31,6 +31,7 @@ from security.crypto import (
     constant_time_equals, generate_hex_token, generate_token, hash_password,
     needs_rehash, verify_password,
 )
+from security.dbio import assert_identifier, is_identifier, mask_dsn
 from security.events import event_record, exception_record, log_event, log_exception
 from security.fileio import safe_join, safe_key, write_json_redacted, write_text_redacted
 from security.inputs import (
@@ -81,6 +82,8 @@ __all__ = [
     # 암호 유틸(CSPRNG/상수시간/비밀번호)
     "generate_token", "generate_hex_token", "constant_time_equals",
     "hash_password", "verify_password", "needs_rehash",
+    # DB IO 가드(식별자 검증/DSN 마스킹)
+    "assert_identifier", "is_identifier", "mask_dsn",
     # 종합검증
     "run_security_verification", "assert_secure", "SecurityReport", "SecurityError",
 ]

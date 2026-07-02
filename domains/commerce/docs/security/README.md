@@ -18,4 +18,6 @@ commerce 번들의 **통합 보안 플러그인**(마스킹 · IO 가드 · 입�
 - **코드 위치**: [../../include/security/](../../include/security/) (stdlib only — 타 번들/프로젝트 이식 가능)
 - **적용 지점(1차 완료)**: DAG·scripts(`install_security`) · bronze clients(`netio.http_request`+`redact`) ·
   bronze tasks(마커 저장 전 `redact`) · silver(`assert_*` 경계 검증) · notify(전송 전 `redact`)
+- **커버리지(2·3차)**: SSRF(`assert_url_allowed`)·아카이브(`safe_extract_*`)·암호(`crypto`)·
+  DB IO(`dbio`: `assert_identifier`/`mask_dsn`) 가드 + 정적 점검 20종. backend/DB IO 이식 대비 ready.
 - **수시 점검/적용 규약**: [../../CLAUDE.md](../../CLAUDE.md) §20 Security Gate

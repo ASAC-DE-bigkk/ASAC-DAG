@@ -138,6 +138,29 @@ Argon2id 를 쓸 수 있는 환경이면 그쪽이 1순위 — 이 모듈은 **�
 
 ---
 
+## 5b. DB IO — 동적 식별자 검증 · 연결 문자열 마스킹
+
+값은 항상 드라이버의 **파라미터 바인딩**을 쓴다(sqlalchemy/psycopg/sqlite3). 이 가드는
+바인딩으로 못 막는 **식별자**(동적 테이블/컬럼명)와 **DSN 자격증명**만 담당한다.
+
+```python
+from security import assert_identifier, mask_dsn
+
+# 값 → 파라미터 바인딩(플러그인 밖, 드라이버 기능)
+session.execute(text("SELECT * FROM t WHERE id = :id"), {"id": user_id})
+
+# 식별자(동적 테이블/컬럼명)만 어쩔 수 없이 끼울 때 → 허용 문자만 통과
+col = assert_identifier(sort_col)                  # 영숫자·밑줄·schema.table 만; 아니면 ValueError
+session.execute(text(f"SELECT * FROM logs ORDER BY {col}"))   # col 은 검증됨
+
+# 연결 문자열을 로그/예외에 남기기 전 비밀번호 마스킹(URL 형 + libpq key=value 형)
+log.error("db connect failed: %s", mask_dsn(settings.database_url))
+```
+정적 점검 `no_sql_text_injection` 이 `text(f"…")`·`text("…" + x)` 등 조립 SQL 을, `no_sql_injection`
+이 `cursor.execute(f"…")` 를 잡는다(파라미터 바인딩·`:name` 은 통과).
+
+---
+
 ## 6. API 요청/응답 기록(리니지, 무시크릿)
 
 ```python

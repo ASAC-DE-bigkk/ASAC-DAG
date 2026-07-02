@@ -117,6 +117,29 @@
 
 ---
 
+## F2. 백엔드/DB IO — SQLAlchemy text() 주입 · 식별자 · 오픈 리다이렉트 · DSN (CWE-89/601/532)
+
+**문제(backend API 조사 반영)**: ORM(SQLAlchemy) 을 써도 복잡한 쿼리에서 `text()` 로 내려가
+문자열을 조립하면 SQLi 가 되살아난다. 파라미터 바인딩은 **값**만 바인딩할 수 있어 **식별자**
+(동적 테이블/컬럼명)는 여전히 문자열로 끼워야 한다. 또 웹 백엔드는 리다이렉트 대상·연결
+문자열이라는 고유 노출면을 가진다.
+
+**기술**:
+- `no_sql_text_injection`(HIGH): `text(f"…")`·`text("…" % x)`·`text("…".format())`·`text("…" + x)`
+  탐지 — `execute()` 뿐 아니라 SQLAlchemy `text()` 통로를 커버. `:name` 바인드 파라미터는 통과.
+- `assert_identifier()`: 동적 식별자를 허용 문자(영숫자·밑줄·`schema.table`)로 제한 — 값이 아닌
+  식별자를 끼울 때의 마지막 SQLi 통로를 좁힌다. **값은 절대 여기로 넣지 않는다**(파라미터 바인딩).
+- `open_redirect_advisory`(MEDIUM): 리터럴이 아닌(=입력 파생 가능) 리다이렉트 대상 경고 —
+  내부 고정 경로/삼항은 통과(FP 억제). 대상 화이트리스트 검증을 유도.
+- `mask_dsn()`: 연결 문자열의 비밀번호를 URL 형(`user:pass@`)과 libpq 키=값 형(`password=`)
+  양쪽에서 마스킹 — `create_engine`/psycopg 예외가 DSN 을 통째로 찍어도 비밀번호가 안 샌다.
+
+**참고**: 이 번들 밖의 auth 백엔드는 이미 파라미터화 ORM·CSRF·세션 쿠키·레이트리밋으로
+잘 방어돼 있다 — 이 가드들은 **이식 대상(backend)에서 실제로 쓰이는 통로**를 플러그인이 미리
+갖춰(ready) 두는 것이며, 값 바인딩 자체는 각 드라이버 기능을 그대로 쓴다(대체하지 않음).
+
+---
+
 ## G. 자격증명 하드코딩 / 공급망 (CWE-798/522, A03:2025)
 
 - **커밋 자격증명 원문**(`no_credential_material`, CRITICAL): PEM 개인키 블록, 벤더 토큰

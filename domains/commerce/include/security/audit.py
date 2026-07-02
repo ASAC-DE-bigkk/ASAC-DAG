@@ -335,6 +335,56 @@ def _read_line(root: Path, hit: str) -> str:
         return ""
 
 
+# (SEC-21) SQLAlchemy text()/raw SQL 에 문자열 조립 전달(CWE-89) — ORM 시대의 주 SQLi 통로.
+# 파라미터 바인딩(text("... :x"))은 통과, 보간(f/%/format/+)만 잡는다. execute() 외 text() 도 커버.
+_SQL_TEXT_RE = re.compile(          # 인라인 예시는 자기매칭 방지로 생략(형태: f-string/%/format/+)
+    r"\btext\s*\(\s*("
+    + r"f[\"'][^)]*\{"
+    + r"|[\"'][^)]*[\"']\s*%[^%=]"
+    + r"|[\"'][^)]*[\"']\s*\.format\s*\("
+    + r"|[\"'][^)]*[\"']\s*\+"
+    + r")")
+
+
+def check_sql_text_injection(root: Path) -> Finding:
+    """SQLAlchemy `text()`(및 raw SQL) 에 동적 조립 문자열을 넘기는지(HIGH, CWE-89)."""
+    hits = _grep(root, _SQL_TEXT_RE, only_ext={".py"})
+    hits = [h for h in hits if _ALLOW_SQL_MARK not in _read_line(root, h)]
+    ok = not hits
+    return Finding("no_sql_text_injection", "HIGH", ok,
+                   "text()/raw SQL 문자열 조립 없음(바인드 파라미터 사용)" if ok
+                   else "SQL text() 주입 위험(:name 바인드 파라미터로 교체): " + "; ".join(hits[:5]))
+
+
+# (SEC-22) 오픈 리다이렉트(CWE-601, OWASP A01) — 리터럴이 아닌 값으로 리다이렉트 대상 지정.
+# advisory: 내부 경로 변수 리다이렉트는 흔한 정상 패턴이라 MEDIUM(비차단). 리터럴/삼항은 제외.
+_REDIRECT_RE = re.compile(r"\b(RedirectResponse|redirect|HttpResponseRedirect)\s*\(\s*([^)]*)")
+_REDIRECT_LITERAL_RE = re.compile(r"^[\"']")   # 첫 인자가 문자열 리터럴로 시작하면 안전으로 간주
+_ALLOW_REDIRECT_MARK = "security: allow-redirect"
+
+
+def check_open_redirect(root: Path) -> Finding:
+    """리다이렉트 대상이 문자열 리터럴이 아닌(=입력 파생 가능) 경우 경고(MEDIUM, CWE-601)."""
+    hits: list[str] = []
+    for p in _iter_files(root):
+        if p.suffix != ".py":
+            continue
+        for ln, line in enumerate(_read(p).splitlines(), 1):
+            if _ALLOW_REDIRECT_MARK in line:
+                continue
+            m = _REDIRECT_RE.search(line)
+            if not m:
+                continue
+            arg = m.group(2).strip()
+            # 리터럴 시작(문자열)·삼항 표현식('/x' if ...)은 안전으로 본다(내부 고정 경로).
+            if arg and not _REDIRECT_LITERAL_RE.match(arg):
+                hits.append(f"{_rel(p, root)}:{ln}")
+    ok = not hits
+    return Finding("open_redirect_advisory", "MEDIUM", ok,
+                   "리다이렉트 대상이 리터럴/고정 경로" if ok
+                   else "오픈 리다이렉트 의심(대상 화이트리스트 검증 권장): " + "; ".join(hits[:5]))
+
+
 # (SEC-11) tarfile/zipfile 추출을 필터/래퍼 없이 사용(CWE-22 zip-slip).
 _ARCHIVE_IMPORT_RE = re.compile(r"(?m)^\s*(import|from)\s+(tarfile|zipfile)\b")
 _EXTRACT_CALL_RE = re.compile(r"\.extract(all)?\s*\(")
@@ -597,7 +647,9 @@ STATIC_CHECKS = (
     check_tls_verify,
     check_http_timeouts,
     check_trojan_source,            # bidi/zero-width(CVE-2021-42574)
-    check_sql_injection,            # CWE-89
+    check_sql_injection,            # CWE-89 (cursor.execute)
+    check_sql_text_injection,       # CWE-89 (SQLAlchemy text()/raw)
+    check_open_redirect,            # CWE-601 (advisory)
     check_unsafe_extract,           # CWE-22 zip-slip
     check_insecure_file_ops,        # CWE-377/732
     check_weak_hash,                # CWE-327 (advisory)

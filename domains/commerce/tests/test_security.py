@@ -1008,3 +1008,53 @@ def test_check_weak_hash_uppercase_new(tmp_path):
     root = _mk_root(tmp_path, {"a.py": 'h = hashlib.ne' + 'w("MD5", data)\n'})
     f = check_weak_hash(root)
     assert not f.ok and "a.py" in f.detail
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# commerce 밖 조사 반영(feat/96 3차) — DB IO 가드 + SQLAlchemy text()/오픈 리다이렉트 점검
+# ════════════════════════════════════════════════════════════════════════════════
+from security import assert_identifier, is_identifier, mask_dsn  # noqa: E402
+
+
+@pytest.mark.parametrize("name,ok", [
+    ("users", True), ("public.users", True), ("col_1", True), ("_x", True),
+    ("users; DROP TABLE t", False), ("u--", False), ("1col", False), ("a.b.c", False),
+    ("", False), ("a b", False), ("tbl'", False), ("x" * 200, False),
+])
+def test_dbio_is_identifier(name, ok):
+    assert is_identifier(name) is ok
+
+
+def test_dbio_assert_identifier_raises():
+    assert assert_identifier("schema.table") == "schema.table"
+    with pytest.raises(ValueError):
+        assert_identifier("t; DELETE FROM u")
+
+
+def test_dbio_mask_dsn_kv_and_url():
+    kv = mask_dsn("host=db " + "password=supers3cret" + " dbname=app")
+    assert "supers3cret" not in kv and PLACEHOLDER in kv and "dbname=app" in kv
+    url = mask_dsn("postgres" + "://u:" + "mypw12345" + "@h:5432/db")
+    assert "mypw12345" not in url and PLACEHOLDER in url
+    assert mask_dsn("") == ""
+
+
+def test_check_sql_text_injection(tmp_path):
+    from security.audit import check_sql_text_injection
+    fstr = 'session.execute(te' + 'xt(f"SELECT * FROM {t}"))\n'
+    concat = 'conn.execute(te' + 'xt("SELECT " + name))\n'
+    safe = 'session.execute(te' + 'xt("SELECT * FROM t WHERE id = :id"), {"id": x})\n'
+    root = _mk_root(tmp_path, {"a.py": fstr, "b.py": concat, "ok.py": safe})
+    f = check_sql_text_injection(root)
+    assert not f.ok and "a.py" in f.detail and "b.py" in f.detail and "ok.py" not in f.detail
+
+
+def test_check_open_redirect(tmp_path):
+    from security.audit import check_open_redirect
+    dyn = "return Redirect" + "Response(request.query_params['next'])\n"
+    literal = 'return Redirect' + 'Response("/dashboard", status_code=303)\n'
+    ternary = "return Redirect" + 'Response("/a" if ok else "/b")\n'
+    root = _mk_root(tmp_path, {"a.py": dyn, "ok.py": literal, "tern.py": ternary})
+    f = check_open_redirect(root)
+    assert not f.ok and f.severity == "MEDIUM"
+    assert "a.py" in f.detail and "ok.py" not in f.detail and "tern.py" not in f.detail

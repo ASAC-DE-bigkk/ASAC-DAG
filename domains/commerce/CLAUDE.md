@@ -929,6 +929,9 @@ When porting to another bundle/project, follow [docs/security/adoption.md](docs/
   `extractall()`; blocks zip-slip, decompression bombs, symlink members).
 - **Tokens / password storage / secret comparison** → `generate_token()` (never `random`),
   `hash_password()`/`verify_password()`/`needs_rehash()` (PBKDF2 600k), `constant_time_equals()`.
+- **DB IO** → bind values via the driver's parameters (never string-build SQL); a dynamic
+  table/column identifier → `assert_identifier()`; log a connection string → `mask_dsn()`.
+- **Redirects (backend)** → never redirect to a non-literal target without allowlisting it.
 - **Free-form logging of external input** → `sanitize_log_value()` (or `install_security(
   neutralize_log_controls=True)`) to neutralize CRLF/ANSI log injection.
 - External API/network exceptions or URLs written to **logs** → `redact()` (mandatory if the exception

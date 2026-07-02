@@ -36,7 +36,14 @@ response:
   (자기매칭 방지: 패턴은 조각 결합/chr()/이스케이프로 작성).
 - **문서**: [docs/security/usage.md](docs/security/usage.md)(사용법) ·
   [docs/security/techniques.md](docs/security/techniques.md)(적용 기술 목록+해설·가이드라인 매핑)
-  신규, security.md 위협 모델 22경로로 확장, README·CLAUDE §20·Share.md 갱신.
+  신규, security.md 위협 모델 확장, README·CLAUDE §20·Share.md 갱신.
+- **커버리지 3차 확장(commerce 밖 조사 반영)**: sample 의 auth 백엔드(FastAPI)·notifications·
+  dbt·DB IO 를 조사(auth 는 이미 파라미터화 ORM·CSRF·세션·레이트리밋으로 견고) → 플러그인이
+  아직 못 잡던 **백엔드/DB IO 취약점 클래스**를 이식 대비로 추가: 신규 `dbio.py`
+  (`assert_identifier` 동적 식별자 검증 · `mask_dsn` URL+libpq DSN 비밀번호 마스킹), 정적 점검
+  2종(`no_sql_text_injection` SQLAlchemy `text()` 주입 HIGH · `open_redirect_advisory` CWE-601
+  MEDIUM). 정적 점검 18→20종. 조치는 전부 **commerce 번들 안**에서 수행(플러그인이 이식원). 검증:
+  전 테스트 **190 통과**, `python -m security` 차단 0.
 
 ### 24. 통합 보안 플러그인化 — install_security() 원샷 + net/file/API/이벤트 가드 (feat/96)
 

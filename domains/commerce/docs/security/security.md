@@ -36,7 +36,9 @@ commerce 번들의 **보안 대응 전용 서브시스템** 문서. 코드는 �
 | 12 | **SSRF** | 사용자 URL 로 사설/메타데이터(IMDS) 요청 유도 | `assert_url_allowed()`(명시 CIDR 차단, IPv4/6·IMDS) + `http_request(url_check=True)` | CWE-918 · A01:2025 |
 | 13 | **자원 고갈** | 거대 응답·압축폭탄으로 메모리/디스크 고갈 | `http_request(max_response_bytes=)` · `safe_extract_*`(엔트리/총량/압축비 상한) | CWE-770(#25)/409 |
 | 14 | **경로 탈출(아카이브)** | zip-slip/심링크로 dest 밖에 쓰기 | `safe_extract_zip/tar`(멤버 검증 + realpath 봉쇄 + PEP 706 filter) | CWE-22 · CVE-2007-4559 |
-| 15 | **SQL 주입** | 문자열 조립 SQL 을 `execute()` 에 전달 | audit: `no_sql_injection`(f-string/%/format/+ 탐지) | CWE-89(#2) |
+| 15 | **SQL 주입** | 문자열 조립 SQL 을 `execute()`·SQLAlchemy `text()` 에 전달 | audit: `no_sql_injection`·`no_sql_text_injection` + `assert_identifier()`(동적 식별자) | CWE-89(#2) |
+| 15b | **오픈 리다이렉트** | 입력 파생 값으로 리다이렉트 대상 지정 | audit: `open_redirect_advisory`(리터럴 아닌 대상 경고) | CWE-601 · A01 |
+| 15c | **DB 자격증명 로그** | 연결 문자열(DSN)이 예외/로그로 통째 노출 | `mask_dsn()`(URL userinfo + libpq `password=` 마스킹) | CWE-532 |
 | 16 | **커밋 자격증명 원문** | PEM 개인키·벤더 토큰(ghp_/xox…)·URL 비밀번호 | audit: `no_credential_material`(CRITICAL) | CWE-798/321 |
 | 17 | **Trojan Source** | bidi/zero-width 문자로 코드 로직 위장 | audit: `no_trojan_source`(chr 조립 스캔) | CVE-2021-42574 |
 | 18 | **약한 암호** | 보안 용도 md5/sha1·`random` 으로 토큰 생성 | audit: `no_weak_hash`·`no_insecure_random` + `crypto`(secrets/PBKDF2) | CWE-327/330 |
@@ -61,6 +63,7 @@ commerce 번들의 **보안 대응 전용 서브시스템** 문서. 코드는 �
 | [fileio.py](../../include/security/fileio.py) | **file IO 가드** — `safe_key()`/`safe_join()`(경로 주입 차단), `write_json_redacted()`/`write_text_redacted()`(at-rest 마스킹) |
 | [archive.py](../../include/security/archive.py) | **아카이브 안전 추출** — `safe_extract_zip()`/`safe_extract_tar()`(zip-slip·압축폭탄·심링크 차단, PEP 706) |
 | [crypto.py](../../include/security/crypto.py) | **암호 유틸** — `generate_token()`(CSPRNG), `constant_time_equals()`, `hash_password()`/`verify_password()`/`needs_rehash()`(PBKDF2 600k) |
+| [dbio.py](../../include/security/dbio.py) | **DB IO 가드** — `assert_identifier()`(동적 테이블/컬럼명 검증), `mask_dsn()`(연결 문자열 비밀번호 마스킹, URL+libpq 형) |
 | [api_guard.py](../../include/security/api_guard.py) | **API 요청/응답 가드** — `api_receipt()`, `response_summary()`, `scrub_url/headers/params()` |
 | [events.py](../../include/security/events.py) | **분석 가능 구조화 로깅** — `log_event()`/`log_exception()`(마스킹된 단일 라인 JSON, §5) |
 | [inputs.py](../../include/security/inputs.py) | 입력 검증 — `assert_iso_date`/`assert_safe_segment`/`is_*` |
@@ -167,11 +170,12 @@ report = run_security_verification()      # SecurityReport(findings=[...])
 assert_secure()                           # 차단 이슈 있으면 SecurityError
 ```
 
-점검 목록: **정적 18종** — Critical: `no_hardcoded_secrets`·`no_credential_material`·
+점검 목록: **정적 20종** — Critical: `no_hardcoded_secrets`·`no_credential_material`·
 `env_example_clean` / High: `env_gitignored`·`safe_yaml_load`·`no_dangerous_calls`·`tls_verify`·
-`no_trojan_source`·`no_sql_injection`·`no_unsafe_extract`·`no_insecure_file_ops`·
-`no_insecure_random` / Medium: `http_timeouts`·`no_weak_hash`·`no_web_misconfig`·
-`cleartext_http_advisory`·`requirements_hygiene` / Low: `xml_parsing_advisory` — 및 **런타임 4종**
+`no_trojan_source`·`no_sql_injection`·`no_sql_text_injection`·`no_unsafe_extract`·
+`no_insecure_file_ops`·`no_insecure_random` / Medium: `http_timeouts`·`no_weak_hash`·
+`no_web_misconfig`·`cleartext_http_advisory`·`requirements_hygiene`·`open_redirect_advisory` /
+Low: `xml_parsing_advisory` — 및 **런타임 4종**
 (`redactor_selftest` High / `log_redaction_installed`·`stdout_redaction_installed`·
 `excepthook_redaction_installed` Medium). 런타임 설치 3종은 **CLI 단독 실행에서 warn 이 정상**
 (엔트리포인트에서 install 되므로) — 프로세스 안 점검은 `security_status()`. 의도적 예외 표식:
