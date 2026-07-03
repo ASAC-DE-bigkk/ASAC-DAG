@@ -24,11 +24,20 @@ from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+_DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _DAGS_ROOT not in sys.path:
+    sys.path.insert(0, _DAGS_ROOT)
+
+from common.errors.airflow import problem_failure_callback  # noqa: E402
 
 from ppltn_ingest.common.discord import post_message, webhook_url  # noqa: E402
 from ppltn_ingest.source.daily_report import aggregate_day, format_message  # noqa: E402
 
 KST = "Asia/Seoul"
+
+# 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+record_population_problem = problem_failure_callback(domain="population")
 
 DEFAULT_PARAMS = {"target": "dev", "report_date": ""}
 
@@ -67,4 +76,8 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["report", "population", "discord"],
 ) as dag:
-    send_report = PythonOperator(task_id="send_report", python_callable=_send_report)
+    send_report = PythonOperator(
+        task_id="send_report",
+        python_callable=_send_report,
+        on_failure_callback=record_population_problem,
+    )

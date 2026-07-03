@@ -36,8 +36,15 @@ from airflow.providers.standard.operators.python import PythonOperator
 
 # 이 파일의 디렉토리(domains/population)를 sys.path에 넣어 `ppltn_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+_DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _DAGS_ROOT not in sys.path:
+    sys.path.insert(0, _DAGS_ROOT)
+
+from common.errors.airflow import problem_failure_callback  # noqa: E402
 
 from ppltn_ingest.common.config import RunContext  # noqa: E402
+from ppltn_ingest.source.config import SOURCE_ID  # noqa: E402
 from ppltn_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     build_run_report,
@@ -47,6 +54,10 @@ from ppltn_ingest.source.ingest import (  # noqa: E402
 )
 
 KST = "Asia/Seoul"
+
+# 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+record_population_problem = problem_failure_callback(
+    domain="population", source_system=SOURCE_ID)
 
 DEFAULT_PARAMS = {
     "target": "dev",
@@ -142,8 +153,21 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["ingest", "population", "bronze", "r2", "iceberg"],
 ) as dag:
-    fetch_raw = PythonOperator(task_id="fetch_raw", python_callable=_fetch_raw)
-    load_bronze = PythonOperator(task_id="load_bronze", python_callable=_load_bronze)
-    report = PythonOperator(task_id="report", python_callable=_report, trigger_rule="all_done")
+    fetch_raw = PythonOperator(
+        task_id="fetch_raw",
+        python_callable=_fetch_raw,
+        on_failure_callback=record_population_problem,
+    )
+    load_bronze = PythonOperator(
+        task_id="load_bronze",
+        python_callable=_load_bronze,
+        on_failure_callback=record_population_problem,
+    )
+    report = PythonOperator(
+        task_id="report",
+        python_callable=_report,
+        trigger_rule="all_done",
+        on_failure_callback=record_population_problem,
+    )
 
     fetch_raw >> load_bronze >> report
