@@ -116,6 +116,28 @@ def test_verify_zero_rows_requires_request_audit(monkeypatch):
     )
 
 
+def test_verify_zero_rows_with_multiple_raw_objects_uses_audit(monkeypatch):
+    cursor = RecordingCursor(rows=[(0, 0, None), (2,)])
+    monkeypatch.setattr(
+        bronze,
+        "trino_cursor",
+        lambda: (cursor, "iceberg_dev", "dev_masondev1024"),
+    )
+
+    row_count = bronze.verify_seoul_traffic_bronze_runtime(
+        raw_object_keys=[
+            "raw/traffic/accinfo/request-1.xml",
+            "raw/traffic/accinfo/request-2.xml",
+        ],
+        dag_run_id="scheduled__2026-07-01T09:15:00+09:00",
+        expected_rows=0,
+        expected_raw_objects=2,
+    )
+
+    assert row_count == 0
+    assert "bronze_seoul_traffic_incident_request_audit" in cursor.statements[1]
+
+
 def test_verify_multiple_raw_objects(monkeypatch):
     cursor = RecordingCursor(rows=[(3, 2, "2026-07-01 00:15:00")])
     monkeypatch.setattr(

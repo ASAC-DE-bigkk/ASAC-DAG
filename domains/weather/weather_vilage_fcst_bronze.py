@@ -48,6 +48,7 @@ from weather_ingest.kma import (  # noqa: E402
     SOURCE_ID,
     build_kma_url,
     build_raw_object_key,
+    kma_base_datetime_from_conf,
     load_kma_grids,
     parse_kma_response,
     resolve_kma_base_datetime,
@@ -62,9 +63,20 @@ DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
 DAG_ID = "weather_vilage_fcst_bronze"
+RECOLLECT_DAG_ID = "weather_vilage_fcst_recollect"
 
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 record_weather_problem = problem_failure_callback(domain="weather", source_system=SOURCE_ID)
+
+
+def dag_run_conf(context: dict) -> dict:
+    dag_run = context.get("dag_run")
+    conf = getattr(dag_run, "conf", None) or {}
+    return conf if isinstance(conf, dict) else {}
+
+
+def current_dag_id(context: dict) -> str:
+    return getattr(context.get("dag"), "dag_id", DAG_ID)
 
 
 def discord_report_date(context) -> str:
@@ -173,7 +185,10 @@ def kma_dag_schedule() -> str | None:
 
 
 def land_kma_raw(**context) -> dict:
-    base_date, base_time = resolve_kma_base_datetime()
+    base_date, base_time = (
+        kma_base_datetime_from_conf(dag_run_conf(context))
+        or resolve_kma_base_datetime()
+    )
     grids = load_kma_grids()
     raw_objects = []
     for index, grid in enumerate(grids):
@@ -286,7 +301,7 @@ def record_kma_run_started(**context) -> str:
         catalog,
         schema,
         source_id=SOURCE_ID,
-        dag_id=DAG_ID,
+        dag_id=current_dag_id(context),
         dag_run_id=context["run_id"],
         status=STATUS_STARTED,
         expected_raw_objects=len(load_kma_grids()),
@@ -301,7 +316,7 @@ def record_kma_run_failed(context) -> None:
             catalog,
             schema,
             source_id=SOURCE_ID,
-            dag_id=DAG_ID,
+            dag_id=current_dag_id(context),
             dag_run_id=context["run_id"],
             status=STATUS_FAILED,
             failure_reason=failure_reason_from_context(context),
@@ -329,7 +344,7 @@ def verify_kma_bronze_runtime(**context) -> int:
         catalog,
         schema,
         source_id=SOURCE_ID,
-        dag_id=DAG_ID,
+        dag_id=current_dag_id(context),
         dag_run_id=context["run_id"],
         status=STATUS_SUCCESS,
         is_publishable=True,
@@ -341,45 +356,62 @@ def verify_kma_bronze_runtime(**context) -> int:
     return verified_rows
 
 
-with DAG(
-    dag_id=DAG_ID,
-    description="Loads KMA getVilageFcst raw JSON into R2 and validates the Iceberg bronze runtime.",
-    start_date=datetime(2026, 1, 1, tzinfo=KST),
-    schedule=kma_dag_schedule(),
-    catchup=False,
-    max_active_runs=1,
-    on_failure_callback=record_kma_run_failed,
-    tags=["ask_seoul", "kma", "bronze", "r2", "iceberg"],
-) as dag:
-    start_manifest = PythonOperator(
-        task_id="record_kma_run_started",
-        python_callable=record_kma_run_started,
-        on_failure_callback=record_weather_problem,
-    )
+def build_kma_bronze_dag(dag_id: str, schedule: str | None, description: str, tags: list[str]):
+    with DAG(
+        dag_id=dag_id,
+        description=description,
+        start_date=datetime(2026, 1, 1, tzinfo=KST),
+        schedule=schedule,
+        catchup=False,
+        max_active_runs=1,
+        on_failure_callback=record_kma_run_failed,
+        tags=tags,
+    ) as built_dag:
+        start_manifest = PythonOperator(
+            task_id="record_kma_run_started",
+            python_callable=record_kma_run_started,
+            on_failure_callback=record_weather_problem,
+        )
 
-    land_raw = PythonOperator(
-        task_id="land_kma_raw",
-        python_callable=land_kma_raw,
-        retries=3,
-        retry_delay=timedelta(minutes=1),
-        retry_exponential_backoff=True,
-        on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
-    )
+        land_raw = PythonOperator(
+            task_id="land_kma_raw",
+            python_callable=land_kma_raw,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
+            on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+        )
 
-    load_bronze = PythonOperator(
-        task_id="load_kma_bronze",
-        python_callable=load_kma_bronze,
-        retries=3,
-        retry_delay=timedelta(minutes=1),
-        retry_exponential_backoff=True,
-        on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
-    )
+        load_bronze = PythonOperator(
+            task_id="load_kma_bronze",
+            python_callable=load_kma_bronze,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
+            on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+        )
 
-    verify_bronze = PythonOperator(
-        task_id="verify_kma_bronze_runtime",
-        python_callable=verify_kma_bronze_runtime,
-        on_success_callback=notify_weather_bronze_success,
-        on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
-    )
+        verify_bronze = PythonOperator(
+            task_id="verify_kma_bronze_runtime",
+            python_callable=verify_kma_bronze_runtime,
+            on_success_callback=notify_weather_bronze_success,
+            on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+        )
 
-    start_manifest >> land_raw >> load_bronze >> verify_bronze
+        start_manifest >> land_raw >> load_bronze >> verify_bronze
+    return built_dag
+
+
+dag = build_kma_bronze_dag(
+    DAG_ID,
+    kma_dag_schedule(),
+    "Loads KMA getVilageFcst raw JSON into R2 and validates the Iceberg bronze runtime.",
+    ["ask_seoul", "kma", "bronze", "r2", "iceberg"],
+)
+
+recollect_dag = build_kma_bronze_dag(
+    RECOLLECT_DAG_ID,
+    None,
+    "Manually recollects a KMA getVilageFcst base_date/base_time through the Bronze contract.",
+    ["ask_seoul", "kma", "bronze", "recollect", "r2", "iceberg"],
+)

@@ -338,7 +338,7 @@ def verify_seoul_traffic_bronze_runtime(
             "Seoul traffic bronze verification failed: "
             f"expected_rows={expected_rows}, actual_rows={table_rows}"
         )
-    if expected_raw_objects is not None and int(row[1]) != expected_raw_objects:
+    if expected_raw_objects is not None and expected_rows != 0 and int(row[1]) != expected_raw_objects:
         raise RuntimeError(
             "Seoul traffic bronze verification failed: "
             f"expected_raw_objects={expected_raw_objects}, actual_raw_objects={row[1]}"

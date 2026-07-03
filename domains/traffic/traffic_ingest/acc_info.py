@@ -57,6 +57,42 @@ def metadata_total_count(metadata: dict) -> int:
     return int(value)
 
 
+def _int_setting(value: object, name: str) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer: {value}") from exc
+
+
+def resolve_acc_info_page_window(
+    conf: dict | None = None,
+    environ: dict | None = None,
+) -> tuple[int, int, int]:
+    conf = conf or {}
+    environ = os.environ if environ is None else environ
+    start_index = _int_setting(
+        conf.get("start_index", environ.get("SEOUL_ACC_INFO_START_INDEX", "1")),
+        "start_index",
+    )
+    end_index = _int_setting(
+        conf.get("end_index", environ.get("SEOUL_ACC_INFO_END_INDEX", "1000")),
+        "end_index",
+    )
+    page_size_value = conf.get("page_size", environ.get("SEOUL_ACC_INFO_PAGE_SIZE"))
+    page_size = (
+        _int_setting(page_size_value, "page_size")
+        if page_size_value not in (None, "")
+        else end_index - start_index + 1
+    )
+    if start_index < 1:
+        raise ValueError(f"start_index must be positive: {start_index}")
+    if end_index < start_index:
+        raise ValueError(f"end_index must be >= start_index: {start_index}, {end_index}")
+    if page_size < 1:
+        raise ValueError(f"page_size must be positive: {page_size}")
+    return start_index, end_index, page_size
+
+
 def next_acc_info_page_ranges(
     start_index: int,
     end_index: int,
