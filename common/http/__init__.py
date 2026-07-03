@@ -12,7 +12,7 @@
 """
 from common.http.auth import HeaderKey, NoAuth, PathKey, QueryKey  # noqa: F401
 from common.http.contract import Transport, TransportResponse  # noqa: F401
-from common.http.core import DEFAULT_TIMEOUT, HttpCore, RequestsTransport  # noqa: F401
+from common.http.core import DEFAULT_TIMEOUT, OK_2XX, HttpCore, RequestsTransport  # noqa: F401
 from common.http.errors import HttpProblemError  # noqa: F401
 from common.http.limits import resolve_rate_limit  # noqa: F401
 from common.http.seoul import SeoulOpenApiClient  # noqa: F401

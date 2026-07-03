@@ -28,20 +28,40 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_USER_AGENT = "asac-dag-http/1.0"
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+# 성공 기준 기본값 — 도메인들의 기존 urlopen/raise_for_status 동작(모든 2xx 성공)과 동일.
+# (#78 리뷰: 200 단독 기본은 transit·commerce 를 조용히 좁혔음 — 2xx 로 상향)
+OK_2XX = tuple(range(200, 300))
 _IDEMPOTENT_METHODS = frozenset({"GET", "HEAD"})
 
 
+def _is_retryable_status(status: int) -> bool:
+    """일시 오류 판정 — 429 + **모든 5xx**(520·599 등 게이트웨이 비표준 코드 포함).
+
+    (#78 리뷰: 고정 열거 {429,500,502,503,504} 는 transit 구 코드의 ">=500 전부 재시도"
+    정책을 좁혔음 — CDN/프록시 비표준 5xx 도 일시 오류로 본다.)
+    """
+    return status == 429 or status >= 500
+
+
 class RequestsTransport:
-    """기본 전송 — requests (#78 Q1 합의: 이미지 포함·다수 사용). lazy import."""
+    """기본 전송 — requests (#78 Q1 합의: 이미지 포함·다수 사용). lazy import.
+
+    Session 을 보관해 keep-alive/커넥션 풀을 재사용한다(#78 리뷰) — 페이지네이션
+    루프에서 호출마다 TCP/TLS 핸드셰이크를 반복하지 않는다.
+    """
+
+    def __init__(self) -> None:
+        self._session = None
 
     def send(self, method: str, url: str, *, params: Mapping[str, str] | None,
              headers: Mapping[str, str] | None, timeout: float) -> TransportResponse:
-        import requests
+        if self._session is None:
+            import requests
+            self._session = requests.Session()
 
         # verify 미노출 — 항상 기본(TLS 검증 ON). timeout 은 HttpCore 가 보장.
-        resp = requests.request(method, url, params=params, headers=headers,
-                                timeout=timeout)
+        resp = self._session.request(method, url, params=params, headers=headers,
+                                     timeout=timeout)
         return TransportResponse(status=resp.status_code, content=resp.content,
                                  headers=dict(resp.headers))
 
@@ -61,6 +81,9 @@ class HttpCore:
 
         if timeout is None:
             raise ValueError("timeout=None 금지 — 기본값을 쓰거나 양수를 지정")
+        if rate_limit is not ... and rate_limit is not None and rate_limit <= 0:
+            # 0/음수는 미지원 — falsy 처리로 "무제한"이 되는 반전 사고 방지(#78 리뷰).
+            raise ValueError("rate_limit 은 양수(req/s) 또는 None(무제한)")
         self.source = source
         self._transport = transport or RequestsTransport()
         self._timeout = float(timeout)
@@ -78,14 +101,14 @@ class HttpCore:
             headers: Mapping[str, str] | None = None,
             auth: "auth_strategies.NoAuth | auth_strategies.QueryKey | auth_strategies.PathKey | auth_strategies.HeaderKey | None" = None,
             timeout: float | None = None,
-            expected_status: tuple[int, ...] = (200,)) -> TransportResponse:
+            expected_status: tuple[int, ...] = OK_2XX) -> TransportResponse:
         return self.request("GET", url, params=params, headers=headers, auth=auth,
                             timeout=timeout, expected_status=expected_status)
 
     def request(self, method: str, url: str, *, params: Mapping[str, str] | None = None,
                 headers: Mapping[str, str] | None = None, auth=None,
                 timeout: float | None = None, retry: bool | None = None,
-                expected_status: tuple[int, ...] = (200,)) -> TransportResponse:
+                expected_status: tuple[int, ...] = OK_2XX) -> TransportResponse:
         if timeout is None:
             timeout = self._timeout
         if timeout is None or timeout <= 0:
@@ -120,7 +143,7 @@ class HttpCore:
             LOGGER.warning("[http:%s] %s %s → status=%d attempt=%d/%d",
                            self.source, method, redact(applied.url),
                            response.status, attempt, attempts)
-            if response.status not in _RETRYABLE_STATUS or attempt >= attempts:
+            if not _is_retryable_status(response.status) or attempt >= attempts:
                 break
             self._sleep(self._backoff_delay(attempt, response))
 

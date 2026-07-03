@@ -130,6 +130,38 @@ def test_connection_error_maps_to_connection_type():
     assert ei.value.problem.type == "urn:asac:error:connection-error"
 
 
+def test_nonstandard_5xx_is_retried():
+    # 게이트웨이/CDN 비표준 5xx(520, 599)도 일시 오류 — 구 transit 정책(>=500 전부) 보존(#78 리뷰)
+    core, transport, _ = _core(
+        [TransportResponse(status=520), TransportResponse(status=599), _ok()])
+    assert core.get("http://x/").status == 200
+    assert len(transport.calls) == 3
+
+
+def test_default_expected_status_accepts_any_2xx():
+    # 기본 성공 기준은 2xx 전체 — 기존 urlopen/raise_for_status 동작과 동일(#78 리뷰)
+    core, _, _ = _core([TransportResponse(status=204)])
+    assert core.get("http://x/").status == 204
+
+
+def test_service_key_query_url_redacted_in_problem():
+    # 공공데이터포털식 ?serviceKey= 쿼리 키 — redaction structural 패턴 커버(#78 리뷰)
+    secret = "enc%2Bkey%3D%3D" + "longsecretpart"
+    core, _, _ = _core([TransportResponse(status=500)], max_attempts=1)
+    with pytest.raises(HttpProblemError) as ei:
+        core.get(f"http://ws.bus.go.kr/api/rest/arrive?serviceKey={secret}&busRouteId=1")
+    assert secret not in ei.value.problem.request["url"]
+    assert PLACEHOLDER in ei.value.problem.request["url"]
+
+
+def test_rate_limit_zero_or_negative_rejected():
+    # falsy 0 이 "무제한"으로 뒤집히는 반전 사고 방지 — 양수 또는 None 만(#78 리뷰)
+    with pytest.raises(ValueError):
+        HttpCore(rate_limit=0)
+    with pytest.raises(ValueError):
+        HttpCore(rate_limit=-1.5)
+
+
 # ── rate limit (3단 계층) ───────────────────────────────────────────────────────
 def test_rate_limit_enforces_min_interval():
     clock = {"now": 0.0}
@@ -157,6 +189,8 @@ def test_rate_limit_layering(monkeypatch, tmp_path):
     assert resolve_rate_limit("kma") == 1.5
     assert resolve_rate_limit("seoul_openapi", 9.0) == 9.0     # 호출측 최우선
     assert resolve_rate_limit("seoul_openapi", None) is None   # 명시적 무제한도 존중
+    config.write_text("seoul_openapi: 0\n", encoding="utf-8")  # 0/음수 파일 값은 경고 후 무시
+    assert resolve_rate_limit("seoul_openapi") == 5.0          # → 코드 기본값으로 후퇴
 
 
 # ── auth 전략 ───────────────────────────────────────────────────────────────────

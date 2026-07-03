@@ -5,7 +5,9 @@
   — 운영이 재배포 없이 튜닝. 파일/키가 없으면 조용히 코드 기본값으로.
 - 호출측 override: HttpCore(rate_limit=...) 또는 어댑터 생성 인자 — 항상 최우선.
 
-값 의미: **초당 최대 호출 수(requests/sec)**. None = 제한 없음.
+값 의미: **초당 최대 호출 수(requests/sec), 양수만 유효**. None = 제한 없음.
+0/음수는 미지원 — config 파일 값이면 경고 후 무시(코드 기본값으로 후퇴),
+호출측 인자면 HttpCore 가 ValueError 를 던진다("0 = 차단" 기대의 반전 사고 방지).
 """
 from __future__ import annotations
 
@@ -33,7 +35,14 @@ def _load_file_limits() -> dict[str, float | None]:
     try:
         import yaml
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return {str(k): (float(v) if v is not None else None) for k, v in data.items()}
+        limits: dict[str, float | None] = {}
+        for key, value in data.items():
+            parsed = float(value) if value is not None else None
+            if parsed is not None and parsed <= 0:
+                LOGGER.warning("http_limits[%s]=%s 무시 — 양수(req/s) 또는 null 만 유효", key, value)
+                continue
+            limits[str(key)] = parsed
+        return limits
     except Exception as exc:    # config 파손이 파이프라인을 멈추지 않게 — 기본값으로 후퇴
         LOGGER.warning("http_limits config 로드 실패(코드 기본값 사용): %s", type(exc).__name__)
         return {}
