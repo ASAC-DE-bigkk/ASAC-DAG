@@ -7,6 +7,25 @@
 
 ## 2026-07-03
 
+### 30. HTTP 호출 경계를 공통 클라이언트로 전환 (#78)
+
+request:
+- 소스 API 호출을 `dags/common/http`(#78 HttpCore)로 통합. 단, commerce 는 §20 보안
+  게이트가 `netio.http_request` 사용을 명시하므로 그 커버리지(SSRF 가드·응답 상한·TLS
+  강제·예외 마스킹)를 잃지 않을 것.
+
+response:
+- `include/bronze/clients.py` 의 `SeoulOpenApiClient` 수동 재시도 루프를 HttpCore 로 대체.
+  **netio 를 HttpCore 의 Transport(`_NetioTransport`)로 감싸** §20 커버리지를 그대로 유지하고,
+  그 위에 통합 재시도(429/5xx+연결오류)·redaction 로깅·rate limit·typed 예외(HttpProblemError)를
+  얹음(합성 — HttpCore Transport 계약의 의도된 확장점).
+- **업무 오류 분류(INFO-000/100/200 등, `parse_page`)는 도메인에 그대로 유지** — HTTP 200
+  응답 본문에서 판정, HttpCore 는 전송/HTTP 상태만 담당. 재시도 소진/HTTP 오류는
+  `SeoulApiError("ERROR-NETWORK", redact(...))` 로 변환해 bronze 마커 계약 보존.
+- `rate_limit=None` — 기존 `SEOUL_REQUEST_DELAY_SECONDS` 간격 유지(이중 지연 방지).
+- 검증: commerce 239 테스트 통과, 오프라인 스모크(성공·재시도·소진·업무오류 4경로) 통과,
+  URL 경로 키가 HttpCore 로그에서 마스킹 확인.
+
 ### 29. 서울 base URL env 이름 통일 — SEOUL_OPEN_API_BASE_URL (#78)
 
 request:

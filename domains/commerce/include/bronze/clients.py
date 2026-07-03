@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from dataclasses import dataclass
 
+from common.http import HttpCore                 # 공통 재시도·redaction·rate limit·typed 예외 (#78)
+from common.http.contract import TransportResponse
+from common.http.errors import HttpProblemError
 from security import netio, redact   # 시크릿 마스킹 + HTTP 정책 래퍼(timeout/TLS/예외 마스킹)
 
 log = logging.getLogger(__name__)
@@ -78,6 +80,25 @@ def parse_page(raw: bytes, service: str) -> Page:
     return Page(raw, code, msg, block.get("row", []) or [], total)
 
 
+class _NetioTransport:
+    """HttpCore 의 Transport 를 commerce 보안 게이트(netio)로 구현 — §20 유지 (#78).
+
+    netio.http_request 가 timeout 주입·TLS 검증 강제·예외 args 마스킹을 담당하고,
+    그 위에 HttpCore 가 통합 재시도(429/5xx+연결오류)·redaction 로깅·typed 예외를
+    얹는다(합성). requests.Session 은 그대로 재사용해 연결 풀링을 유지한다.
+    """
+
+    def __init__(self, session) -> None:
+        self._session = session
+
+    def send(self, method: str, url: str, *, params, headers, timeout) -> TransportResponse:
+        resp = netio.http_request(method, url, session=self._session, timeout=timeout,
+                                  params=dict(params) if params else None,
+                                  headers=dict(headers) if headers else None)
+        return TransportResponse(status=resp.status_code, content=resp.content,
+                                 headers=dict(resp.headers))
+
+
 class SeoulOpenApiClient:
     def __init__(self, key: str, base_url: str, *, timeout: int = 30,
                  max_attempts: int = 3, backoff_seconds: float = 2.0) -> None:
@@ -87,38 +108,27 @@ class SeoulOpenApiClient:
 
         self._key = key
         self._base = base_url.rstrip("/")
-        self._timeout = timeout
-        self._max_attempts = max_attempts
-        self._backoff = backoff_seconds
-        self._session = requests.Session()
+        # rate_limit 은 None — commerce 는 기존 SEOUL_REQUEST_DELAY_SECONDS 간격을
+        # 그대로 유지한다(HttpCore rate limit 과 이중 지연 방지, 처리량 동작 보존).
+        self._core = HttpCore(
+            source="seoul_openapi",
+            transport=_NetioTransport(requests.Session()),
+            timeout=float(timeout),
+            max_attempts=max_attempts,
+            backoff_base=backoff_seconds,
+            rate_limit=None,
+        )
 
     def _url(self, service: str, start: int, end: int) -> str:
         return f"{self._base}/{self._key}/json/{service}/{start}/{end}/"
 
-    def _safe_url(self, service: str, start: int, end: int) -> str:
-        return f"{self._base}/***/json/{service}/{start}/{end}/"  # 로그용(키 마스킹)
-
     def fetch_page(self, service: str, start: int, end: int) -> Page:
-        import requests  # 지연 임포트
-
-        last_exc: Exception | None = None
-        for attempt in range(1, self._max_attempts + 1):
-            try:
-                # netio 래퍼: timeout 보장·TLS 검증 강제·예외 args 마스킹(같은 타입 재전파).
-                resp = netio.http_request("GET", self._url(service, start, end),
-                                          session=self._session, timeout=self._timeout)
-                resp.raise_for_status()
-                return parse_page(resp.content, service)
-            except SeoulApiError:
-                raise  # API 레벨 오류는 재시도 안 함
-            except (requests.RequestException, ValueError) as exc:
-                last_exc = exc
-                # requests 예외 메시지엔 인증키가 박힌 URL 이 들어갈 수 있어 마스킹 후 기록.
-                log.warning("fetch attempt %d/%d failed for %s: %s", attempt,
-                            self._max_attempts, self._safe_url(service, start, end),
-                            redact(str(exc)))
-                if attempt < self._max_attempts:
-                    time.sleep(self._backoff * attempt)
-        # 이 메시지는 bronze 마커(error 필드)로 영구 저장되므로 반드시 마스킹한다.
-        raise SeoulApiError("ERROR-NETWORK",
-                            f"max retries exceeded: {redact(str(last_exc))}", service)
+        # 전송·재시도·URL redaction 로깅은 HttpCore 소관(URL 경로의 키는 로그/예외에서 마스킹).
+        # 업무 오류(INFO-100 등) 분류는 parse_page 가 담당 — HTTP 200 응답 본문에서 판정한다.
+        try:
+            response = self._core.get(self._url(service, start, end))
+        except HttpProblemError as exc:
+            # 재시도 소진/HTTP 오류. 이 메시지는 bronze 마커(error 필드)로 영구 저장되므로 마스킹.
+            raise SeoulApiError("ERROR-NETWORK",
+                                f"max retries exceeded: {redact(str(exc))}", service)
+        return parse_page(response.content, service)

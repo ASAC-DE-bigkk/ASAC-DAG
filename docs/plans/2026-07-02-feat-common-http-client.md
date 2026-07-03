@@ -74,7 +74,10 @@ dags/common/http/
    - **culture** — KOPIS 오버슛 400=목록 끝(#84, CLOSED) 판별이 `requests.HTTPError` 에
      묶여 있고 회귀 테스트가 이를 단언 → 소유자가 `HttpProblemError.status==400` 으로
      판별 이관 + 회귀 테스트 재작성
-4. [ ] **commerce** — top-level `common` 충돌 해소(#109) 머지 후 마지막 전환(오류 분류 로직 큼)
+4. [x] **commerce** — #109 머지 후 전환 완료. §20 보안 게이트(netio) 유지를 위해 netio 를
+   HttpCore Transport(`_NetioTransport`)로 감싸 SSRF/응답상한/TLS/예외마스킹 커버리지 보존 +
+   HttpCore 통합 재시도·redaction·typed 예외 적용. INFO 업무오류 분류(`parse_page`)는
+   도메인 유지, `rate_limit=None`(기존 SEOUL_REQUEST_DELAY_SECONDS 간격 보존)
 5. [ ] 각 도메인 기존 http 모듈은 위임(re-export shim) 후 제거 — 무중단(@kang-gyeongmin) ·
    plan.md 통합 원칙 3 준수
 
