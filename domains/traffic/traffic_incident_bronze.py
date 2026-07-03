@@ -47,7 +47,6 @@ from traffic_ingest.common.runtime import (  # noqa: E402
 )
 
 
-COMMON_DISCORD_WEBHOOK_ENV = "ASK_SEOUL_DISCORD_WEBHOOK_URL"
 TRAFFIC_DISCORD_WEBHOOK_ENV = "TRAFFIC_DISCORD_WEBHOOK_URL"
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
@@ -82,7 +81,7 @@ def stage_name(task_id: str) -> str:
 
 
 def send_traffic_discord(title: str, description: str, color: int, footer: str) -> None:
-    webhook_url = (os.environ.get(TRAFFIC_DISCORD_WEBHOOK_ENV) or os.environ.get(COMMON_DISCORD_WEBHOOK_ENV) or "").strip()
+    webhook_url = (os.environ.get(TRAFFIC_DISCORD_WEBHOOK_ENV) or "").strip()
     if not webhook_url:
         LOGGER.info("[traffic notify:noop] %s (webhook url not configured)", title)
         return
