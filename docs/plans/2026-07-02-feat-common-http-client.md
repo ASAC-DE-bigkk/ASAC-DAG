@@ -60,15 +60,22 @@ dags/common/http/
 
 ## 단계별 계획
 
-1. [x] `common/http/` 구현 + 단위 테스트 19건(timeout 강제·verify 미노출·재시도/Retry-After·
-   typed 예외 redaction·rate limit 계층·auth 전략·서울 어댑터). commerce `SeoulClient` 의
-   오류분류/redaction 경험은 core 설계에 선반영(@kang-gyeongmin 제안)
-2. [ ] 파일럿: population 전환 → 실DAG 검증 — **@kang-gyeongmin 담당**
-3. [ ] 도메인 순차 전환(도메인별 커밋·검증): **traffic 2차**(@masondev1024 제안 — path-key·XML·
-   INFO-000·pagination 이 core 검증에 적합, 호출 경계만 HttpCore 로 교체하고 성공 기준·
-   partial 검증·schema 판단은 도메인 유지) → weather(query-key·JSON·grid fanout) →
-   transit → culture → commerce 마지막(오류 분류 로직 큼)
-4. [ ] 각 도메인 기존 http 모듈은 위임(re-export shim) 후 제거 — 무중단(@kang-gyeongmin) ·
+1. [x] `common/http/` 구현 + 단위 테스트 20건(timeout 강제·verify 미노출·재시도/Retry-After·
+   typed 예외 redaction·rate limit 계층·auth 전략·서울 어댑터·base URL env). commerce
+   `SeoulClient` 의 오류분류/redaction 경험은 core 설계에 선반영(@kang-gyeongmin 제안)
+2. [x] 전환 완료(호출 경계만 HttpCore 로 교체 — 성공 기준·파싱·스키마 판단은 도메인 유지):
+   - **population** — `common/http.py` shim(fetch 시그니처 보존), 단발 호출 유지
+   - **traffic** — `runtime.fetch_url` 내부만 위임, 단발(재시도=Airflow task retries)
+   - **transit** — `api._read` 의 수동 지수 백오프를 HttpCore 로(#29 정책 2·4·8s 등가 보존)
+3. [ ] **소유자 위임** — 아래 두 도메인은 방금 머지된 도메인 특화 로직(회귀 테스트 포함)이
+   있어, 그 의도를 가장 잘 아는 소유자가 직접 전환한다(무중단·회귀 방지):
+   - **weather** — KMA 429 백오프(#106, `Retry-After` 무제한 존중 + 300s 상한)는 HttpCore
+     기본(30s 캡)과 튜닝이 달라, 소유자가 `backoff_max` 등을 맞춰 전환 + 전용 테스트 이관
+   - **culture** — KOPIS 오버슛 400=목록 끝(#84, CLOSED) 판별이 `requests.HTTPError` 에
+     묶여 있고 회귀 테스트가 이를 단언 → 소유자가 `HttpProblemError.status==400` 으로
+     판별 이관 + 회귀 테스트 재작성
+4. [ ] **commerce** — top-level `common` 충돌 해소(#109) 머지 후 마지막 전환(오류 분류 로직 큼)
+5. [ ] 각 도메인 기존 http 모듈은 위임(re-export shim) 후 제거 — 무중단(@kang-gyeongmin) ·
    plan.md 통합 원칙 3 준수
 
 ## 열어둔 질문
