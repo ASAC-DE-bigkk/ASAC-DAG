@@ -48,6 +48,7 @@ from weather_ingest.kma import (  # noqa: E402
 
 
 KMA_PUBLISH_CRON_KST = "20 2,5,8,11,14,17,20,23 * * *"
+COMMON_DISCORD_WEBHOOK_ENV = "ASK_SEOUL_DISCORD_WEBHOOK_URL"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
@@ -82,7 +83,7 @@ def stage_name(task_id: str) -> str:
 
 
 def send_weather_discord(title: str, description: str, color: int, footer: str) -> None:
-    webhook_url = (os.environ.get(WEATHER_DISCORD_WEBHOOK_ENV) or "").strip()
+    webhook_url = (os.environ.get(WEATHER_DISCORD_WEBHOOK_ENV) or os.environ.get(COMMON_DISCORD_WEBHOOK_ENV) or "").strip()
     if not webhook_url:
         LOGGER.info("[weather notify:noop] %s (webhook url not configured)", title)
         return

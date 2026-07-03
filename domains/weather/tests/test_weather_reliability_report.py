@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -21,6 +23,20 @@ class RecordingCursor:
         return self.rows.pop(0)
 
 
+@pytest.fixture(autouse=True)
+def stub_dag_run_summary(monkeypatch):
+    monkeypatch.setattr(
+        report,
+        "collect_dag_run_summary",
+        lambda dag_id, detected_at, lookback_hours: {
+            "dag_id": dag_id,
+            "success": 2,
+            "failed": 1,
+            "running": 0,
+        },
+    )
+
+
 def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
@@ -36,6 +52,7 @@ def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
     )
 
     assert result["status"] == "PASS"
+    assert result["dag_runs"] == {"dag_id": "weather_vilage_fcst_bronze", "success": 2, "failed": 1, "running": 0}
     assert result["weather"]["grid_count"] == 80
     assert result["blast_radius"] == ["iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst"]
     assert "current_timestamp - INTERVAL '24' HOUR" in cursor.statements[0]
@@ -89,7 +106,8 @@ def test_weather_message_does_not_include_webhook(monkeypatch):
     message = report.format_weather_discord_message(result)
 
     assert "secret-token" not in message
-    assert "기상청 단기예보 Bronze 신뢰성 리포트" in message
+    assert "success=2 failed=1 running=0" in message
+    assert "Bronze" in message
 
 
 def test_weather_send_discord_posts_payload(monkeypatch):
