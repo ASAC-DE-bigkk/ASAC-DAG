@@ -14,4 +14,4 @@ boto3>=1.34      # STORAGE_BACKEND=r2: Cloudflare R2(S3 호환) 클라이언트 
 
 # bronze 적재(commerce_load_bronze) — **이미지 추가 필요**:
 trino>=0.328     # bronze: Trino 증분 적재(trino.dbapi) — 형제 라인(common_dbt_smoke)과 동일
-pyiceberg[s3fs]>=0.7  # bronze: 전체 스냅샷 적재(Trino 우회, R2 Data Catalog REST + R2 S3 FileIO)
+pyiceberg[s3fs]>=0.11.1,<0.12  # bronze: 전체 스냅샷 적재(Trino 우회, R2 Data Catalog REST + R2 S3 FileIO). stable 0.11 라인

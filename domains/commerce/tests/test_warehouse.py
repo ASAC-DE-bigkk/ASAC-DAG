@@ -82,11 +82,29 @@ def test_to_naive_utc():
     assert dt == datetime(2026, 7, 3, 5, 30, 25, 123456) and dt.tzinfo is None
 
 
-def test_iter_increment_rejects_page_ndjson():
+def test_iter_increment_row_ndjson():
     st = _FakeStorage()
-    st.data["k"] = _rows_ndjson([{"list_total_count": 1, "row": []}])
+    st.data["k"] = _rows_ndjson([{"MGTNO": "1", "BPLCNM": "a"}, {"MGTNO": "2"}])
+    assert [r["MGTNO"] for r in wh.iter_increment_rows(st, "k")] == ["1", "2"]
+
+
+def test_iter_increment_page_ndjson_parsed():
+    st = _FakeStorage()
+    # feat/58 이전 page-NDJSON: 줄 = API 페이지 응답(봉투). parse_page 로 레코드 추출.
+    page = {"LOCALDATA_072404": {"list_total_count": 2, "RESULT": {"CODE": "INFO-000"},
+                                 "row": [{"MGTNO": "A"}, {"MGTNO": "B"}]}}
+    st.data["k"] = (json.dumps(page, ensure_ascii=False) + "\n").encode("utf-8")
+    recs = list(wh.iter_increment_rows(st, "k", service_name="LOCALDATA_072404"))
+    assert [r["MGTNO"] for r in recs] == ["A", "B"]
+
+
+def test_iter_increment_page_ndjson_needs_service_name():
+    st = _FakeStorage()
+    page = {"LOCALDATA_072404": {"list_total_count": 1, "RESULT": {"CODE": "INFO-000"},
+                                 "row": [{"MGTNO": "A"}]}}
+    st.data["k"] = (json.dumps(page, ensure_ascii=False) + "\n").encode("utf-8")
     with pytest.raises(ValueError):
-        list(wh.iter_increment_rows(st, "k"))
+        list(wh.iter_increment_rows(st, "k"))   # service_name 없음
 
 
 def test_project_records_lineage():
@@ -144,6 +162,15 @@ def test_load_unit_publishable_false_on_count_mismatch(trino_env, monkeypatch):
     monkeypatch.setattr(wh.load_state, "write_receipt", lambda *a, **k: None)
     r = wh.load_unit(st, _unit("a", "k", count=5, engine="trino"), load_date="d")
     assert r["is_publishable"] is False
+
+
+def test_load_unit_legacy_publishable_on_rows_positive(trino_env, monkeypatch):
+    st = _FakeStorage()
+    monkeypatch.setattr(wh, "load_unit_pyiceberg", lambda s, u, load_date: 500)
+    monkeypatch.setattr(wh.load_state, "write_receipt", lambda *a, **k: None)
+    u = _unit("a", "k", engine="pyiceberg", count=500); u["legacy"] = True
+    r = wh.load_unit(st, u, load_date="d")
+    assert r["action"] == "loaded" and r["is_publishable"] is True and r["rows_loaded"] == 500
 
 
 def test_write_manifest_per_dataset(trino_env, monkeypatch):

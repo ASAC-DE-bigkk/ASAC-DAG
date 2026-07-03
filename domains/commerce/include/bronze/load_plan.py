@@ -22,12 +22,14 @@ from common.storage import Storage
 
 log = logging.getLogger(__name__)
 
-# 증분 mode → 적재 엔진.
-PYICEBERG_MODES = ("first", "full_reconcile")
+# 소량 변경분만 Trino(증분). 그 외(전체 스냅샷: 최초 row-NDJSON `first` / feat/58 이전 legacy 전량)는
+# PyIceberg(대용량 커밋 1회, Trino OOM 회피).
+TRINO_MODES = ("changed",)
+LEGACY_MODE = "legacy_full"      # feat/58 이전 page-NDJSON(마커에 increment_mode 없음) 전량 스냅샷
 
 
 def choose_engine(increment_mode: str) -> str:
-    return "pyiceberg" if increment_mode in PYICEBERG_MODES else "trino"
+    return "trino" if increment_mode in TRINO_MODES else "pyiceberg"
 
 
 def _bound_by_dates(run_ids: list[str], max_dates: int | None) -> list[str]:
@@ -62,12 +64,16 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
 
     반환: {
       units: [{short, run_id, date, increment_key, increment_mode, increment_count,
-               observed_date, dag_run_id, collected_at, engine}],
-      resolved_runs: {short: [run_id, ...]},   # 완료 run(적재/identical) 오름차순 — finalize 가
-                                               # 적재 성공분까지만 워터마크를 전진시킬 때 사용.
-      pending_keep: [...], pending_expired: [...],
-      no_watermark: bool,
+               observed_date, dag_run_id, collected_at, service_name, engine, legacy}],
+      resolved_runs: {short: [run_id, ...]},   # 완료 run(적재/identical) 오름차순 —
+                                               # finalize 가 적재 성공분까지만 워터마크 전진에 사용.
+      pending_keep: [...], pending_expired: [...], no_watermark: bool,
     }
+
+    워터마크 이후의 **완료 run 을 시간순으로 전부 적재**(사용자: "raw 폴더를 처음부터 읽어 적재").
+    포맷 무관 — feat/58 이전 **page-NDJSON(legacy 전량)도 로더가 parse_page 로 읽어 적재**한다
+    (과거 데이터 보존). identical(파일 없음)은 적재 없이 전진. incomplete 는 pending(관측).
+    엔진: changed(소량) → Trino, 그 외(legacy 전량 / 최초 first) → PyIceberg(대용량 커밋 1회).
     """
     all_runs = markers.list_run_ids(storage, prefix)          # 시간순
     no_watermark = not load_state.has_watermark(storage, prefix)
@@ -84,29 +90,35 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
             completed = markers.completed_shorts(storage, prefix, rid)
             if short in completed:
                 inc_key = paths.bronze_object_key(prefix=prefix, run_id=rid, short=short)
-                if storage.exists(inc_key):                  # identical(파일없음)은 적재 없이 전진
+                if storage.exists(inc_key):                   # identical(파일없음)은 적재 없이 전진
                     m = _read_marker(storage, prefix, rid, short)
-                    mode = m.get("increment_mode", "changed")
+                    legacy = "increment_mode" not in m        # feat/58 이전 page-NDJSON 전량
+                    mode = LEGACY_MODE if legacy else m.get("increment_mode", "changed")
+                    count = m.get("increment_count")
+                    if count is None:
+                        count = m.get("rows_total")           # legacy: 전량 = rows_total
                     units.append({
                         "short": short, "run_id": rid, "date": rdate,
                         "increment_key": inc_key, "increment_mode": mode,
-                        "increment_count": int(m.get("increment_count") or 0),
+                        "increment_count": None if count is None else int(count),
                         "observed_date": m.get("observed_date", rdate),
                         "dag_run_id": m.get("run_id", ""),
                         "collected_at": m.get("collected_at", ""),
-                        "engine": choose_engine(mode),
-                    })
+                        "service_name": m.get("source_name"),  # page-NDJSON parse_page 용
+                        "engine": choose_engine(mode), "legacy": legacy})
                 resolved.add((rdate, short))
                 resolved_runs.setdefault(short, []).append(rid)
             elif 0 <= load_state.days_between(rdate, today) <= load_state.RETRY_LOOKBACK_DAYS:
-                new_incomplete.add((rdate, short))           # 관측용(현재-2일 이내)
+                new_incomplete.add((rdate, short))            # 관측용(현재-2일 이내)
 
     pending_keep, pending_expired = load_state.reconcile_pending(
         pending, resolved=resolved, new_incomplete=new_incomplete, today=today)
 
-    log.info("load plan: units=%d (pyiceberg=%d/trino=%d), pending 유지=%d 폐기=%d, no_watermark=%s",
-             len(units), sum(u["engine"] == "pyiceberg" for u in units),
+    log.info("load plan: units=%d (pyiceberg=%d/trino=%d, legacy=%d), pending 유지=%d 폐기=%d, "
+             "no_watermark=%s", len(units),
+             sum(u["engine"] == "pyiceberg" for u in units),
              sum(u["engine"] == "trino" for u in units),
+             sum(u.get("legacy") for u in units),
              len(pending_keep), len(pending_expired), no_watermark)
     return {"units": units, "resolved_runs": resolved_runs,
             "pending_keep": pending_keep, "pending_expired": pending_expired,

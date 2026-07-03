@@ -7,6 +7,27 @@
 
 ## 2026-07-03
 
+### 30. commerce_load_bronze 크래시 수정 — page-NDJSON(과거 데이터) 적재 지원
+
+request:
+- commerce_load_bronze 첫 실행이 죽음. 원인 분석 요청. (판단) 과거 데이터를 스킵하지 말고
+  **현재 코드로 읽어 적재**하도록 변경. pyiceberg 는 최신 stable(0.11.1)로 이미지 반영(별도 host 브랜치).
+
+response:
+- **원인**: 워터마크 없는 첫 실행이 raw 를 처음부터 스캔 → `2026-06-30`·`2026-07-01` run 이
+  **feat/58 이전 page-NDJSON**(줄=API 페이지 응답, 마커에 increment_mode 없음). 로더가 이를
+  스킵하지 않고 **ValueError 로 태스크를 죽임**(계획은 스킵인데 구현이 raise). 게다가 35/39
+  데이터셋은 row-NDJSON 증분 파일이 없어(07-02/03 identical) 스킵만으론 bronze 가 빈다.
+- **수정(과거 데이터 적재)**: `iter_increment_rows` 를 **두 포맷 모두 지원**으로 변경 —
+  row-NDJSON(줄=레코드) + page-NDJSON(줄=페이지 응답 → `parse_page(...).rows`, service_name 필요).
+  `resolve_load_plan` 은 워터마크 이후 **완료 run 을 시간순 전부 적재**(legacy 전량=PyIceberg,
+  changed=Trino, identical=적재없이 전진). diff_target 우회/legacy 스킵 제거.
+- **검증**: 실제 데이터 드라이런 — 66 유닛(legacy 62 PyIceberg + changed 4 Trino), general_restaurant
+  06-30 legacy 파일에서 실제 레코드 파싱 확인(534,680건, 전체 인허가 컬럼). 단위테스트 **263 통과**,
+  `python -m security` 차단 0.
+- **pyiceberg**: 이미지에 미설치 확인(trino·pyarrow 는 있음) → host repo `feat/7-dockerfile-pyiceburg`
+  브랜치에서 `Dockerfile.airflow` 에 `pyiceberg[s3fs]>=0.11.1,<0.12` 추가(별도 작업). requirements.txt 동기화.
+
 ### 29. bronze 적재 — 수집과 분리된 commerce_load_bronze DAG(PyIceberg/Trino) + 파일 상태 (Step 2~3)
 
 request:

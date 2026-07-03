@@ -1,10 +1,13 @@
-"""bronze 웨어하우스 적재 엔진 — raw 증분(row-NDJSON) → Iceberg 원본층 테이블.
+"""bronze 웨어하우스 적재 엔진 — raw(row/page-NDJSON) → Iceberg 원본층 테이블.
 
 적재 단위(load_plan.resolve_load_plan 의 unit) 하나를 멱등 적재한다. 엔진 2경로(사용자 확정):
-- **PyIceberg**(mode=first/full_reconcile = 전체 스냅샷): Trino 코디네이터를 우회해 Arrow 배치를
-  **적재당 커밋 1회**로 append(메모리 바운드). 대용량(예: general_restaurant 503MB)·초기 백필용.
+- **PyIceberg**(전체 스냅샷 = 최초 first / feat/58 이전 legacy 전량): Trino 코디네이터를 우회해
+  Arrow 배치를 **적재당 커밋 1회**로 append(메모리 바운드). 대용량·초기 백필용.
   → INSERT VALUES 로 수천 커밋을 만들던 Trino OOM 을 회피.
 - **Trino**(mode=changed = 소량 변경분): `trino.dbapi` INSERT(파라미터 바인딩). 일일 증분용.
+
+**포맷 2종 모두 적재**(과거 데이터 보존): row-NDJSON(feat/58 이후, 줄=레코드) + page-NDJSON
+(feat/58 이전, 줄=API 페이지 응답 → parse_page 로 레코드 추출). iter_increment_rows 가 흡수.
 
 멱등: (dataset, bronze_run_id) delete-then-(insert|append). 값은 전부 파라미터/Arrow 바인딩
 (record_json 등 외부 데이터 SQL 리터럴 조립 금지, §20). catalog/schema 는 assert_identifier 통과분만.
@@ -126,24 +129,34 @@ def _canonical_json(rec: dict) -> str:
     return json.dumps(rec, ensure_ascii=False, sort_keys=True)
 
 
-def iter_increment_rows(storage: Storage, increment_key: str) -> Iterator[dict]:
-    """증분 파일(row-NDJSON)을 줄 단위 스트리밍으로 레코드 산출(대형 파일 메모리 바운드).
+def iter_increment_rows(storage: Storage, increment_key: str,
+                        *, service_name: str | None = None) -> Iterator[dict]:
+    """증분/전량 파일을 줄 단위 스트리밍으로 **레코드** 산출(대형 파일 메모리 바운드).
 
-    page-NDJSON(구형, 줄=페이지 응답)은 적재 범위 아님 — 첫 줄이 인허가 레코드(MGTNO 등)가
-    아니면 예외로 중단.
+    두 포맷 모두 지원(과거 데이터 보존):
+    - **row-NDJSON**(feat/58 이후): 줄 = 레코드 1건 → 그대로 산출.
+    - **page-NDJSON**(feat/58 이전): 줄 = API 페이지 응답 → `parse_page(...).rows` 로 레코드 산출.
+      page 포맷은 `service_name`(LOCALDATA_*) 이 필요하다(응답 봉투 키).
+    포맷은 첫 줄로 판별(레코드=MGTNO 보유 / 페이지=봉투 구조).
     """
+    from bronze.clients import parse_page
+
     data = storage.read_bytes(increment_key)
-    checked = False
+    fmt: str | None = None
     for raw_line in data.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        rec = json.loads(line)
-        if not checked:
-            if not isinstance(rec, dict) or ("MGTNO" not in rec and "mgtno" not in rec):
-                raise ValueError(f"row-NDJSON 아님(page-NDJSON 은 적재 범위 아님): {increment_key}")
-            checked = True
-        yield rec
+        obj = json.loads(line)
+        if fmt is None:
+            fmt = "row" if (isinstance(obj, dict) and ("MGTNO" in obj or "mgtno" in obj)) else "page"
+            if fmt == "page" and not service_name:
+                raise ValueError(f"page-NDJSON 파싱에 service_name 필요: {increment_key}")
+        if fmt == "row":
+            yield obj
+        else:
+            for rec in parse_page(raw_line, service_name).rows:
+                yield rec
 
 
 def _to_naive_utc(value: str) -> datetime:
@@ -216,7 +229,9 @@ def load_unit_trino(storage: Storage, unit: dict, *, load_date: str) -> int:
     short = assert_identifier(unit["short"], field="dataset short")
     run_id = unit["run_id"]
     ctx = _unit_ctx(unit, load_date)
-    rows = project_records(iter_increment_rows(storage, unit["increment_key"]), **ctx)
+    rows = project_records(
+        iter_increment_rows(storage, unit["increment_key"],
+                            service_name=unit.get("service_name")), **ctx)
 
     conn = _connect(catalog, schema)
     try:
@@ -303,7 +318,9 @@ def load_unit_pyiceberg(storage: Storage, unit: dict, *, load_date: str) -> int:
     table.delete(And(EqualTo("dataset", short), EqualTo("bronze_run_id", run_id)))
 
     total, batch = 0, []
-    rows_iter = project_records(iter_increment_rows(storage, unit["increment_key"]), **ctx)
+    rows_iter = project_records(
+        iter_increment_rows(storage, unit["increment_key"],
+                            service_name=unit.get("service_name")), **ctx)
 
     def _flush():
         nonlocal total
@@ -325,19 +342,19 @@ def load_unit_pyiceberg(storage: Storage, unit: dict, *, load_date: str) -> int:
 def load_unit(storage: Storage, unit: dict, *, load_date: str) -> dict:
     """엔진(unit['engine'])에 따라 1개 단위 적재. 실패는 예외로 전파(태스크가 재시도)."""
     engine = unit.get("engine", "trino")
-    if engine == "pyiceberg":
-        rows = load_unit_pyiceberg(storage, unit, load_date=load_date)
-    else:
-        rows = load_unit_trino(storage, unit, load_date=load_date)
-    ok = rows == int(unit.get("increment_count") or 0) or unit.get("increment_count") in (None, "")
+    prefix = get_settings().storage_prefix
+    rows = (load_unit_pyiceberg if engine == "pyiceberg" else load_unit_trino)(
+        storage, unit, load_date=load_date)
+    exp = unit.get("increment_count")
+    ok = rows > 0 if exp in (None, "") else rows == int(exp)   # 기준 없으면 rows>0
     result = {"short": unit["short"], "run_id": unit["run_id"], "date": unit.get("date"),
-              "engine": engine, "rows_loaded": rows,
-              "rows_expected": int(unit.get("increment_count") or 0),
-              "observed_date": unit.get("observed_date") or load_date,
+              "engine": engine, "observed_date": unit.get("observed_date") or load_date,
               "load_date": load_date, "dag_run_id": unit.get("dag_run_id") or "",
+              "rows_loaded": rows, "rows_expected": int(exp or 0),
               "is_publishable": bool(ok), "action": "loaded"}
-    load_state.write_receipt(storage, get_settings().storage_prefix, result)
-    log.info("적재[%s] %s run=%s rows=%d/%s pub=%s", engine, unit["short"], unit["run_id"],
+    load_state.write_receipt(storage, prefix, result)
+    log.info("적재[%s]%s %s run=%s rows=%d/%s pub=%s", engine,
+             "(legacy)" if unit.get("legacy") else "", unit["short"], unit["run_id"],
              rows, result["rows_expected"], result["is_publishable"])
     return result
 
