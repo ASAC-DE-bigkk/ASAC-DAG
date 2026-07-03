@@ -16,6 +16,12 @@ from airflow.providers.standard.operators.python import PythonOperator
 
 # 동봉 패키지 import (Airflow 3.x 는 dags 하위폴더를 sys.path 에 자동 추가 안 함)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+_DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _DAGS_ROOT not in sys.path:
+    sys.path.insert(0, _DAGS_ROOT)
+
+from common.errors.airflow import problem_failure_callback
 
 from seoul_transit import config
 from seoul_transit.bus import collect_bus_raw
@@ -33,6 +39,9 @@ SOURCES = {
     "bronze_bus_arrival": "bus_arrival",
     "bronze_bus_position": "bus_position",
 }
+
+# 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+record_transit_problem = problem_failure_callback(domain=DOMAIN, source_system=SOURCE)
 
 
 def sql_identifier(value: str) -> str:
@@ -145,4 +154,5 @@ with DAG(
     ingest = PythonOperator(
         task_id="ingest_bus",
         python_callable=ingest_bus,
+        on_failure_callback=record_transit_problem,
     )
