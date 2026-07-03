@@ -36,6 +36,12 @@ from airflow.sdk import Asset
 
 # 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+_DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _DAGS_ROOT not in sys.path:
+    sys.path.insert(0, _DAGS_ROOT)
+
+from common.errors.airflow import problem_failure_callback  # noqa: E402
 
 from culture_ingest.common.config import (  # noqa: E402
     CULTURE_BRONZE_ASSET,
@@ -54,6 +60,11 @@ from culture_ingest.source.ingest import (  # noqa: E402
 from culture_ingest.common.notify import build_report_payload, notifier_from_env  # noqa: E402
 
 KST = "Asia/Seoul"
+
+# 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+# 이 DAG 은 KOPIS·서울 열린데이터광장 두 소스를 함께 적재해 문서 레벨에서 소스를
+# 특정할 수 없어 source_system 은 생략한다(소스별 지정은 추후 ProblemError 로).
+record_culture_problem = problem_failure_callback(domain="culture")
 
 DEFAULT_PARAMS = {
     "target": "dev",
@@ -282,12 +293,17 @@ with DAG(
     tags=["ingest", "culture", "bronze", "r2"],
 ) as dag:
     # 1) plan: 적재할 데이터셋 목록과 공유 ingest_ts를 계산.
-    plan = PythonOperator(task_id="plan", python_callable=_plan)
+    plan = PythonOperator(
+        task_id="plan",
+        python_callable=_plan,
+        on_failure_callback=record_culture_problem,
+    )
 
     # 2) fetch_raw: plan 결과를 동적 매핑, 데이터셋마다 raw 박제까지만(재현 불가 경계).
     fetch_raw = PythonOperator.partial(
         task_id="fetch_raw",
         python_callable=_fetch_raw,
+        on_failure_callback=record_culture_problem,
     ).expand(op_kwargs=plan.output)
 
     # 3) load_bronze: R2 raw → bronze Iceberg (멱등, API 재호출 없이 단독 재시도 가능).
@@ -299,9 +315,15 @@ with DAG(
         python_callable=_load_bronze,
         trigger_rule="all_done",
         outlets=[Asset(CULTURE_BRONZE_ASSET)],
+        on_failure_callback=record_culture_problem,
     )
 
     # 4) report: 일부가 실패해도(all_done) 항상 요약을 남김.
-    report = PythonOperator(task_id="report", python_callable=_report, trigger_rule="all_done")
+    report = PythonOperator(
+        task_id="report",
+        python_callable=_report,
+        trigger_rule="all_done",
+        on_failure_callback=record_culture_problem,
+    )
 
     plan >> fetch_raw >> load_bronze_task >> report

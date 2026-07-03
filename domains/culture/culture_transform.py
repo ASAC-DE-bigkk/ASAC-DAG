@@ -29,10 +29,20 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import Asset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+_DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _DAGS_ROOT not in sys.path:
+    sys.path.insert(0, _DAGS_ROOT)
+
+from common.errors.airflow import problem_failure_callback  # noqa: E402
 
 from culture_ingest.common.config import CULTURE_BRONZE_ASSET  # noqa: E402
 
 KST = "Asia/Seoul"
+
+# 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+# dbt 변환 DAG 라 외부 소스가 없어 source_system 은 생략.
+record_culture_problem = problem_failure_callback(domain="culture")
 
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/culture"
@@ -63,12 +73,17 @@ with DAG(
     tags=["transform", "culture", "silver", "gold", "dbt"],
 ) as dag:
     # bronze 신선도 게이트 — 48h 넘게 낡았으면 여기서 멈추고 수집부터 고치게 한다.
-    freshness = BashOperator(task_id="dbt_source_freshness", bash_command=_dbt("source freshness"))
+    freshness = BashOperator(task_id="dbt_source_freshness",
+                             bash_command=_dbt("source freshness"),
+                             on_failure_callback=record_culture_problem)
 
-    seed = BashOperator(task_id="dbt_seed", bash_command=_dbt("seed"))
+    seed = BashOperator(task_id="dbt_seed", bash_command=_dbt("seed"),
+                        on_failure_callback=record_culture_problem)
 
-    run_models = BashOperator(task_id="dbt_run", bash_command=_dbt("run"))
+    run_models = BashOperator(task_id="dbt_run", bash_command=_dbt("run"),
+                              on_failure_callback=record_culture_problem)
 
-    test_models = BashOperator(task_id="dbt_test", bash_command=_dbt("test"))
+    test_models = BashOperator(task_id="dbt_test", bash_command=_dbt("test"),
+                               on_failure_callback=record_culture_problem)
 
     freshness >> seed >> run_models >> test_models
