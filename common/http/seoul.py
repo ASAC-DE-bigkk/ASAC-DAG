@@ -21,13 +21,24 @@ DEFAULT_BASE_URL = "http://openapi.seoul.go.kr:8088"
 SOURCE = "seoul_openapi"
 
 
+def _env_base_url() -> str:
+    """base URL 해석: 인자 > env > 코드 안전 기본값(값이 없어도 깨지지 않게).
+
+    env 이름이 도메인마다 갈라져 있어 둘 다 읽는다 — 루트 .env 는
+    SEOUL_OPEN_API_BASE_URL(population), commerce 번들은 SEOUL_OPENAPI_BASE_URL.
+    이름 통일은 후속 과제(기획 문서 '열어둔 질문' 참고).
+    """
+    return (os.environ.get("SEOUL_OPEN_API_BASE_URL")
+            or os.environ.get("SEOUL_OPENAPI_BASE_URL")
+            or DEFAULT_BASE_URL)
+
+
 class SeoulOpenApiClient:
     def __init__(self, core: HttpCore, key: str, *,
                  base_url: str | None = None) -> None:
         self._core = core                                  # 합성 — 부모 아님
         self._key = key
-        self._base_url = (base_url or os.environ.get(
-            "SEOUL_OPENAPI_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+        self._base_url = (base_url or _env_base_url()).rstrip("/")
 
     def url_for(self, service: str, start: int, end: int, *, fmt: str = "json") -> str:
         """{api_key} 자리표시자를 남긴 템플릿 — 실제 키 치환은 PathKey(요청 직전)가 한다."""
