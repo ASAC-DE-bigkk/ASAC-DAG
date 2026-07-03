@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,12 @@ if DAG_DIR not in sys.path:
 DOMAINS_DIR = os.path.dirname(DAG_DIR)
 if DOMAINS_DIR not in sys.path:
     sys.path.insert(0, DOMAINS_DIR)
+# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+DAGS_ROOT_DIR = os.path.dirname(DOMAINS_DIR)
+if DAGS_ROOT_DIR not in sys.path:
+    sys.path.insert(0, DAGS_ROOT_DIR)
+
+from common.errors.airflow import problem_failure_callback  # noqa: E402
 
 from _shared.bronze_run_manifest import (  # noqa: E402
     STATUS_FAILED,
@@ -32,6 +39,7 @@ from weather_ingest.common.runtime import (  # noqa: E402
     download_raw_object,
     fetch_url,
     is_dev_target,
+    raw_prefix,
     sha256_hex,
     trino_cursor,
     upload_raw_object,
@@ -41,6 +49,7 @@ from weather_ingest.kma import (  # noqa: E402
     SOURCE_ID,
     build_kma_url,
     build_raw_object_key,
+    kma_base_datetime_from_conf,
     load_kma_grids,
     parse_kma_response,
     resolve_kma_base_datetime,
@@ -48,12 +57,89 @@ from weather_ingest.kma import (  # noqa: E402
 
 
 KMA_PUBLISH_CRON_KST = "20 2,5,8,11,14,17,20,23 * * *"
-COMMON_DISCORD_WEBHOOK_ENV = "ASK_SEOUL_DISCORD_WEBHOOK_URL"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
+KMA_REQUEST_DELAY_SECONDS = 5
+KMA_RETRY_STATUSES = (429, 500, 502, 503, 504)
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
 DAG_ID = "weather_vilage_fcst_bronze"
+RECOLLECT_DAG_ID = "weather_vilage_fcst_recollect"
+
+# 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+record_weather_problem = problem_failure_callback(domain="weather", source_system=SOURCE_ID)
+
+
+def dag_run_conf(context: dict) -> dict:
+    dag_run = context.get("dag_run")
+    conf = getattr(dag_run, "conf", None) or {}
+    return conf if isinstance(conf, dict) else {}
+
+
+def current_dag_id(context: dict) -> str:
+    return getattr(context.get("dag"), "dag_id", DAG_ID)
+
+
+def safe_object_key_segment(value: object) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._=-" else "_" for ch in str(value or "unknown"))
+
+
+def kma_landing_checkpoint_key(context: dict, base_date: str, base_time: str) -> str:
+    dag_id = safe_object_key_segment(current_dag_id(context))
+    run_id = safe_object_key_segment(context["run_id"])
+    return (
+        f"{raw_prefix().rstrip('/')}"
+        f"/_checkpoints/{SOURCE_ID}/dag_id={dag_id}/run_id={run_id}/base-{base_date}{base_time}.json"
+    )
+
+
+def is_missing_r2_object_error(exc: Exception) -> bool:
+    error = (getattr(exc, "response", {}) or {}).get("Error", {})
+    return str(error.get("Code", "")) in {"NoSuchKey", "NotFound", "404"}
+
+
+def raw_object_grid_key(raw_object: dict) -> tuple[int, int]:
+    return int(raw_object["nx"]), int(raw_object["ny"])
+
+
+def load_kma_landing_checkpoint(checkpoint_key: str, base_date: str, base_time: str) -> list[dict]:
+    try:
+        raw_bytes = download_raw_object(checkpoint_key, "KMA landing checkpoint")
+    except Exception as exc:
+        if is_missing_r2_object_error(exc):
+            return []
+        raise
+    payload = json.loads(raw_bytes.decode("utf-8"))
+    if payload.get("base_date") != base_date or payload.get("base_time") != base_time:
+        raise RuntimeError(f"KMA landing checkpoint base mismatch: {checkpoint_key}")
+    raw_objects = payload.get("raw_objects") or []
+    if not isinstance(raw_objects, list):
+        raise RuntimeError(f"KMA landing checkpoint raw_objects must be a list: {checkpoint_key}")
+    return raw_objects
+
+
+def save_kma_landing_checkpoint(
+    checkpoint_key: str,
+    *,
+    context: dict,
+    base_date: str,
+    base_time: str,
+    raw_objects: list[dict],
+) -> None:
+    payload = {
+        "source_id": SOURCE_ID,
+        "dag_id": current_dag_id(context),
+        "dag_run_id": context["run_id"],
+        "base_date": base_date,
+        "base_time": base_time,
+        "raw_objects": raw_objects,
+    }
+    upload_raw_object(
+        raw_bytes=json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8"),
+        object_key=checkpoint_key,
+        content_type="application/json; charset=utf-8",
+        log_label="KMA landing checkpoint",
+    )
 
 
 def discord_report_date(context) -> str:
@@ -83,7 +169,7 @@ def stage_name(task_id: str) -> str:
 
 
 def send_weather_discord(title: str, description: str, color: int, footer: str) -> None:
-    webhook_url = (os.environ.get(WEATHER_DISCORD_WEBHOOK_ENV) or os.environ.get(COMMON_DISCORD_WEBHOOK_ENV) or "").strip()
+    webhook_url = (os.environ.get(WEATHER_DISCORD_WEBHOOK_ENV) or "").strip()
     if not webhook_url:
         LOGGER.info("[weather notify:noop] %s (webhook url not configured)", title)
         return
@@ -162,16 +248,37 @@ def kma_dag_schedule() -> str | None:
 
 
 def land_kma_raw(**context) -> dict:
-    base_date, base_time = resolve_kma_base_datetime()
+    base_date, base_time = (
+        kma_base_datetime_from_conf(dag_run_conf(context))
+        or resolve_kma_base_datetime()
+    )
     grids = load_kma_grids()
+    checkpoint_key = kma_landing_checkpoint_key(context, base_date, base_time)
+    checkpoint_raw_objects = load_kma_landing_checkpoint(checkpoint_key, base_date, base_time)
+    checkpoint_by_grid = {raw_object_grid_key(item): item for item in checkpoint_raw_objects}
     raw_objects = []
+    api_request_count = 0
+    reused_raw_object_count = 0
     for grid in grids:
-        collected_at = datetime.now(timezone.utc)
-        request_id = str(uuid.uuid4())
         nx = int(grid["nx"])
         ny = int(grid["ny"])
+        existing_raw_object = checkpoint_by_grid.get((nx, ny))
+        if existing_raw_object:
+            raw_objects.append(existing_raw_object)
+            reused_raw_object_count += 1
+            continue
+        if api_request_count:
+            time.sleep(KMA_REQUEST_DELAY_SECONDS)
+        collected_at = datetime.now(timezone.utc)
+        request_id = str(uuid.uuid4())
         url = build_kma_url(base_date=base_date, base_time=base_time, nx=nx, ny=ny)
-        http_status, raw_bytes = fetch_url(url, "ask-seoul-kma-bronze/1.0")
+        http_status, raw_bytes = fetch_url(
+            url,
+            "ask-seoul-kma-bronze/1.0",
+            max_attempts=4,
+            retry_statuses=KMA_RETRY_STATUSES,
+            retry_base_delay_seconds=30,
+        )
         parse_kma_response(raw_bytes)
         raw_hash = sha256_hex(raw_bytes)
         raw_object_key = build_raw_object_key(
@@ -188,27 +295,39 @@ def land_kma_raw(**context) -> dict:
             content_type="application/json; charset=utf-8",
             log_label="KMA raw payload",
         )
-        raw_objects.append(
-            {
-                "request_id": request_id,
-                "raw_object_key": raw_object_key,
-                "raw_hash": raw_hash,
-                "http_status": http_status,
-                "collected_at": collected_at.isoformat(),
-                "place_id": str(grid["place_id"]),
-                "base_date": base_date,
-                "base_time": base_time,
-                "nx": nx,
-                "ny": ny,
-            }
+        raw_object = {
+            "request_id": request_id,
+            "raw_object_key": raw_object_key,
+            "raw_hash": raw_hash,
+            "http_status": http_status,
+            "collected_at": collected_at.isoformat(),
+            "place_id": str(grid["place_id"]),
+            "base_date": base_date,
+            "base_time": base_time,
+            "nx": nx,
+            "ny": ny,
+        }
+        raw_objects.append(raw_object)
+        api_request_count += 1
+        save_kma_landing_checkpoint(
+            checkpoint_key,
+            context=context,
+            base_date=base_date,
+            base_time=base_time,
+            raw_objects=raw_objects,
         )
-    print(f"Landed {len(raw_objects)} KMA raw objects for {len(grids)} grids")
+    print(
+        f"Landed {len(raw_objects)} KMA raw objects for {len(grids)} grids "
+        f"(reused={reused_raw_object_count}, api_requests={api_request_count})"
+    )
     return {
         "source_id": SOURCE_ID,
         "raw_objects": raw_objects,
         "raw_object_keys": [item["raw_object_key"] for item in raw_objects],
         "grid_count": len(grids),
         "api_call_count": len(raw_objects),
+        "api_request_count": api_request_count,
+        "reused_raw_object_count": reused_raw_object_count,
         "base_date": base_date,
         "base_time": base_time,
     }
@@ -267,7 +386,7 @@ def record_kma_run_started(**context) -> str:
         catalog,
         schema,
         source_id=SOURCE_ID,
-        dag_id=DAG_ID,
+        dag_id=current_dag_id(context),
         dag_run_id=context["run_id"],
         status=STATUS_STARTED,
         expected_raw_objects=len(load_kma_grids()),
@@ -282,7 +401,7 @@ def record_kma_run_failed(context) -> None:
             catalog,
             schema,
             source_id=SOURCE_ID,
-            dag_id=DAG_ID,
+            dag_id=current_dag_id(context),
             dag_run_id=context["run_id"],
             status=STATUS_FAILED,
             failure_reason=failure_reason_from_context(context),
@@ -310,7 +429,7 @@ def verify_kma_bronze_runtime(**context) -> int:
         catalog,
         schema,
         source_id=SOURCE_ID,
-        dag_id=DAG_ID,
+        dag_id=current_dag_id(context),
         dag_run_id=context["run_id"],
         status=STATUS_SUCCESS,
         is_publishable=True,
@@ -322,44 +441,62 @@ def verify_kma_bronze_runtime(**context) -> int:
     return verified_rows
 
 
-with DAG(
-    dag_id=DAG_ID,
-    description="Loads KMA getVilageFcst raw JSON into R2 and validates the Iceberg bronze runtime.",
-    start_date=datetime(2026, 1, 1, tzinfo=KST),
-    schedule=kma_dag_schedule(),
-    catchup=False,
-    max_active_runs=1,
-    on_failure_callback=record_kma_run_failed,
-    tags=["ask_seoul", "kma", "bronze", "r2", "iceberg"],
-) as dag:
-    start_manifest = PythonOperator(
-        task_id="record_kma_run_started",
-        python_callable=record_kma_run_started,
-    )
+def build_kma_bronze_dag(dag_id: str, schedule: str | None, description: str, tags: list[str]):
+    with DAG(
+        dag_id=dag_id,
+        description=description,
+        start_date=datetime(2026, 1, 1, tzinfo=KST),
+        schedule=schedule,
+        catchup=False,
+        max_active_runs=1,
+        on_failure_callback=record_kma_run_failed,
+        tags=tags,
+    ) as built_dag:
+        start_manifest = PythonOperator(
+            task_id="record_kma_run_started",
+            python_callable=record_kma_run_started,
+            on_failure_callback=record_weather_problem,
+        )
 
-    land_raw = PythonOperator(
-        task_id="land_kma_raw",
-        python_callable=land_kma_raw,
-        retries=3,
-        retry_delay=timedelta(minutes=1),
-        retry_exponential_backoff=True,
-        on_failure_callback=record_and_notify_kma_run_failed,
-    )
+        land_raw = PythonOperator(
+            task_id="land_kma_raw",
+            python_callable=land_kma_raw,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
+            on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+        )
 
-    load_bronze = PythonOperator(
-        task_id="load_kma_bronze",
-        python_callable=load_kma_bronze,
-        retries=3,
-        retry_delay=timedelta(minutes=1),
-        retry_exponential_backoff=True,
-        on_failure_callback=record_and_notify_kma_run_failed,
-    )
+        load_bronze = PythonOperator(
+            task_id="load_kma_bronze",
+            python_callable=load_kma_bronze,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
+            on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+        )
 
-    verify_bronze = PythonOperator(
-        task_id="verify_kma_bronze_runtime",
-        python_callable=verify_kma_bronze_runtime,
-        on_success_callback=notify_weather_bronze_success,
-        on_failure_callback=record_and_notify_kma_run_failed,
-    )
+        verify_bronze = PythonOperator(
+            task_id="verify_kma_bronze_runtime",
+            python_callable=verify_kma_bronze_runtime,
+            on_success_callback=notify_weather_bronze_success,
+            on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+        )
 
-    start_manifest >> land_raw >> load_bronze >> verify_bronze
+        start_manifest >> land_raw >> load_bronze >> verify_bronze
+    return built_dag
+
+
+dag = build_kma_bronze_dag(
+    DAG_ID,
+    kma_dag_schedule(),
+    "Loads KMA getVilageFcst raw JSON into R2 and validates the Iceberg bronze runtime.",
+    ["ask_seoul", "kma", "bronze", "r2", "iceberg"],
+)
+
+recollect_dag = build_kma_bronze_dag(
+    RECOLLECT_DAG_ID,
+    None,
+    "Manually recollects a KMA getVilageFcst base_date/base_time through the Bronze contract.",
+    ["ask_seoul", "kma", "bronze", "recollect", "r2", "iceberg"],
+)

@@ -25,6 +25,10 @@ class Sink:
     def put(self, key: str, body: bytes, content_type: str) -> None:  # pragma: no cover
         raise NotImplementedError
 
+    def get(self, key: str) -> bytes:  # pragma: no cover
+        """적재해 둔 원본 객체를 다시 읽는다(load_bronze의 입력은 raw뿐)."""
+        raise NotImplementedError
+
     def describe(self) -> str:  # pragma: no cover
         raise NotImplementedError
 
@@ -47,6 +51,9 @@ class R2Sink(Sink):
     def put(self, key: str, body: bytes, content_type: str) -> None:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=body, ContentType=content_type)
 
+    def get(self, key: str) -> bytes:
+        return self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+
     def describe(self) -> str:
         return f"r2://{self.bucket}"
 
@@ -62,6 +69,11 @@ class LocalSink(Sink):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as handle:
             handle.write(body)
+
+    def get(self, key: str) -> bytes:
+        path = os.path.join(self.root_dir, key.replace("/", os.sep))
+        with open(path, "rb") as handle:
+            return handle.read()
 
     def describe(self) -> str:
         return f"file://{self.root_dir}"
@@ -85,7 +97,7 @@ class DatasetResult:
     object_keys: list[str] = field(default_factory=list)
     error: str = ""
     checks: dict = field(default_factory=dict)  # 수집 검증 결과 (common.checks.evaluate_landing)
-    iceberg_rows: int = 0  # bronze Iceberg 테이블에 적재된 행 수 (write_iceberg 시)
+    iceberg_rows: int = 0  # bronze Iceberg 테이블에 적재된 행 수 (load_bronze 실행 시)
     duration_sec: float = 0.0  # 이 데이터셋 적재 소요(초)
     finished_ts: str = ""  # 이 데이터셋 적재 완료 시각 (UTC YYYYMMDDTHHMMSSZ)
 
@@ -104,6 +116,7 @@ class DatasetResult:
             "rows": self.rows,
             "bytes": self.bytes_written,
             "error": self.error,
+            "object_keys": self.object_keys,  # load_bronze(raw→Iceberg) 입력 — 리포트에선 제거됨
             "checks": self.checks,
             "iceberg_rows": self.iceberg_rows,
             "duration_sec": self.duration_sec,

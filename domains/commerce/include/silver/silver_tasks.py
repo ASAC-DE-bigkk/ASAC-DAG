@@ -12,10 +12,10 @@ from __future__ import annotations
 import logging
 
 from bronze.clients import parse_page
-from common import paths, registry
-from common.schemas import COMMON_COLUMNS
-from common.settings import get_settings
-from common.storage import get_storage
+from commerce_core import paths, registry
+from commerce_core.schemas import COMMON_COLUMNS
+from commerce_core.settings import get_settings
+from commerce_core.storage import get_storage
 from security import assert_iso_date, assert_safe_segment   # 파티션 경로 주입 방어(경계 검증)
 from silver.validators import validate_normalized
 

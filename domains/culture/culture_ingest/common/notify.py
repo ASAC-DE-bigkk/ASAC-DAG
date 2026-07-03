@@ -153,7 +153,11 @@ def build_report_payload(report: dict) -> dict:
         f"소요 {dur}",
     ]
     ib_total = report.get("total_iceberg_rows", 0)
-    if ib_total:
+    if report.get("load_failed"):
+        # load 실패면 iceberg_rows=0 이라 아래 `if ib_total:` 로는 줄이 통째로 사라진다 —
+        # bronze 미갱신은 항상 명시적으로 표기(침묵 방지).
+        parts.append("Iceberg 적재: ❌ FAIL (bronze 미갱신)")
+    elif ib_total:
         parts.append(f"Iceberg {int(ib_total):,}")
     fresh = (report.get("freshness") or {}).get("max_age_hours")
     if fresh is not None:

@@ -21,7 +21,7 @@
 |---|---|
 | [docs/configuration.md](docs/configuration/configuration.md) | **필요한 환경변수 전체 + `.env.commerce` 주입 방식** — 환경이 바뀌며 빠진 값(SEOUL_API_KEY_COMM 등) 정리 |
 | [.env.commerce.example](.env.commerce.example) | 환경변수 템플릿(실파일 `.env.commerce` 는 gitignore) |
-| [include/common/env.py](include/common/env.py) · [include/common/settings.py](include/common/settings.py) | env 로더 · 설정 dataclass |
+| [include/commerce_core/env.py](include/commerce_core/env.py) · [include/commerce_core/settings.py](include/commerce_core/settings.py) | env 로더 · 설정 dataclass (구 `include/common` — #109 개명) |
 
 ## 3. 파이프라인 계약 (commerce 카테고리)
 

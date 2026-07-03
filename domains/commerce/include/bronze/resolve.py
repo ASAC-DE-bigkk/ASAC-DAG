@@ -15,11 +15,18 @@ from __future__ import annotations
 import argparse
 import sys
 from collections import Counter
+from pathlib import Path
 
-from bronze.clients import SeoulApiError, SeoulOpenApiClient
-from common import registry
-from common.env import load_commerce_env
-from common.settings import get_settings
+# CLI(`python -m bronze.resolve`, cwd=include) 경로엔 DAG 부트스트랩이 없다 —
+# clients.py 가 common.http(#78, dags 루트)를 top-level import 하므로 직접 올린다.
+_DAGS_ROOT = str(Path(__file__).resolve().parents[4])
+if _DAGS_ROOT not in sys.path:
+    sys.path.insert(0, _DAGS_ROOT)
+
+from bronze.clients import SeoulApiError, SeoulOpenApiClient  # noqa: E402
+from commerce_core import registry  # noqa: E402
+from commerce_core.env import load_commerce_env  # noqa: E402
+from commerce_core.settings import get_settings  # noqa: E402
 
 
 def _client() -> SeoulOpenApiClient:

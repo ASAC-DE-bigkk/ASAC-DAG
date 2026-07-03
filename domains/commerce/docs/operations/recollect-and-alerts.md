@@ -39,10 +39,10 @@ docker compose exec airflow-scheduler airflow dags trigger commerce_recollect_ra
 
 예외 발생 시 **로그 내용을 알림 메시지로 보낼 수 있는 인터페이스**. 구현체만 두고 **실제 전송은
 하지 않는다**(기본 `NoopNotifier`). 파이프라인에도 **아직 와이어링하지 않음** — 인터페이스 제공만.
-코드: [../../include/common/notify.py](../../include/common/notify.py).
+코드: [../../include/commerce_core/notify.py](../../include/commerce_core/notify.py).
 
 ```python
-from common.notify import Notifier, set_notifier, notify_exception
+from commerce_core.notify import Notifier, set_notifier, notify_exception
 
 # 1) 채널 구현(예: 웹훅) — 운영에서 주입
 class WebhookNotifier(Notifier):

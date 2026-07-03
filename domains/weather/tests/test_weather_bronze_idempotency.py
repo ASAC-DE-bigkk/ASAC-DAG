@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from weather_ingest.bronze import insert_kma_bronze_rows  # noqa: E402
+from weather_ingest.bronze import create_kma_bronze_table, insert_kma_bronze_rows  # noqa: E402
 
 
 class RecordingCursor:
@@ -16,6 +16,18 @@ class RecordingCursor:
 
     def execute(self, sql):
         self.statements.append(" ".join(sql.split()))
+
+
+def test_kma_create_table_uses_load_date_partitioning_for_fresh_tables():
+    cursor = RecordingCursor()
+
+    qualified_table = create_kma_bronze_table(cursor, "iceberg_dev", "dev_masondev1024")
+
+    assert qualified_table == "iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst"
+    assert len(cursor.statements) == 4
+    assert cursor.statements[0] == "CREATE SCHEMA IF NOT EXISTS iceberg_dev.dev_masondev1024"
+    assert "CREATE TABLE IF NOT EXISTS iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst" in cursor.statements[1]
+    assert "partitioning = ARRAY['load_date']" in cursor.statements[1]
 
 
 def test_kma_insert_replaces_same_retry_scope_before_append():

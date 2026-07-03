@@ -15,6 +15,11 @@ if DAG_DIR not in sys.path:
 DOMAINS_DIR = os.path.dirname(DAG_DIR)
 if DOMAINS_DIR not in sys.path:
     sys.path.insert(0, DOMAINS_DIR)
+DAGS_ROOT_DIR = os.path.dirname(DOMAINS_DIR)
+if DAGS_ROOT_DIR not in sys.path:
+    sys.path.insert(0, DAGS_ROOT_DIR)
+
+from common.errors.airflow import problem_failure_callback  # noqa: E402
 
 from _shared.bronze_run_manifest import (  # noqa: E402
     STATUS_FAILED,
@@ -31,6 +36,7 @@ from traffic_ingest.acc_info import (  # noqa: E402
     metadata_total_count,
     next_acc_info_page_ranges,
     parse_seoul_acc_info_response,
+    resolve_acc_info_page_window,
 )
 from traffic_ingest.bronze import (  # noqa: E402
     create_seoul_traffic_bronze_table,
@@ -47,12 +53,27 @@ from traffic_ingest.common.runtime import (  # noqa: E402
 )
 
 
-COMMON_DISCORD_WEBHOOK_ENV = "ASK_SEOUL_DISCORD_WEBHOOK_URL"
 TRAFFIC_DISCORD_WEBHOOK_ENV = "TRAFFIC_DISCORD_WEBHOOK_URL"
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
 DAG_ID = "traffic_incident_bronze"
+RECOLLECT_DAG_ID = "traffic_incident_recollect"
+
+# 공통 에러 모듈 파일럿(#77) — 태스크 최종 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+# 기존 콜백(manifest 기록·Discord 알림)과 리스트로 나란히 걸어 기존 동작은 바꾸지 않는다.
+record_traffic_problem = problem_failure_callback(
+    domain="traffic", source_system="seoul_topis")
+
+
+def dag_run_conf(context: dict) -> dict:
+    dag_run = context.get("dag_run")
+    conf = getattr(dag_run, "conf", None) or {}
+    return conf if isinstance(conf, dict) else {}
+
+
+def current_dag_id(context: dict) -> str:
+    return getattr(context.get("dag"), "dag_id", DAG_ID)
 
 
 def discord_report_date(context) -> str:
@@ -82,7 +103,7 @@ def stage_name(task_id: str) -> str:
 
 
 def send_traffic_discord(title: str, description: str, color: int, footer: str) -> None:
-    webhook_url = (os.environ.get(TRAFFIC_DISCORD_WEBHOOK_ENV) or os.environ.get(COMMON_DISCORD_WEBHOOK_ENV) or "").strip()
+    webhook_url = (os.environ.get(TRAFFIC_DISCORD_WEBHOOK_ENV) or "").strip()
     if not webhook_url:
         LOGGER.info("[traffic notify:noop] %s (webhook url not configured)", title)
         return
@@ -164,9 +185,7 @@ def traffic_dag_schedule() -> str | None:
 
 
 def land_seoul_traffic_raw(**context) -> dict:
-    start_index = int(os.environ.get("SEOUL_ACC_INFO_START_INDEX", "1"))
-    end_index = int(os.environ.get("SEOUL_ACC_INFO_END_INDEX", "1000"))
-    page_size = int(os.environ.get("SEOUL_ACC_INFO_PAGE_SIZE", str(end_index - start_index + 1)))
+    start_index, end_index, page_size = resolve_acc_info_page_window(dag_run_conf(context))
 
     parsed_rows = 0
     raw_objects = []
@@ -314,7 +333,7 @@ def record_seoul_traffic_run_started(**context) -> str:
         catalog,
         schema,
         source_id=SOURCE_ID,
-        dag_id=DAG_ID,
+        dag_id=current_dag_id(context),
         dag_run_id=context["run_id"],
         status=STATUS_STARTED,
     )
@@ -328,7 +347,7 @@ def record_seoul_traffic_run_failed(context) -> None:
             catalog,
             schema,
             source_id=SOURCE_ID,
-            dag_id=DAG_ID,
+            dag_id=current_dag_id(context),
             dag_run_id=context["run_id"],
             status=STATUS_FAILED,
             failure_reason=failure_reason_from_context(context),
@@ -356,7 +375,7 @@ def verify_seoul_traffic_bronze_runtime(**context) -> int:
         catalog,
         schema,
         source_id=SOURCE_ID,
-        dag_id=DAG_ID,
+        dag_id=current_dag_id(context),
         dag_run_id=context["run_id"],
         status=STATUS_SUCCESS,
         is_publishable=True,
@@ -368,44 +387,62 @@ def verify_seoul_traffic_bronze_runtime(**context) -> int:
     return verified_rows
 
 
-with DAG(
-    dag_id=DAG_ID,
-    description="Loads Seoul TOPIS AccInfo XML into R2 and validates the Iceberg bronze runtime.",
-    start_date=datetime(2026, 1, 1, tzinfo=KST),
-    schedule=traffic_dag_schedule(),
-    catchup=False,
-    max_active_runs=1,
-    on_failure_callback=record_seoul_traffic_run_failed,
-    tags=["ask_seoul", "traffic", "bronze", "r2", "iceberg"],
-) as dag:
-    start_manifest = PythonOperator(
-        task_id="record_seoul_traffic_run_started",
-        python_callable=record_seoul_traffic_run_started,
-    )
+def build_traffic_bronze_dag(dag_id: str, schedule: str | None, description: str, tags: list[str]):
+    with DAG(
+        dag_id=dag_id,
+        description=description,
+        start_date=datetime(2026, 1, 1, tzinfo=KST),
+        schedule=schedule,
+        catchup=False,
+        max_active_runs=1,
+        on_failure_callback=record_seoul_traffic_run_failed,
+        tags=tags,
+    ) as built_dag:
+        start_manifest = PythonOperator(
+            task_id="record_seoul_traffic_run_started",
+            python_callable=record_seoul_traffic_run_started,
+            on_failure_callback=[record_traffic_problem],
+        )
 
-    land_raw = PythonOperator(
-        task_id="land_seoul_traffic_raw",
-        python_callable=land_seoul_traffic_raw,
-        retries=3,
-        retry_delay=timedelta(minutes=1),
-        retry_exponential_backoff=True,
-        on_failure_callback=record_and_notify_seoul_traffic_run_failed,
-    )
+        land_raw = PythonOperator(
+            task_id="land_seoul_traffic_raw",
+            python_callable=land_seoul_traffic_raw,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
+            on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
+        )
 
-    load_bronze = PythonOperator(
-        task_id="load_seoul_traffic_bronze",
-        python_callable=load_seoul_traffic_bronze,
-        retries=3,
-        retry_delay=timedelta(minutes=1),
-        retry_exponential_backoff=True,
-        on_failure_callback=record_and_notify_seoul_traffic_run_failed,
-    )
+        load_bronze = PythonOperator(
+            task_id="load_seoul_traffic_bronze",
+            python_callable=load_seoul_traffic_bronze,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
+            on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
+        )
 
-    verify_bronze = PythonOperator(
-        task_id="verify_seoul_traffic_bronze_runtime",
-        python_callable=verify_seoul_traffic_bronze_runtime,
-        on_success_callback=notify_traffic_bronze_success,
-        on_failure_callback=record_and_notify_seoul_traffic_run_failed,
-    )
+        verify_bronze = PythonOperator(
+            task_id="verify_seoul_traffic_bronze_runtime",
+            python_callable=verify_seoul_traffic_bronze_runtime,
+            on_success_callback=notify_traffic_bronze_success,
+            on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
+        )
 
-    start_manifest >> land_raw >> load_bronze >> verify_bronze
+        start_manifest >> land_raw >> load_bronze >> verify_bronze
+    return built_dag
+
+
+dag = build_traffic_bronze_dag(
+    DAG_ID,
+    traffic_dag_schedule(),
+    "Loads Seoul TOPIS AccInfo XML into R2 and validates the Iceberg bronze runtime.",
+    ["ask_seoul", "traffic", "bronze", "r2", "iceberg"],
+)
+
+recollect_dag = build_traffic_bronze_dag(
+    RECOLLECT_DAG_ID,
+    None,
+    "Manually recollects Seoul TOPIS AccInfo page windows through the Bronze contract.",
+    ["ask_seoul", "traffic", "bronze", "recollect", "r2", "iceberg"],
+)

@@ -15,7 +15,9 @@ target(dev/prod)은 카탈로그(iceberg_dev/iceberg)를 가르며 기본 dev.
 
 from __future__ import annotations
 
+import os
 import shlex
+import sys
 from datetime import timedelta
 
 import pendulum
@@ -23,7 +25,17 @@ import pendulum
 from airflow import DAG
 from airflow.providers.standard.operators.bash import BashOperator
 
+# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+_DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _DAGS_ROOT not in sys.path:
+    sys.path.insert(0, _DAGS_ROOT)
+
+from common.errors.airflow import problem_failure_callback  # noqa: E402
+
 KST = "Asia/Seoul"
+
+# 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+record_population_problem = problem_failure_callback(domain="population")
 
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/population"
@@ -61,18 +73,21 @@ with DAG(
     seed_refs = BashOperator(
         task_id="dbt_seed",
         bash_command=_dbt("seed"),
+        on_failure_callback=record_population_problem,
     )
 
     # silver(incremental merge) + gold(table 재생성, seed 조인) 빌드.
     run_models = BashOperator(
         task_id="dbt_run",
         bash_command=_dbt("run --select silver_seoul_ppltn gold_seoul_ppltn_by_time"),
+        on_failure_callback=record_population_problem,
     )
 
     # 데이터 품질 테스트 (assert_silver_not_empty 등).
     test_models = BashOperator(
         task_id="dbt_test",
         bash_command=_dbt("test"),
+        on_failure_callback=record_population_problem,
     )
 
     seed_refs >> run_models >> test_models

@@ -17,7 +17,10 @@ import os
 import sys
 
 # 이 스크립트의 상위(domains/population)를 sys.path에 넣어 `ppltn_ingest.*` import.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_DOMAIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _DOMAIN_DIR)
+# dags 루트 — ppltn_ingest.common.http 가 common.http(#78)를 top-level import 한다.
+sys.path.insert(0, os.path.dirname(os.path.dirname(_DOMAIN_DIR)))
 
 from ppltn_ingest.source.ingest import IngestOptions, run_batch  # noqa: E402
 

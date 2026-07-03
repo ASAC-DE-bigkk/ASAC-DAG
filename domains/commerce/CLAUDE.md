@@ -869,16 +869,23 @@ Rules to follow when adding or editing pipeline code:
 - Put everything a DAG needs under `dags/domains/<category>/`: the DAG file(s), `include/`
   (the import root), `config/` (YAML registries), `tests/`, `docs/`, `.airflowignore`,
   and runtime args (`.env.commerce` / `.env.commerce.example`).
-- Under `include/`, use concern packages directly (`common/`, `bronze/`, `silver/`) —
+- Under `include/`, use concern packages directly (`commerce_core/`, `bronze/`, `silver/`) —
   no wrapper package. Separate bronze (collection) and silver (processing) packages.
+  (`commerce_core/` was renamed from `common/` in #109 — a top-level `common` package
+  shadowed the repo-wide shared package `dags/common` in single-process DagBag loads.
+  Do not reintroduce a bundle package named `common`.)
 - Each DAG must bootstrap its own include onto sys.path so `dags/` is portable
   (drop into any Airflow project, no PYTHONPATH config needed):
-  `sys.path.insert(0, str(Path(__file__).resolve().parent / "include"))`.
-- Right after the bootstrap, load the bundle env file: `from common.env import
+  `sys.path.insert(0, str(Path(__file__).resolve().parent / "include"))`,
+  then the dags root for the shared package (`common.storage` used by
+  `commerce_core.storage`): `sys.path.insert(0, str(Path(__file__).resolve().parents[2]))`.
+- Right after the bootstrap, load the bundle env file: `from commerce_core.env import
   load_commerce_env; load_commerce_env()`. It fills `os.environ` from `.env.commerce`
   (setdefault — process/compose env wins). **Do not add commerce vars to the host root
   `.env`**; put them in `.env.commerce`. Details: [docs/configuration.md](docs/configuration/configuration.md).
-- Imports are top-level: `from common... import`, `from bronze... import`, `from silver... import`.
+- Imports are top-level: `from commerce_core... import`, `from bronze... import`, `from silver... import`.
+  Generic storage lives in the repo-wide `dags/common` (`from common.storage import ...`);
+  commerce consumes it via the `commerce_core.storage` adapter (settings/env contract unchanged).
 - `.airflowignore` (per category) excludes `include/ config/ tests/ docs/` from DAG parsing —
   use **glob** syntax (`include/**`), since Airflow 3.x defaults `dag_ignore_file_syntax=glob`.
 - Record large changes in `change-log.md` (see **Change Log Rule** above).

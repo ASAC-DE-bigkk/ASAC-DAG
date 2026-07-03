@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from common.schemas import Dataset
+from commerce_core.schemas import Dataset
 
 # dags/domains/commerce/include/common/registry.py → parents[2] == dags/domains/commerce/
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "dataset_registry.yaml"

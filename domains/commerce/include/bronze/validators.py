@@ -1,7 +1,7 @@
 """bronze 완전성 점검 — '끝까지 순회했는가 + 건수 일치'를 판정(순수 함수, 테스트 대상)."""
 from __future__ import annotations
 
-from common.schemas import STATUS_OK, STATUS_PARTIAL
+from commerce_core.schemas import STATUS_OK, STATUS_PARTIAL
 
 
 def assess_completeness(*, rows_total: int, list_total_count: int,

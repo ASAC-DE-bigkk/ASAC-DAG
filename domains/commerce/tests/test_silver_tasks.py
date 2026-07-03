@@ -1,8 +1,8 @@
 """silver: 정규화 · 스키마 검증 · bronze→silver 적재(로컬 스토리지) 테스트."""
 import json
 
-from common import registry
-from common.schemas import COMMON_COLUMNS
+from commerce_core import registry
+from commerce_core.schemas import COMMON_COLUMNS
 from silver import silver_tasks
 from silver.validators import validate_normalized
 
@@ -38,7 +38,7 @@ def test_build_silver_reads_ndjson_and_writes_parquet(tmp_path, monkeypatch):
     monkeypatch.setenv("STORAGE_BACKEND", "local")
     monkeypatch.setenv("LOCAL_DATA_ROOT", str(tmp_path))
     monkeypatch.delenv("COMMERCE_STORAGE_PREFIX", raising=False)
-    from common.storage import get_storage
+    from commerce_core.storage import get_storage
 
     ds = registry.by_short("food_cold_storage")          # service_name = LOCALDATA_072207
     # bronze = API당 1파일, 줄당 원본 페이지(여기선 2페이지 = 2줄)

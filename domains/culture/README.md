@@ -12,15 +12,14 @@ Cloudflare R2에 그대로 적재하고, 조회 가능한 bronze Iceberg 테이�
         └───────────┬─────────────┘
                     ▼
      culture_bronze DAG                   (Airflow · @daily)
-     plan → ingest_dataset(×12 동적매핑) → report
-                    │
-        ┌───────────┴────────────┐
-        ▼                        ▼
-   R2 raw (원본 보존)        bronze Iceberg (Trino · 선택)
-   raw/culture/…             iceberg[_dev].culture.bronze_*
-                    │
-                    ▼
-        ASAC-DBT: silver → gold     (다른 레포 · dbt)
+     plan → fetch_raw(×12 동적매핑) → load_bronze → report
+                │ raw 박제              │ raw 재독 (API 재호출 X)
+                ▼                       ▼
+   R2 raw (원본 보존)  ──────────▶  bronze Iceberg (Trino)
+   raw/culture/…                    iceberg[_dev].culture.bronze_*
+                                        │
+                                        ▼
+                        ASAC-DBT: silver → gold     (다른 레포 · dbt)
 ```
 
 ## 문서 (docs/)

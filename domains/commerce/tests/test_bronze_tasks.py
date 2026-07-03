@@ -3,9 +3,9 @@ import json
 
 from bronze import bronze_tasks
 from bronze.validators import assess_completeness
-from common import paths
-from common.schemas import Dataset
-from common.storage import Storage
+from commerce_core import paths
+from commerce_core.schemas import Dataset
+from commerce_core.storage import Storage
 
 
 class FakeStorage(Storage):

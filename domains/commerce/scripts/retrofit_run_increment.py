@@ -24,7 +24,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "include"))
-from common.env import load_commerce_env  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # dags 루트(common.*, #109)
+from commerce_core.env import load_commerce_env  # noqa: E402
 
 load_commerce_env()
 
@@ -34,9 +35,9 @@ install_security()   # 로그·stdout·예외훅 시크릿 마스킹(스크립�
 
 from bronze import incremental  # noqa: E402
 from bronze.clients import parse_page  # noqa: E402
-from common import paths, registry  # noqa: E402
-from common.settings import get_settings  # noqa: E402
-from common.storage import get_storage  # noqa: E402
+from commerce_core import paths, registry  # noqa: E402
+from commerce_core.settings import get_settings  # noqa: E402
+from commerce_core.storage import get_storage  # noqa: E402
 
 
 def _rows_from_object(data: bytes, service_name: str) -> list[dict]:

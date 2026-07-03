@@ -133,6 +133,60 @@ response:
 - Step 1~10 순차 to-do(각 구현 방법·완료 기준) + 결정 대기 7건(§7) 정리.
   인덱스 갱신: docs/pipeline/README.md · docs/README.md 문서 맵.
 
+### 30. HTTP 호출 경계를 공통 클라이언트로 전환 (#78)
+
+request:
+- 소스 API 호출을 `dags/common/http`(#78 HttpCore)로 통합. 단, commerce 는 §20 보안
+  게이트가 `netio.http_request` 사용을 명시하므로 그 커버리지(SSRF 가드·응답 상한·TLS
+  강제·예외 마스킹)를 잃지 않을 것.
+
+response:
+- `include/bronze/clients.py` 의 `SeoulOpenApiClient` 수동 재시도 루프를 HttpCore 로 대체.
+  **netio 를 HttpCore 의 Transport(`_NetioTransport`)로 감싸** §20 커버리지를 그대로 유지하고,
+  그 위에 통합 재시도(429/5xx+연결오류)·redaction 로깅·rate limit·typed 예외(HttpProblemError)를
+  얹음(합성 — HttpCore Transport 계약의 의도된 확장점).
+- **업무 오류 분류(INFO-000/100/200 등, `parse_page`)는 도메인에 그대로 유지** — HTTP 200
+  응답 본문에서 판정, HttpCore 는 전송/HTTP 상태만 담당. 재시도 소진/HTTP 오류는
+  `SeoulApiError("ERROR-NETWORK", redact(...))` 로 변환해 bronze 마커 계약 보존.
+- `rate_limit=None` — 기존 `SEOUL_REQUEST_DELAY_SECONDS` 간격 유지(이중 지연 방지).
+- (#78 코드리뷰 반영) `security/redaction.py` structural 패턴에 `serviceKey=` 쿼리 키 추가
+  (공공데이터포털/KMA 형식 — dags/common/security 로 재복사), `parse_page` 의 비정수
+  `list_total_count` 를 `SeoulApiError("ERROR-PARSE")` 로 래핑(원시 ValueError 누출 차단),
+  `bronze/resolve.py` CLI 에 dags 루트 부트스트랩 추가(`python -m bronze.resolve` 복구).
+- 검증: commerce 241 테스트 통과, 오프라인 스모크(성공·재시도·소진·업무오류 4경로) 통과,
+  URL 경로 키가 HttpCore 로그에서 마스킹 확인.
+
+### 29. 서울 base URL env 이름 통일 — SEOUL_OPEN_API_BASE_URL (#78)
+
+request:
+- 루트 `.env` 통합 원칙(#72)에 따라 base URL env 이름도 루트 이름
+  `SEOUL_OPEN_API_BASE_URL`로 통일할 것 — 사용자 결정.
+
+response:
+- `settings.py` 읽기 훅 `SEOUL_OPENAPI_BASE_URL` → `SEOUL_OPEN_API_BASE_URL` 개명,
+  configuration.md·test_security.py 예시 동반 개명. 실환경 값 이관 불필요 — #72 때
+  `.env.commerce` 항목은 이미 삭제(코드 기본값과 동일)돼 코드 훅만 남아 있었음.
+- 공용 서울 어댑터(`dags/common/http/seoul.py`)도 같은 이름 하나만 읽는다.
+
+### 28. include/common → include/commerce_core 개명 + storage 승격 (#109)
+
+request:
+- dags/common(공통 상위 패키지, #77 에러 모듈)과 commerce top-level `common` 이 단일 프로세스
+  DagBag 로드(`airflow dags test` 등)에서 충돌(sys.modules 캐시가 `import common.errors` 를 가림).
+- 방침(Q&A 합의): **dags/common 을 상위 개념으로** 보고 **겹치는 기능만 먼저 합침**,
+  나머지 모듈은 **무삭제 보존**(notify 포함), 잔류 패키지 이름은 `commerce_core`.
+
+response:
+- **storage 승격**: `storage.py` 의 범용 부분(Storage/LocalStorage/R2Storage)을 `dags/common/storage.py`
+  로 이동(+`build_storage` 팩토리, Settings 결합 제거). commerce 쪽은 `commerce_core/storage.py`
+  얇은 어댑터로 대체 — 클래스 재수출 + `get_storage()` 가 기존 Settings/env 계약 그대로 유지(동작 불변).
+- **개명**: `include/common/` → `include/commerce_core/` (env/hashing/notify/paths/registry/schemas/
+  settings 전 모듈 보존). 소비처 17파일 import 전환(`from common.*` → `from commerce_core.*`),
+  DAG·scripts·conftest 부트스트랩에 dags 루트 추가(`common.storage` 해석용).
+- **금지 규약 추가**: 번들 안에 top-level `common` 패키지 재도입 금지(CLAUDE.md §19 명시).
+- 검증: commerce 전 테스트 239 통과, `python -m security` 차단 0, 단일 프로세스 전체 DagBag
+  파싱 재현 테스트 통과(충돌 해소 확인).
+
 ### 27. 취약점 코퍼스 — 정적 detector 20종 발화 증명 + 격리 (feat/96)
 
 request:
