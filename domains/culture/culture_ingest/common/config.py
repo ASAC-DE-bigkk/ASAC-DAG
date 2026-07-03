@@ -14,6 +14,10 @@ from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))  # 한국 표준시 (UTC+9)
 
+# culture bronze Iceberg의 논리 Asset URI — culture_bronze(outlet)와
+# culture_transform(schedule)이 공유한다. target(dev/prod)과 무관한 논리 이름.
+CULTURE_BRONZE_ASSET = "iceberg://culture/bronze"
+
 
 def load_env_file(path: str | None) -> dict[str, str]:
     """dotenv 형식 파일을 dict로 파싱. 경로가 없거나 비면 빈 dict 반환."""

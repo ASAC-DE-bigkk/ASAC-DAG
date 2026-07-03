@@ -9,6 +9,8 @@
   # 실제 적재 -> seoul-dev 버킷 (12개 전체, 상세는 상한 적용)
   python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.env \
       --date-from 20260101 --date-to 20261231 --include-detail --max-detail 200
+
+종료 코드: 0=성공 · 1=데이터셋 fetch 실패 또는 bronze load 실패 · 2=설정/인증 실패(사전 점검)
 """
 
 from __future__ import annotations

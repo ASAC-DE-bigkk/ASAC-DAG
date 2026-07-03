@@ -103,7 +103,7 @@ def ingest_dataset(
     t0 = time.monotonic()
     sample_body: bytes | None = None  # 첫 페이지 = 드리프트(관측 스키마) 점검용 샘플
 
-    def _record_page(filename: str, key: str, body: bytes) -> None:
+    def _record_page(body: bytes) -> None:
         nonlocal sample_body
         sample_body = sample_body or body
 
@@ -118,7 +118,7 @@ def ingest_dataset(
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-                _record_page(filename, key, page.body)
+                _record_page(page.body)
 
         elif ds.kind == "kopis_boxoffice":
             # 예매상황판: 페이징 없이 단일 GET 1건만 적재(page-0001.xml).
@@ -129,7 +129,7 @@ def ingest_dataset(
             result.rows += page.row_count
             result.bytes_written += len(page.body)
             result.object_keys.append(key)
-            _record_page("page-0001.xml", key, page.body)
+            _record_page(page.body)
 
         elif ds.kind == "seoul_list":
             # 서울 목록: 1000행 윈도우를 page-NNNNNN.json으로 적재.
@@ -141,7 +141,7 @@ def ingest_dataset(
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-                _record_page(filename, key, page.body)
+                _record_page(page.body)
 
         elif ds.kind == "kopis_detail":
             # 상세: 목록에서 id를 모아 건별 상세를 id=<값>.xml로 적재.
@@ -165,7 +165,7 @@ def ingest_dataset(
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-                _record_page(filename, key, page.body)
+                _record_page(page.body)
             # 일시적 단건 실패는 관용하되, 하나도 못 받거나 과반이 실패하면 실질 장애로
             # 보고 태스크를 실패시켜 재시도·알림한다.
             if ids and (not result.pages or len(detail_errors) > len(ids) // 2):
