@@ -22,7 +22,7 @@ domains/population/
 │     ├─ config.py                #     적재 루트(raw/population)·source_id·API 키
 │     ├─ client.py                #     citydata_ppltn 호출 (원본 bytes만, 파싱 X)
 │     ├─ areas.py                 #     121개 장소(AREA_NM) 레지스트리
-│     └─ ingest.py                #     오케스트레이션 fetch→R2 raw→bronze insert + 리포트
+│     └─ ingest.py                #     오케스트레이션 (1)fetch+R2 raw (2)raw→bronze + 리포트
 ├─ scripts/
 │  └─ run_ppltn_ingest.py         # 로컬 실행용 CLI (dry-run / 실제 적재)
 ├─ docs/
@@ -35,6 +35,17 @@ Airflow는 dags 폴더를 재귀적으로 스캔하므로 이 DAG는
 `domains/population/population_bronze.py`에서 자동 인식됩니다. `ppltn_ingest/`와
 `scripts/`는 `.airflowignore`로 **DAG 스캔에서는 제외**되지만 import은 됩니다 — DAG가
 자기 디렉토리를 `sys.path`에 넣고 `ppltn_ingest.*`를 불러옵니다.
+
+## 태스크 구조: fetch_raw >> load_bronze >> report
+
+태스크 경계는 **"다시 만들 수 없는 것"과 "다시 만들 수 있는 것" 사이**입니다:
+
+- `fetch_raw` — API 호출 + R2 raw 아카이브. 실시간 응답은 재현 불가이므로 받는 즉시
+  박제까지 한 태스크. XCom으로는 payload가 아니라 **raw 객체 키 + 메타데이터**만 넘깁니다.
+- `load_bronze` — XCom의 키로 R2 raw를 다시 읽어 Iceberg bronze에 멱등 적재.
+  bronze만 실패하면 **API 재호출 없이 이 태스크만 재시도**되고, 같은 로직을 raw 기반
+  backfill에 재사용할 수 있습니다.
+- `report` — run 리포트를 R2에 기록(`all_done`이라 실패한 run도 리포트가 남음).
 
 ## bronze 설계: schema-on-read (원본 payload)
 

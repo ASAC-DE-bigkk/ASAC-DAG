@@ -11,7 +11,9 @@ import os
 from ..common.config import load_env_file, pick
 
 # raw 원본 객체가 적재되는 raw prefix (이슈 #16 → #75: raw/<domain>).
-LANDING_ROOT = "raw/population"
+# 개인 샌드박스 테스트 시 env로 덮어쓴다 (예: dev/<github_id>/raw/population) --
+# 공유 dev 경로(raw/population)와 격리해 팀원 실행과 겹치지 않게.
+LANDING_ROOT = os.environ.get("SEOUL_PPLTN_LANDING_ROOT", "raw/population")
 
 # 추적 메타데이터 source_id -- raw path와 bronze row 양쪽에 쓰인다.
 SOURCE_ID = "seoul_ppltn"

@@ -21,6 +21,9 @@ class Sink:
     def put(self, key: str, body: bytes, content_type: str) -> None:  # pragma: no cover
         raise NotImplementedError
 
+    def get(self, key: str) -> bytes:  # pragma: no cover
+        raise NotImplementedError
+
     def describe(self) -> str:  # pragma: no cover
         raise NotImplementedError
 
@@ -43,6 +46,10 @@ class R2Sink(Sink):
     def put(self, key: str, body: bytes, content_type: str) -> None:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=body, ContentType=content_type)
 
+    def get(self, key: str) -> bytes:
+        response = self.client.get_object(Bucket=self.bucket, Key=key)
+        return response["Body"].read()
+
     def describe(self) -> str:
         return f"r2://{self.bucket}"
 
@@ -58,6 +65,11 @@ class LocalSink(Sink):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as handle:
             handle.write(body)
+
+    def get(self, key: str) -> bytes:
+        path = os.path.join(self.root_dir, key.replace("/", os.sep))
+        with open(path, "rb") as handle:
+            return handle.read()
 
     def describe(self) -> str:
         return f"file://{self.root_dir}"

@@ -19,6 +19,33 @@ from . import config as source_config
 
 
 @dataclass
+class ParsedBody:
+    """응답 body에서 뽑은 최소 메타데이터 (필드 분해 없음).
+
+    fetch 직후뿐 아니라 R2 raw 아카이브를 다시 읽어 bronze를 만들 때도 쓴다.
+    """
+
+    record: dict | None      # citydata_ppltn[0] 레코드 -- bronze payload용
+    result_code: str | None
+    result_msg: str | None
+    row_count: int
+
+
+def parse_body(body: bytes) -> ParsedBody:
+    """응답 bytes에서 레코드/결과코드만 꺼낸다(업무 필드 파싱X — silver 몫)."""
+    data = json.loads(body)
+    container = data.get(source_config.PPLTN_CONTAINER_KEY)
+    meta = data.get("RESULT") or {}
+    rows = container if isinstance(container, list) else []
+    return ParsedBody(
+        record=rows[0] if rows else None,
+        result_code=meta.get("RESULT.CODE") or meta.get("CODE"),
+        result_msg=meta.get("RESULT.MESSAGE") or meta.get("MESSAGE"),
+        row_count=len(rows),
+    )
+
+
+@dataclass
 class FetchResult:
     """장소 1건 조회 원본 결과 (필드 분해 없음)."""
 
@@ -57,19 +84,13 @@ class SeoulPpltnClient:
     def fetch_area(self, area_nm: str) -> FetchResult:
         """장소 1건을 조회해 원본 bytes + 최소 메타데이터를 반환한다(파싱X)."""
         result = fetch(self.build_url(area_nm), timeout=self.timeout)
-        data = json.loads(result.body)
-        container = data.get(source_config.PPLTN_CONTAINER_KEY)
-        meta = data.get("RESULT") or {}
-        code = meta.get("RESULT.CODE") or meta.get("CODE")
-        msg = meta.get("RESULT.MESSAGE") or meta.get("MESSAGE")
-        rows = container if isinstance(container, list) else []
-        record = rows[0] if rows else None
+        parsed = parse_body(result.body)
         return FetchResult(
             area_nm=area_nm,
             status=result.status,
             raw_body=result.body,
-            record=record,
-            result_code=code,
-            result_msg=msg,
-            row_count=len(rows),
+            record=parsed.record,
+            result_code=parsed.result_code,
+            result_msg=parsed.result_msg,
+            row_count=parsed.row_count,
         )
