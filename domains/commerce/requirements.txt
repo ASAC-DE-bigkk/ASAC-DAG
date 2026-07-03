@@ -9,5 +9,9 @@ PyYAML>=6.0
 
 # 기능별(이미지에 이미 포함 — 명세용):
 pandas>=2.0      # silver: parquet 정규화(write_parquet)
-pyarrow>=14      # silver: parquet 엔진
+pyarrow>=14      # silver: parquet 엔진 · bronze: PyIceberg Arrow 배치
 boto3>=1.34      # STORAGE_BACKEND=r2: Cloudflare R2(S3 호환) 클라이언트 — s3fs 아님
+
+# bronze 적재(commerce_load_bronze) — **이미지 추가 필요**:
+trino>=0.328     # bronze: Trino 증분 적재(trino.dbapi) — 형제 라인(common_dbt_smoke)과 동일
+pyiceberg[s3fs]>=0.7  # bronze: 전체 스냅샷 적재(Trino 우회, R2 Data Catalog REST + R2 S3 FileIO)

@@ -7,6 +7,71 @@
 
 ## 2026-07-03
 
+### 29. bronze 적재 — 수집과 분리된 commerce_load_bronze DAG(PyIceberg/Trino) + 파일 상태 (Step 2~3)
+
+request:
+- medallion(#28) Step 2~6 구현. dags=ASAC-DAG `feat/113-commerce-bronze`, dbt=ASAC-DBT
+  `feat/38-commerce-Bronze-Layer-ingest`.
+- (재설계 지시) 수집 DAG 에 적재를 직결하지 말 것 — 대용량에서 Trino OOM. raw 와 bronze 를 분리,
+  적재는 어느 raw 를 읽었는지 이력관리(재적재 가능·raw 와 격리된 공간). complete 없어 못 읽은
+  일자·대상은 기록 후 다음 실행 재시도(현재-2일 재감시, 3일 폐기). 어느 날짜까지 적재했는지 파일로
+  관리(없으면 처음부터 전체 재적재). **전체 재적재는 PyIceberg, 그 외는 Trino 증분**(한 번에 모든
+  날짜 X). **RDB 사용 금지.** 로더 content_hash dedup 은 증분 경로에서 무의미 → 미적용.
+
+response:
+- **수집·적재 분리**: `commerce_raw.py` 는 raw-only 로 복원(이전 결합 되돌림 — Trino 무의존).
+  신규 **[commerce_load_bronze.py](commerce_load_bronze.py)** DAG 가 적재 전담
+  (`resolve_plan → plan_units → ensure_warehouse → load_one.expand → finalize`).
+- **적재 엔진 [include/bronze/warehouse.py](include/bronze/warehouse.py)**: mode=first(전체 스냅샷)
+  → **PyIceberg**(R2 Data Catalog REST + R2 S3 FileIO, `delete`+Arrow `append`, 커밋 1회 — Trino
+  코디네이터 우회로 OOM 회피), mode=changed(소량) → **Trino** 증분(`?` 파라미터 바인딩). 단일 테이블
+  `commerce.bronze_localdata_license`(39종 dataset 컬럼 구분) + `bronze_collection_run_manifest`
+  (데이터셋별 발행 게이트). row-NDJSON 라인 스트리밍, canonical sha256 content_hash(컬럼 보존, 로더
+  dedup 없음). 식별자만 assert_identifier 보간(allow-sql).
+- **파일 상태(RDB 없음) [include/bronze/load_state.py](include/bronze/load_state.py)**: raw 와 격리된
+  `{prefix}/commerce_bronze_state/`(commerce_ prefix) 에 워터마크(데이터셋별 마지막 적재 run) +
+  pending(complete 없는 (date, short), 현재-2일 재감시·3일 폐기) + receipt(적재 감사 로그).
+  **[load_plan.py](include/bronze/load_plan.py)**: `resolve_load_plan`(무손실 skip — diff-target 은
+  완료 run 에서만 전진하므로 incomplete 건너뛰어도 무손실), `commit_watermark`(적재 성공분까지만
+  전진, 실패 run 직전 정지 → 다음 실행 재시도). 실행당 `COMMERCE_LOAD_MAX_DATES`(기본 3) 바운드.
+- **격리·명명**: Iceberg 물리 저장은 R2 Data Catalog 관리(폴더=UUID, 클라이언트 지정 불가) —
+  구분 핸들은 논리 스키마 `commerce`. 상태/이력 파일만 `commerce_` prefix 로 직접 관리.
+- **env/deps**: `.env.commerce.example`(COMMERCE_SCHEMA·COMMERCE_BRONZE_STATE_LAYER·
+  COMMERCE_LOAD_MAX_DATES·TRINO_*·R2 Data Catalog), `requirements.txt` 에 `trino`·`pyiceberg[s3fs]`
+  추가(**이미지 추가 필요**).
+- **테스트**: `test_warehouse.py`·`test_load_state.py`·`test_load_plan.py` 신규 — 전체 **260 통과**
+  (239→+21), `python -m security` 차단 0. 두 DAG(collect raw-only / load) 파싱·배선 검증.
+  PyIceberg/Trino 실제 왕복은 이미지 통합(Step 4).
+- **silver/gold(dbt)** 는 ASAC-DBT `feat/38` 에 별도 구현(Step 5~6): `dbt/domains/commerce/`
+  (sources·silver_license_history SCD2·silver_license_current·테스트). Step 4/7 백필,
+  Step 8 좌표 보정, transform DAG(Step 10)는 후속.
+
+### 28. medallion 구현 계획 문서 — raw→bronze(Iceberg)→silver→gold + 좌표 보정 설계 (제안)
+
+request:
+- python/airflow/iceberg/dbt/trino/R2 환경에서 bronze·silver·gold 역할 분담과 "raw 적재를
+  bronze 레이어로 통합할지"를 검토하고, 단계별 to-do 의 **구현 방법까지 정의한 docs** 요청.
+- 추가 요구: 업장 좌표(중부원점 TM 추정)와 주소 기반 **재보정 위경도**를 silver 에서 조인하도록
+  설계 포함(어떤 로직/API 로 보정할지 확인 필요). 제약: `dbt/` 하위 타 도메인 폴더는 타인
+  작업물이라 의존·병합하지 않음, dbt commerce 프로젝트는 미구현 상태에서 신규 설계.
+
+response:
+- **[docs/pipeline/medallion-implementation-plan.md](docs/pipeline/medallion-implementation-plan.md) 신설**(제안·승인 대기 항목 포함):
+  raw=R2 랜딩(현행 유지, #75/#21 결정 준수) / bronze=Iceberg `commerce.bronze_localdata_license`
+  단일 변경로그 테이블(record_json 통짜 + 계보 컬럼, `load_date` 파티션, delete-then-insert 멱등,
+  dataset 단위 manifest 발행 게이트) / silver=dbt SCD2(`silver_license_history`·
+  `silver_license_current`, 전순서 버전 정렬 + 연속 중복 제거로 A→B→A 원복 보존) /
+  gold=`gold_commerce_license_status_current`(현황 스냅샷, 일별 추이는 phase-2). **raw→bronze 통합 안 함**
+  (Trino 는 iceberg 커넥터뿐이라 JSONL 직질의 불가 — 부족한 것은 적재 단계).
+- 백필·분기 정합성 복구는 `_diff_target` 전체본 기반 `mode=full_reconcile` 단일 코드 경로.
+- **좌표 보정 설계**: 원천엔 X/Y(좌표계 미표기)뿐, 위경도 없음 확인 → 2트랙(좌표 변환 pyproj
+  ·주소 지오코딩 API)+EPSG(2097 vs 5174) 실측 판별, `commerce_geocode_collect` 신규 수집 라인
+  (raw 보존 → `bronze_geocode_address`, address_key 멱등·증분), silver 에서 LEFT JOIN 으로
+  `lon/lat_corrected`·`location_source`·`location_quality` 산출. API 후보(VWorld/Kakao/Naver/juso)
+  비교·약관/쿼터 체크리스트는 확정 전 조사 항목으로 명시.
+- Step 1~10 순차 to-do(각 구현 방법·완료 기준) + 결정 대기 7건(§7) 정리.
+  인덱스 갱신: docs/pipeline/README.md · docs/README.md 문서 맵.
+
 ### 27. 취약점 코퍼스 — 정적 detector 20종 발화 증명 + 격리 (feat/96)
 
 request:
