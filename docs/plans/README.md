@@ -39,3 +39,4 @@
 | 2026-07-02 | [R2 원본 경로 raw/ 전환](2026-07-02-feat-r2-raw-prefix.md) | 진행 중 (#75) |
 | 2026-07-02 | [공통 에러 모듈 — RFC 9457 + R2 적재](2026-07-02-feat-common-error-module.md) | 진행 중 (#77) |
 | 2026-07-03 | [Weather/Traffic Bronze 재수집 DAG](2026-07-03-feat-114-weather-traffic-recollect.md) | 진행 중 (#114) |
+| 2026-07-02 | [공통 HTTP 클라이언트 — 소스 API 호출 통합](2026-07-02-feat-common-http-client.md) | 진행 중 (#78) |
