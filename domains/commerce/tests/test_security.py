@@ -1058,3 +1058,105 @@ def test_check_open_redirect(tmp_path):
     f = check_open_redirect(root)
     assert not f.ok and f.severity == "MEDIUM"
     assert "a.py" in f.detail and "ok.py" not in f.detail and "tern.py" not in f.detail
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 정밀 리뷰 회귀(fable 세션 마감) — opus 구현부의 6개 결함 수정을 잠근다(P1~P6).
+# ════════════════════════════════════════════════════════════════════════════════
+
+# [P1] netio: verify 를 falsy(False/0/"") 로 넘기면 TLS 검증 비활성 → 전부 차단.
+#      None(기본 위임)·truthy(True·CA 경로)만 허용(이전엔 `is False` 만 봐서 0/"" 가 우회).
+@pytest.mark.parametrize("bad", [False, 0, "", 0.0])
+def test_netio_blocks_all_falsy_verify(bad):
+    from security import InsecureRequestBlocked
+    with pytest.raises(InsecureRequestBlocked):
+        http_request("GET", "http://x/", session=_FakeSess(), **{"verify": bad})
+
+
+@pytest.mark.parametrize("ok_verify", [None, True, "/etc/ssl/ca.pem"])
+def test_netio_allows_none_and_truthy_verify(ok_verify):
+    sess = _FakeSess()
+    http_request("GET", "http://x/", session=sess, timeout=1, **{"verify": ok_verify})
+    assert sess.kwargs["verify"] == ok_verify        # 가드 통과 → 그대로 전달
+
+
+# [P2] netio SSRF: IPv4-compatible(::/96, 예 ::7f00:1=127.0.0.1)·6to4/teredo 내장 IPv4 우회 차단.
+@pytest.mark.parametrize("url", [
+    "http://[::7f00:1]/x",                            # IPv4-compatible → 127.0.0.1
+    "http://[::a9fe:a9fe]/x",                         # ::169.254.169.254 (IMDS)
+    "http://[2002:7f00:1::]/x",                       # 6to4 로 127.0.0.1 임베드
+    "http://[2002:a9fe:a9fe::]/x",                    # 6to4 로 IMDS 임베드
+])
+def test_ssrf_guard_blocks_ipv6_embedded_v4(url):
+    assert not is_url_allowed(url)
+
+
+def test_ssrf_guard_still_allows_public_ipv6():
+    assert is_url_allowed("https://[2606:2800:220:1:248:1893:25c8:1946]/x")
+
+
+# [P3] redaction/events: 시크릿이 dict '키' 로 들어와도 마스킹(값 경로와 동일 정책).
+def test_redactor_masks_dict_keys():
+    red = Redactor()
+    red.add_secret("SECRETKEY_ABC123")
+    out = red.redact({"SECRETKEY_ABC123": "v", "normal_field": "x"})
+    assert "SECRETKEY_ABC123" not in out and PLACEHOLDER in out
+    assert "normal_field" in out                      # 일반 필드명은 그대로
+
+
+def test_event_record_masks_secret_in_dict_key(_registered_key):
+    from security.events import event_record
+    rec = event_record("t", where="w", ctx={_KEY: "val"})
+    assert _KEY not in json.dumps(rec, ensure_ascii=False)
+
+
+# [P4] crypto: 비문자열 저장값(None/bytes, 예 DB NULL)은 크래시 대신 깨끗한 거부.
+@pytest.mark.parametrize("bad", [None, b"pbkdf2_sha256$600000$x$y", 12345, ["x"]])
+def test_verify_password_non_str_encoded_rejects(bad):
+    assert verify_password("pw", bad) is False
+
+
+@pytest.mark.parametrize("bad", [None, b"x", 12345])
+def test_needs_rehash_non_str_encoded_true(bad):
+    assert needs_rehash(bad) is True
+
+
+# [P5] audit: weak-hash 정규식이 (?i:...) 스코프 플래그(3.11+) 없이 대소문자 인자를 모두 잡는다.
+def test_check_weak_hash_new_case_insensitive_portable(tmp_path):
+    from security.audit import check_weak_hash
+    root = _mk_root(tmp_path, {
+        "u.py": 'a = hashlib.ne' + 'w("MD5")\n',       # 대문자
+        "l.py": 'b = hashlib.ne' + 'w("sha1")\n',      # 소문자
+        "m.py": 'c = hashlib.ne' + 'w("Sha1")\n',      # 혼합
+        "ok.py": 'd = hashlib.ne' + 'w("sha256")\n',   # 안전
+    })
+    f = check_weak_hash(root)
+    assert not f.ok
+    assert all(n in f.detail for n in ("u.py", "l.py", "m.py")) and "ok.py" not in f.detail
+
+
+# [P6] CLI: 비UTF-8 콘솔(cp949 등)에서 '—' 포함 리포트 출력이 크래시하지 않는다.
+def test_cli_emit_survives_non_utf8_console():
+    from security.__main__ import _emit
+
+    class _Cp949Stdout:
+        """print() 가 cp949 로 인코딩 실패하는 콘솔 흉내(buffer 폴백 확인)."""
+        def __init__(self):
+            self.buffer = io.BytesIO()
+
+        def write(self, s):
+            s.encode("cp949")                          # '—' 있으면 UnicodeEncodeError
+            return len(s)
+
+        def flush(self):
+            pass
+
+    import sys as _sys
+    saved = _sys.stdout
+    _sys.stdout = _Cp949Stdout()
+    try:
+        _emit("결과: PASS — 차단 이슈 없음")             # em-dash 포함 → print 는 실패, buffer 로 폴백
+        written = _sys.stdout.buffer.getvalue()
+    finally:
+        _sys.stdout = saved
+    assert "PASS".encode("utf-8") in written and written.endswith(b"\n")

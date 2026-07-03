@@ -434,9 +434,14 @@ def check_insecure_file_ops(root: Path) -> Finding:
 
 
 # (SEC-13) 보안 용도 약한 해시(CWE-327/328) — usedforsecurity=False 명시는 허용(비보안 용도).
-# hashlib.new 의 대문자 인자("MD5"/"SHA1") 도 OpenSSL 이 대소문자 무시로 받으므로 이름부는 (?i:...) 처리.
+# hashlib.new 의 대문자 인자("MD5"/"SHA1") 도 OpenSSL 이 대소문자 무시로 받으므로 대소문자 변형을
+# 모두 잡는다. (?i:...) 스코프 플래그는 Python 3.11+ 전용 → **이식성**을 위해 문자클래스로 표기
+# (플러그인은 3.9+ 어느 프로젝트에도 그대로 떨어뜨려 쓸 수 있어야 한다).
+_MD5_CI = r"[Mm][Dd]5"
+_SHA1_CI = r"[Ss][Hh][Aa]1"
 _WEAK_HASH_RE = re.compile(
-    r"hashlib\.(md5|sha1)\s*\(|hashlib\.new\s*\(\s*[\"'](?i:md5|sha1)[\"']")
+    r"hashlib\.(md5|sha1)\s*\(|"
+    r"hashlib\.new\s*\(\s*[\"'](?:" + _MD5_CI + r"|" + _SHA1_CI + r")[\"']")
 
 
 def check_weak_hash(root: Path) -> Finding:

@@ -68,9 +68,12 @@ def hash_password(password: str, *, iterations: int = DEFAULT_ITERATIONS) -> str
 def verify_password(password: str, encoded: str) -> bool:
     """저장된 해시로 비밀번호 검증(상수시간). 파라미터는 저장값에서만 읽는다.
 
-    손상/악의적 저장값(잘못된 알고리즘·반복수 0/음수·base64 오류)은 예외 대신 **깨끗한 거부**
-    (False)로 처리한다 — 검증 경로가 예외로 죽지 않게(로그인 DoS 방지).
+    손상/악의적 저장값(None·비문자열·잘못된 알고리즘·반복수 0/음수·base64 오류)은 예외 대신
+    **깨끗한 거부**(False)로 처리한다 — 검증 경로가 예외로 죽지 않게(로그인 DoS 방지;
+    DB NULL 이 None 으로 들어와도 크래시 없이 거부).
     """
+    if not isinstance(encoded, str):     # None/bytes 등 비문자열 저장값 → 크래시 대신 거부
+        return False
     try:
         algo, iter_s, salt_b64, hash_b64 = encoded.split("$")
         if algo != _ALGO:
@@ -87,7 +90,12 @@ def verify_password(password: str, encoded: str) -> bool:
 
 
 def needs_rehash(encoded: str, *, min_iterations: int = DEFAULT_ITERATIONS) -> bool:
-    """저장 해시가 현행 정책(알고리즘/반복수) 미달이면 True — 로그인 성공 시 재해시 유도."""
+    """저장 해시가 현행 정책(알고리즘/반복수) 미달이면 True — 로그인 성공 시 재해시 유도.
+
+    비문자열/손상 저장값은 재해시 필요(True)로 본다 — 크래시 없이 안전한 방향으로 판정.
+    """
+    if not isinstance(encoded, str):
+        return True
     try:
         algo, iter_s, _salt, _hash = encoded.split("$")
         return algo != _ALGO or int(iter_s) < min_iterations

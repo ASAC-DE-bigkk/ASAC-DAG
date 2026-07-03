@@ -21,8 +21,25 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     report = run_security_verification(root=args.root, runtime_checks=not args.no_runtime)
-    print(report.render())
+    _emit(report.render())
     return 1 if report.blocking else 0
+
+
+def _emit(text: str) -> None:
+    """리포트 출력 — 비UTF-8 콘솔(Windows cp949 등)에서도 크래시하지 않게 폴백한다.
+
+    render() 에는 '—'(em-dash) 같은 비ASCII 가 들어가 cp949 코덱으로는 print 가
+    UnicodeEncodeError 를 낸다(게이트 명령 자체가 죽음). 실패 시 UTF-8 바이트로 직접 쓴다.
+    """
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        buf = getattr(sys.stdout, "buffer", None)
+        if buf is not None:
+            buf.write(text.encode("utf-8", errors="replace") + b"\n")
+            buf.flush()
+        else:                       # buffer 없는 스트림 → ASCII 치환으로라도 출력 보장
+            print(text.encode("ascii", errors="replace").decode("ascii"))
 
 
 if __name__ == "__main__":

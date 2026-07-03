@@ -42,7 +42,8 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, Mapping):
-        return {str(k): _json_safe(v) for k, v in value.items()}
+        # 키도 마스킹(시크릿이 dict 키로 들어오는 경우 방지 — 값 경로와 동일 정책).
+        return {redact(str(k)): _json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_json_safe(v) for v in value]
     if isinstance(value, BaseException):

@@ -122,7 +122,11 @@ class Redactor:
         if isinstance(obj, str):
             return self.redact_text(obj)
         if isinstance(obj, Mapping):
-            return {k: self.redact(v) for k, v in obj.items()}
+            # 키도 마스킹한다 — 시크릿이 값이 아니라 **키**로 들어오는 경우(예: 토큰으로
+            # 인덱싱된 dict) 누출 방지. literal 마스킹은 등록된 시크릿을 포함한 키만 바꾸므로
+            # 일반 필드명은 그대로 남는다(구조 파손 없음).
+            return {self.redact_text(k) if isinstance(k, str) else k: self.redact(v)
+                    for k, v in obj.items()}
         if isinstance(obj, (list, tuple)):
             return type(obj)(self.redact(v) for v in obj)
         if isinstance(obj, BaseException):

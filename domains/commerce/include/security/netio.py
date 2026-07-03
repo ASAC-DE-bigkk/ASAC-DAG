@@ -59,7 +59,8 @@ _BLOCKED_V4 = tuple(ipaddress.ip_network(n) for n in (
     "255.255.255.255/32", "100.100.100.200/32",   # 마지막: Alibaba Cloud IMDS
 ))
 _BLOCKED_V6 = tuple(ipaddress.ip_network(n) for n in (
-    "::/128", "::1/128", "::ffff:0:0/96",          # v4-mapped 는 아래에서 v4 로도 재검사
+    "::/96",                                        # IPv4-compatible(::a.b.c.d, 폐기됨) + unspecified
+    "::1/128", "::ffff:0:0/96",                    # v4-mapped 는 아래에서 v4 로도 재검사
     "64:ff9b::/96", "64:ff9b:1::/48",              # NAT64 변환 프리픽스(정책 우회 차단)
     "100::/64", "2001:db8::/32", "2002::/16", "fc00::/7", "fe80::/10", "ff00::/8",
 ))
@@ -67,8 +68,16 @@ _BLOCKED_V6 = tuple(ipaddress.ip_network(n) for n in (
 
 def _ip_blocked(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
     if isinstance(ip, ipaddress.IPv6Address):
+        # v6 에 IPv4 를 품는 형식(v4-mapped/6to4/teredo)은 내장 IPv4 도 v4 정책으로 재검사한다
+        # (::7f00:1 같은 IPv4-compatible 은 ::/96 블록이, 6to4/teredo 는 아래 추출이 잡는다).
         mapped = ip.ipv4_mapped
         if mapped is not None and _ip_blocked(mapped):
+            return True
+        sixto = ip.sixtofour
+        if sixto is not None and _ip_blocked(sixto):
+            return True
+        teredo = ip.teredo
+        if teredo is not None and (_ip_blocked(teredo[0]) or _ip_blocked(teredo[1])):
             return True
         return any(ip in net for net in _BLOCKED_V6)
     return any(ip in net for net in _BLOCKED_V4)
@@ -142,7 +151,10 @@ def http_request(method: str, url: str, *, session: Any = None,
     allow_redirects 는 기본 False(명시 전달 시 존중 — 리다이렉트 hop 의 가드 우회 차단).
     max_response_bytes: 스트리밍 카운터로 응답 크기 상한 강제(초과 시 ResponseTooLarge).
     """
-    if kwargs.get("verify") is False:
+    # verify 를 falsy(False/0/"" 등)로 넘기면 requests 가 인증서 검증을 끈다 → 전부 차단.
+    # None(=기본값 위임, 검증 유지)과 truthy(True·CA 경로 문자열)만 허용한다.
+    verify = kwargs.get("verify", True)
+    if verify is not None and not verify:
         raise InsecureRequestBlocked(
             "TLS certificate verification must not be disabled (security policy)")
     if url_check:

@@ -7,6 +7,30 @@
 
 ## 2026-07-03
 
+### 26. 보안 플러그인 정밀 리뷰 — opus 구현부 6개 결함 수정 + 회귀 잠금 (feat/96)
+
+request:
+- 어제(fable) 진행 중 **opus 로 구현된 영역**에 미흡한 부분이 있으니, 해당 영역을 확인해
+  **전체 조치 후 테스트**까지 진행할 것.
+
+response:
+- **적대적 정밀 리뷰**로 opus-era 모듈에서 실동작 결함 6종 확인·수정(전부 commerce 번들 안):
+  - **P1 (HIGH) TLS 가드 우회** — `netio.http_request` 가 `verify is False` 만 차단해
+    `verify=0`/`""` 로 인증서 검증 비활성이 통과. → falsy 전부 차단(None=기본 위임·truthy=CA 경로만 허용).
+  - **P2 (HIGH) IPv6 SSRF 우회** — `::7f00:1`(IPv4-compatible `::/96`)·6to4/teredo 내장 IPv4 가
+    미검사로 루프백/IMDS 도달 가능. → `::/96` 차단 + `sixtofour`/`teredo` 내장 IPv4 를 v4 정책으로 재검사.
+  - **P3 (MED) dict '키' 미마스킹** — `Redactor.redact`·`events._json_safe` 가 값만 가리고 키는
+    통과 → 시크릿이 키로 오면 누출. → 두 경로 모두 문자열 키 마스킹(등록 시크릿 포함 키만 치환, 일반 필드명 보존).
+  - **P4 (MED) 비밀번호 검증 크래시** — `verify_password(None)`/`needs_rehash(None)` 가
+    AttributeError(DB NULL → 로그인 DoS). 문서화된 "깨끗한 거부"와 모순. → 비문자열 저장값을 크래시 없이 거부(False)/재해시(True).
+  - **P5 (MED) 이식성 회귀** — `audit.py` 의 `(?i:...)` 스코프 인라인 플래그가 **Python 3.11+ 전용**
+    → <3.11 프로젝트에서 audit import 시 `re.error`(플러그인 이식성 목표와 모순). → 문자클래스로 재작성(3.9+ 동작).
+  - **P6 (MED) 게이트 CLI 크래시** — 문서화된 `python -m security` 가 Windows **cp949** 콘솔에서
+    `—`(em-dash) 로 `UnicodeEncodeError`. → 비UTF-8 콘솔에서 UTF-8 buffer 폴백(출력 보장).
+- **회귀 테스트 6종(20 파라미터 케이스) 추가** — 각 수정을 잠금(자기감사 회피 위해 위반 샘플은 조각 결합/tmp).
+- **검증**: 전 테스트 **213 통과**(190→213), `python -m security` 차단 0(경고 3건은 CLI 단독 실행 런타임
+  점검 = 정상). cp949 콘솔에서 게이트 CLI 정상 출력 확인.
+
 ### 25. 보안 플러그인 커버리지 확장 — SSRF·아카이브·암호·정적점검 11종 + 적대적 검증 (feat/96)
 
 request:
