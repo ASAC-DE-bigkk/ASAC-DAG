@@ -1,7 +1,7 @@
 """common.notify — 알림 인터페이스(기본 no-op·주입·notify_exception) 단위 테스트."""
 import pytest
 
-from common import notify
+from commerce_core import notify
 
 
 @pytest.fixture(autouse=True)

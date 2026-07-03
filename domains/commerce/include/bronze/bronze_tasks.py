@@ -24,11 +24,11 @@ from datetime import datetime, timezone
 from bronze.clients import SeoulAuthError, SeoulOpenApiClient, parse_page
 from bronze import incremental
 from bronze.validators import assess_completeness
-from common import paths
-from common.hashing import sha256_hex
-from common.schemas import DOMAIN, SOURCE_SYSTEM, Dataset
-from common.settings import get_settings
-from common.storage import Storage, get_storage
+from commerce_core import paths
+from commerce_core.hashing import sha256_hex
+from commerce_core.schemas import DOMAIN, SOURCE_SYSTEM, Dataset
+from commerce_core.settings import get_settings
+from commerce_core.storage import Storage, get_storage
 from security import redact   # 마커(error)·요약에 저장되는 메시지의 시크릿 마스킹(이중 방어)
 
 log = logging.getLogger(__name__)

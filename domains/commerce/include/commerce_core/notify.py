@@ -5,7 +5,7 @@
 `set_notifier()` 로 주입(또는 `COMMERCE_NOTIFIER` 같은 env 로 팩토리 분기)하면 된다.
 
 사용(향후, 예):
-    from common.notify import notify_exception
+    from commerce_core.notify import notify_exception
     try:
         ...수집...
     except Exception as exc:

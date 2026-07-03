@@ -53,8 +53,8 @@ R2 적재 확인:
 ```bash
 docker compose exec airflow-scheduler python - <<'PY'
 import sys; sys.path.insert(0, "/opt/airflow/dags/domains/commerce/include")
-from common.env import load_commerce_env; load_commerce_env()
-from common.storage import get_storage
+from commerce_core.env import load_commerce_env; load_commerce_env()
+from commerce_core.storage import get_storage
 s = get_storage()
 s.write_text("healthcheck/ping.txt", "ok")
 print("R2 ok:", s.exists("healthcheck/ping.txt"))

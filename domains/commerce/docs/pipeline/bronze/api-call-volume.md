@@ -101,8 +101,8 @@ calls(dataset) = ceil(list_total_count / SEOUL_PAGE_SIZE)   # SEOUL_PAGE_SIZE = 
 # .env.commerce 에 SEOUL_API_KEY_COMM 설정 후 (configuration.md)
 PYTHONPATH=dags/domains/commerce/include python - <<'PY'
 import json, math, urllib.request, os
-from common.env import load_commerce_env; load_commerce_env()
-from common import registry
+from commerce_core.env import load_commerce_env; load_commerce_env()
+from commerce_core import registry
 KEY=os.environ["SEOUL_API_KEY_COMM"]; BASE="http://openapi.seoul.go.kr:8088"
 tot=0
 for d in registry.enabled_for_schedule("daily"):

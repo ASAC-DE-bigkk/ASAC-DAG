@@ -1,7 +1,7 @@
 """bronze.markers — run_id 목록/최신·완료 short·미완료(재수집) 대상 단위 테스트."""
 from bronze import markers
-from common import paths
-from common.storage import Storage
+from commerce_core import paths
+from commerce_core.storage import Storage
 
 
 class FakeStorage(Storage):

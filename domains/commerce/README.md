@@ -40,7 +40,7 @@ cp .env.commerce.example .env.commerce      # PowerShell: Copy-Item
 # 인증키는 루트 .env 의 SEOUL_API_KEY_COMM(필수). R2 쓰면 STORAGE_BACKEND=r2 + R2_* 확인.
 ```
 
-DAG 임포트 시 [include/common/env.py](include/common/env.py) 의 `load_commerce_env()` 가
+DAG 임포트 시 [include/commerce_core/env.py](include/commerce_core/env.py) 의 `load_commerce_env()` 가
 `.env.commerce` 를 `os.environ` 에 채운다(프로세스/compose env 가 우선, 빈 값만 setdefault).
 값에는 `${VAR}` 참조를 쓸 수 있어 **루트 `.env` 와 겹치는 R2 값은 중복 없이 불러온다**.
 

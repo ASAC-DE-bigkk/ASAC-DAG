@@ -7,6 +7,25 @@
 
 ## 2026-07-03
 
+### 28. include/common → include/commerce_core 개명 + storage 승격 (#109)
+
+request:
+- dags/common(공통 상위 패키지, #77 에러 모듈)과 commerce top-level `common` 이 단일 프로세스
+  DagBag 로드(`airflow dags test` 등)에서 충돌(sys.modules 캐시가 `import common.errors` 를 가림).
+- 방침(Q&A 합의): **dags/common 을 상위 개념으로** 보고 **겹치는 기능만 먼저 합침**,
+  나머지 모듈은 **무삭제 보존**(notify 포함), 잔류 패키지 이름은 `commerce_core`.
+
+response:
+- **storage 승격**: `storage.py` 의 범용 부분(Storage/LocalStorage/R2Storage)을 `dags/common/storage.py`
+  로 이동(+`build_storage` 팩토리, Settings 결합 제거). commerce 쪽은 `commerce_core/storage.py`
+  얇은 어댑터로 대체 — 클래스 재수출 + `get_storage()` 가 기존 Settings/env 계약 그대로 유지(동작 불변).
+- **개명**: `include/common/` → `include/commerce_core/` (env/hashing/notify/paths/registry/schemas/
+  settings 전 모듈 보존). 소비처 17파일 import 전환(`from common.*` → `from commerce_core.*`),
+  DAG·scripts·conftest 부트스트랩에 dags 루트 추가(`common.storage` 해석용).
+- **금지 규약 추가**: 번들 안에 top-level `common` 패키지 재도입 금지(CLAUDE.md §19 명시).
+- 검증: commerce 전 테스트 239 통과, `python -m security` 차단 0, 단일 프로세스 전체 DagBag
+  파싱 재현 테스트 통과(충돌 해소 확인).
+
 ### 27. 취약점 코퍼스 — 정적 detector 20종 발화 증명 + 격리 (feat/96)
 
 request:

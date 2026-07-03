@@ -10,7 +10,7 @@ commerce 전용 인자는 이 번들의 `.env.commerce` 가 공급한다 → [co
 
 ## 스토리지 백엔드 (유일한 환경 축)
 
-`STORAGE_BACKEND` 으로 결정([../include/common/storage.py](../../include/common/storage.py)):
+`STORAGE_BACKEND` 으로 결정([../include/commerce_core/storage.py](../../include/commerce_core/storage.py)):
 
 | 값 | 백엔드 | 위치 | 자격증명 | 추가 패키지 |
 |---|---|---|---|---|

@@ -2,12 +2,12 @@
 
 CLAUDE.md §2의 비협상 데이터 규칙을 구현. 동일한 `key`가 백엔드(local/R2)에 무관하게
 사용되며, 백엔드는 자신의 root/bucket만 앞에 붙인다. 구현:
-[../include/common/storage.py](../../include/common/storage.py) ·
-[../include/common/paths.py](../../include/common/paths.py).
+[../include/commerce_core/storage.py](../../include/commerce_core/storage.py) ·
+[../include/commerce_core/paths.py](../../include/commerce_core/paths.py).
 
 ## 백엔드 전환
 
-`STORAGE_BACKEND` 환경변수로 결정([../include/common/storage.py](../../include/common/storage.py)의 `get_storage()`):
+`STORAGE_BACKEND` 환경변수로 결정([../include/commerce_core/storage.py](../../include/commerce_core/storage.py)의 `get_storage()`):
 
 | 값 | 백엔드 | 위치 | 용도 |
 |---|---|---|---|
@@ -21,7 +21,7 @@ CLAUDE.md §2의 비협상 데이터 규칙을 구현. 동일한 `key`가 백엔
 
 bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **연/월/일 디렉터리 아래**에 둔다
 (연/월/일은 run_id 날짜에서 파생). silver 는 **논리일** 파티션. `{prefix}`(=`COMMERCE_STORAGE_PREFIX`,
-비우면 없음)·bucket 접두는 스토리지 백엔드가 붙인다([paths.py](../../include/common/paths.py)):
+비우면 없음)·bucket 접두는 스토리지 백엔드가 붙인다([paths.py](../../include/commerce_core/paths.py)):
 
 ```text
 {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
@@ -88,7 +88,7 @@ silver/commerce/general_restaurant/observed_date=2026-06-30/part-000.parquet
 ## Cloudflare R2 설정 (`STORAGE_BACKEND=r2`)
 
 R2 는 S3 호환 — **boto3** S3 클라이언트에 커스텀 엔드포인트(path-style·SigV4·region `auto`)를 준다
-([storage.py](../../include/common/storage.py)의 `R2Storage`). s3fs 가 아니라 boto3 를 쓰는 이유는
+([storage.py](../../include/commerce_core/storage.py)의 `R2Storage`). s3fs 가 아니라 boto3 를 쓰는 이유는
 호스트 이미지에 boto3 만 있고 s3fs 는 없기 때문(번들 안에서 자립 해결).
 값은 `.env.commerce` 로 공급([configuration.md](../configuration/configuration.md) §2.3):
 
@@ -111,8 +111,8 @@ R2_REGION=auto
 ```bash
 docker compose exec airflow-scheduler python - <<'PY'
 import sys; sys.path.insert(0, "/opt/airflow/dags/domains/commerce/include")
-from common.env import load_commerce_env; load_commerce_env()
-from common.storage import get_storage
+from commerce_core.env import load_commerce_env; load_commerce_env()
+from commerce_core.storage import get_storage
 s = get_storage()
 s.write_text("healthcheck/ping.txt", "ok")
 print("exists:", s.exists("healthcheck/ping.txt"))

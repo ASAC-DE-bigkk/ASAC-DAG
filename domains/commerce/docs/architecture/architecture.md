@@ -56,7 +56,7 @@ check_api_key (gate) ──┤
 - **gate**: `check_api_key` 가 인증키를 선검증 → 키 오류면 전체 빠른 실패.
 - 태스크 간에는 **저장 키/요약(작은 dict)** 만 XCom 으로 전달, 페이로드는 스토리지 재조회.
 - `params`: `observed_date`(silver 논리일 override). force 없음 — 매 실행이 전체 수집.
-- **알림 인터페이스**(예외→알림, [common/notify.py](../../include/common/notify.py))는 제공되나 **미와이어링/비활성**
+- **알림 인터페이스**(예외→알림, [common/notify.py](../../include/commerce_core/notify.py))는 제공되나 **미와이어링/비활성**
   (기본 no-op) — [../operations/recollect-and-alerts.md](../operations/recollect-and-alerts.md) §2.
 
 태스크는 모두(CLAUDE.md §11): **재시도 안전**(같은 run_id 폴더에 덮어씀) · **관찰 가능**

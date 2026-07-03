@@ -33,9 +33,11 @@ from pathlib import Path
 
 # 자립(portable): 자기 카테고리의 include 를 import 경로에 올린다.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "include"))
+# 공통 패키지(dags/common) — commerce_core.storage 가 common.storage 를 쓴다(#109).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # 번들 자립용 env 적재(프로세스 env 우선). 자세히: docs/configuration/configuration.md
-from common.env import load_commerce_env  # noqa: E402
+from commerce_core.env import load_commerce_env  # noqa: E402
 
 load_commerce_env()
 
@@ -56,9 +58,9 @@ except ImportError:  # Airflow 2.x
     from airflow.operators.python import get_current_context
 
 from bronze import bronze_tasks, markers
-from common import paths, registry
-from common.settings import get_settings
-from common.storage import get_storage
+from commerce_core import paths, registry
+from commerce_core.settings import get_settings
+from commerce_core.storage import get_storage
 
 log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))

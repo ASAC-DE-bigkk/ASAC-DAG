@@ -3,7 +3,7 @@
 매 수집이 전체 데이터를 다시 저장하던 것을, **정렬본 기준으로 전날과 다른 신규 row만** 저장하도록
 바꾼다. 코드: [../../../include/bronze/incremental.py](../../../include/bronze/incremental.py) ·
 배선: [../../../include/bronze/bronze_tasks.py](../../../include/bronze/bronze_tasks.py) ·
-경로: [../../../include/common/paths.py](../../../include/common/paths.py).
+경로: [../../../include/commerce_core/paths.py](../../../include/commerce_core/paths.py).
 
 ## 1. 저장 모델 (랜딩 → 증분 → diff 이동, 수집일 태깅)
 
