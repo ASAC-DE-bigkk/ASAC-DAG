@@ -84,9 +84,18 @@ errors/observed_date=YYYY-MM-DD/domain=<domain>/dag_id=<dag_id>/<run_id>__<HHMMS
 
 1. [x] `common/errors/` 구현 + `common/security/` 승격 + 단위 테스트
    (redaction — commerce `test_bronze_marker_error_is_redacted` 본뜸 · 경로 · 직렬화 · 콜백)
-2. [ ] 파일럿 traffic 적용(DAG 1개, 구조 단순) — 기존 콜백과 리스트로 병행, 실패 유도 e2e 확인
-3. [ ] 전 도메인 DAG에 callback 연결 (도메인별 커밋)
+2. [x] 파일럿 traffic 적용 — 기존 콜백과 리스트로 병행. 실패 유도 e2e 완료(dev R2 적재·redaction·
+   재시도 중 미기록 확인). 관찰: dag.test 경로에서는 콜백 컨텍스트에 exception 이 없어 `detail`
+   생략됨 — 실스케줄 경로에서 재확인 필요(열린 질문 3)
+3. [x] 전 도메인 DAG에 callback 연결 (도메인별 커밋) — transit(3)·culture(1)·population(3)·
+   weather(3)·traffic 보완(2)·commerce(2, #109 개명 선행 필요). 외부 소스 없는 transform/report
+   는 source_system 생략, 혼합 소스(culture)도 생략(추후 ProblemError 로 소스별 지정)
 4. [ ] (추후) DB 저장/이중 저장 결정 → `DbSink` 추가
+
+## 열어둔 질문 (구현 중 발견)
+
+3. Airflow 3 콜백 컨텍스트의 `exception` 전달 여부 — dag.test 경로에서는 미전달로 `detail` 이
+   비었음. 실스케줄러 경로 검증 후, 미전달이면 TI 로그 tail 등 보강 검토
 
 ## 결정 기록 (#77 논의)
 
