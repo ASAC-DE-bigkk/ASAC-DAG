@@ -46,6 +46,28 @@ plan ──▶ fetch_raw (12개 동적 매핑 · 병렬) ──▶ load_bronze �
   실패). `True`면 위반 시 run 실패. → [reliability.md](reliability.md)
 - **`report`는 `all_done`** — 일부 데이터셋이 실패해도 리포트는 항상 돌아 커버리지·SLO 스냅샷을 남긴다.
 
+### 변환 오케스트레이션 (culture_transform)
+
+DAG [`culture_transform`](../culture_transform.py) — bronze → silver/gold dbt 변환. 태스크 흐름:
+
+```text
+dbt_source_freshness ──▶ dbt_seed ──▶ dbt_run ──▶ dbt_test
+```
+
+- **왜 Asset 트리거인가** — cron이 아니라 `culture_bronze`의 **load_bronze outlet**
+  (`Asset("iceberg://culture/bronze")`, #102)을 **구독**해 기동한다(`schedule=[Asset(...)]`).
+  bronze가 **실제로 갱신됐을 때만** 변환이 돈다 — 수집이 실패·지연된 날에도 시간표대로 도는
+  cron의 **우연 결합**이 사라져, 낡은 bronze 위에서 헛도는 run이 없다. 논리 Asset URI는
+  target(dev/prod)과 무관하며 [`config.py`](../culture_ingest/common/config.py)의
+  `CULTURE_BRONZE_ASSET`이 outlet·schedule의 **단일 진실 원천**.
+- **freshness 게이트를 맨 앞에** — `dbt source freshness`가 `sources.yml` 계약(경고 30h/에러 48h)을
+  실측한다. **error만 실패**시켜, bronze가 48h 넘게 낡았으면 seed/run/test로 나아가지 않고 **여기서
+  멈춘다** → 낡은 입력으로 silver/gold를 오염시키는 대신 **수집부터 고치게** 신호를 준다.
+- **seed → run → test** — seed(`sema_branch_gu`, 시립미술관 분관→자치구 매핑)는 작아서 매 run 멱등
+  갱신. run이 silver 9종 + gold 3종을 dbt `ref()` 순서로 빌드하고, test가 계약을 검증한다.
+- **target 파라미터** — 트리거 시 덮어쓸 수 있고 기본 dev. dbt target이 카탈로그(iceberg_dev/iceberg)를
+  가른다. → [change-log #103](../change-log.md)
+
 ### 데이터 흐름 (오케스트레이션 관점)
 
 한 데이터셋이 거치는 경로:
