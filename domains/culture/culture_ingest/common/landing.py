@@ -104,6 +104,7 @@ class DatasetResult:
             "rows": self.rows,
             "bytes": self.bytes_written,
             "error": self.error,
+            "object_keys": self.object_keys,  # load_bronze(raw→Iceberg) 입력 — 리포트에선 제거됨
             "checks": self.checks,
             "iceberg_rows": self.iceberg_rows,
             "duration_sec": self.duration_sec,

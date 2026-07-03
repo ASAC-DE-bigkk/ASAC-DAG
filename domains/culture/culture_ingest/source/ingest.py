@@ -242,7 +242,8 @@ def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int
 
     "깨지면 얼마나 빨리 알고, 무엇이 영향인지 숫자로" — bronze v0의 SLO 측정점.
     """
-    rows = [s for s in summaries if s]
+    # object_keys는 태스크 간 전달용 — 리포트 JSON에는 싣지 않는다(리니지는 _manifest.json).
+    rows = [{k: v for k, v in s.items() if k != "object_keys"} for s in summaries if s]
     landed = [s for s in rows if not s["error"]]
     skipped = [s for s in rows if s["error"] and "skipped" in s["error"]]
     failed = [s for s in rows if s["error"] and "skipped" not in s["error"]]
