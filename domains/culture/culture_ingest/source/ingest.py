@@ -343,6 +343,58 @@ def build_warehouse(target: str = "dev") -> BronzeWarehouse:
     return BronzeWarehouse(build_warehouse_settings(target))
 
 
+def load_bronze_from_raw(
+    ctx: RunContext,
+    summaries: list[dict],
+    *,
+    sink,
+    warehouse,
+) -> dict[str, int]:
+    """fetch 단계가 raw에 박제한 객체를 다시 읽어 bronze Iceberg에 멱등 적재한다.
+
+    입력은 R2 raw뿐(API 재호출 없음) — bronze만 실패한 run은 이 단계만 재시도하면
+    된다. 데이터셋 단위로 격리해 하나가 실패해도 나머지는 적재하고, 말미에 실패
+    목록으로 예외를 던진다(fail loud). 적재 자체는 ``warehouse.load``의
+    ingest_ts delete-then-insert 라 재실행이 중복을 만들지 않는다.
+    반환: {dataset: 적재 행 수} (에러/skipped 데이터셋은 제외).
+    """
+    loaded: dict[str, int] = {}
+    failures: list[str] = []
+    for s in summaries:
+        if not s or s.get("error"):
+            continue  # 실패/skipped 데이터셋은 적재 대상 아님(리포트가 이미 드러냄)
+        ds = BY_NAME[s["name"]]
+        try:
+            records = []
+            for key in s.get("object_keys") or []:
+                filename = key.rsplit("/", 1)[-1]
+                for rec in parse_records(ds.source, sink.get(key), ds.row_tag, ds.endpoint):
+                    records.append((key, filename, rec))
+            loaded[ds.name] = warehouse.load(ds, ctx, records)
+        except Exception as exc:  # noqa: BLE001 -- 데이터셋별 격리, 말미 fail loud
+            failures.append(f"{ds.name}: {type(exc).__name__}: {exc}")
+    if failures:
+        raise RuntimeError("bronze 적재 실패: " + " | ".join(failures))
+    return loaded
+
+
+def load_bronze(
+    ctx: RunContext,
+    summaries: list[dict],
+    *,
+    target: str = "dev",
+    env_file: str | None = None,
+) -> dict[str, int]:
+    """R2 싱크·Trino 웨어하우스를 만들어 ``load_bronze_from_raw``를 실행 (DAG/CLI 공용)."""
+    settings = build_r2_settings(target, env_file)
+    missing = missing_r2(settings)
+    if missing:
+        raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
+    return load_bronze_from_raw(
+        ctx, summaries, sink=R2Sink(settings), warehouse=build_warehouse(target)
+    )
+
+
 def run_batch(
     names: list[str] | None,
     *,
