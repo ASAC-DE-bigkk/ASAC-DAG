@@ -80,7 +80,7 @@ cp .env.commerce.example .env.commerce     # PowerShell: Copy-Item
 | 변수 | 기본값 | 필수 | 설명 |
 |---|---|---|---|
 | `SEOUL_API_KEY_COMM` | (없음) | **예** | 인증키. **루트 `.env` 에서 주입**(ASAC-DAG#70 이관, `SEOUL_API_KEY_<도메인>` 규칙) — 반드시 채워야 bronze 수집 가능. 로그/경로/메타에 노출 금지 |
-| `SEOUL_OPENAPI_BASE_URL` | `http://openapi.seoul.go.kr:8088` | 아니오 | API 베이스 URL |
+| `SEOUL_OPEN_API_BASE_URL` | `http://openapi.seoul.go.kr:8088` | 아니오 | API 베이스 URL |
 | `SEOUL_PAGE_SIZE` | `1000` | 아니오 | 1회 조회 건수(서울 상한 1000으로 캡) |
 | `SEOUL_MAX_PAGES` | (없음)=무제한 | 아니오 | **비우면/미설정=무제한**(끝까지 순회). 일반 API 는 호출 횟수 제한 없음. `>0`=부분 수집(개발용), `0`·음수도 무제한 |
 | `SEOUL_REQUEST_DELAY_SECONDS` | `0.2` | 아니오 | 페이지 간 지연(초) |

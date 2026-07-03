@@ -82,7 +82,7 @@ def test_collect_secret_values_rules():
         "SEOUL_API_KEY_COMM": _KEY,                  # 수집
         "R2_SECRET_ACCESS_KEY": "secretvalue123456",  # 수집
         "R2_ACCESS_KEY_ID": "accesskeyid123456",    # 수집
-        "SEOUL_OPENAPI_BASE_URL": "http://x/y",     # deny(_URL)
+        "SEOUL_OPEN_API_BASE_URL": "http://x/y",    # deny(_URL)
         "R2_ENDPOINT": "https://e",                 # 이름 비시크릿
         "STORAGE_BACKEND": "local",                 # 비시크릿
         "R2_REGION": "auto",                        # 짧음/비시크릿

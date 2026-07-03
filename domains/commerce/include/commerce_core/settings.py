@@ -71,7 +71,8 @@ def get_settings() -> Settings:
         r2_region=os.getenv("R2_REGION", "auto"),
         seoul_openapi_key=os.getenv("SEOUL_API_KEY_COMM", ""),
         seoul_openapi_base_url=os.getenv(
-            "SEOUL_OPENAPI_BASE_URL", "http://openapi.seoul.go.kr:8088"
+            # 루트 .env 통일 이름(#78 — #72 키 통일과 같은 원칙, 구 SEOUL_OPENAPI_BASE_URL)
+            "SEOUL_OPEN_API_BASE_URL", "http://openapi.seoul.go.kr:8088"
         ),
         seoul_page_size=min(_env_int("SEOUL_PAGE_SIZE", 1000), 1000),
         seoul_max_pages=_env_limit("SEOUL_MAX_PAGES"),  # 값 없으면 무제한(None)

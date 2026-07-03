@@ -7,6 +7,18 @@
 
 ## 2026-07-03
 
+### 29. 서울 base URL env 이름 통일 — SEOUL_OPEN_API_BASE_URL (#78)
+
+request:
+- 루트 `.env` 통합 원칙(#72)에 따라 base URL env 이름도 루트 이름
+  `SEOUL_OPEN_API_BASE_URL`로 통일할 것 — 사용자 결정.
+
+response:
+- `settings.py` 읽기 훅 `SEOUL_OPENAPI_BASE_URL` → `SEOUL_OPEN_API_BASE_URL` 개명,
+  configuration.md·test_security.py 예시 동반 개명. 실환경 값 이관 불필요 — #72 때
+  `.env.commerce` 항목은 이미 삭제(코드 기본값과 동일)돼 코드 훅만 남아 있었음.
+- 공용 서울 어댑터(`dags/common/http/seoul.py`)도 같은 이름 하나만 읽는다.
+
 ### 28. include/common → include/commerce_core 개명 + storage 승격 (#109)
 
 request:
