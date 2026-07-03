@@ -39,6 +39,7 @@ from weather_ingest.common.runtime import (  # noqa: E402
     download_raw_object,
     fetch_url,
     is_dev_target,
+    raw_prefix,
     sha256_hex,
     trino_cursor,
     upload_raw_object,
@@ -77,6 +78,68 @@ def dag_run_conf(context: dict) -> dict:
 
 def current_dag_id(context: dict) -> str:
     return getattr(context.get("dag"), "dag_id", DAG_ID)
+
+
+def safe_object_key_segment(value: object) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._=-" else "_" for ch in str(value or "unknown"))
+
+
+def kma_landing_checkpoint_key(context: dict, base_date: str, base_time: str) -> str:
+    dag_id = safe_object_key_segment(current_dag_id(context))
+    run_id = safe_object_key_segment(context["run_id"])
+    return (
+        f"{raw_prefix().rstrip('/')}"
+        f"/_checkpoints/{SOURCE_ID}/dag_id={dag_id}/run_id={run_id}/base-{base_date}{base_time}.json"
+    )
+
+
+def is_missing_r2_object_error(exc: Exception) -> bool:
+    error = (getattr(exc, "response", {}) or {}).get("Error", {})
+    return str(error.get("Code", "")) in {"NoSuchKey", "NotFound", "404"}
+
+
+def raw_object_grid_key(raw_object: dict) -> tuple[int, int]:
+    return int(raw_object["nx"]), int(raw_object["ny"])
+
+
+def load_kma_landing_checkpoint(checkpoint_key: str, base_date: str, base_time: str) -> list[dict]:
+    try:
+        raw_bytes = download_raw_object(checkpoint_key, "KMA landing checkpoint")
+    except Exception as exc:
+        if is_missing_r2_object_error(exc):
+            return []
+        raise
+    payload = json.loads(raw_bytes.decode("utf-8"))
+    if payload.get("base_date") != base_date or payload.get("base_time") != base_time:
+        raise RuntimeError(f"KMA landing checkpoint base mismatch: {checkpoint_key}")
+    raw_objects = payload.get("raw_objects") or []
+    if not isinstance(raw_objects, list):
+        raise RuntimeError(f"KMA landing checkpoint raw_objects must be a list: {checkpoint_key}")
+    return raw_objects
+
+
+def save_kma_landing_checkpoint(
+    checkpoint_key: str,
+    *,
+    context: dict,
+    base_date: str,
+    base_time: str,
+    raw_objects: list[dict],
+) -> None:
+    payload = {
+        "source_id": SOURCE_ID,
+        "dag_id": current_dag_id(context),
+        "dag_run_id": context["run_id"],
+        "base_date": base_date,
+        "base_time": base_time,
+        "raw_objects": raw_objects,
+    }
+    upload_raw_object(
+        raw_bytes=json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8"),
+        object_key=checkpoint_key,
+        content_type="application/json; charset=utf-8",
+        log_label="KMA landing checkpoint",
+    )
 
 
 def discord_report_date(context) -> str:
@@ -190,14 +253,24 @@ def land_kma_raw(**context) -> dict:
         or resolve_kma_base_datetime()
     )
     grids = load_kma_grids()
+    checkpoint_key = kma_landing_checkpoint_key(context, base_date, base_time)
+    checkpoint_raw_objects = load_kma_landing_checkpoint(checkpoint_key, base_date, base_time)
+    checkpoint_by_grid = {raw_object_grid_key(item): item for item in checkpoint_raw_objects}
     raw_objects = []
-    for index, grid in enumerate(grids):
-        if index:
+    api_request_count = 0
+    reused_raw_object_count = 0
+    for grid in grids:
+        nx = int(grid["nx"])
+        ny = int(grid["ny"])
+        existing_raw_object = checkpoint_by_grid.get((nx, ny))
+        if existing_raw_object:
+            raw_objects.append(existing_raw_object)
+            reused_raw_object_count += 1
+            continue
+        if api_request_count:
             time.sleep(KMA_REQUEST_DELAY_SECONDS)
         collected_at = datetime.now(timezone.utc)
         request_id = str(uuid.uuid4())
-        nx = int(grid["nx"])
-        ny = int(grid["ny"])
         url = build_kma_url(base_date=base_date, base_time=base_time, nx=nx, ny=ny)
         http_status, raw_bytes = fetch_url(
             url,
@@ -222,27 +295,39 @@ def land_kma_raw(**context) -> dict:
             content_type="application/json; charset=utf-8",
             log_label="KMA raw payload",
         )
-        raw_objects.append(
-            {
-                "request_id": request_id,
-                "raw_object_key": raw_object_key,
-                "raw_hash": raw_hash,
-                "http_status": http_status,
-                "collected_at": collected_at.isoformat(),
-                "place_id": str(grid["place_id"]),
-                "base_date": base_date,
-                "base_time": base_time,
-                "nx": nx,
-                "ny": ny,
-            }
+        raw_object = {
+            "request_id": request_id,
+            "raw_object_key": raw_object_key,
+            "raw_hash": raw_hash,
+            "http_status": http_status,
+            "collected_at": collected_at.isoformat(),
+            "place_id": str(grid["place_id"]),
+            "base_date": base_date,
+            "base_time": base_time,
+            "nx": nx,
+            "ny": ny,
+        }
+        raw_objects.append(raw_object)
+        api_request_count += 1
+        save_kma_landing_checkpoint(
+            checkpoint_key,
+            context=context,
+            base_date=base_date,
+            base_time=base_time,
+            raw_objects=raw_objects,
         )
-    print(f"Landed {len(raw_objects)} KMA raw objects for {len(grids)} grids")
+    print(
+        f"Landed {len(raw_objects)} KMA raw objects for {len(grids)} grids "
+        f"(reused={reused_raw_object_count}, api_requests={api_request_count})"
+    )
     return {
         "source_id": SOURCE_ID,
         "raw_objects": raw_objects,
         "raw_object_keys": [item["raw_object_key"] for item in raw_objects],
         "grid_count": len(grids),
         "api_call_count": len(raw_objects),
+        "api_request_count": api_request_count,
+        "reused_raw_object_count": reused_raw_object_count,
         "base_date": base_date,
         "base_time": base_time,
     }
