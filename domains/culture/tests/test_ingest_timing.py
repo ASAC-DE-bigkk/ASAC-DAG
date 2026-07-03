@@ -30,7 +30,7 @@ def _run(tmp_path, name, include_detail=False):
         def detail(self, *a, **k): raise RuntimeError("no net")
 
     clients = Clients(kopis=DeadKopis(), seoul=None)
-    return ingest_dataset(ds, clients, landing, opts, warehouse=None)
+    return ingest_dataset(ds, clients, landing, opts)
 
 
 def test_timing_set_on_skipped_path(tmp_path):

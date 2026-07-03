@@ -24,6 +24,7 @@ from culture_ingest.source.config import LANDING_ROOT  # noqa: E402
 from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     build_run_report,
+    load_bronze,
     run_batch,
     write_run_report,
 )
@@ -41,7 +42,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-rows", type=int, default=None, help="서울 행 수 상한")
     p.add_argument("--max-detail", type=int, default=200)
     p.add_argument("--include-detail", action="store_true")
-    p.add_argument("--write-iceberg", action="store_true", help="R2 적재 후 bronze Iceberg 테이블에도 적재(Trino)")
+    p.add_argument("--write-iceberg", action="store_true", help="R2 적재 후 bronze Iceberg에도 적재(fetch→load 순차 실행)")
     p.add_argument("--dry-run", action="store_true", help="로컬 디렉토리에 기록, R2 건너뜀")
     p.add_argument("--local-dir", default="./_dryrun")
     p.add_argument("--run-id", default="manual")
@@ -58,7 +59,6 @@ def main(argv=None) -> int:
         max_rows=args.max_rows,
         max_detail=args.max_detail,
         include_detail=args.include_detail,
-        write_iceberg=args.write_iceberg,
     )
 
     try:
@@ -74,6 +74,22 @@ def main(argv=None) -> int:
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    # fetch 성공분을 이어서 bronze Iceberg에 적재 (한 프로세스에서 fetch→load).
+    # load 실패는 fetch 설정 실패(exit 2)와 구분해 exit 1 — raw는 이미 박제됐으니
+    # 아래 fetch 리포트는 그대로 출력하고, 재시도는 load 단계만 하면 된다.
+    load_failed = False
+    if args.write_iceberg and not args.dry_run:
+        try:
+            loaded = load_bronze(
+                ctx, [r.summary() for r in results], target=args.target, env_file=args.env_file
+            )
+            for r in results:
+                r.iceberg_rows = loaded.get(r.name, 0)
+            print(f"iceberg loaded: {sum(loaded.values())} rows across {len(loaded)} datasets")
+        except RuntimeError as exc:
+            load_failed = True
+            print(f"ERROR bronze load: {exc}", file=sys.stderr)
 
     sink = "file://" + args.local_dir if args.dry_run else f"r2://{args.target}"
     print(f"target={args.target} sink={sink} load_date={ctx.load_date} ingest_ts={ctx.ingest_ts}")
@@ -121,7 +137,7 @@ def main(argv=None) -> int:
         for r in failed:
             print(f"  FAILED {r.name}: {r.error}", file=sys.stderr)
         return 1
-    return 0
+    return 1 if load_failed else 0
 
 
 if __name__ == "__main__":

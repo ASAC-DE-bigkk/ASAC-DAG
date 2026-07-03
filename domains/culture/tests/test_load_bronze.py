@@ -116,6 +116,8 @@ def test_load_bronze_fails_when_parse_loses_rows():
     summaries = [_summary(name="kopis_performance", keys=("k1",), rows=2)]
     with pytest.raises(RuntimeError, match="파싱 유실"):
         load_bronze_from_raw(CTX, summaries, sink=sink, warehouse=wh)
+    # 대조는 적재 **앞**에서 — 의심 데이터는 테이블에 아예 쓰지 않는다.
+    assert wh.calls == []
 
 
 def test_load_bronze_isolates_unknown_dataset_name():
