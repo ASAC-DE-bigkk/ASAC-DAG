@@ -62,7 +62,9 @@ raw 박제(fetch_raw)는 성공했는데 `load_bronze`만 실패한 run은 **API
 load_bronze만 재실행하면 된다. 같은 `ingest_ts` 파티션을 delete-then-insert 하므로 멱등:
 
 ```bash
-airflow tasks clear culture_bronze -t load_bronze -s <ts> -e <ts> --yes
+# <ts> = 해당 run의 logical date (ISO8601, 예: 2026-07-03T00:00:00+09:00)
+# -d: downstream(report)도 함께 재실행 — 리포트·Discord의 load_failed 표기까지 갱신
+airflow tasks clear culture_bronze -t load_bronze -d -s <ts> -e <ts> --yes
 ```
 
 `run_report.json`의 `load_failed: true`(리포트/Discord 알림)가 이 케이스의 신호다.
