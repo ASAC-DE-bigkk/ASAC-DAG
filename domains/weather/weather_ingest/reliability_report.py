@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -17,6 +17,7 @@ IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger(__name__)
 
+WEATHER_BRONZE_DAG_ID = "weather_vilage_fcst_bronze"
 WEATHER_TABLE = "bronze_kma_vilage_fcst"
 WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "WEATHER_DISCORD_WEBHOOK_URL")
 SCHEDULE_ENV = "ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE"
@@ -168,6 +169,29 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
     }
 
 
+def collect_dag_run_summary(dag_id: str, detected_at: datetime, lookback_hours: int) -> dict[str, Any]:
+    from airflow.models.dagrun import DagRun
+    from airflow.settings import Session
+    from sqlalchemy import func
+
+    cutoff = detected_at.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
+    session = Session()
+    try:
+        rows = (
+            session.query(DagRun.state, func.count())
+            .filter(DagRun.dag_id == dag_id, DagRun.run_after >= cutoff)
+            .group_by(DagRun.state)
+            .all()
+        )
+    finally:
+        session.close()
+    summary = {"dag_id": dag_id, "success": 0, "failed": 0, "running": 0}
+    for state, count in rows:
+        if state in summary:
+            summary[state] = int(count)
+    return summary
+
+
 def build_weather_reliability_report(cursor=None, detected_at: datetime | None = None) -> dict[str, Any]:
     config = report_config()
     cursor = cursor or trino_cursor()
@@ -181,6 +205,17 @@ def build_weather_reliability_report(cursor=None, detected_at: datetime | None =
             "error": str(exc),
             "table": _qualified(config, WEATHER_TABLE),
         }
+    try:
+        dag_runs = collect_dag_run_summary(WEATHER_BRONZE_DAG_ID, detected_at, config.lookback_hours)
+    except Exception as exc:
+        dag_runs = {
+            "dag_id": WEATHER_BRONZE_DAG_ID,
+            "success": 0,
+            "failed": 0,
+            "running": 0,
+            "reason": "dag_run_query_failed",
+            "error": str(exc),
+        }
 
     return {
         "report_name": "weather_bronze_reliability",
@@ -190,6 +225,7 @@ def build_weather_reliability_report(cursor=None, detected_at: datetime | None =
         "lookback_hours": config.lookback_hours,
         "status": weather["status"],
         "weather": weather,
+        "dag_runs": dag_runs,
         "blast_radius": [_qualified(config, WEATHER_TABLE)],
     }
 
@@ -219,6 +255,15 @@ def format_weather_discord_message(report: dict[str, Any]) -> str:
             f"rows={weather.get('row_count', 0)} raw_objects={weather.get('raw_object_count', 0)} "
             f"base={weather.get('base_date', '-')}{weather.get('base_time', '')} "
             f"reason={weather.get('reason', '-')}"
+        ),
+        "",
+        f"**DAG runs / last {report['lookback_hours']}h**",
+        (
+            f"- dag_id=`{report['dag_runs'].get('dag_id')}` "
+            f"success={report['dag_runs'].get('success', 0)} "
+            f"failed={report['dag_runs'].get('failed', 0)} "
+            f"running={report['dag_runs'].get('running', 0)} "
+            f"reason={report['dag_runs'].get('reason', '-')}"
         ),
         "",
         "**Checks**",

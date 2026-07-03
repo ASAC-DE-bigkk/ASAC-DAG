@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -17,6 +17,7 @@ IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger(__name__)
 
+TRAFFIC_BRONZE_DAG_ID = "traffic_incident_bronze"
 TRAFFIC_TABLE = "bronze_seoul_traffic_incident"
 TRAFFIC_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
 WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "TRAFFIC_DISCORD_WEBHOOK_URL")
@@ -171,6 +172,29 @@ def collect_traffic_summary(cursor, config: TrafficReportConfig, detected_at: da
     }
 
 
+def collect_dag_run_summary(dag_id: str, detected_at: datetime, lookback_hours: int) -> dict[str, Any]:
+    from airflow.models.dagrun import DagRun
+    from airflow.settings import Session
+    from sqlalchemy import func
+
+    cutoff = detected_at.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
+    session = Session()
+    try:
+        rows = (
+            session.query(DagRun.state, func.count())
+            .filter(DagRun.dag_id == dag_id, DagRun.run_after >= cutoff)
+            .group_by(DagRun.state)
+            .all()
+        )
+    finally:
+        session.close()
+    summary = {"dag_id": dag_id, "success": 0, "failed": 0, "running": 0}
+    for state, count in rows:
+        if state in summary:
+            summary[state] = int(count)
+    return summary
+
+
 def build_traffic_reliability_report(cursor=None, detected_at: datetime | None = None) -> dict[str, Any]:
     config = report_config()
     cursor = cursor or trino_cursor()
@@ -185,6 +209,17 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
             "table": _qualified(config, TRAFFIC_TABLE),
             "audit_table": _qualified(config, TRAFFIC_AUDIT_TABLE),
         }
+    try:
+        dag_runs = collect_dag_run_summary(TRAFFIC_BRONZE_DAG_ID, detected_at, config.lookback_hours)
+    except Exception as exc:
+        dag_runs = {
+            "dag_id": TRAFFIC_BRONZE_DAG_ID,
+            "success": 0,
+            "failed": 0,
+            "running": 0,
+            "reason": "dag_run_query_failed",
+            "error": str(exc),
+        }
 
     return {
         "report_name": "traffic_bronze_reliability",
@@ -194,6 +229,7 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
         "lookback_hours": config.lookback_hours,
         "status": traffic["status"],
         "traffic": traffic,
+        "dag_runs": dag_runs,
         "blast_radius": [
             _qualified(config, TRAFFIC_TABLE),
             _qualified(config, TRAFFIC_AUDIT_TABLE),
@@ -226,6 +262,15 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
             f"/{traffic.get('list_total_count', 0)} "
             f"requested_end={traffic.get('max_end_index', 0)} zero_row_ok={traffic.get('zero_row_success_count', 0)} "
             f"reason={traffic.get('reason', '-')}"
+        ),
+        "",
+        f"**DAG runs / last {report['lookback_hours']}h**",
+        (
+            f"- dag_id=`{report['dag_runs'].get('dag_id')}` "
+            f"success={report['dag_runs'].get('success', 0)} "
+            f"failed={report['dag_runs'].get('failed', 0)} "
+            f"running={report['dag_runs'].get('running', 0)} "
+            f"reason={report['dag_runs'].get('reason', '-')}"
         ),
         "",
         "**Checks**",
