@@ -64,6 +64,8 @@ _TOK = "zzzz" + "zzzzzzzz"
     ("aws_secret_access_key=" + _PRIV, _PRIV),
     (_AKIA + " used", _AKIA),
     ("token=" + _TOK + " next", _TOK),
+    # 공공데이터포털/KMA 쿼리 키(#78) — URL 인코딩된 값도 & 앞까지 통째로 마스킹
+    ("/api/rest/arrive?serviceKey=" + "enc%2Bkey%3D%3D" + "&busRouteId=1", "enc%2Bkey%3D%3D"),
 ])
 def test_structural_patterns_mask(text, secret):
     assert secret not in Redactor().redact_text(text)
@@ -82,7 +84,7 @@ def test_collect_secret_values_rules():
         "SEOUL_API_KEY_COMM": _KEY,                  # 수집
         "R2_SECRET_ACCESS_KEY": "secretvalue123456",  # 수집
         "R2_ACCESS_KEY_ID": "accesskeyid123456",    # 수집
-        "SEOUL_OPENAPI_BASE_URL": "http://x/y",     # deny(_URL)
+        "SEOUL_OPEN_API_BASE_URL": "http://x/y",    # deny(_URL)
         "R2_ENDPOINT": "https://e",                 # 이름 비시크릿
         "STORAGE_BACKEND": "local",                 # 비시크릿
         "R2_REGION": "auto",                        # 짧음/비시크릿
