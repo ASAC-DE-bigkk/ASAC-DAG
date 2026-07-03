@@ -1,43 +1,37 @@
-"""서울 교통 실시간 API 호출 헬퍼 (표준 라이브러리만 사용).
+"""서울 교통 실시간 API 호출 헬퍼 — 공통 HTTP 클라이언트(#78) 경유.
 
-외부 API 일시 오류(5xx·429·네트워크·timeout)에 지수 백오프로 재시도한다.
-예: ws.bus.go.kr 가 간헐적으로 HTTP 503 → 한 번의 일시 오류로 태스크가 죽지 않게.
-영구 오류(4xx: 잘못된 키/파라미터 등)는 재시도해도 의미 없어 즉시 올린다.
+외부 API 일시 오류(5xx·429·네트워크·timeout) 재시도는 HttpCore 가 수행한다.
+기존(#29) 지수 백오프 정책 — 2·4·8s, 최초 1회 + 재시도 3회 — 을
+max_attempts/backoff_base 로 보존(HttpCore 는 여기에 jitter·Retry-After 존중 추가).
+영구 오류(4xx: 잘못된 키/파라미터 등)는 재시도 없이 즉시 HttpProblemError 로 올린다.
 """
 
 import json
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
+
+from common.http import HttpCore
 
 SUBWAY_BASE = "http://swopenapi.seoul.go.kr/api/subway"  # 지하철 도착·위치 (JSON)
 OPENAPI_BASE = "http://openapi.seoul.go.kr:8088"          # 주차·citydata(도로) (JSON)
 BUS_BASE = "http://ws.bus.go.kr/api/rest"                 # 서울 TOPIS 버스 도착·위치 (XML)
 
-_RETRIES = 3            # 일시 오류 시 추가 시도 횟수
-_BACKOFF = 2.0         # 백오프 기준(초) → 2, 4, 8s
+_MAX_ATTEMPTS = 4       # 기존 _RETRIES=3(추가 시도) + 최초 1회
+_BACKOFF_BASE = 2.0     # 기존 _BACKOFF=2.0 → 2, 4, 8s
 
-_HEADERS = {"User-Agent": "asac-transit-collector/1.0"}
+_CORE = HttpCore(
+    source="seoul_openapi",
+    max_attempts=_MAX_ATTEMPTS,
+    backoff_base=_BACKOFF_BASE,
+    user_agent="asac-transit-collector/1.0",
+)
 
 
 def _read(url: str, timeout: int) -> str:
-    """원본 응답 텍스트. 일시 오류(5xx·429·URLError·timeout)에 지수 백오프 재시도, 4xx 는 즉시 실패."""
-    last = None
-    for attempt in range(_RETRIES + 1):
-        try:
-            req = urllib.request.Request(url, headers=_HEADERS)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            last = e
-            if e.code < 500 and e.code != 429:  # 4xx(429 제외) = 재시도 무의미 → 즉시 실패
-                raise
-        except (urllib.error.URLError, TimeoutError) as e:  # 연결 실패/타임아웃
-            last = e
-        if attempt < _RETRIES:
-            time.sleep(_BACKOFF * (2 ** attempt))
-    raise last  # 모든 재시도 소진 → 마지막 예외를 올림(태스크 실패로 드러냄)
+    """원본 응답 텍스트. 일시 오류 재시도·소진 시 HttpProblemError 는 HttpCore 소관.
+
+    URL 에 키가 박혀 있어도(서울식 경로 키) 로그·예외에서는 redact 된다.
+    """
+    return _CORE.get(url, timeout=timeout).text
 
 
 def get(url: str, timeout: int = 20) -> dict:
