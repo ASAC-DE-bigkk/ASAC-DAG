@@ -24,13 +24,11 @@ SOURCE = "seoul_openapi"
 def _env_base_url() -> str:
     """base URL 해석: 인자 > env > 코드 안전 기본값(값이 없어도 깨지지 않게).
 
-    env 이름이 도메인마다 갈라져 있어 둘 다 읽는다 — 루트 .env 는
-    SEOUL_OPEN_API_BASE_URL(population), commerce 번들은 SEOUL_OPENAPI_BASE_URL.
-    이름 통일은 후속 과제(기획 문서 '열어둔 질문' 참고).
+    env 이름은 루트 .env 로 통일된 `SEOUL_OPEN_API_BASE_URL` 하나만 읽는다
+    (#78 결정 — #72 키 통일과 같은 원칙. commerce 의 옛 이름
+    `SEOUL_OPENAPI_BASE_URL` 은 코드 훅까지 이 이름으로 개명됨).
     """
-    return (os.environ.get("SEOUL_OPEN_API_BASE_URL")
-            or os.environ.get("SEOUL_OPENAPI_BASE_URL")
-            or DEFAULT_BASE_URL)
+    return os.environ.get("SEOUL_OPEN_API_BASE_URL") or DEFAULT_BASE_URL
 
 
 class SeoulOpenApiClient:

@@ -73,6 +73,7 @@ dags/common/http/
 
 ## 열어둔 질문
 
-1. 서울 base URL env 이름 통일 — 현재 `SEOUL_OPEN_API_BASE_URL`(루트 .env·population) vs
-   `SEOUL_OPENAPI_BASE_URL`(commerce 번들)로 갈라져 있음. 어댑터는 둘 다 읽게 해뒀으나
-   Step 0.5(계약 통일)의 키 이름 통일과 같은 방식으로 한쪽으로 정리 필요
+- (없음) 서울 base URL env 이름은 **루트 .env 이름 `SEOUL_OPEN_API_BASE_URL`로 통일 완료**
+  (#78 — #72 키 통일과 같은 원칙, 사용자 결정). commerce 코드 훅·문서·테스트 예시의
+  구 이름 `SEOUL_OPENAPI_BASE_URL` 은 전부 개명. 실환경 값 이관 불필요 — #72 때
+  `.env.commerce` 항목은 이미 삭제(기본값과 동일)돼 코드 훅만 남아 있었음

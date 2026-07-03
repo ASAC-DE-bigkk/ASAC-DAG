@@ -207,18 +207,13 @@ def test_seoul_client_per_call_key_override():
     assert "override-key-11111" in transport.calls[0]["url"]
 
 
-def test_seoul_client_base_url_from_env_both_names(monkeypatch):
-    # 루트 .env 이름(SEOUL_OPEN_API_BASE_URL)이 1순위, commerce 이름은 폴백
-    core, transport, _ = _core([_ok(), _ok(), _ok()])
+def test_seoul_client_base_url_unified_env_name(monkeypatch):
+    # 루트 .env 로 통일된 이름 하나만 읽는다(#78 결정). 없으면 코드 안전 기본값.
+    core, transport, _ = _core([_ok(), _ok()])
     monkeypatch.setenv("SEOUL_OPEN_API_BASE_URL", "http://from-root-env")
-    monkeypatch.setenv("SEOUL_OPENAPI_BASE_URL", "http://from-commerce-env")
     SeoulOpenApiClient(core, _KEY).fetch_bytes("SVC", 1, 5)
     assert transport.calls[0]["url"].startswith("http://from-root-env/")
 
     monkeypatch.delenv("SEOUL_OPEN_API_BASE_URL")
     SeoulOpenApiClient(core, _KEY).fetch_bytes("SVC", 1, 5)
-    assert transport.calls[1]["url"].startswith("http://from-commerce-env/")
-
-    monkeypatch.delenv("SEOUL_OPENAPI_BASE_URL")
-    SeoulOpenApiClient(core, _KEY).fetch_bytes("SVC", 1, 5)
-    assert transport.calls[2]["url"].startswith("http://openapi.seoul.go.kr:8088/")
+    assert transport.calls[1]["url"].startswith("http://openapi.seoul.go.kr:8088/")
