@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,8 @@ from weather_ingest.kma import (  # noqa: E402
 KMA_PUBLISH_CRON_KST = "20 2,5,8,11,14,17,20,23 * * *"
 COMMON_DISCORD_WEBHOOK_ENV = "ASK_SEOUL_DISCORD_WEBHOOK_URL"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
+KMA_REQUEST_DELAY_SECONDS = 5
+KMA_RETRY_STATUSES = (429, 500, 502, 503, 504)
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
@@ -165,13 +168,21 @@ def land_kma_raw(**context) -> dict:
     base_date, base_time = resolve_kma_base_datetime()
     grids = load_kma_grids()
     raw_objects = []
-    for grid in grids:
+    for index, grid in enumerate(grids):
+        if index:
+            time.sleep(KMA_REQUEST_DELAY_SECONDS)
         collected_at = datetime.now(timezone.utc)
         request_id = str(uuid.uuid4())
         nx = int(grid["nx"])
         ny = int(grid["ny"])
         url = build_kma_url(base_date=base_date, base_time=base_time, nx=nx, ny=ny)
-        http_status, raw_bytes = fetch_url(url, "ask-seoul-kma-bronze/1.0")
+        http_status, raw_bytes = fetch_url(
+            url,
+            "ask-seoul-kma-bronze/1.0",
+            max_attempts=4,
+            retry_statuses=KMA_RETRY_STATUSES,
+            retry_base_delay_seconds=30,
+        )
         parse_kma_response(raw_bytes)
         raw_hash = sha256_hex(raw_bytes)
         raw_object_key = build_raw_object_key(
