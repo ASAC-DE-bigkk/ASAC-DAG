@@ -26,9 +26,6 @@ DEFAULT_USER_AGENT = "ask-seoul-bronze/1.0"
 # Airflow 태스크 retries 몫). 동작 보존을 위해 HttpCore 도 1회로 고정한다.
 MAX_ATTEMPTS = 1
 
-# urllib.urlopen 은 2xx 응답을 성공으로 반환했다 — 성공 기준을 그대로 보존.
-_OK_STATUS = tuple(range(200, 300))
-
 _CORE: HttpCore | None = None
 
 
@@ -41,6 +38,8 @@ def _core() -> HttpCore:
             timeout=float(DEFAULT_TIMEOUT),
             max_attempts=MAX_ATTEMPTS,
             user_agent=DEFAULT_USER_AGENT,
+            # 기존 코드는 호출 간 지연이 없었다 — 코드 기본 5req/s 미적용(#78 리뷰).
+            rate_limit=None,
         )
     return _CORE
 
@@ -60,10 +59,10 @@ def fetch(url: str, *, timeout: int = DEFAULT_TIMEOUT, user_agent: str = DEFAULT
     ``redact_secret``으로 마스킹한 메시지만 로그/메타데이터에 남겨야 한다.
     (HttpCore 가 던지는 ``HttpProblemError`` 는 이미 redact 되어 있다.)
     """
+    # 성공 기준은 core 기본(OK_2XX) — 기존 urlopen 의 "모든 2xx 성공"과 동일.
     response = _core().get(
         url,
         headers={"User-Agent": user_agent},
         timeout=float(timeout),
-        expected_status=_OK_STATUS,
     )
     return HttpResult(status=response.status, body=response.content)
