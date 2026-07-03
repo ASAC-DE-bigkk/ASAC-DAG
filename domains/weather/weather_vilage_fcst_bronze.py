@@ -16,6 +16,12 @@ if DAG_DIR not in sys.path:
 DOMAINS_DIR = os.path.dirname(DAG_DIR)
 if DOMAINS_DIR not in sys.path:
     sys.path.insert(0, DOMAINS_DIR)
+# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+DAGS_ROOT_DIR = os.path.dirname(DOMAINS_DIR)
+if DAGS_ROOT_DIR not in sys.path:
+    sys.path.insert(0, DAGS_ROOT_DIR)
+
+from common.errors.airflow import problem_failure_callback  # noqa: E402
 
 from _shared.bronze_run_manifest import (  # noqa: E402
     STATUS_FAILED,
@@ -56,6 +62,9 @@ DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
 DAG_ID = "weather_vilage_fcst_bronze"
+
+# 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+record_weather_problem = problem_failure_callback(domain="weather", source_system=SOURCE_ID)
 
 
 def discord_report_date(context) -> str:
@@ -345,6 +354,7 @@ with DAG(
     start_manifest = PythonOperator(
         task_id="record_kma_run_started",
         python_callable=record_kma_run_started,
+        on_failure_callback=record_weather_problem,
     )
 
     land_raw = PythonOperator(
@@ -353,7 +363,7 @@ with DAG(
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
-        on_failure_callback=record_and_notify_kma_run_failed,
+        on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
     )
 
     load_bronze = PythonOperator(
@@ -362,14 +372,14 @@ with DAG(
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
-        on_failure_callback=record_and_notify_kma_run_failed,
+        on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
     )
 
     verify_bronze = PythonOperator(
         task_id="verify_kma_bronze_runtime",
         python_callable=verify_kma_bronze_runtime,
         on_success_callback=notify_weather_bronze_success,
-        on_failure_callback=record_and_notify_kma_run_failed,
+        on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
     )
 
     start_manifest >> land_raw >> load_bronze >> verify_bronze
