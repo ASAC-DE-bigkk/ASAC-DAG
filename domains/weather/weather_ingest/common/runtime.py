@@ -1,6 +1,8 @@
 import hashlib
 import os
 import re
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -74,10 +76,40 @@ def sha256_hex(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def fetch_url(url: str, user_agent: str) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, headers={"User-Agent": user_agent})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return response.status, response.read()
+def http_retry_delay(exc: urllib.error.HTTPError, attempt: int, base_delay_seconds: float) -> float:
+    retry_after = exc.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            pass
+    return min(base_delay_seconds * (2 ** (attempt - 1)), 300.0)
+
+
+def fetch_url(
+    url: str,
+    user_agent: str,
+    *,
+    max_attempts: int = 1,
+    retry_statuses: tuple[int, ...] = (),
+    retry_base_delay_seconds: float = 1.0,
+) -> tuple[int, bytes]:
+    retry_codes = set(retry_statuses)
+    for attempt in range(1, max_attempts + 1):
+        request = urllib.request.Request(url, headers={"User-Agent": user_agent})
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code not in retry_codes or attempt >= max_attempts:
+                raise
+            delay = http_retry_delay(exc, attempt, retry_base_delay_seconds)
+            print(
+                f"Source API HTTP {exc.code}; retrying in {delay:.1f}s "
+                f"(attempt {attempt + 1}/{max_attempts})"
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable fetch_url retry state")
 
 
 def upload_raw_object(
