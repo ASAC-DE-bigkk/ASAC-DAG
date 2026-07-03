@@ -13,7 +13,7 @@ commerce 가 **현재 프로젝트에서 정상 동작하기 위해 필요한 �
 ## 1. 어떻게 주입되는가 (`.env.commerce` + 로더)
 
 DAG([../commerce_raw.py](../../commerce_raw.py))가 임포트될 때
-[include/common/env.py](../../include/common/env.py) 의 `load_commerce_env()` 가
+[include/commerce_core/env.py](../../include/commerce_core/env.py) 의 `load_commerce_env()` 가
 이 폴더의 `.env.commerce` 를 읽어 `os.environ` 에 채운다.
 
 ```text
@@ -71,9 +71,9 @@ cp .env.commerce.example .env.commerce     # PowerShell: Copy-Item
 
 ## 2. 환경변수 전체 목록
 
-읽는 코드: [include/common/settings.py](../../include/common/settings.py) ·
-[include/common/registry.py](../../include/common/registry.py) ·
-[include/common/env.py](../../include/common/env.py).
+읽는 코드: [include/commerce_core/settings.py](../../include/commerce_core/settings.py) ·
+[include/commerce_core/registry.py](../../include/commerce_core/registry.py) ·
+[include/commerce_core/env.py](../../include/commerce_core/env.py).
 
 ### 2.1 서울 OpenAPI
 
@@ -151,7 +151,7 @@ cp .env.commerce.example .env.commerce     # PowerShell: Copy-Item
 ```bash
 # 1) env 적재/우선순위 확인(시크릿 미출력)
 PYTHONPATH=dags/domains/commerce/include \
-  python -c "from common.env import load_commerce_env; print(load_commerce_env())"
+  python -c "from commerce_core.env import load_commerce_env; print(load_commerce_env())"
 
 # 2) 인증키/서비스명 검증(컨테이너)
 docker compose exec airflow-scheduler \

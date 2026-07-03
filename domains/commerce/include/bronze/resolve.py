@@ -17,9 +17,9 @@ import sys
 from collections import Counter
 
 from bronze.clients import SeoulApiError, SeoulOpenApiClient
-from common import registry
-from common.env import load_commerce_env
-from common.settings import get_settings
+from commerce_core import registry
+from commerce_core.env import load_commerce_env
+from commerce_core.settings import get_settings
 
 
 def _client() -> SeoulOpenApiClient:

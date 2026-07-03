@@ -20,7 +20,7 @@
 
 | 도메인 | 위치 | 모듈 |
 |---|---|---|
-| commerce | `domains/commerce/include/common/` | env, hashing, notify, paths, registry, schemas, settings, storage |
+| commerce | `domains/commerce/include/commerce_core/` (구 `include/common` — #109 개명) | env, hashing, notify, paths, registry, schemas, settings, storage(어댑터 — 구현은 `dags/common/storage.py`) |
 | culture | `domains/culture/culture_ingest/common/` | checks, config, http, landing, records, warehouse |
 | population | `domains/population/ppltn_ingest/common/` | bronze, config, http, landing, trino |
 | traffic | `domains/traffic/traffic_ingest/common/` | runtime |
@@ -32,7 +32,7 @@
 | 관심사 | 중복 구현 | 통합 목표 |
 |---|---|---|
 | HTTP / API 클라이언트 | culture `http`, population `http`, transit `api`, commerce `clients` | `common/http.py` (TBD) |
-| R2 / 오브젝트 스토리지 랜딩 | culture `landing`, population `landing`, transit `r2_landing`, commerce `storage` | `common/landing.py` (TBD) |
+| R2 / 오브젝트 스토리지 랜딩 | culture `landing`, population `landing`, transit `r2_landing`, ~~commerce `storage`~~ | `common/landing.py` (TBD) — commerce `storage`는 `common/storage.py`로 승격 완료(#109), 나머지 도메인 landing 통합 시 재사용 |
 | 설정 / 환경변수 로딩 | culture·population·transit `config`, commerce `env`·`settings`, traffic·weather `runtime` | `common/config.py` (TBD) |
 | Trino / 웨어하우스 접근 | culture `warehouse`, population `trino` | `common/warehouse.py` (TBD) |
 | 레코드 유틸 | culture `records`, transit `records` | (TBD) |
@@ -71,3 +71,4 @@
 | 2026-07-02 | DAG 네이밍 규칙 `<domain>_<dataset>_<stage>` 확정 (#73) — stage는 역할형(bronze/transform/elt/recollect/smoke), dataset 생략은 옵션(확장 가능성 있으면 명시 권장), 공통 DAG는 `common` 접두, 파일명=dag_id | 접두(`seoul_`/도메인/소스)·단계 표기 혼재 해소. 옛 dag_id 실행 이력은 메타DB에 보존 |
 | 2026-07-02 | (재검토) transit `*_elt` → `*_bronze` 재변경 — elt는 DAG 안 일괄 변환에만 사용. 저장 계약(테이블·경로) 네이밍은 별도 이슈로 분리 | transit 실동작은 bronze 한정(변환은 ASAC-DBT 몫, docstring에 의도 명시) — 같은 접미사의 이중 의미(EL만 vs 일괄) 차단 |
 | 2026-07-02 | (#75 합의) R2 오브젝트 원본 경로 `raw/` 채택, dag_id·Iceberg 테이블명의 `bronze`는 유지. commerce 기존 데이터는 담당자가 raw/로 이관, 코드는 경로만 수정 | 용어 확정: raw=R2 랜딩 원본, bronze=Iceberg 웨어하우스 원본층. PR #74 리뷰(@yooseongjin527) 제안 수용 |
+| 2026-07-03 | (#109) `dags/common`을 **상위 패키지로 확정** — 겹치는 기능만 우선 승격(스토리지), 도메인 기능은 무삭제 보존. commerce `include/common`은 `include/commerce_core`로 개명, 번들 내 top-level `common` 패키지 재도입 금지 | #77 파일럿 검증 중 단일 프로세스 DagBag 로드에서 commerce `common`이 `dags/common`을 가려 `import common.errors` 실패 확인(sys.modules 캐시). 사용자 승인 — 2026-07-02 "dags/common 확정" 결정은 유지·강화, commerce 번들 자립 계약은 개명으로 보존 |

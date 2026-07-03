@@ -103,7 +103,7 @@ curl -s "http://openapi.seoul.go.kr:8088/sample/json/LOCALDATA_072404/1/10/"
 # .env.commerce 에 SEOUL_API_KEY_COMM 설정 후 (configuration.md 참고)
 PYTHONPATH=dags/domains/commerce/include python - <<'PY'
 import json, urllib.request, os
-from common.env import load_commerce_env; load_commerce_env()
+from commerce_core.env import load_commerce_env; load_commerce_env()
 KEY=os.environ["SEOUL_API_KEY_COMM"]; BASE="http://openapi.seoul.go.kr:8088"; SVC="LOCALDATA_072404"
 def page(s,e):
     raw=urllib.request.urlopen(f"{BASE}/{KEY}/json/{SVC}/{s}/{e}/",timeout=60).read()

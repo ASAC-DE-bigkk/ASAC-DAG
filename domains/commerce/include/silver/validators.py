@@ -1,7 +1,7 @@
 """silver 스키마 검증 — 정규화 레코드가 공통 컬럼 계약을 지키는지 점검(순수 함수)."""
 from __future__ import annotations
 
-from common.schemas import COMMON_COLUMNS
+from commerce_core.schemas import COMMON_COLUMNS
 
 
 def validate_normalized(records: list[dict]) -> dict:

@@ -146,7 +146,7 @@ summary = response_summary(status=resp.status_code, body=resp.content)   # 길�
   **운영 지표는 전부 남는다**.
 - **전송**: `log_event()`/`log_exception()`/`api_receipt()` 의 **반환 dict 는 이미 마스킹**돼
   있어 webhook/email/slack 컨텍스트로 그대로 실어 보내도 안전하다
-  (commerce 는 [include/common/notify.py](../../include/common/notify.py) 가 전송 전 `redact()` 를 한 번 더 적용 — 이중 방어).
+  (commerce 는 [include/commerce_core/notify.py](../../include/commerce_core/notify.py) 가 전송 전 `redact()` 를 한 번 더 적용 — 이중 방어).
 
 ---
 
@@ -191,7 +191,7 @@ Low: `xml_parsing_advisory` — 및 **런타임 4종**
 | [include/bronze/clients.py](../../include/bronze/clients.py) | HTTP 호출을 **`netio.http_request()`** 로(정책 단일점) + 예외/재시도 로그 `redact()` |
 | [include/bronze/bronze_tasks.py](../../include/bronze/bronze_tasks.py) | 마커 `error` 필드·실패 로그를 저장/출력 전 `redact()`(이중 방어) |
 | [include/silver/silver_tasks.py](../../include/silver/silver_tasks.py) | `build_silver` 경계에서 `assert_safe_segment(short)`/`assert_iso_date(observed_date)` |
-| [include/common/notify.py](../../include/common/notify.py) | 알림 message·context 를 전송 전 `redact()` |
+| [include/commerce_core/notify.py](../../include/commerce_core/notify.py) | 알림 message·context 를 전송 전 `redact()` |
 | [scripts/*.py](../../scripts/) | env 적재 직후 `install_security()`(스크립트도 엔트리포인트) |
 
 ---

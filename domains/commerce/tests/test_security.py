@@ -197,8 +197,8 @@ def test_bronze_marker_error_is_redacted(tmp_path, monkeypatch):
     refresh_env_secrets()            # 가짜 키를 기본 redactor 에 등록
 
     from bronze import bronze_tasks
-    from common.schemas import Dataset
-    from common.storage import get_storage
+    from commerce_core.schemas import Dataset
+    from commerce_core.storage import get_storage
 
     class _FakeClient:               # fetch_page 가 키 박힌 URL 예외를 던지는 가짜 클라이언트
         def __init__(self, *a, **k): pass

@@ -3,7 +3,7 @@
     PYTHONPATH=dags/domains/commerce/include pytest dags/domains/commerce/tests/test_recollect_rules.py -q
 """
 from bronze import markers as M
-from common import paths
+from commerce_core import paths
 
 
 class _FS:

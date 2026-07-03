@@ -33,9 +33,11 @@ from pathlib import Path
 
 # 자립(portable): 자기 카테고리의 include 를 import 경로에 올린다.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "include"))
+# 공통 패키지(dags/common) — commerce_core.storage 가 common.storage 를 쓴다(#109).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # 번들 자립용 env 적재(프로세스 env 우선). 자세히: docs/configuration/configuration.md
-from common.env import load_commerce_env  # noqa: E402
+from commerce_core.env import load_commerce_env  # noqa: E402
 
 load_commerce_env()
 
@@ -56,9 +58,11 @@ except ImportError:  # Airflow 2.x
     from airflow.operators.python import get_current_context
 
 from bronze import bronze_tasks, markers
-from common import paths, registry
-from common.settings import get_settings
-from common.storage import get_storage
+from commerce_core import paths, registry
+from commerce_core.schemas import SOURCE_SYSTEM
+from commerce_core.settings import get_settings
+from commerce_core.storage import get_storage
+from common.errors.airflow import problem_failure_callback
 
 log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
@@ -69,7 +73,15 @@ COLLECTIBLE = registry.enabled_for_schedule("daily")
 COLLECTIBLE_SHORTS = [d.short for d in COLLECTIBLE]
 PENDING = registry.pending_for_schedule("daily")
 
-_DEFAULT_ARGS = {"owner": "data-eng", "retries": 2, "retry_delay": pendulum.duration(minutes=3)}
+# 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+# default_args 로 걸어 두 DAG(collect/recollect)의 모든 태스크에 일괄 적용한다.
+# (ingest_one 의 비인증 오류는 status=failed 반환으로 격리되어 태스크가 실패하지
+#  않으므로 여기 잡히지 않는다 — 그 경로는 마커/재수집 체계가 담당, 의도 유지.)
+record_commerce_problem = problem_failure_callback(
+    domain="commerce", source_system=SOURCE_SYSTEM)
+
+_DEFAULT_ARGS = {"owner": "data-eng", "retries": 2, "retry_delay": pendulum.duration(minutes=3),
+                 "on_failure_callback": record_commerce_problem}
 _PARAMS = {"observed_date": Param(default="", type="string",
            description="논리 수집일 override (YYYY-MM-DD, silver 파티션). 비우면 run 의 ds.")}
 

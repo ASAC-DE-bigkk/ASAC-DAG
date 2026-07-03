@@ -34,7 +34,7 @@ API 호출이 실패해서 못 모았던 게 아니다. LOCALDATA API 는 코드
 
 ## 1. 메커니즘 (코드로 확인)
 
-수집 대상은 `service_name` 이 채워진 것만이다([../../include/common/registry.py](../../../include/common/registry.py)):
+수집 대상은 `service_name` 이 채워진 것만이다([../../include/commerce_core/registry.py](../../../include/commerce_core/registry.py)):
 
 ```python
 def enabled_for_schedule(schedule):       # DAG 의 수집 대상(=job)

@@ -42,15 +42,15 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "include"))
 
-from common.env import load_commerce_env   # 번들 .env 적재(프로세스 env 우선)
+from commerce_core.env import load_commerce_env   # 번들 .env 적재(프로세스 env 우선)
 load_commerce_env()
 
 from bronze import bronze_tasks        # include/bronze
-from common import registry            # include/common
+from commerce_core import registry            # include/commerce_core
 from silver import silver_tasks        # include/silver
 ```
 
-- 패키지 간 참조도 top-level 로: `from common.settings import get_settings`.
+- 패키지 간 참조도 top-level 로: `from commerce_core.settings import get_settings`.
 - 부트스트랩 직후 `load_commerce_env()` 로 번들 `.env.commerce` 를 적재한다 — 호스트 루트
   `.env` 에 카테고리 변수를 넣지 않아도 `dags/` 와 함께 인자가 따라온다([configuration.md](../configuration/configuration.md)).
 - 테스트는 `tests/conftest.py` 가 동일하게 `include` 를 path 에 올린다.

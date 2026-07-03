@@ -1,6 +1,10 @@
-"""스토리지 추상화 — local(개발) ↔ R2(dev/prod). key 는 백엔드 무관 POSIX 경로.
+"""스토리지 추상화 — local(개발) ↔ R2(S3 호환). key 는 백엔드 무관 POSIX 경로 (#109).
 
-R2 버킷 루트(seoul-dev/) 접두는 R2Storage 가 붙인다. write_parquet 는 silver 전용.
+commerce `include/common/storage.py`(현 `commerce_core`)에서 승격한 범용 부분.
+도메인 결합(Settings)은 제거하고 `build_storage()` 팩토리로 파라미터화했다 —
+도메인별 env 규약(예: commerce STORAGE_BACKEND/COMMERCE_STORAGE_PREFIX)은
+각 도메인 어댑터(`commerce_core.storage.get_storage`)가 유지한다.
+`write_parquet` 는 silver 전용(lazy pandas).
 """
 from __future__ import annotations
 
@@ -9,8 +13,6 @@ import json
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
-
-from common.settings import get_settings
 
 
 class Storage(ABC):
@@ -137,12 +139,13 @@ class R2Storage(Storage):
                              CopySource={"Bucket": self.bucket, "Key": src_key})
 
 
-def get_storage() -> Storage:
-    s = get_settings()
-    if s.storage_backend == "local":
-        return LocalStorage(s.local_data_root)
-    if s.storage_backend == "r2":
-        return R2Storage(bucket=s.r2_bucket, endpoint=s.r2_endpoint,
-                         key=s.r2_access_key_id, secret=s.r2_secret_access_key,
-                         region=s.r2_region)
-    raise ValueError(f"unknown STORAGE_BACKEND: {s.storage_backend!r}")
+def build_storage(backend: str, *, local_root: str = "",
+                  bucket: str = "", endpoint: str = "", key: str = "",
+                  secret: str = "", region: str = "auto") -> Storage:
+    """백엔드 이름으로 Storage 조립 — env 규약은 호출측(도메인 어댑터)이 정한다."""
+    if backend == "local":
+        return LocalStorage(local_root)
+    if backend == "r2":
+        return R2Storage(bucket=bucket, endpoint=endpoint, key=key,
+                         secret=secret, region=region)
+    raise ValueError(f"unknown storage backend: {backend!r}")
