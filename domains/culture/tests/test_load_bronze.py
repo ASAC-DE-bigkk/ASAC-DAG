@@ -31,6 +31,20 @@ def test_run_report_strips_object_keys():
     assert report["coverage"]["landed"] == 1  # 기존 집계는 그대로
 
 
+def test_run_report_load_failed_fails_slo():
+    # fetch 전부 성공이라도 load_bronze 실패면 SLO는 실패 — bronze 미갱신이
+    # 초록 리포트 뒤에 숨는 침묵을 막는다.
+    report = build_run_report([_summary()], CTX, expected_total=1, load_failed=True)
+    assert report["load_failed"] is True
+    assert report["slo_passed"] is False
+
+
+def test_run_report_load_failed_defaults_false():
+    report = build_run_report([_summary()], CTX, expected_total=1)
+    assert report["load_failed"] is False
+    assert report["slo_passed"] is True  # 기존 PASS 판정은 무변화
+
+
 class FakeSink:
     def __init__(self, objects: dict[str, bytes]):
         self.objects = objects

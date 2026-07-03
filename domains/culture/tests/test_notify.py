@@ -77,6 +77,17 @@ def test_payload_hides_iceberg_when_zero():
     assert "Iceberg" not in p["embeds"][0]["description"]
 
 
+def test_payload_load_failed_shows_iceberg_fail():
+    # load_bronze 실패 시 total_iceberg_rows=0 이라 `if ib_total:` 경로로는 Iceberg
+    # 줄이 통째로 사라진다 — load_failed면 항상 FAIL 표기가 있어야 한다.
+    report = _sample_report(True)
+    report["load_failed"] = True
+    report["slo_passed"] = False  # build_run_report(load_failed=True)가 내리는 판정과 동일
+    emb = notify.build_report_payload(report)["embeds"][0]
+    assert "Iceberg 적재: ❌ FAIL (bronze 미갱신)" in emb["description"]
+    assert emb["color"] == notify.COLOR_FAIL
+
+
 def test_dataset_line_has_korean_name_slug_and_rows():
     p = notify.build_report_payload(_sample_report(True))
     desc = p["embeds"][0]["description"]

@@ -169,19 +169,25 @@ def _load_bronze(**context) -> dict:
 
     all_done — 일부 데이터셋 fetch가 실패해도 성공분은 적재한다(실패는 fetch_raw
     태스크가 이미 빨갛고 report가 집계). 성공한 fetch가 하나도 없으면 실패.
+    즉 부분 실패 run에서도 성공분만으로 bronze가 갱신된다(부분 데이터 변환 허용).
     API 재호출 없음: bronze만 깨진 run은 이 태스크만 clear 하면 된다.
     """
     params = context["params"]
     summaries = normalize_mapped_results(context["ti"].xcom_pull(task_ids="fetch_raw"))
-    loadable = [s for s in summaries if not s["error"]]
+    loadable = [s for s in summaries if not s["error"]]  # 하드 실패·skipped(적재할 raw 없음) 모두 제외
     if not loadable:
         raise AirflowException("load_bronze: 성공한 fetch_raw 결과가 없음")
-    end = _interval_end(context)
-    ctx = RunContext(
-        load_date=end.in_timezone(KST).strftime("%Y-%m-%d"),
-        ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
-        run_id=context["dag_run"].run_id,
-    )
+    planned = context["ti"].xcom_pull(task_ids="plan") or []
+    if planned:  # plan이 계산한 값을 그대로 써서 fetch와 같은 파티션을 보장(단일 진실원)
+        first = planned[0]
+        ctx = RunContext(load_date=first["load_date"], ingest_ts=first["ingest_ts"], run_id=first["run_id"])
+    else:  # plan XCom 유실 시 폴백 — 스케줄/수동 run 모두 같은 값으로 재유도된다
+        end = _interval_end(context)
+        ctx = RunContext(
+            load_date=end.in_timezone(KST).strftime("%Y-%m-%d"),
+            ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
+            run_id=context["dag_run"].run_id,
+        )
     loaded = load_bronze(ctx, loadable, target=normalize_target(params["target"]))
     total = sum(loaded.values())
     print(f"[culture bronze] iceberg loaded {total} rows / {len(loaded)} datasets")
@@ -206,7 +212,10 @@ def _report(**context) -> None:
     # 매핑 인스턴스 1개면 pull 이 dict 하나를 줄 수 있어 정규화 필수(#87).
     summaries = normalize_mapped_results(context["ti"].xcom_pull(task_ids="fetch_raw"))
     # load_bronze 결과(iceberg 행수)를 리포트에 반영 — fetch summary의 iceberg_rows=0 을 덮는다.
-    loaded = context["ti"].xcom_pull(task_ids="load_bronze") or {}
+    # 적재할 fetch 성공분이 있는데 load_bronze XCom이 없으면(=태스크 실패) SLO 실패로 드러낸다.
+    loaded = context["ti"].xcom_pull(task_ids="load_bronze")
+    load_failed = loaded is None and any(not s["error"] for s in summaries)
+    loaded = loaded or {}
     for s in summaries:
         s["iceberg_rows"] = loaded.get(s["name"], 0)
     # 기대 커버리지 = plan이 계획한 데이터셋 수(성공 summary 수가 아님). 하드 실패한
@@ -226,14 +235,17 @@ def _report(**context) -> None:
         if name not in returned
     ]
     expected = len(planned) or len(summaries)  # plan XCom이 없으면 성공 수로 폴백
-    report = build_run_report(summaries + missing, ctx, expected_total=expected)
+    report = build_run_report(summaries + missing, ctx, expected_total=expected, load_failed=load_failed)
 
     cov = report["coverage"]
     print(
         f"[culture bronze] coverage {cov['landed']}/{cov['expected']} ({cov['coverage_pct']}%) · "
-        f"rows={report['total_rows']} · violations={report['violation_count']} · "
+        f"rows={report['total_rows']} · iceberg={report['total_iceberg_rows']} · "
+        f"violations={report['violation_count']} · "
         f"freshness_max={report['freshness']['max_age_hours']}h · SLO={'PASS' if report['slo_passed'] else 'FAIL'}"
     )
+    if load_failed:
+        print("  ⚠ load_bronze 실패 — bronze Iceberg 미갱신 (raw는 박제됨, load_bronze만 clear 하면 됨)")
     for v in report["violations"]:
         print(f"  ⚠ {v['dataset']}: {v['violation']}")
 
@@ -280,6 +292,8 @@ with DAG(
 
     # 3) load_bronze: R2 raw → bronze Iceberg (멱등, API 재호출 없이 단독 재시도 가능).
     #    성공 시 Asset 갱신 → culture_transform(dbt) 자동 기동 (#103).
+    #    all_done이라 일부 fetch 실패여도 성공분으로 Asset이 발행된다
+    #    (부분 데이터 변환 허용 — 실패는 리포트·그리드가 드러냄).
     load_bronze_task = PythonOperator(
         task_id="load_bronze",
         python_callable=_load_bronze,

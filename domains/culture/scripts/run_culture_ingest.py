@@ -108,8 +108,11 @@ def main(argv=None) -> int:
             f"bytes={r.bytes_written:<9} {r.error}"
         )
 
-    # 정량 run 리포트 (커버리지·완전성·드리프트·freshness) 빌드 + 적재
-    report = build_run_report([r.summary() for r in results], ctx, expected_total=len(results))
+    # 정량 run 리포트 (커버리지·완전성·드리프트·freshness) 빌드 + 적재.
+    # bronze load 실패도 SLO에 반영 — exit code(1)만이 아니라 리포트에도 드러낸다.
+    report = build_run_report(
+        [r.summary() for r in results], ctx, expected_total=len(results), load_failed=load_failed
+    )
     cov = report["coverage"]
     print(
         f"\nREPORT coverage={cov['landed']}/{cov['expected']} ({cov['coverage_pct']}%) "

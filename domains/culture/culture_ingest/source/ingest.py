@@ -221,10 +221,14 @@ def normalize_mapped_results(pulled) -> list[dict]:
     return [r for r in pulled if r]
 
 
-def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int) -> dict:
+def build_run_report(
+    summaries: list[dict], ctx: RunContext, expected_total: int, *, load_failed: bool = False
+) -> dict:
     """데이터셋별 요약을 모아 run 단위 신뢰성 리포트를 만든다.
 
     "깨지면 얼마나 빨리 알고, 무엇이 영향인지 숫자로" — bronze v0의 SLO 측정점.
+    ``load_failed`` = bronze Iceberg 적재(load) 단계 실패 — fetch가 전부 성공해도
+    bronze가 미갱신이면 SLO 실패로 드러낸다(초록 리포트 뒤 침묵 방지).
     """
     # object_keys는 태스크 간 전달용 — 리포트 JSON에는 싣지 않는다(리니지는 _manifest.json).
     rows = [{k: v for k, v in s.items() if k != "object_keys"} for s in summaries if s]
@@ -241,8 +245,8 @@ def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int
         if ch.get("freshness_age_hours") is not None:
             ages.append(ch["freshness_age_hours"])
 
-    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 이면 통과
-    slo_passed = not failed and not violations
+    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 + bronze 적재 성공이면 통과
+    slo_passed = not failed and not violations and not load_failed
     return {
         "domain": "culture",
         "layer": "bronze",
@@ -258,6 +262,7 @@ def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int
         },
         "total_rows": sum(s["rows"] for s in landed),
         "total_iceberg_rows": sum(s.get("iceberg_rows", 0) for s in landed),
+        "load_failed": load_failed,
         "freshness": {"max_age_hours": max(ages) if ages else None},
         "violation_count": len(violations),
         "violations": violations,
