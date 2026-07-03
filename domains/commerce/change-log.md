@@ -23,7 +23,11 @@ response:
   응답 본문에서 판정, HttpCore 는 전송/HTTP 상태만 담당. 재시도 소진/HTTP 오류는
   `SeoulApiError("ERROR-NETWORK", redact(...))` 로 변환해 bronze 마커 계약 보존.
 - `rate_limit=None` — 기존 `SEOUL_REQUEST_DELAY_SECONDS` 간격 유지(이중 지연 방지).
-- 검증: commerce 239 테스트 통과, 오프라인 스모크(성공·재시도·소진·업무오류 4경로) 통과,
+- (#78 코드리뷰 반영) `security/redaction.py` structural 패턴에 `serviceKey=` 쿼리 키 추가
+  (공공데이터포털/KMA 형식 — dags/common/security 로 재복사), `parse_page` 의 비정수
+  `list_total_count` 를 `SeoulApiError("ERROR-PARSE")` 로 래핑(원시 ValueError 누출 차단),
+  `bronze/resolve.py` CLI 에 dags 루트 부트스트랩 추가(`python -m bronze.resolve` 복구).
+- 검증: commerce 241 테스트 통과, 오프라인 스모크(성공·재시도·소진·업무오류 4경로) 통과,
   URL 경로 키가 HttpCore 로그에서 마스킹 확인.
 
 ### 29. 서울 base URL env 이름 통일 — SEOUL_OPEN_API_BASE_URL (#78)

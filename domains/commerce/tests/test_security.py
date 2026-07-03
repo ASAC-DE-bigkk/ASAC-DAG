@@ -64,6 +64,8 @@ _TOK = "zzzz" + "zzzzzzzz"
     ("aws_secret_access_key=" + _PRIV, _PRIV),
     (_AKIA + " used", _AKIA),
     ("token=" + _TOK + " next", _TOK),
+    # 공공데이터포털/KMA 쿼리 키(#78) — URL 인코딩된 값도 & 앞까지 통째로 마스킹
+    ("/api/rest/arrive?serviceKey=" + "enc%2Bkey%3D%3D" + "&busRouteId=1", "enc%2Bkey%3D%3D"),
 ])
 def test_structural_patterns_mask(text, secret):
     assert secret not in Redactor().redact_text(text)

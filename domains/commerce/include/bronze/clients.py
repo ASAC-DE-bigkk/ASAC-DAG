@@ -71,7 +71,13 @@ def parse_page(raw: bytes, service: str) -> Page:
     result = block.get("RESULT", {})
     code = result.get("CODE", "ERROR-UNKNOWN")
     msg = result.get("MESSAGE", "")
-    total = int(block.get("list_total_count", 0) or 0)
+    try:
+        total = int(block.get("list_total_count", 0) or 0)
+    except (TypeError, ValueError):
+        # 스키마 드리프트(비정수 count) — "fetch 오류는 항상 SeoulApiError" 계약 유지(#78 리뷰).
+        raise SeoulApiError(
+            "ERROR-PARSE",
+            f"invalid list_total_count: {block.get('list_total_count')!r}", service)
     if code == CODE_NO_DATA:
         return Page(raw, code, msg, [], total)
     if code != CODE_OK:
