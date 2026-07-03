@@ -1,10 +1,10 @@
 """bronze 웨어하우스 적재 엔진 — raw(row/page-NDJSON) → Iceberg 원본층 테이블.
 
-적재 단위(load_plan.resolve_load_plan 의 unit) 하나를 멱등 적재한다. 엔진 2경로(사용자 확정):
-- **PyIceberg**(전체 스냅샷 = 최초 first / feat/58 이전 legacy 전량): Trino 코디네이터를 우회해
-  Arrow 배치를 **적재당 커밋 1회**로 append(메모리 바운드). 대용량·초기 백필용.
-  → INSERT VALUES 로 수천 커밋을 만들던 Trino OOM 을 회피.
-- **Trino**(mode=changed = 소량 변경분): `trino.dbapi` INSERT(파라미터 바인딩). 일일 증분용.
+적재 단위(load_plan.resolve_load_plan 의 unit) 하나를 멱등 적재한다. 엔진은 **첫 파일이냐(순서)**로
+결정된다(사용자 확정 — 파일 크기 아님):
+- **PyIceberg**(첫 파일 = 전체 재적재, is_base): Trino 코디네이터를 우회해 Arrow 배치를 **적재당
+  커밋 1회**로 append(메모리 바운드). 대용량 첫 스냅샷의 INSERT VALUES 커밋 폭증/OOM 을 회피.
+- **Trino**(이후 = 증분): `trino.dbapi` INSERT(파라미터 바인딩). 소량 변경분 적재.
 
 **포맷 2종 모두 적재**(과거 데이터 보존): row-NDJSON(feat/58 이후, 줄=레코드) + page-NDJSON
 (feat/58 이전, 줄=API 페이지 응답 → parse_page 로 레코드 추출). iter_increment_rows 가 흡수.
@@ -357,7 +357,7 @@ def load_unit(storage: Storage, unit: dict, *, load_date: str) -> dict:
               "is_publishable": bool(ok), "action": "loaded"}
     load_state.write_receipt(storage, prefix, result)
     log.info("적재[%s]%s %s run=%s rows=%d/%s pub=%s", engine,
-             "(legacy)" if unit.get("legacy") else "", unit["short"], unit["run_id"],
+             "(base)" if unit.get("is_base") else "", unit["short"], unit["run_id"],
              rows, result["rows_expected"], result["is_publishable"])
     return result
 

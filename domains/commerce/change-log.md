@@ -7,6 +7,24 @@
 
 ## 2026-07-04
 
+### 32. 적재 엔진 기준 = 첫 파일(순서), 크기/legacy 아님 — 07-01 증분 오분류 수정
+
+request:
+- (지적) 엔진을 파일 크기로 판단하지 말 것. **첫 파일이라 큰 것**이지 크기가 기준이 아니다.
+  첫 파일이니 전체 재적재이고, 이후 파일을 PyIceberg 로 돌리면 안 된다.
+
+response:
+- **근거 확인**: 07-01 general_restaurant 파일은 row-NDJSON **280건(293KB)** 짜리 증분인데, 이전
+  코드가 마커 `rows_total`(=534,748, API 전체수)을 파일 건수로 오독하고 `increment_mode` 없음을
+  legacy 전량으로 취급해 PyIceberg 로 잘못 분류했다(06-30 은 page-NDJSON 534,680건 진짜 full).
+- **수정(순서 기준)**: `resolve_load_plan` — 데이터셋 bronze 최초 적재(워터마크 없음)의 **첫 파일 =
+  전체 재적재(PyIceberg)**, 그 이후 모든 파일 = **증분(Trino)**. 파일 크기/legacy 로 판단하지 않는다.
+  기대 건수는 마커 `increment_count`(신뢰 가능)만 사용, `rows_total` 절대 미사용(없으면 rows>0 판정).
+  (앞서 잠깐 넣었던 파일-크기 기준 및 `Storage.size` 추가는 되돌림 — abstract 메서드가 테스트 파손도 유발.)
+- **검증(실데이터)**: 워터마크 06-30 상태에서 계획 = 27유닛 전부 Trino 증분·PyIceberg 0.
+  general_restaurant 07-01 을 Trino 로 실적재 → **280건**(534K 아님), 534,680 → 534,960(+280).
+  단위테스트 **266 통과**, security 차단 0.
+
 ### 31. commerce_load_bronze 통합 검증 — 이미지 리빌드 + 동시성/receipt 수정 (전 39종 적재 성공)
 
 request:

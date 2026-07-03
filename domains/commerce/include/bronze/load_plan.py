@@ -22,15 +22,6 @@ from common.storage import Storage
 
 log = logging.getLogger(__name__)
 
-# 소량 변경분만 Trino(증분). 그 외(전체 스냅샷: 최초 row-NDJSON `first` / feat/58 이전 legacy 전량)는
-# PyIceberg(대용량 커밋 1회, Trino OOM 회피).
-TRINO_MODES = ("changed",)
-LEGACY_MODE = "legacy_full"      # feat/58 이전 page-NDJSON(마커에 increment_mode 없음) 전량 스냅샷
-
-
-def choose_engine(increment_mode: str) -> str:
-    return "trino" if increment_mode in TRINO_MODES else "pyiceberg"
-
 
 def _bound_by_dates(run_ids: list[str], max_dates: int | None) -> list[str]:
     """run_ids(시간순)를 **가장 이른 max_dates 개 날짜**까지만. None/<=0 이면 무제한."""
@@ -71,9 +62,13 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
     }
 
     워터마크 이후의 **완료 run 을 시간순으로 전부 적재**(사용자: "raw 폴더를 처음부터 읽어 적재").
-    포맷 무관 — feat/58 이전 **page-NDJSON(legacy 전량)도 로더가 parse_page 로 읽어 적재**한다
-    (과거 데이터 보존). identical(파일 없음)은 적재 없이 전진. incomplete 는 pending(관측).
-    엔진: changed(소량) → Trino, 그 외(legacy 전량 / 최초 first) → PyIceberg(대용량 커밋 1회).
+    포맷 무관 — page-NDJSON(첫 full)·row-NDJSON(증분) 모두 로더가 흡수(과거 데이터 보존).
+    identical(파일 없음)은 적재 없이 전진. incomplete 는 pending(관측).
+
+    **엔진 = 첫 파일이냐(순서) 기준**(사용자 확정): 테이블이 비어(=워터마크 없음) 처음 적재하는
+    데이터셋의 **첫 번째 파일 = 전체 재적재 → PyIceberg**(테이블 형태 + 대용량 벌크). 그 이후의
+    모든 파일 = **증분 → Trino**. (파일 크기로 판단하지 않는다 — 첫 파일이라 큰 것뿐, 이후 증분은
+    소량이라 Trino 로 적재한다.)
     """
     all_runs = markers.list_run_ids(storage, prefix)          # 시간순
     no_watermark = not load_state.has_watermark(storage, prefix)
@@ -84,6 +79,8 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
 
     for short in datasets:
         wm = watermark.get(short, "")
+        first_load = not wm                                   # 이 데이터셋 bronze 최초 적재?
+        base_done = False                                     # 첫 파일(전체 재적재)을 이미 배정했나
         cands = _bound_by_dates([r for r in all_runs if r > wm], max_dates)
         for rid in cands:
             rdate = rid[:10]
@@ -92,20 +89,23 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
                 inc_key = paths.bronze_object_key(prefix=prefix, run_id=rid, short=short)
                 if storage.exists(inc_key):                   # identical(파일없음)은 적재 없이 전진
                     m = _read_marker(storage, prefix, rid, short)
-                    legacy = "increment_mode" not in m        # feat/58 이전 page-NDJSON 전량
-                    mode = LEGACY_MODE if legacy else m.get("increment_mode", "changed")
+                    # 첫 적재의 첫 파일 = 전체 재적재(PyIceberg). 그 외 = 증분(Trino).
+                    is_base = first_load and not base_done
+                    if is_base:
+                        base_done = True
+                    # 기대 건수: 마커 increment_count(신뢰 가능)만. rows_total(=API 전체수)은
+                    # 파일 건수와 다르므로 절대 사용 금지 → 없으면 None(발행 판정은 rows>0).
                     count = m.get("increment_count")
-                    if count is None:
-                        count = m.get("rows_total")           # legacy: 전량 = rows_total
                     units.append({
                         "short": short, "run_id": rid, "date": rdate,
-                        "increment_key": inc_key, "increment_mode": mode,
-                        "increment_count": None if count is None else int(count),
+                        "increment_key": inc_key,
+                        "increment_mode": ("full" if is_base else m.get("increment_mode") or "increment"),
+                        "increment_count": None if (is_base or count is None) else int(count),
                         "observed_date": m.get("observed_date", rdate),
                         "dag_run_id": m.get("run_id", ""),
                         "collected_at": m.get("collected_at", ""),
                         "service_name": m.get("source_name"),  # page-NDJSON parse_page 용
-                        "engine": choose_engine(mode), "legacy": legacy})
+                        "engine": "pyiceberg" if is_base else "trino", "is_base": is_base})
                 resolved.add((rdate, short))
                 resolved_runs.setdefault(short, []).append(rid)
             elif 0 <= load_state.days_between(rdate, today) <= load_state.RETRY_LOOKBACK_DAYS:
@@ -114,11 +114,10 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
     pending_keep, pending_expired = load_state.reconcile_pending(
         pending, resolved=resolved, new_incomplete=new_incomplete, today=today)
 
-    log.info("load plan: units=%d (pyiceberg=%d/trino=%d, legacy=%d), pending 유지=%d 폐기=%d, "
+    log.info("load plan: units=%d (base/pyiceberg=%d, 증분/trino=%d), pending 유지=%d 폐기=%d, "
              "no_watermark=%s", len(units),
-             sum(u["engine"] == "pyiceberg" for u in units),
-             sum(u["engine"] == "trino" for u in units),
-             sum(u.get("legacy") for u in units),
+             sum(u.get("is_base") for u in units),
+             sum(not u.get("is_base") for u in units),
              len(pending_keep), len(pending_expired), no_watermark)
     return {"units": units, "resolved_runs": resolved_runs,
             "pending_keep": pending_keep, "pending_expired": pending_expired,
