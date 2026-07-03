@@ -23,6 +23,9 @@ _CORE = HttpCore(
     max_attempts=_MAX_ATTEMPTS,
     backoff_base=_BACKOFF_BASE,
     user_agent="asac-transit-collector/1.0",
+    # 기존 코드는 호출 간 지연이 없었다 — 코드 기본 5req/s 를 받지 않는다(#78 리뷰).
+    # 지하철·버스·주차 3개 호스트가 한 버킷으로 묶이는 것도 방지. 스로틀 도입은 별도 결정.
+    rate_limit=None,
 )
 
 
