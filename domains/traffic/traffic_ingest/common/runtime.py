@@ -77,18 +77,14 @@ def sha256_hex(payload: bytes) -> str:
 
 # HTTP 호출 경계만 공통 클라이언트(#78)로 위임. max_attempts=1 — 기존 fetch_url 은
 # 단발 호출이었고 재시도는 Airflow task retries 소관(HttpCore 재시도를 켜면 이중 재시도).
-_HTTP = HttpCore(source="seoul_topis", timeout=30.0, max_attempts=1)
-_SUCCESS_STATUS = tuple(range(200, 300))  # urlopen 이 2xx 만 반환하던 동작과 동일
+# rate_limit=None — 기존 코드에 호출 간 지연 없음(동작 보존 명시).
+_HTTP = HttpCore(source="seoul_topis", timeout=30.0, max_attempts=1, rate_limit=None)
 
 
 def fetch_url(url: str, user_agent: str) -> tuple[int, bytes]:
     # URL 은 호출측(acc_info)이 키까지 조립해 완성된 형태로 들어온다 → NoAuth.
-    response = _HTTP.get(
-        url,
-        headers={"User-Agent": user_agent},
-        auth=NoAuth(),
-        expected_status=_SUCCESS_STATUS,
-    )
+    # 성공 기준은 core 기본(OK_2XX) — urlopen 이 2xx 만 반환하던 동작과 동일.
+    response = _HTTP.get(url, headers={"User-Agent": user_agent}, auth=NoAuth())
     return response.status, response.content
 
 
