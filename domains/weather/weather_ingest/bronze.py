@@ -56,7 +56,8 @@ def create_kma_bronze_table(cursor, catalog: str, schema: str) -> str:
             dag_run_id varchar
         )
         WITH (
-            format = 'PARQUET'
+            format = 'PARQUET',
+            partitioning = ARRAY['load_date']
         )
         """
     )
