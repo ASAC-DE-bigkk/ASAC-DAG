@@ -31,7 +31,7 @@ docs/
 ├─ architecture/   project_setting.md · architecture.md · storage.md
 ├─ configuration/  configuration.md · environments.md
 ├─ operations/     operations.md · deploy-local.md · deploy-dev.md · deploy-prod.md
-├─ pipeline/       common_info.md
+├─ pipeline/       common_info.md · medallion-implementation-plan.md
 │  └─ bronze/      pagination-ordering.md · api-call-volume.md · status-tracking-model.md · uncollectable-datasets.md
 └─ security/       security.md · adoption.md
 ```

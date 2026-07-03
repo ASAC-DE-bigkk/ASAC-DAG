@@ -1,0 +1,154 @@
+"""commerce_load_bronze — raw 증분(R2) → **Iceberg bronze 적재** 라인 (수집과 분리).
+
+raw 수집(commerce_collect_raw/recollect)과 **완전히 분리**된 적재 전용 DAG. raw 는 R2 오브젝트
+랜딩(불변), 이 DAG 가 그걸 읽어 Trino/PyIceberg 로 Iceberg 원본층 테이블에 적재한다.
+
+정책(사용자 확정 · docs/pipeline/medallion-implementation-plan.md):
+- 상태는 **파일 기반(RDB 없음)**, raw 와 격리된 공간(`{COMMERCE_BRONZE_STATE_LAYER}`).
+  워터마크(데이터셋별 마지막 적재 run) + pending(complete 없어 미적재 일자, 현재-2일 재감시·3일 폐기).
+- 워터마크 없음 → 처음부터 전체 재적재(**PyIceberg**, 대용량 커밋 1회). 있음 → **Trino** 증분.
+  한 번에 모든 날짜를 적재하지 않고 실행당 최대 날짜 수로 바운드(catch-up 은 다음 실행이 이어감).
+- Iceberg/parquet + 상태파일 삭제 후 재적재 가능(raw 불변). 적재 실패 run 은 워터마크를 전진시키지
+  않아 다음 실행이 재시도.
+
+  resolve_plan ─> ensure_warehouse ─> load_one.expand ─> finalize(워터마크/pending/manifest)
+"""
+from __future__ import annotations
+
+import logging
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "include"))
+
+from common.env import load_commerce_env  # noqa: E402
+
+load_commerce_env()
+
+from security import install_security  # noqa: E402
+
+install_security()
+
+import os  # noqa: E402
+
+import pendulum  # noqa: E402
+from airflow.decorators import dag, task  # noqa: E402
+from airflow.models.param import Param  # noqa: E402
+from airflow.utils.trigger_rule import TriggerRule  # noqa: E402
+
+from bronze import load_plan, load_state, warehouse  # noqa: E402
+from common import registry  # noqa: E402
+from common.settings import get_settings  # noqa: E402
+from common.storage import get_storage  # noqa: E402
+
+log = logging.getLogger(__name__)
+KST = timezone(timedelta(hours=9))
+
+COLLECTIBLE_SHORTS = [d.short for d in registry.enabled_for_schedule("daily")]
+_DEFAULT_MAX_DATES = int(os.getenv("COMMERCE_LOAD_MAX_DATES", "3") or "3")
+_DEFAULT_ARGS = {"owner": "data-eng", "retries": 2, "retry_delay": pendulum.duration(minutes=3)}
+_PARAMS = {"max_dates": Param(default=_DEFAULT_MAX_DATES, type="integer",
+           description="실행당 적재할 최대 날짜 수(0=무제한). backfill catch-up 은 재실행이 이어감.")}
+
+
+@task
+def resolve_plan(**ctx) -> dict:
+    """워터마크/pending + raw run 목록으로 적재 계획 산출(무엇을 어느 엔진으로)."""
+    storage = get_storage()
+    prefix = get_settings().storage_prefix
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    max_dates = int(ctx["params"].get("max_dates") or 0)
+    plan = load_plan.resolve_load_plan(
+        storage, prefix=prefix, datasets=list(COLLECTIBLE_SHORTS),
+        watermark=load_state.read_watermark(storage, prefix),
+        pending=load_state.read_pending(storage, prefix),
+        today=today, max_dates=max_dates or None)
+    log.info("계획: units=%d, pending 유지=%d 폐기=%d, no_watermark=%s",
+             len(plan["units"]), len(plan["pending_keep"]),
+             len(plan["pending_expired"]), plan["no_watermark"])
+    return plan
+
+
+@task
+def plan_units(plan: dict) -> list[dict]:
+    """계획에서 적재 단위 리스트만 추출 — expand 매핑 입력(XCom 커스텀 키 매핑 불가 회피)."""
+    return list(plan.get("units", []))
+
+
+@task
+def resolve_load_date() -> str:
+    """bronze load_date(파티션) = 적재 실행일(KST)."""
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+@task
+def ensure_warehouse(plan: dict) -> bool:
+    """적재할 units 이 있을 때만 Iceberg 스키마/테이블 IF NOT EXISTS(Trino DDL, 경량)."""
+    if not plan.get("units"):
+        log.info("적재 대상 없음 — warehouse 준비 생략.")
+        return False
+    warehouse.ensure_schema_and_tables()
+    return True
+
+
+@task(map_index_template="{{ short }}", max_active_tis_per_dagrun=1)
+def load_one(unit: dict, load_date: str, **ctx) -> dict:
+    """적재 단위 1건(엔진 분기). raw 를 재읽어 멱등 적재 → 실패 시 태스크 재시도.
+
+    **직렬화**(max_active_tis_per_dagrun=1): 39종이 동일 Iceberg 테이블에 병렬 커밋하면
+    낙관적 동시성 충돌(CommitFailedException)로 대부분 실패한다. 한 번에 한 단위만 적재한다.
+    """
+    try:
+        from airflow.sdk import get_current_context
+    except ImportError:
+        from airflow.operators.python import get_current_context
+    get_current_context()["short"] = unit.get("short", "?")
+    return warehouse.load_unit(get_storage(), unit, load_date=load_date)
+
+
+@task(trigger_rule=TriggerRule.ALL_DONE)
+def finalize(plan: dict, load_results: list[dict]) -> dict:
+    """워터마크 전진(적재 성공분까지) · pending 갱신 · manifest 발행."""
+    storage = get_storage()
+    prefix = get_settings().storage_prefix
+    results = [r for r in (load_results or []) if r]
+    succeeded = {(r["short"], r["run_id"]) for r in results}
+    planned = {(u["short"], u["run_id"]) for u in plan.get("units", [])}
+    failed = planned - succeeded
+
+    current = load_state.read_watermark(storage, prefix)
+    final_wm = load_plan.commit_watermark(
+        current, resolved_runs=plan.get("resolved_runs", {}), failed_run_ids=failed)
+    load_state.write_watermark(storage, prefix, final_wm)
+    load_state.write_pending(storage, prefix, plan.get("pending_keep", []))
+
+    manifest = warehouse.write_manifest(results) if results else {"published": 0, "datasets": 0}
+    metrics = {"loaded_units": len(results), "failed_units": len(failed),
+               "published": manifest.get("published", 0),
+               "pending": len(plan.get("pending_keep", [])),
+               "expired": len(plan.get("pending_expired", [])),
+               "finalized_at": datetime.now(timezone.utc).isoformat()}
+    log.info("finalize: %s", metrics)
+    if failed:
+        log.warning("적재 실패 run(다음 실행 재시도): %s", sorted(failed))
+    if plan.get("pending_expired"):
+        log.warning("pending 폐기(3일 경과, complete 없음): %s", plan["pending_expired"])
+    return metrics
+
+
+@dag(dag_id="commerce_load_bronze", schedule="0 4 * * *",
+     start_date=pendulum.datetime(2024, 1, 1, tz="Asia/Seoul"), catchup=False,
+     max_active_runs=1, default_args=_DEFAULT_ARGS, tags=["seoul", "commerce", "bronze"],
+     doc_md=__doc__, params=_PARAMS)
+def commerce_load_bronze():
+    plan = resolve_plan()
+    units = plan_units(plan)
+    load_date = resolve_load_date()
+    prep = ensure_warehouse(plan)
+    loaded = load_one.partial(load_date=load_date).expand(unit=units)
+    prep >> loaded
+    finalize(plan, loaded)
+
+
+commerce_load_bronze()
