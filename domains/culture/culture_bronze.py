@@ -1,8 +1,11 @@
-"""Airflow DAG: culture 도메인 bronze(원본) 적재 -> R2.
+"""Airflow DAG: culture 도메인 bronze 적재 -> R2 raw + bronze Iceberg.
 
-일배치. 채택한 culture 데이터셋을 KOPIS / 서울 열린데이터에서 받아 원본 API 응답을
-R2 ``raw/culture/`` 아래에 적재한다(``culture_ingest`` 참고). 데이터셋마다
-매핑 태스크 1개라서, 한 데이터셋 실패가 격리되고 재시도 가능하며 그리드에서 바로 보인다.
+일배치. ``plan -> fetch_raw(동적 매핑) -> load_bronze -> report`` 네 태스크 구조.
+fetch_raw는 채택한 culture 데이터셋을 KOPIS / 서울 열린데이터에서 받아 원본 API
+응답을 R2 ``raw/culture/`` 아래에 박제만 한다(재현 불가 경계). load_bronze가 그
+raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 run은 API 재호출
+없이 load_bronze만 재시도하면 된다(``culture_ingest`` 참고). 데이터셋마다 매핑
+태스크 1개라서, 한 데이터셋 실패가 격리되고 재시도 가능하며 그리드에서 바로 보인다.
 
 시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가
 ``KOPIS_SERVICE_KEY``, ``SEOUL_API_KEY_CULT``, ``R2_DEV_*``를 주입) -- 값은 여기 없다.
@@ -15,7 +18,6 @@ R2 ``raw/culture/`` 아래에 적재한다(``culture_ingest`` 참고). 데이터
   include_detail  KOPIS 상세 엔드포인트도 크롤(상한 있음)               기본 True
   max_detail      상세 크롤당 id 상한                                  기본 200
   kopis_rows      KOPIS 목록 페이지 크기                               기본 100
-  write_iceberg   R2 적재 후 bronze Iceberg 테이블에도 적재(Trino)     기본 False
   fail_on_violation  계약 위반 시 run 실패                             기본 False
 """
 
@@ -30,16 +32,22 @@ import pendulum
 from airflow import DAG
 from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import Asset
 
 # 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from culture_ingest.common.config import RunContext, normalize_target  # noqa: E402
+from culture_ingest.common.config import (  # noqa: E402
+    CULTURE_BRONZE_ASSET,
+    RunContext,
+    normalize_target,
+)
 from culture_ingest.source.datasets import enabled_datasets  # noqa: E402
 from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     build_run_report,
     ingest_one,
+    load_bronze,
     normalize_mapped_results,
     write_run_report,
 )
@@ -57,7 +65,6 @@ DEFAULT_PARAMS = {
     "max_detail": 200,
     "kopis_rows": 100,
     "fail_on_violation": False,  # True면 계약 위반(완전성·드리프트·freshness) 시 run 실패
-    "write_iceberg": False,  # True면 R2 적재 후 bronze Iceberg 테이블에도 적재(Trino)
 }
 
 
@@ -119,13 +126,12 @@ def _plan(**context) -> list[dict]:
             "include_detail": include_detail,
             "max_detail": int(params["max_detail"]),
             "kopis_rows": int(params["kopis_rows"]),
-            "write_iceberg": bool(params["write_iceberg"]),
         }
         for name in names
     ]
 
 
-def _ingest(
+def _fetch_raw(
     name: str,
     target: str,
     load_date: str,
@@ -136,10 +142,10 @@ def _ingest(
     include_detail: bool,
     max_detail: int,
     kopis_rows: int,
-    write_iceberg: bool,
     **context,
 ) -> dict:
-    """데이터셋 1개를 적재 (매핑 태스크 1개). 실패 시 AirflowException으로 그 태스크만 실패."""
+    """데이터셋 1개의 원본을 R2 raw에 박제 (매핑 태스크 1개, bronze 적재는 load_bronze가).
+    실패 시 AirflowException으로 그 태스크만 실패."""
     ctx = RunContext(load_date=load_date, ingest_ts=ingest_ts, run_id=run_id)
     opts = IngestOptions(
         date_from=date_from,
@@ -147,16 +153,47 @@ def _ingest(
         kopis_rows=kopis_rows,
         max_detail=max_detail,
         include_detail=include_detail,
-        write_iceberg=write_iceberg,
     )
     result = ingest_one(name, ctx=ctx, opts=opts, target=target)
     print(
         f"{name}: pages={result.pages} rows={result.rows} bytes={result.bytes_written} "
-        f"iceberg_rows={result.iceberg_rows} {result.error}"
+        f"{result.error}"
     )
     if result.error and "skipped" not in result.error:
         raise AirflowException(f"{name} failed: {result.error}")
     return result.summary()
+
+
+def _load_bronze(**context) -> dict:
+    """R2 raw(fetch_raw 산출)를 다시 읽어 bronze Iceberg에 멱등 적재.
+
+    all_done — 일부 데이터셋 fetch가 실패해도 성공분은 적재한다(실패는 fetch_raw
+    태스크가 이미 빨갛고 report가 집계). 성공한 fetch가 하나도 없으면 실패.
+    즉 부분 실패 run에서도 성공분만으로 bronze가 갱신된다(부분 데이터 변환 허용).
+    API 재호출 없음: bronze만 깨진 run은 이 태스크만 clear 하면 된다.
+    """
+    params = context["params"]
+    summaries = normalize_mapped_results(context["ti"].xcom_pull(task_ids="fetch_raw"))
+    loadable = [s for s in summaries if not s["error"]]  # 하드 실패·skipped(적재할 raw 없음) 모두 제외
+    if not loadable:
+        raise AirflowException("load_bronze: 성공한 fetch_raw 결과가 없음")
+    planned = context["ti"].xcom_pull(task_ids="plan") or []
+    if planned:  # plan이 계산한 값을 그대로 써서 fetch와 같은 파티션을 보장(단일 진실원)
+        first = planned[0]
+        ctx = RunContext(load_date=first["load_date"], ingest_ts=first["ingest_ts"], run_id=first["run_id"])
+    else:  # plan XCom 유실 시 폴백 — 스케줄/수동 run 모두 같은 값으로 재유도된다
+        end = _interval_end(context)
+        ctx = RunContext(
+            load_date=end.in_timezone(KST).strftime("%Y-%m-%d"),
+            ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
+            run_id=context["dag_run"].run_id,
+        )
+    loaded = load_bronze(ctx, loadable, target=normalize_target(params["target"]))
+    total = sum(loaded.values())
+    print(f"[culture bronze] iceberg loaded {total} rows / {len(loaded)} datasets")
+    for name, rows in sorted(loaded.items()):
+        print(f"  {name}: {rows} rows")
+    return loaded
 
 
 def _report(**context) -> None:
@@ -173,9 +210,16 @@ def _report(**context) -> None:
         run_id=context["dag_run"].run_id,
     )
     # 매핑 인스턴스 1개면 pull 이 dict 하나를 줄 수 있어 정규화 필수(#87).
-    summaries = normalize_mapped_results(context["ti"].xcom_pull(task_ids="ingest_dataset"))
+    summaries = normalize_mapped_results(context["ti"].xcom_pull(task_ids="fetch_raw"))
+    # load_bronze 결과(iceberg 행수)를 리포트에 반영 — fetch summary의 iceberg_rows=0 을 덮는다.
+    # 적재할 fetch 성공분이 있는데 load_bronze XCom이 없으면(=태스크 실패) SLO 실패로 드러낸다.
+    loaded = context["ti"].xcom_pull(task_ids="load_bronze")
+    load_failed = loaded is None and any(not s["error"] for s in summaries)
+    loaded = loaded or {}
+    for s in summaries:
+        s["iceberg_rows"] = loaded.get(s["name"], 0)
     # 기대 커버리지 = plan이 계획한 데이터셋 수(성공 summary 수가 아님). 하드 실패한
-    # ingest_dataset 매핑 인스턴스는 예외를 던져 XCom에 결과를 안 남기므로, summaries만
+    # fetch_raw 매핑 인스턴스는 예외를 던져 XCom에 결과를 안 남기므로, summaries만
     # 세면 실패가 분모에서도 사라져 coverage가 늘 ~100%로 보인다(#39).
     planned = [d["name"] for d in (context["ti"].xcom_pull(task_ids="plan") or [])]
     returned = {s["name"] for s in summaries}
@@ -191,14 +235,17 @@ def _report(**context) -> None:
         if name not in returned
     ]
     expected = len(planned) or len(summaries)  # plan XCom이 없으면 성공 수로 폴백
-    report = build_run_report(summaries + missing, ctx, expected_total=expected)
+    report = build_run_report(summaries + missing, ctx, expected_total=expected, load_failed=load_failed)
 
     cov = report["coverage"]
     print(
         f"[culture bronze] coverage {cov['landed']}/{cov['expected']} ({cov['coverage_pct']}%) · "
-        f"rows={report['total_rows']} · violations={report['violation_count']} · "
+        f"rows={report['total_rows']} · iceberg={report['total_iceberg_rows']} · "
+        f"violations={report['violation_count']} · "
         f"freshness_max={report['freshness']['max_age_hours']}h · SLO={'PASS' if report['slo_passed'] else 'FAIL'}"
     )
+    if load_failed:
+        print("  ⚠ load_bronze 실패 — bronze Iceberg 미갱신 (raw는 박제됨, load_bronze만 clear 하면 됨)")
     for v in report["violations"]:
         print(f"  ⚠ {v['dataset']}: {v['violation']}")
 
@@ -216,7 +263,7 @@ def _report(**context) -> None:
 
     # 런타임 신뢰성 게이트(opt-in): fail_on_violation=True일 때만 위반 시 run 실패.
     # 기본은 surface 전용 — 계약 v0가 안정화되기 전 거짓 경보를 피한다.
-    # (수집 자체 실패는 ingest_dataset 매핑 태스크가 이미 빨갛게 실패시킨다.)
+    # (수집 자체 실패는 fetch_raw 매핑 태스크가 이미 빨갛게 실패시킨다.)
     if bool(params.get("fail_on_violation")) and not report["slo_passed"]:
         raise AirflowException(
             f"culture bronze SLO 위반: failed={cov['failed']} violations={report['violation_count']}"
@@ -225,7 +272,7 @@ def _report(**context) -> None:
 
 with DAG(
     dag_id="culture_bronze",
-    description="Land culture domain raw source data (KOPIS + Seoul OA) to R2 raw/culture.",
+    description="Land culture raw source data (KOPIS + Seoul OA) to R2 raw/culture, then load bronze Iceberg.",
     start_date=pendulum.datetime(2026, 6, 1, tz=KST),
     schedule="@daily",
     catchup=False,
@@ -237,13 +284,24 @@ with DAG(
     # 1) plan: 적재할 데이터셋 목록과 공유 ingest_ts를 계산.
     plan = PythonOperator(task_id="plan", python_callable=_plan)
 
-    # 2) ingest_dataset: plan 결과를 동적 매핑해 데이터셋마다 태스크 1개씩 병렬 실행.
-    ingest_dataset_task = PythonOperator.partial(
-        task_id="ingest_dataset",
-        python_callable=_ingest,
+    # 2) fetch_raw: plan 결과를 동적 매핑, 데이터셋마다 raw 박제까지만(재현 불가 경계).
+    fetch_raw = PythonOperator.partial(
+        task_id="fetch_raw",
+        python_callable=_fetch_raw,
     ).expand(op_kwargs=plan.output)
 
-    # 3) report: 일부 데이터셋이 실패해도(all_done) 항상 요약을 남김.
+    # 3) load_bronze: R2 raw → bronze Iceberg (멱등, API 재호출 없이 단독 재시도 가능).
+    #    성공 시 Asset 갱신 → culture_transform(dbt) 자동 기동 (#103).
+    #    all_done이라 일부 fetch 실패여도 성공분으로 Asset이 발행된다
+    #    (부분 데이터 변환 허용 — 실패는 리포트·그리드가 드러냄).
+    load_bronze_task = PythonOperator(
+        task_id="load_bronze",
+        python_callable=_load_bronze,
+        trigger_rule="all_done",
+        outlets=[Asset(CULTURE_BRONZE_ASSET)],
+    )
+
+    # 4) report: 일부가 실패해도(all_done) 항상 요약을 남김.
     report = PythonOperator(task_id="report", python_callable=_report, trigger_rule="all_done")
 
-    plan >> ingest_dataset_task >> report
+    plan >> fetch_raw >> load_bronze_task >> report

@@ -9,6 +9,8 @@
   # 실제 적재 -> seoul-dev 버킷 (12개 전체, 상세는 상한 적용)
   python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.env \
       --date-from 20260101 --date-to 20261231 --include-detail --max-detail 200
+
+종료 코드: 0=성공 · 1=데이터셋 fetch 실패 또는 bronze load 실패 · 2=설정/인증 실패(사전 점검)
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from culture_ingest.source.config import LANDING_ROOT  # noqa: E402
 from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     build_run_report,
+    load_bronze,
     run_batch,
     write_run_report,
 )
@@ -41,7 +44,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-rows", type=int, default=None, help="서울 행 수 상한")
     p.add_argument("--max-detail", type=int, default=200)
     p.add_argument("--include-detail", action="store_true")
-    p.add_argument("--write-iceberg", action="store_true", help="R2 적재 후 bronze Iceberg 테이블에도 적재(Trino)")
+    p.add_argument("--write-iceberg", action="store_true", help="R2 적재 후 bronze Iceberg에도 적재(fetch→load 순차 실행)")
     p.add_argument("--dry-run", action="store_true", help="로컬 디렉토리에 기록, R2 건너뜀")
     p.add_argument("--local-dir", default="./_dryrun")
     p.add_argument("--run-id", default="manual")
@@ -58,7 +61,6 @@ def main(argv=None) -> int:
         max_rows=args.max_rows,
         max_detail=args.max_detail,
         include_detail=args.include_detail,
-        write_iceberg=args.write_iceberg,
     )
 
     try:
@@ -75,6 +77,22 @@ def main(argv=None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
+    # fetch 성공분을 이어서 bronze Iceberg에 적재 (한 프로세스에서 fetch→load).
+    # load 실패는 fetch 설정 실패(exit 2)와 구분해 exit 1 — raw는 이미 박제됐으니
+    # 아래 fetch 리포트는 그대로 출력하고, 재시도는 load 단계만 하면 된다.
+    load_failed = False
+    if args.write_iceberg and not args.dry_run:
+        try:
+            loaded = load_bronze(
+                ctx, [r.summary() for r in results], target=args.target, env_file=args.env_file
+            )
+            for r in results:
+                r.iceberg_rows = loaded.get(r.name, 0)
+            print(f"iceberg loaded: {sum(loaded.values())} rows across {len(loaded)} datasets")
+        except RuntimeError as exc:
+            load_failed = True
+            print(f"ERROR bronze load: {exc}", file=sys.stderr)
+
     sink = "file://" + args.local_dir if args.dry_run else f"r2://{args.target}"
     print(f"target={args.target} sink={sink} load_date={ctx.load_date} ingest_ts={ctx.ingest_ts}")
     if args.max_pages or args.max_rows or (not args.include_detail):
@@ -90,8 +108,11 @@ def main(argv=None) -> int:
             f"bytes={r.bytes_written:<9} {r.error}"
         )
 
-    # 정량 run 리포트 (커버리지·완전성·드리프트·freshness) 빌드 + 적재
-    report = build_run_report([r.summary() for r in results], ctx, expected_total=len(results))
+    # 정량 run 리포트 (커버리지·완전성·드리프트·freshness) 빌드 + 적재.
+    # bronze load 실패도 SLO에 반영 — exit code(1)만이 아니라 리포트에도 드러낸다.
+    report = build_run_report(
+        [r.summary() for r in results], ctx, expected_total=len(results), load_failed=load_failed
+    )
     cov = report["coverage"]
     print(
         f"\nREPORT coverage={cov['landed']}/{cov['expected']} ({cov['coverage_pct']}%) "
@@ -121,7 +142,7 @@ def main(argv=None) -> int:
         for r in failed:
             print(f"  FAILED {r.name}: {r.error}", file=sys.stderr)
         return 1
-    return 0
+    return 1 if load_failed else 0
 
 
 if __name__ == "__main__":

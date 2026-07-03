@@ -1,11 +1,13 @@
 """culture 적재 오케스트레이션.
 
-:class:`Dataset` 하나를 받아 원본 객체 + 매니페스트로 적재하고, 호출자가 쓰는
-두 진입점을 제공한다:
+fetch(원본 박제)와 load(bronze 적재)를 분리한 두 계열의 진입점을 제공한다:
 
-* ``run_batch`` -- 로컬 CLI: 실행 컨텍스트 1개로 여러 데이터셋(같은 ingest_ts 공유).
-* ``ingest_one`` -- Airflow DAG: 매핑 태스크당 데이터셋 1개. 상류에서 만든 실행
-  컨텍스트를 공유해 모든 태스크가 같은 ingest_ts 파티션에 적재되게 한다.
+* fetch -- :class:`Dataset` 을 원본 객체 + 매니페스트로 raw에 박제.
+  ``run_batch`` 는 로컬 CLI용(실행 컨텍스트 1개로 여러 데이터셋), ``ingest_one``
+  은 Airflow 매핑 태스크용(상류에서 만든 컨텍스트를 공유해 같은 ingest_ts 파티션).
+* load -- fetch가 박제한 raw만 다시 읽어 bronze Iceberg에 멱등 적재(API 재호출 없음).
+  ``load_bronze`` 는 R2·Trino를 만들어 주는 진입점, ``load_bronze_from_raw`` 는
+  싱크·웨어하우스를 주입받는 코어.
 """
 
 from __future__ import annotations
@@ -43,7 +45,6 @@ class IngestOptions:
     max_rows: int | None = None  # 서울 행 수 상한 (None = 전체)
     max_detail: int = 200  # KOPIS 상세 엔드포인트에서 크롤할 id 상한
     include_detail: bool = False  # kopis_detail 데이터셋 실행 여부
-    write_iceberg: bool = False  # R2 적재 후 bronze Iceberg 테이블에도 적재(Trino)
 
 
 @dataclass
@@ -93,25 +94,18 @@ def ingest_dataset(
     clients: Clients,
     landing: Landing,
     opts: IngestOptions,
-    warehouse: BronzeWarehouse | None = None,
 ) -> DatasetResult:
     """데이터셋 1개를 받아 페이지 + 매니페스트를 적재한다. 에러는 예외로 던지지 않고
     결과(result)에 담아, 배치가 한 데이터셋 실패를 넘어 계속 돌 수 있게 한다.
-
-    ``warehouse``가 주어지면 R2 적재 후 bronze Iceberg 테이블에도 적재한다.
     """
     prefix = landing.prefix_for(ds.source, ds.name)
     result = DatasetResult(name=ds.name, source=ds.source, endpoint=ds.endpoint, prefix=prefix)
     t0 = time.monotonic()
     sample_body: bytes | None = None  # 첫 페이지 = 드리프트(관측 스키마) 점검용 샘플
-    # Iceberg 적재 시에만 페이지 본문을 모은다(아니면 메모리 낭비 없이 카운트만).
-    landed_pages: list[tuple[str, str, bytes]] = []  # (page_no, raw_object_key, body)
 
-    def _record_page(filename: str, key: str, body: bytes) -> None:
+    def _record_page(body: bytes) -> None:
         nonlocal sample_body
         sample_body = sample_body or body
-        if warehouse is not None:
-            landed_pages.append((filename, key, body))
 
     try:
         if ds.kind == "kopis_list":
@@ -124,7 +118,7 @@ def ingest_dataset(
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-                _record_page(filename, key, page.body)
+                _record_page(page.body)
 
         elif ds.kind == "kopis_boxoffice":
             # 예매상황판: 페이징 없이 단일 GET 1건만 적재(page-0001.xml).
@@ -135,7 +129,7 @@ def ingest_dataset(
             result.rows += page.row_count
             result.bytes_written += len(page.body)
             result.object_keys.append(key)
-            _record_page("page-0001.xml", key, page.body)
+            _record_page(page.body)
 
         elif ds.kind == "seoul_list":
             # 서울 목록: 1000행 윈도우를 page-NNNNNN.json으로 적재.
@@ -147,7 +141,7 @@ def ingest_dataset(
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-                _record_page(filename, key, page.body)
+                _record_page(page.body)
 
         elif ds.kind == "kopis_detail":
             # 상세: 목록에서 id를 모아 건별 상세를 id=<값>.xml로 적재.
@@ -171,7 +165,7 @@ def ingest_dataset(
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
                 result.object_keys.append(key)
-                _record_page(filename, key, page.body)
+                _record_page(page.body)
             # 일시적 단건 실패는 관용하되, 하나도 못 받거나 과반이 실패하면 실질 장애로
             # 보고 태스크를 실패시켜 재시도·알림한다.
             if ids and (not result.pages or len(detail_errors) > len(ids) // 2):
@@ -203,16 +197,6 @@ def ingest_dataset(
         if result.checks["violations"]:
             print(f"  [contract] {ds.name}: " + " | ".join(result.checks["violations"]))
         landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params))
-
-        # bronze Iceberg 적재 (선택): 페이지를 레코드로 풀어 테이블에 INSERT.
-        if warehouse is not None and result.rows > 0:
-            records = [
-                (key, filename, rec)
-                for filename, key, body in landed_pages
-                for rec in parse_records(ds.source, body, ds.row_tag, ds.endpoint)
-            ]
-            result.iceberg_rows = warehouse.load(ds, landing.ctx, records)
-            print(f"  [iceberg] {ds.name}: {result.iceberg_rows} rows -> {warehouse.qualified(ds.name)}")
     except Exception as exc:  # noqa: BLE001 -- 데이터셋별로 잡아 두고 배치는 계속 진행
         result.error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -237,12 +221,17 @@ def normalize_mapped_results(pulled) -> list[dict]:
     return [r for r in pulled if r]
 
 
-def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int) -> dict:
+def build_run_report(
+    summaries: list[dict], ctx: RunContext, expected_total: int, *, load_failed: bool = False
+) -> dict:
     """데이터셋별 요약을 모아 run 단위 신뢰성 리포트를 만든다.
 
     "깨지면 얼마나 빨리 알고, 무엇이 영향인지 숫자로" — bronze v0의 SLO 측정점.
+    ``load_failed`` = bronze Iceberg 적재(load) 단계 실패 — fetch가 전부 성공해도
+    bronze가 미갱신이면 SLO 실패로 드러낸다(초록 리포트 뒤 침묵 방지).
     """
-    rows = [s for s in summaries if s]
+    # object_keys는 태스크 간 전달용 — 리포트 JSON에는 싣지 않는다(리니지는 _manifest.json).
+    rows = [{k: v for k, v in s.items() if k != "object_keys"} for s in summaries if s]
     landed = [s for s in rows if not s["error"]]
     skipped = [s for s in rows if s["error"] and "skipped" in s["error"]]
     failed = [s for s in rows if s["error"] and "skipped" not in s["error"]]
@@ -256,8 +245,8 @@ def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int
         if ch.get("freshness_age_hours") is not None:
             ages.append(ch["freshness_age_hours"])
 
-    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 이면 통과
-    slo_passed = not failed and not violations
+    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 + bronze 적재 성공이면 통과
+    slo_passed = not failed and not violations and not load_failed
     return {
         "domain": "culture",
         "layer": "bronze",
@@ -273,6 +262,7 @@ def build_run_report(summaries: list[dict], ctx: RunContext, expected_total: int
         },
         "total_rows": sum(s["rows"] for s in landed),
         "total_iceberg_rows": sum(s.get("iceberg_rows", 0) for s in landed),
+        "load_failed": load_failed,
         "freshness": {"max_age_hours": max(ages) if ages else None},
         "violation_count": len(violations),
         "violations": violations,
@@ -342,6 +332,66 @@ def build_warehouse(target: str = "dev") -> BronzeWarehouse:
     return BronzeWarehouse(build_warehouse_settings(target))
 
 
+def load_bronze_from_raw(
+    ctx: RunContext,
+    summaries: list[dict],
+    *,
+    sink,
+    warehouse,
+) -> dict[str, int]:
+    """fetch 단계가 raw에 박제한 객체를 다시 읽어 bronze Iceberg에 멱등 적재한다.
+
+    입력은 R2 raw뿐(API 재호출 없음) — bronze만 실패한 run은 이 단계만 재시도하면
+    된다. 데이터셋 단위로 격리해 하나가 실패해도 나머지는 적재하고, 말미에 실패
+    목록으로 예외를 던진다(fail loud). 적재 자체는 ``warehouse.load``의
+    ingest_ts delete-then-insert 라 재실행이 중복을 만들지 않는다.
+    반환: {dataset: 적재 행 수} (에러/skipped 데이터셋은 제외).
+    """
+    loaded: dict[str, int] = {}
+    failures: list[str] = []
+    for s in summaries:
+        if not s or s.get("error"):
+            continue  # 실패/skipped 데이터셋은 적재 대상 아님(리포트가 이미 드러냄)
+        try:
+            # 미등록 이름도 KeyError로 루프를 죽이지 않게 조회부터 try 안에서.
+            ds = BY_NAME[s["name"]]
+            records = []
+            for key in s.get("object_keys") or []:
+                filename = key.rsplit("/", 1)[-1]
+                for rec in parse_records(ds.source, sink.get(key), ds.row_tag, ds.endpoint):
+                    records.append((key, filename, rec))
+            # fetch가 센 행수와 **적재 전** 대조 — 손상 raw를 parse_records가 빈 리스트로
+            # 삼켜 0행 침묵 성공하는 구멍을 막고, 의심 데이터는 테이블에 쓰지 않는다.
+            if len(records) != s.get("rows", len(records)):
+                failures.append(
+                    f"{ds.name}: 파싱 {len(records)}행 ≠ fetch {s['rows']}행 (raw 파싱 유실 의심)"
+                )
+                continue
+            loaded[ds.name] = warehouse.load(ds, ctx, records)
+        except Exception as exc:  # noqa: BLE001 -- 데이터셋별 격리, 말미 fail loud
+            failures.append(f"{s['name']}: {type(exc).__name__}: {exc}")
+    if failures:
+        raise RuntimeError("bronze 적재 실패: " + " | ".join(failures))
+    return loaded
+
+
+def load_bronze(
+    ctx: RunContext,
+    summaries: list[dict],
+    *,
+    target: str = "dev",
+    env_file: str | None = None,
+) -> dict[str, int]:
+    """R2 싱크·Trino 웨어하우스를 만들어 ``load_bronze_from_raw``를 실행 (DAG/CLI 공용)."""
+    settings = build_r2_settings(target, env_file)
+    missing = missing_r2(settings)
+    if missing:
+        raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
+    return load_bronze_from_raw(
+        ctx, summaries, sink=R2Sink(settings), warehouse=build_warehouse(target)
+    )
+
+
 def run_batch(
     names: list[str] | None,
     *,
@@ -356,8 +406,7 @@ def run_batch(
     ctx = RunContext.create(run_id=run_id)
     clients = build_clients(env_file)
     landing = build_landing(ctx, target=target, env_file=env_file, dry_run=dry_run, local_dir=local_dir)
-    warehouse = build_warehouse(target) if opts.write_iceberg and not dry_run else None
-    results = [ingest_dataset(ds, clients, landing, opts, warehouse) for ds in select(names)]
+    results = [ingest_dataset(ds, clients, landing, opts) for ds in select(names)]
     return ctx, results
 
 
@@ -379,5 +428,4 @@ def ingest_one(
     ds = BY_NAME[name]
     clients = build_clients(env_file)
     landing = build_landing(ctx, target=target, env_file=env_file, dry_run=dry_run, local_dir=local_dir)
-    warehouse = build_warehouse(target) if opts.write_iceberg and not dry_run else None
-    return ingest_dataset(ds, clients, landing, opts, warehouse)
+    return ingest_dataset(ds, clients, landing, opts)
