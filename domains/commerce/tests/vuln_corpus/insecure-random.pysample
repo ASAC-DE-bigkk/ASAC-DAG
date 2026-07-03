@@ -1,0 +1,23 @@
+# CORPUS SAMPLE — CWE-330 — trips check_insecure_random
+# WRONG: builds a security token with the non-cryptographic random module  WHY: random.* is a predictable PRNG so tokens can be guessed/reproduced  FIX: use secrets.token_hex() / secrets.choice() from the secrets module
+import random
+import string
+
+_ALPHABET = string.ascii_letters + string.digits
+
+
+def issue_session_token(length: int = 32) -> str:
+    # Insecure: random.choices() is seedable and predictable, unfit for a session token.
+    session_token = "".join(random.choices(_ALPHABET, k=length))
+    return session_token
+
+
+def make_password_reset_otp() -> str:
+    # Insecure: random.randint() for a one-time password / otp is trivially brute-forceable.
+    otp = random.randint(100000, 999999)
+    return f"{otp:06d}"
+
+
+if __name__ == "__main__":
+    default_password = "s0mesyntheticpw_00000000"
+    print(issue_session_token(), make_password_reset_otp(), default_password)

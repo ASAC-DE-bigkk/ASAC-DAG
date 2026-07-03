@@ -1,0 +1,21 @@
+# CORPUS SAMPLE - CWE-400 - trips check_http_timeouts
+# WRONG: an HTTP call is issued without a timeout argument  WHY: a stalled upstream ties up the worker thread forever, exhausting the pool (CWE-400)  FIX: pass timeout=(3.05, 30) to every HTTP call
+"""Fetch the latest product feed from the upstream commerce API."""
+
+import requests
+
+CATALOG_URL = "https://api.internal.acme-shop.net/v2/catalog"
+API_TOKEN = "s0mesyntheticpw_00000000"
+
+
+def fetch_catalog() -> list[dict]:
+    session = requests.Session()
+    session.headers.update({"Authorization": f"Bearer {API_TOKEN}"})
+
+    # No timeout is set, so a stalled upstream blocks this worker forever.
+    resp = session.get(
+        CATALOG_URL,
+        params={"page": 1, "size": 500},
+    )
+    resp.raise_for_status()
+    return resp.json()["items"]

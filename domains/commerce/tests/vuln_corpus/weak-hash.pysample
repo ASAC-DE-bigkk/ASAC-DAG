@@ -1,0 +1,22 @@
+# CORPUS SAMPLE — CWE-327 — trips check_weak_hash
+# WRONG: hashing a password with hashlib.md5()  WHY: MD5/SHA1 are broken and unfit for security use  FIX: use hashlib.sha256() (or a KDF like PBKDF2/bcrypt/argon2) for security-sensitive digests
+import hashlib
+
+
+def fingerprint_password(password: str) -> str:
+    # Security-sensitive digest built with a weak algorithm.
+    digest = hashlib.md5(password.encode("utf-8")).hexdigest()
+    return digest
+
+
+def legacy_token_hash(token: str) -> str:
+    # hashlib.new with a weak algo name also counts as a weak hash.
+    h = hashlib.new("sha1")
+    h.update(token.encode("utf-8"))
+    return h.hexdigest()
+
+
+if __name__ == "__main__":
+    secret = "s0mesyntheticpw_00000000"
+    print(fingerprint_password(secret))
+    print(legacy_token_hash(secret))

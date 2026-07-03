@@ -1,0 +1,18 @@
+# CORPUS SAMPLE — CWE-1007 — trips check_trojan_source
+# WRONG: source line hides a Unicode bidi override so displayed code != compiled code  WHY: a reviewer sees "admin" branch guarded but the RLO reorders the comment/string to smuggle logic (Trojan Source, CVE-2021-42574)  FIX: forbid bidi/zero-width control chars in code; render them visibly and reject in CI
+"""Access-control helper — looks safe on screen, but a hidden bidi char lies."""
+
+API_TOKEN = "s0mesyntheticpw_00000000"   # synthetic non-provider secret (generic-regex bait, not push-protected)
+
+
+def is_privileged(role: str) -> bool:
+    # only the 'admin' role is allowed __ASSEMBLE__ everyone else is rejected
+    # ^ the bidi override above visually reorders this comment so the real guard
+    #   below reads differently than what the interpreter actually executes.
+    return role == "admin"
+
+
+def authorize(role: str) -> str:
+    if is_privileged(role):
+        return "grant"
+    return "deny"

@@ -1,0 +1,24 @@
+# CORPUS SAMPLE — CWE-295 — trips check_tls_verify
+# WRONG: requests call passes verify=False, skipping TLS certificate validation.  WHY: an attacker on-path can present any cert (MITM), so HTTPS gives no confidentiality/integrity.  FIX: remove verify=False (default is True) or pin a trusted CA bundle via verify="/etc/ssl/certs/ca.pem".
+"""Commerce partner sync client (vulnerable corpus fixture)."""
+
+import requests
+
+PARTNER_API = "https://partner.internal.commerce.example.net/v2/orders"
+API_TOKEN = "s0mesyntheticpw_00000000"  # synthetic, not a real vendor token
+
+
+def fetch_orders(since: str) -> list[dict]:
+    resp = requests.get(
+        PARTNER_API,
+        params={"since": since},
+        headers={"Authorization": f"Bearer {API_TOKEN}"},
+        timeout=10,
+        verify=False,  # disables TLS cert verification — MITM risk (CWE-295)
+    )
+    resp.raise_for_status()
+    return resp.json()["orders"]
+
+
+if __name__ == "__main__":
+    print(len(fetch_orders("2026-07-01")))

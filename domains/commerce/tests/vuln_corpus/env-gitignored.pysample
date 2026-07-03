@@ -1,0 +1,29 @@
+# CORPUS SAMPLE — CWE-538 — trips check_env_gitignored
+# WRONG: .gitignore never ignores .env.commerce (and drops the !.env.commerce.example keep rule)  WHY: the runtime secret file gets committed and tracked, exposing credentials in git history  FIX: add a line ".env.commerce" (or ".env.*") plus "!.env.commerce.example" so the real secret is ignored while the example stays tracked
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Test / cache artifacts
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Data & logs
+data/
+logs/
+*.log
+
+# NOTE: no rule here ignores the runtime commerce secret file, so
+# .env.commerce (which holds live DB/API credentials) ends up tracked.

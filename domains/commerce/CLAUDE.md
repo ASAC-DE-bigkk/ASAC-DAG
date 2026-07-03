@@ -898,30 +898,57 @@ pipeline contract ([docs/common_info.md](docs/pipeline/common_info.md)), operati
 ## 20. Security Gate (recall · apply · check, ongoing)
 
 
-This bundle has a **security subsystem** that blocks secret leakage, input injection, and common
-vulnerable patterns. Code: [include/security/](include/security/) (stdlib, portable). Threat model /
-logic: [docs/security/security.md](docs/security/security.md). Porting to other bundles:
-[docs/security/adoption.md](docs/security/adoption.md). These three are part of the CLAUDE-chain (§19),
+This bundle has a **portable security plugin** that blocks secret leakage (logs, stdout/stderr,
+uncaught exceptions, at-rest artifacts, notifications), input injection, SSRF, archive extraction
+attacks, weak crypto, and common vulnerable patterns — grounded in OWASP Top 10:2025 / CWE Top 25
+2025 / ASVS 5.0. Code: [include/security/](include/security/) (stdlib only, portable). Threat model /
+logic: [docs/security/security.md](docs/security/security.md). Usage recipes:
+[docs/security/usage.md](docs/security/usage.md). Applied-technique explainer:
+[docs/security/techniques.md](docs/security/techniques.md). Porting to other bundles/projects:
+[docs/security/adoption.md](docs/security/adoption.md). These are part of the CLAUDE-chain (§19),
 so they travel across sessions.
 
 
-**Recall**: before any security-adjacent work, read [docs/security/security.md](docs/security/security.md).
+**Recall**: before any security-adjacent work, read [docs/security/security.md](docs/security/security.md);
+for how to call a specific guard, [docs/security/usage.md](docs/security/usage.md).
 When porting to another bundle/project, follow [docs/security/adoption.md](docs/security/adoption.md)
-(includes a copy-paste prompt).
+(includes a copy-paste prompt). Adoption is drop-in: copy the folder + one line of bootstrap.
 
 
 **Apply (triggers)** — when you add/change code matching any of these, respond immediately:
 
 
+- **New DAG/entrypoint (script/server too)** → call `install_security()` once, right after loading
+  env (installs log + stdout/stderr + excepthook redaction and registers env secrets).
+- **HTTP calls** → use `netio.http_request/http_get/http_post` (timeout injected, TLS-verify-off
+  blocked, exception args scrubbed); at minimum always set `timeout=`.
+- **HTTP to a user/external-supplied URL (SSRF)** → `http_request(url_check=True)` or
+  `assert_url_allowed()` (blocks private/metadata IPs, resolves hostnames); cap huge responses
+  with `max_response_bytes=`.
+- **Extracting a zip/tar** → `safe_extract_zip()` / `safe_extract_tar()` (never bare
+  `extractall()`; blocks zip-slip, decompression bombs, symlink members).
+- **Tokens / password storage / secret comparison** → `generate_token()` (never `random`),
+  `hash_password()`/`verify_password()`/`needs_rehash()` (PBKDF2 600k), `constant_time_equals()`.
+- **DB IO** → bind values via the driver's parameters (never string-build SQL); a dynamic
+  table/column identifier → `assert_identifier()`; log a connection string → `mask_dsn()`.
+- **Redirects (backend)** → never redirect to a non-literal target without allowlisting it.
+- **Free-form logging of external input** → `sanitize_log_value()` (or `install_security(
+  neutralize_log_controls=True)`) to neutralize CRLF/ANSI log injection.
 - External API/network exceptions or URLs written to **logs** → `redact()` (mandatory if the exception
-  reaches a stored artifact).
-- error/metadata **stored to storage/marker/DB** → `redact()` before storing (block at-rest leakage).
-- Sending to an external channel (**webhook/email/slack**) → `redact(message)` / `redact(context)`.
-- **User input** (params) used as a path/identifier → `assert_iso_date()` / `assert_safe_segment()`.
+  reaches a stored artifact). Re-raising/wrapping exceptions → `scrub_exception(exc)`.
+- error/metadata **stored to storage/marker/DB** → `redact()` before storing (block at-rest leakage);
+  local files → `write_json_redacted()` / `write_text_redacted()`.
+- **Paths/keys built from input** → `safe_key()` / `safe_join()`; **user input** (params) used as a
+  path/identifier → `assert_iso_date()` / `assert_safe_segment()`.
+- **API call records** (receipt/response meta to store or notify) → `api_receipt()` /
+  `response_summary()` / `scrub_url·headers·params()` — never store raw URL/header/param dumps.
+- **Operational/error logging that must stay analyzable** → `log_event()` / `log_exception()`
+  (masked single-line JSON; returned dict is safe to transmit to notifiers).
+- Sending to an external channel (**webhook/email/slack**) → `redact(message)` / `redact(context)`
+  (or send the `log_exception()` return dict).
 - **New secret env var** → name it per the `KEY/SECRET/TOKEN/CREDENTIAL/ACCESS_KEY/…` convention (auto
-  masking) or call `register_secret()`.
-- **New DAG/entrypoint** → call `install_log_redaction()` once, right after loading env.
-- HTTP calls set `timeout=`; use yaml `safe_load`; never `eval/exec/pickle/shell=True/verify=False`.
+  masking) or call `register_secret()` / `install_security(extra_secrets=[...])`.
+- Use yaml `safe_load`; never `eval/exec/pickle/shell=True`, never disable TLS verification.
 
 
 **Check (single point)**: always run before finishing; blocking (CRITICAL/HIGH) findings must be 0.

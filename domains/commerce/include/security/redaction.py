@@ -50,6 +50,9 @@ _STRUCTURAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      r"\1" + PLACEHOLDER),
     # AWS 스타일 액세스 키 ID
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), PLACEHOLDER),
+    # URL userinfo 자격증명(scheme://<userinfo>@host)의 userinfo 전체 → 통째 마스킹.
+    # `user:pass` 뿐 아니라 **토큰 단독**(user 없는 https://TOKEN@host)도 가린다.
+    (re.compile(r"(?<=://)[^/@\s]{1,256}(?=@)"), PLACEHOLDER),
     # 이름있는 시크릿 할당/쿼리: secret=…, token=…, api_key=…, access_key_id=…, password=…
     # 선행 \b 를 두지 않는다 → aws_secret_access_key 처럼 _ 로 이어붙은 이름도 잡는다.
     # (이름 직후의 =/: 앵커가 secretary= 같은 부분일치 오탐을 막는다.)
@@ -119,7 +122,11 @@ class Redactor:
         if isinstance(obj, str):
             return self.redact_text(obj)
         if isinstance(obj, Mapping):
-            return {k: self.redact(v) for k, v in obj.items()}
+            # 키도 마스킹한다 — 시크릿이 값이 아니라 **키**로 들어오는 경우(예: 토큰으로
+            # 인덱싱된 dict) 누출 방지. literal 마스킹은 등록된 시크릿을 포함한 키만 바꾸므로
+            # 일반 필드명은 그대로 남는다(구조 파손 없음).
+            return {self.redact_text(k) if isinstance(k, str) else k: self.redact(v)
+                    for k, v in obj.items()}
         if isinstance(obj, (list, tuple)):
             return type(obj)(self.redact(v) for v in obj)
         if isinstance(obj, BaseException):
@@ -128,6 +135,52 @@ class Redactor:
 
     def has_literals(self) -> bool:
         return bool(self._literals)
+
+
+# 로그 인젝션(CWE-117) 무력화 — CR/LF/탭은 가시 이스케이프로, 나머지 제어문자(C0/C1/DEL,
+# ANSI ESC 포함)와 U+2028/U+2029(라인 분리자)는 \uXXXX 로 치환한다.
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def sanitize_log_value(value: object, *, max_len: int = 2000) -> str:
+    """외부 입력을 **자유형 로그**에 넣기 전 제어문자 무력화(위조 로그라인·ANSI 공격 차단).
+
+    개행/CR/탭 → 리터럴 이스케이프(`\\n`/`\\r`/`\\t`), 그 외 제어문자 → `\\uXXXX`,
+    max_len 초과분은 `…(+N)` 로 절단. events.py 의 JSON 경로는 json.dumps 가 이미
+    무력화하므로 불필요 — 이 헬퍼는 `log.info("user=%s", user)` 류 직접 로깅용이다.
+    """
+    text = value if isinstance(value, str) else str(value)
+    text = (text.replace("\\", "\\\\").replace("\r", "\\r")
+                .replace("\n", "\\n").replace("\t", "\\t"))
+    text = _CTRL_RE.sub(lambda m: f"\\u{ord(m.group(0)):04x}", text)
+    if len(text) > max_len:
+        text = text[:max_len] + f"…(+{len(text) - max_len})"
+    return text
+
+
+def scrub_exception(exc: BaseException, *, redactor: "Redactor | None" = None,
+                    max_depth: int = 8) -> BaseException:
+    """예외 **객체 자체**의 args 를 체인(__cause__/__context__)까지 따라가며 마스킹.
+
+    타입을 바꾸지 않고 같은 예외를 그대로 다시 던질 수 있게 한다(호출측 except 절 보존).
+    requests 예외처럼 메시지에 키 박힌 URL 이 들어가는 경우, 이 예외가 어디로 전파되든
+    (로그·마커·알림·상위 재포장) str(exc) 에 시크릿이 남지 않는다.
+    """
+    red = redactor or _default
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    depth = 0
+    while cur is not None and id(cur) not in seen and depth < max_depth:
+        seen.add(id(cur))
+        depth += 1
+        try:
+            cur.args = tuple(
+                red.redact(a) if isinstance(a, (str, dict, list, tuple)) else a
+                for a in cur.args)
+        except Exception:   # args 재할당 불가 예외(슬롯 등)는 건너뜀 — 로그 필터가 2차 방어
+            pass
+        cur = cur.__cause__ or cur.__context__
+    return exc
 
 
 # ── 모듈 전역 기본 redactor + 편의 함수 ─────────────────────────────────────────

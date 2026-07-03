@@ -1,0 +1,20 @@
+# CORPUS SAMPLE — CWE-89 — trips check_sql_text_injection
+# WRONG: user input is interpolated into the SQL passed to text()  WHY: an attacker can inject SQL via the order_status value  FIX: use a bound parameter (text("... WHERE status = :status")) and pass params={"status": status}
+"""Fetch commerce orders by status from the analytics warehouse."""
+
+from sqlalchemy import create_engine, text
+
+DB_URL = "postgresql+psycopg2://analyst:s0mesyntheticpw_00000000@warehouse:5432/commerce"
+engine = create_engine(DB_URL)
+
+
+def fetch_orders_by_status(status: str) -> list[dict]:
+    with engine.connect() as conn:
+        # BUG: f-string interpolation builds the SQL string handed to text().
+        stmt = text(f"SELECT id, total, created_at FROM orders WHERE status = '{status}'")
+        rows = conn.execute(stmt).mappings().all()
+    return [dict(r) for r in rows]
+
+
+if __name__ == "__main__":
+    print(fetch_orders_by_status("shipped"))

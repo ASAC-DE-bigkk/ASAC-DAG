@@ -1,0 +1,19 @@
+# CORPUS SAMPLE — CWE-377 — trips check_insecure_file_ops
+# WRONG: predictable tempfile.mktemp() name + world-writable 0o666 chmod  WHY: TOCTOU race lets an attacker pre-create/hijack the path, and 0o666 lets any local user read/overwrite the file  FIX: use tempfile.mkstemp()/NamedTemporaryFile for an atomic fd and chmod 0o600 (owner-only)
+
+import os
+import tempfile
+
+
+def export_report(payload: bytes) -> str:
+    """Write a report to a temp file, then hand its path to a downstream job."""
+    # Insecure: mktemp only reserves a name; the file is created later (race window).
+    tmp_path = tempfile.mktemp(suffix=".json")
+
+    with open(tmp_path, "wb") as handle:
+        handle.write(payload)
+
+    # Insecure: 0o666 grants group + other write on a file holding report data.
+    os.chmod(tmp_path, 0o666)
+
+    return tmp_path

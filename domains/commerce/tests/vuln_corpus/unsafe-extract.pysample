@@ -1,0 +1,27 @@
+# CORPUS SAMPLE — CWE-22 — trips check_unsafe_extract
+# WRONG: tarfile.extractall() called with no filter= and no safe_extract wrapper  WHY: a crafted archive entry with ../ paths escapes the target dir (zip-slip / tar-slip, CWE-22)  FIX: pass filter="data" (Py 3.12+) or route through security/archive.py safe_extract_*
+"""Unpack a vendor product-feed archive into the staging directory."""
+
+import os
+import tarfile
+import zipfile
+
+STAGING_DIR = "/tmp/commerce/staging"
+
+
+def unpack_feed_tar(archive_path: str) -> None:
+    """Extract a .tar.gz product feed shipped by a partner."""
+    with tarfile.open(archive_path, mode="r:gz") as tar:
+        # no member sanitization: a member named "../../etc/passwd" is honored
+        tar.extractall(path=STAGING_DIR)
+
+
+def unpack_feed_zip(archive_path: str, member: str) -> str:
+    """Extract a single named entry from a .zip product feed."""
+    with zipfile.ZipFile(archive_path) as zf:
+        # single-member extract is just as unsafe without path validation
+        return zf.extract(member, path=STAGING_DIR)
+
+
+if __name__ == "__main__":
+    unpack_feed_tar(os.path.join(STAGING_DIR, "feed.tar.gz"))

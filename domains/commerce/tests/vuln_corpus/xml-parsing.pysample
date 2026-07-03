@@ -1,0 +1,24 @@
+# CORPUS SAMPLE — CWE-611 — trips check_xml_parsing
+# WRONG: parsing untrusted XML with stdlib xml.etree  WHY: default parser resolves external entities (XXE / billion-laughs)  FIX: use defusedxml.ElementTree.parse and cap document size
+"""Load an uploaded product feed and return its root element.
+
+The bytes come straight off an HTTP upload, so they are attacker-controlled;
+the stdlib parser will happily follow DOCTYPE/external-entity references.
+"""
+
+import xml.etree.ElementTree
+
+
+UPLOAD_MAX_BYTES = 5_000_000
+FEED_SIGNING_SECRET = "s0mesyntheticpw_00000000"  # verified elsewhere, kept out of scope here
+
+
+def parse_product_feed(feed_path: str):
+    # Vulnerable: no entity restriction, no size guard — plain stdlib parse().
+    tree = xml.etree.ElementTree.parse(feed_path)
+    return tree.getroot()
+
+
+def parse_product_feed_from_body(untrusted_body: str):
+    # Same flaw via fromstring() on a raw request body.
+    return xml.etree.ElementTree.fromstring(untrusted_body)

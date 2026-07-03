@@ -5,6 +5,126 @@
 
 ---
 
+## 2026-07-03
+
+### 27. 취약점 코퍼스 — 정적 detector 20종 발화 증명 + 격리 (feat/96)
+
+request:
+- 보안 플러그인 검증/증명 목적으로 **취약점 코드(코퍼스)** 작성. 자기 프로젝트라 방어적 용도의
+  취약 샘플 생성은 문제 없음. (Q&A) 산출물 형태 = **취약점 코퍼스**(detector 별 취약 샘플 +
+  self-audit 격리 + "스캔하면 N건 검출" e2e 테스트).
+
+response:
+- **격리 설계(무침습)**: 샘플을 `tests/vuln_corpus/*.pysample` 로 저장. self-audit(`_iter_files`)는
+  `.py/.md/...` 확장자만 스캔하므로 `.pysample` 은 **불가시** → 취약 코드가 트리에 있어도 게이트
+  청결 유지(audit.py 수정 0). e2e 테스트가 각 샘플을 tmp 에 실제 파일명(`.py`/`requirements.txt`/
+  `.env.commerce.example`/`.gitignore`)으로 복사해 매핑 detector 발화를 잠근다.
+- **다중 에이전트 워크플로**(map→author→적대적 검증): audit.py 의 `STATIC_CHECKS` 20종을 매핑,
+  detector 별 **읽기 쉬운 취약 샘플**을 병렬 저작하고 각 샘플을 실제 정규식과 대조해 발화 예측 검증.
+  22개 샘플 산출(credential_material 은 PEM·벤더토큰·URL userinfo 3종) → **정적 detector 20종 전수 커버**.
+- **push-safety**: 벤더 토큰(`ghp_…`)·PEM 개인키·bidi 제어문자는 커밋 시 GitHub push protection 을
+  건드리므로 커밋 금지 — 샘플엔 `__ASSEMBLE__` placeholder, 테스트가 조각 결합으로 런타임 조립
+  (pem/ghp_token/bidi). 나머지는 provider 포맷 아닌 **합성 값**이라 커밋 안전(전 파일 push-safe 스캔 통과).
+- **Ground-truth**: 22 샘플을 조립·materialize 해 매핑 detector 실행 → **전수 발화 확인**(fires + detail 일치).
+- **검증**: 전 테스트 **239 통과**(213→+26: 파라미터화 발화 22 + 완전성/격리/게이트청결/통합스캔 4),
+  `python -m security` 차단 0(코퍼스 무누출 확인). `test_every_static_detector_has_a_corpus_sample` 로
+  신규 detector 추가 시 대응 샘플 누락을 자동 강제. 문서: [tests/vuln_corpus/README.md](tests/vuln_corpus/README.md).
+
+### 26. 보안 플러그인 정밀 리뷰 — opus 구현부 6개 결함 수정 + 회귀 잠금 (feat/96)
+
+request:
+- 어제(fable) 진행 중 **opus 로 구현된 영역**에 미흡한 부분이 있으니, 해당 영역을 확인해
+  **전체 조치 후 테스트**까지 진행할 것.
+
+response:
+- **적대적 정밀 리뷰**로 opus-era 모듈에서 실동작 결함 6종 확인·수정(전부 commerce 번들 안):
+  - **P1 (HIGH) TLS 가드 우회** — `netio.http_request` 가 `verify is False` 만 차단해
+    `verify=0`/`""` 로 인증서 검증 비활성이 통과. → falsy 전부 차단(None=기본 위임·truthy=CA 경로만 허용).
+  - **P2 (HIGH) IPv6 SSRF 우회** — `::7f00:1`(IPv4-compatible `::/96`)·6to4/teredo 내장 IPv4 가
+    미검사로 루프백/IMDS 도달 가능. → `::/96` 차단 + `sixtofour`/`teredo` 내장 IPv4 를 v4 정책으로 재검사.
+  - **P3 (MED) dict '키' 미마스킹** — `Redactor.redact`·`events._json_safe` 가 값만 가리고 키는
+    통과 → 시크릿이 키로 오면 누출. → 두 경로 모두 문자열 키 마스킹(등록 시크릿 포함 키만 치환, 일반 필드명 보존).
+  - **P4 (MED) 비밀번호 검증 크래시** — `verify_password(None)`/`needs_rehash(None)` 가
+    AttributeError(DB NULL → 로그인 DoS). 문서화된 "깨끗한 거부"와 모순. → 비문자열 저장값을 크래시 없이 거부(False)/재해시(True).
+  - **P5 (MED) 이식성 회귀** — `audit.py` 의 `(?i:...)` 스코프 인라인 플래그가 **Python 3.11+ 전용**
+    → <3.11 프로젝트에서 audit import 시 `re.error`(플러그인 이식성 목표와 모순). → 문자클래스로 재작성(3.9+ 동작).
+  - **P6 (MED) 게이트 CLI 크래시** — 문서화된 `python -m security` 가 Windows **cp949** 콘솔에서
+    `—`(em-dash) 로 `UnicodeEncodeError`. → 비UTF-8 콘솔에서 UTF-8 buffer 폴백(출력 보장).
+- **회귀 테스트 6종(20 파라미터 케이스) 추가** — 각 수정을 잠금(자기감사 회피 위해 위반 샘플은 조각 결합/tmp).
+- **검증**: 전 테스트 **213 통과**(190→213), `python -m security` 차단 0(경고 3건은 CLI 단독 실행 런타임
+  점검 = 정상). cp949 콘솔에서 게이트 CLI 정상 출력 확인.
+
+### 25. 보안 플러그인 커버리지 확장 — SSRF·아카이브·암호·정적점검 11종 + 적대적 검증 (feat/96)
+
+request:
+- 추가 개발된 보안 모듈의 커버 영역 **외의 다른 취약점**도 커버할 수 있게, **최신 보안
+  가이드라인**을 이용해 추가 대응 모듈 구성.
+- 사용법 문서와 **적용 기술 목록·해설 문서**를 security 문서로 남길 것. 커밋·push.
+
+response:
+- **가이드라인 리서치**(다중 에이전트 웹 조사): OWASP Top 10:2025(A03 공급망·A10 예외처리
+  신설, SSRF→A01), CWE Top 25 2025(SQLi #2·경로탐색 #6·자원무제한 #25 신규), ASVS 5.0.0,
+  PEP 706·Trojan Source(CVE-2021-42574)·SSRF/비밀번호 저장 치트시트 확보 → SEC-01~20 계획.
+- **신규 모듈 2종**: `crypto.py`(CSPRNG 토큰·상수시간 비교·PBKDF2-HMAC-SHA256 600k 비밀번호
+  해시, NFKC 정규화·자기서술 인코딩·needs_rehash), `archive.py`(zip-slip·압축폭탄·심링크 차단
+  안전 추출, PEP 706 filter, 스트리밍 바이트 재검증).
+- **기존 모듈 확장**: `netio`(SSRF 가드 `assert_url_allowed` — 명시 CIDR 차단 IPv4/6·IMDS,
+  호스트명 DNS 해석; 응답 크기 상한 `max_response_bytes`), `redaction`(URL userinfo 마스킹·
+  `sanitize_log_value` 로그 인젝션 무력화), `log_filter`(`neutralize_controls` opt-in).
+- **정적 점검 7→18종**: credential_material(PEM/벤더 토큰/URL 비번, CRITICAL)·trojan_source·
+  sql_injection·unsafe_extract·insecure_file_ops·weak_hash·insecure_random·web_misconfig·
+  xml_parsing·cleartext_http·requirements_hygiene 신설 + tls/yaml/dangerous 강화. 런타임 점검 4종.
+- **적대적 검증**(다중 에이전트, 차원별 리뷰→독립 검증): 확인된 **16개 결함 전부 수정** —
+  SSRF 호스트명 우회(resolve_dns 기본 True), 로그 포맷문자열 %-지정자 훼손(렌더 후 마스킹),
+  tar 압축폭탄(next() 스트리밍+압축입력 상한), 정적 점검 우회(shell=True 멀티라인·SQL 내부
+  따옴표·yaml 위치 로더·자격증명 라인공유·filter 부분일치·requirements 환경마커·weak_hash
+  대문자·userinfo 토큰단독·verify_password 크래시·NFKC 누락 등).
+- **검증**: 회귀 테스트 20건 추가 → **전 테스트 174 통과**, `python -m security` 차단 0
+  (자기매칭 방지: 패턴은 조각 결합/chr()/이스케이프로 작성).
+- **문서**: [docs/security/usage.md](docs/security/usage.md)(사용법) ·
+  [docs/security/techniques.md](docs/security/techniques.md)(적용 기술 목록+해설·가이드라인 매핑)
+  신규, security.md 위협 모델 확장, README·CLAUDE §20·Share.md 갱신.
+- **커버리지 3차 확장(commerce 밖 조사 반영)**: sample 의 auth 백엔드(FastAPI)·notifications·
+  dbt·DB IO 를 조사(auth 는 이미 파라미터화 ORM·CSRF·세션·레이트리밋으로 견고) → 플러그인이
+  아직 못 잡던 **백엔드/DB IO 취약점 클래스**를 이식 대비로 추가: 신규 `dbio.py`
+  (`assert_identifier` 동적 식별자 검증 · `mask_dsn` URL+libpq DSN 비밀번호 마스킹), 정적 점검
+  2종(`no_sql_text_injection` SQLAlchemy `text()` 주입 HIGH · `open_redirect_advisory` CWE-601
+  MEDIUM). 정적 점검 18→20종. 조치는 전부 **commerce 번들 안**에서 수행(플러그인이 이식원). 검증:
+  전 테스트 **190 통과**, `python -m security` 차단 0.
+
+### 24. 통합 보안 플러그인化 — install_security() 원샷 + net/file/API/이벤트 가드 (feat/96)
+
+request:
+- 1차: `dags/domains/commerce` 안에서 대응 가능한 **모든 보안이 적용**되게 처리.
+- 2차: 전체 프로그램(모든 IT 프로젝트)에서 쓸 수 있는 **통합 보안처리 플러그인**으로 —
+  현 폴더 구조를 유지한 채, network IO·file IO·log·stdout·예외처리·API receipt/response 를
+  security 코드 **하나의 적용**으로 커버하도록 사전 대응(ready). 추후 common 폴더로 제공 시
+  다른 프로젝트는 **받아쓰기만 하면 되는 수준**으로.
+- 단, 로그 분석은 가능해야 함 — 취약점을 만들지 않는 경계에서 처리/에러 로그의
+  기록·해석·전송이 되게 구조화. 이식 방법과 제공 기능을 정리한 보안 문서 작성.
+- 브랜치: `feat/96-security-plugin`.
+
+response:
+- **플러그인 신규 모듈 6종** ([include/security/](include/security/), 전부 stdlib only·번들 비종속):
+  `bootstrap.py`(**`install_security()` 원샷** — env 시크릿 적재 + 로그/stdout·stderr/
+  sys·threading 예외훅 마스킹, idempotent·기동 비차단), `stdio_guard.py`(print·미처리
+  트레이스백 마스킹), `netio.py`(`http_request/get/post` — timeout 자동 주입·TLS 검증 비활성
+  차단·예외 args 스크럽 후 같은 타입 재전파), `fileio.py`(`safe_key`/`safe_join` 경로 주입
+  차단 + `write_json_redacted` at-rest 마스킹 저장), `api_guard.py`(`api_receipt`/
+  `response_summary`/`scrub_url·headers·params` — 저장 가능한 무시크릿 요청 영수증·응답 요약),
+  `events.py`(`log_event`/`log_exception` — **마스킹된 단일 라인 JSON** 처리/에러 로그, 반환
+  dict 는 알림 전송에도 안전 → 분석 가능성 유지). `redaction.py` 에 `scrub_exception`(예외
+  체인 args 마스킹) 추가, audit 에 런타임 점검 3종(log/stdout/excepthook 설치 여부) 등록.
+- **1차 wiring**: DAG(`commerce_raw.py`)·scripts 2종 → `install_security()`;
+  bronze `clients.py` HTTP 호출 → `netio.http_request`(정책 단일점);
+  `silver_tasks.build_silver` 경계에 `assert_safe_segment(short)`/`assert_iso_date` 추가.
+  기존 redact 지점(마커 error·notify·재시도 로그)은 유지(이중 방어).
+- **검증**: 신규 테스트 24케이스 포함 전 테스트 **106 통과**, `python -m security` 차단 0
+  (런타임 설치 3종은 CLI 단독 실행에서 warn = 정상, 문서화).
+- **문서**: [docs/security/security.md](docs/security/security.md)(위협 모델 11경로·모듈 표·
+  로그 분석 경계·검증), [docs/security/adoption.md](docs/security/adoption.md)(받아쓰기 이식
+  가이드 + common 승격 계약 + 에이전트 프롬프트), docs/security/README·CLAUDE.md §20·Share.md 갱신.
+
 ## 2026-07-02
 
 ### 23. DAG 명칭 변경 — commerce_localdata_{elt,recollect} → commerce_{collect,recollect}_raw

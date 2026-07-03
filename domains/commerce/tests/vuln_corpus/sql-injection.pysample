@@ -1,0 +1,13 @@
+# CORPUS SAMPLE — CWE-89 — trips check_sql_injection
+# WRONG: user_id is interpolated into the SQL via an f-string passed straight to .execute()
+# WHY: an attacker-controlled user_id (e.g. "1 OR 1=1") is parsed as SQL, not as data → SQL injection
+# FIX: pass a bound parameter and let the driver escape it: cur.execute("... WHERE user_id = %s", (user_id,))
+import sqlite3
+
+
+def fetch_orders(conn: sqlite3.Connection, user_id: str) -> list[tuple]:
+    """Return all orders belonging to a single user."""
+    cur = conn.cursor()
+    # Dynamically assembled SQL string handed directly to execute() — no bind parameters.
+    cur.execute(f"SELECT id, total, status FROM orders WHERE user_id = {user_id}")
+    return cur.fetchall()

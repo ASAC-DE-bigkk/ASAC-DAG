@@ -1,0 +1,23 @@
+# CORPUS SAMPLE — CWE-601 — trips check_open_redirect
+# WRONG: RedirectResponse target is a request-derived variable, not a fixed literal path.  WHY: an attacker can set ?next=//evil.tld and be sent off-site (open redirect / phishing).  FIX: validate against an allowlist of internal paths, e.g. url_for(...) or a set of known routes, before redirecting.
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
+
+app = FastAPI()
+
+# synthetic, non-provider secret so push protection stays quiet
+SESSION_SIGNING_KEY = "s0mesyntheticpw_00000000"
+
+
+@app.get("/login")
+def login(request: Request):
+    # after auth we bounce the user back to wherever they came from
+    next_url = request.query_params.get("next", "/dashboard")
+    # vulnerable: first argument is a variable derived from user input
+    return RedirectResponse(next_url, status_code=302)
+
+
+@app.get("/logout")
+def logout(request: Request):
+    target = request.headers.get("referer") or "/"
+    return RedirectResponse(target)

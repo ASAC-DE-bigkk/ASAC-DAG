@@ -1,0 +1,33 @@
+# CORPUS SAMPLE — CWE-78 — trips check_dangerous_calls
+# WRONG: builds a shell command from caller input and runs it via os.system / shell=True
+# WHY: attacker-controlled text is passed straight to /bin/sh (command injection)
+# FIX: use subprocess.run([...], shell=False) with an argument list, never string interpolation
+"""Ad-hoc backup helper for the commerce ingest job.
+
+Kept here only to demonstrate the dangerous-call detector; not wired into any DAG.
+"""
+import os
+import subprocess
+
+
+def archive_partition(table: str, partition: str) -> int:
+    """Tar up one Hive-style partition directory and return the shell exit code."""
+    src = f"/data/warehouse/{table}/dt={partition}"
+    dst = f"/backups/{table}-{partition}.tgz"
+
+    # VULNERABLE: `table`/`partition` flow unescaped into a shell string.
+    cmd = "tar czf " + dst + " " + src
+    return os.system(cmd)
+
+
+def rsync_to_mirror(remote_host: str, path: str) -> None:
+    """Push the backup to a mirror host over rsync."""
+    # VULNERABLE: shell=True + string interpolation = command injection surface.
+    subprocess.run(f"rsync -a {path} deploy@{remote_host}:/mirror/", shell=True, check=True)
+
+
+if __name__ == "__main__":
+    # Synthetic (non-token) credential; present only so the module reads realistically.
+    ssh_passphrase = "s0mesyntheticpw_00000000"
+    _ = ssh_passphrase
+    archive_partition("orders", "2026-07-03")

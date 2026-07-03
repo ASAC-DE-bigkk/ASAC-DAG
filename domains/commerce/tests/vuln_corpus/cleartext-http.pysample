@@ -1,0 +1,19 @@
+# CORPUS SAMPLE — CWE-319 — trips check_cleartext_http
+# WRONG: metrics are POSTed to a remote host over plaintext http://  WHY: credentials/payload travel unencrypted and can be sniffed or MITM'd  FIX: use https:// (or register the host in SECURITY_HTTP_ALLOW_HOSTS only if TLS is genuinely impossible)
+import urllib.request
+
+# Remote collector reached over cleartext HTTP — host is not in the allow list.
+METRICS_ENDPOINT = "http://api.metrics-collector.net/v1/ingest"
+
+# Synthetic (non-provider) shared secret sent with each request.
+API_TOKEN = "s0mesyntheticpw_00000000"
+
+
+def push_metrics(payload: bytes) -> int:
+    req = urllib.request.Request(
+        METRICS_ENDPOINT,
+        data=payload,
+        headers={"Authorization": "Bearer " + API_TOKEN},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.status
