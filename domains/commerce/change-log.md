@@ -5,7 +5,29 @@
 
 ---
 
-## 2026-07-03
+## 2026-07-04
+
+### 31. commerce_load_bronze 통합 검증 — 이미지 리빌드 + 동시성/receipt 수정 (전 39종 적재 성공)
+
+request:
+- 리빌드까지 진행하고 검증. 실패하면 조치하고 성공할 때까지 반복.
+
+response:
+- **이미지**: `feat/7-dockerfile-pyiceburg` 의 pyiceberg[s3fs] 0.11.1 로 이미지 리빌드·재기동 →
+  pyiceberg/pyarrow/trino 임포트 확인.
+- **통합 검증 중 발견·수정 2건**:
+  1. `load_state.write_receipt` 가 `bronze_run_id` 키를 찾다 KeyError(load_unit 결과는 `run_id`) →
+     `run_id` 폴백 추가.
+  2. **Iceberg 동시 커밋 충돌**: 39 load_one 이 동일 테이블에 병렬 append → `CommitFailedException`
+     (낙관적 동시성)으로 28/39 실패. → `load_one` **직렬화**(`max_active_tis_per_dagrun=1`) +
+     `load_unit_pyiceberg` 를 **트랜잭션 1커밋**(delete+청크 append 묶음, 스냅샷 폭증/충돌창 제거).
+- **재적재 가능 검증**: bronze 테이블 drop + 상태파일 삭제 → 워터마크 없음(전체 재적재 조건) 확인 후
+  재실행. (사용자 "iceberg/parquet + 상태 삭제 후 재적재 가능" 설계 실증.)
+- **결과(dev, max_dates=1, 06-30 legacy 전량)**: **load_one 39/39 성공·0 실패**, bronze
+  **1,342,222행 / 39종 / 1,341,784 유니크 mgtno**, manifest 39 전부 publishable, 워터마크 39·pending 0·
+  receipt 39. record_json `json_extract_scalar` 파싱 정상(BPLCNM·TRDSTATENM) → silver 준비 완료.
+  단위테스트 **264 통과**, security 차단 0. (직렬 백필 ~17분 — 대부분 general_restaurant 53만건.
+  일일 증분은 소량이라 빠름. 07-01 이후는 재실행이 catch-up.)
 
 ### 30. commerce_load_bronze 크래시 수정 — page-NDJSON(과거 데이터) 적재 지원
 

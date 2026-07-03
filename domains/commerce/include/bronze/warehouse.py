@@ -314,27 +314,30 @@ def load_unit_pyiceberg(storage: Storage, unit: dict, *, load_date: str) -> int:
 
     cat = _pyiceberg_catalog()
     table = cat.load_table(f"{schema}.{BRONZE_TABLE}")
-    # 멱등: 같은 (dataset, bronze_run_id) 선삭제 후 append.
-    table.delete(And(EqualTo("dataset", short), EqualTo("bronze_run_id", run_id)))
 
     total, batch = 0, []
     rows_iter = project_records(
         iter_increment_rows(storage, unit["increment_key"],
                             service_name=unit.get("service_name")), **ctx)
 
-    def _flush():
-        nonlocal total
-        if not batch:
-            return
-        table.append(_arrow_table(batch))
-        total += len(batch)
-        batch.clear()
+    # 멱등: 같은 (dataset, bronze_run_id) 선삭제 후 append 를 **트랜잭션 1커밋**으로 묶는다
+    # (청크마다 커밋하면 스냅샷 폭증 + 동시성 충돌 창 확대). delete 대상 없으면 무해(no-op).
+    with table.transaction() as txn:
+        txn.delete(And(EqualTo("dataset", short), EqualTo("bronze_run_id", run_id)))
 
-    for row in rows_iter:
-        batch.append(row)
-        if len(batch) >= PYICEBERG_CHUNK_ROWS:
-            _flush()
-    _flush()
+        def _flush():
+            nonlocal total
+            if not batch:
+                return
+            txn.append(_arrow_table(batch))     # 청크 parquet 은 즉시 기록(메모리 바운드), 커밋은 1회
+            total += len(batch)
+            batch.clear()
+
+        for row in rows_iter:
+            batch.append(row)
+            if len(batch) >= PYICEBERG_CHUNK_ROWS:
+                _flush()
+        _flush()
     return total
 
 

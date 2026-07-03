@@ -81,3 +81,12 @@ def test_write_receipt_isolated_path():
     (key,) = list(st.data)
     assert key.startswith("commerce_bronze_state/receipts/2026-07-03/")   # raw 밖·commerce_ prefix
     assert key.endswith("R__bakery.json")
+
+
+def test_write_receipt_accepts_run_id():
+    # load_unit 결과는 run_id 키(bronze_run_id 아님) — 폴백 동작 확인.
+    st = _FakeStorage()
+    ls.write_receipt(st, "", {"load_date": "2026-07-03", "run_id": "2026-06-30_160452_591",
+                              "short": "clinic", "rows_loaded": 3})
+    (key,) = list(st.data)
+    assert key.endswith("2026-06-30_160452_591__clinic.json")

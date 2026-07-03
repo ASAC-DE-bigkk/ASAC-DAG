@@ -136,7 +136,11 @@ def retry_dates(pending: list[dict], *, today: str) -> set[str]:
 
 # ── receipt (적재 단위 감사 로그) ─────────────────────────────────────────────
 def write_receipt(storage: Storage, prefix: str, receipt: dict) -> None:
-    """적재 단위 1건의 이력 기록(격리 공간). raw 계보 + 엔진/행수/시각."""
-    key = receipt_key(prefix, load_date=receipt["load_date"],
-                      bronze_run_id=receipt["bronze_run_id"], short=receipt["short"])
+    """적재 단위 1건의 이력 기록(격리 공간). raw 계보 + 엔진/행수/시각.
+
+    receipt 의 run 식별자는 `bronze_run_id` 또는 `run_id`(load_unit 결과) 중 존재하는 것을 쓴다.
+    """
+    run_id = receipt.get("bronze_run_id") or receipt["run_id"]
+    key = receipt_key(prefix, load_date=receipt["load_date"], bronze_run_id=run_id,
+                      short=receipt["short"])
     storage.write_json(key, {**receipt, "recorded_at": _utcnow_iso()})
