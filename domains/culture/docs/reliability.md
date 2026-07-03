@@ -37,10 +37,11 @@
 | `coverage.landed` / `skipped` / `failed` | 적재 성공 / skip(옵션 off 등) / 실패 수 |
 | `coverage.coverage_pct` | `landed / expected × 100` |
 | `total_rows` · `total_iceberg_rows` | 적재 행 수 합(raw / Iceberg) |
+| `load_failed` | bronze Iceberg 적재(`load_bronze`) 실패 여부 — fetch 성공분이 있는데 bronze 미갱신이면 `true` |
 | `freshness.max_age_hours` | 데이터셋 중 가장 오래된 적재 경과(시간) |
 | `violation_count` · `violations[]` | 계약 위반 수 · `{dataset, violation}` |
 | `failed_datasets[]` | 하드 실패 `{dataset, error}` |
-| `slo_passed` | `실패 0 && 위반 0` |
+| `slo_passed` | `실패 0 && 위반 0 && load 성공` — 초록 리포트 뒤 bronze 미갱신 침묵 방지 |
 | `datasets[]` | 데이터셋별 summary 전체 |
 
 적재 위치: `raw/culture/_reports/load_date=…/ingest_ts=…/run_report.json` → [storage.md](storage.md).
@@ -49,7 +50,8 @@
 
 | 유형 | 어떻게 드러나나 | 기본 동작 | 대응 |
 |------|----------------|-----------|------|
-| **수집 실패** (API 5xx·키 오류·파싱 실패) | 매핑 태스크 **red**(`AirflowException`) | 그 태스크만 실패·재시도(2회), run은 계속(`report`는 all_done) | 로그 확인 → 재수집 |
+| **수집 실패** (API 5xx·키 오류·파싱 실패) | `fetch_raw` 매핑 태스크 **red**(`AirflowException`) | 그 태스크만 실패·재시도(2회), run은 계속(`load_bronze`·`report`는 all_done) | 로그 확인 → 재수집 |
+| **bronze 적재 실패** (Trino 오류·raw 파싱 유실) | `load_bronze` **red** + `run_report.load_failed=true` | raw는 박제됨, `slo_passed=false` | `load_bronze`만 clear 재실행(API 재호출 없음) → [operations.md](operations.md) |
 | **계약 위반** (완전성·드리프트·freshness) | `run_report.violations` + 로그 `⚠` | **surface만**(run 성공 유지) | `fail_on_violation=True`면 run 실패로 승격 |
 | **커버리지 저하** (일부 데이터셋 누락) | `coverage_pct < 100` · `failed_datasets` | — | 누락 데이터셋 재수집 |
 | **target 오타** | `plan` 태스크 **red**(`ValueError`) | run 즉시 중단(fail-fast) | `target`을 `dev`/`prod`로 |

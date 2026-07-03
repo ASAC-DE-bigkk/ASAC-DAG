@@ -11,12 +11,15 @@ raw/culture/<소스>/<데이터셋>/load_date=<KST>/ingest_ts=<UTC>/page-NNNN.<x
 ```
 
 - `ingest_ts`(UTC)가 **실행 1회를 격리** → 재시도/부분 실행이 이전 데이터를 안 덮어씀.
+- raw는 **재현 불가 경계**의 산출물(실시간 API 응답 박제) — bronze Iceberg는 여기서 언제든 재생.
 - run마다 신뢰성 리포트: `raw/culture/_reports/load_date=…/ingest_ts=…/run_report.json`
-  → [reliability.md](reliability.md)
+  (bronze 적재 실패는 `load_failed` 필드로 표기) → [reliability.md](reliability.md)
 - dev → 버킷 `seoul-dev`, prod → `seoul`.
 
-## bronze Iceberg 테이블 (선택 적재, `write_iceberg=True`)
+## bronze Iceberg 테이블 (`load_bronze` 태스크가 매 run 적재)
 
+- `load_bronze`가 fetch_raw가 박제한 **R2 raw만 다시 읽어** 적재(API 재호출 없음) — 매 run의
+  상시 경로다. bronze만 실패한 run의 복구 → [operations.md](operations.md).
 - 이름: `iceberg.culture.bronze_<dataset>` (dev는 `iceberg_dev.culture.bronze_<dataset>`).
 - 포맷 Parquet, 파티션 `load_date`. 레코드 1건 = 1행, 원본은 `record_json`에 보존.
 - 생성/적재 코드: [`common/warehouse.py`](../culture_ingest/common/warehouse.py) (`BronzeWarehouse`).
