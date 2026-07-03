@@ -19,6 +19,7 @@ KST = ZoneInfo("Asia/Seoul")
 SOURCE_ID = "kma_vilage_fcst"
 SOURCE_DOMAIN = "weather_forecast"
 DEFAULT_GRID_CSV = Path(__file__).resolve().parents[1] / "config" / "seoul_kma_grids.csv"
+DEFAULT_EXPECTED_GRID_COUNT = 80
 
 
 def build_raw_object_key(
@@ -38,7 +39,16 @@ def build_raw_object_key(
     )
 
 
-def load_kma_grids(path: str | None = None) -> list[dict]:
+def expected_kma_grid_count() -> int:
+    return int(
+        os.environ.get(
+            "ASK_SEOUL_KMA_EXPECTED_GRIDS",
+            os.environ.get("ASK_SEOUL_REPORT_EXPECTED_KMA_GRIDS", DEFAULT_EXPECTED_GRID_COUNT),
+        )
+    )
+
+
+def load_kma_grids(path: str | None = None, expected_grid_count: int | None = None) -> list[dict]:
     grid_path = Path(path or os.environ.get("ASK_SEOUL_KMA_GRID_CSV") or DEFAULT_GRID_CSV)
     grids = []
     seen = set()
@@ -53,6 +63,9 @@ def load_kma_grids(path: str | None = None) -> list[dict]:
             grids.append({"place_id": row.get("place_id") or f"kma_{nx}_{ny}", "nx": nx, "ny": ny})
     if not grids:
         raise RuntimeError(f"No KMA grids configured: {grid_path}")
+    expected = expected_kma_grid_count() if expected_grid_count is None else expected_grid_count
+    if len(grids) != expected:
+        raise RuntimeError(f"KMA grid count mismatch: expected={expected}, actual={len(grids)}, path={grid_path}")
     return grids
 
 
