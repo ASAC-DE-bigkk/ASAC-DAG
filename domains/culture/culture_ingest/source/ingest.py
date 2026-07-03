@@ -363,16 +363,25 @@ def load_bronze_from_raw(
     for s in summaries:
         if not s or s.get("error"):
             continue  # 실패/skipped 데이터셋은 적재 대상 아님(리포트가 이미 드러냄)
-        ds = BY_NAME[s["name"]]
         try:
+            # 미등록 이름도 KeyError로 루프를 죽이지 않게 조회부터 try 안에서.
+            ds = BY_NAME[s["name"]]
             records = []
             for key in s.get("object_keys") or []:
                 filename = key.rsplit("/", 1)[-1]
                 for rec in parse_records(ds.source, sink.get(key), ds.row_tag, ds.endpoint):
                     records.append((key, filename, rec))
-            loaded[ds.name] = warehouse.load(ds, ctx, records)
+            rows_loaded = warehouse.load(ds, ctx, records)
+            # fetch가 센 행수와 대조 — 손상 raw를 parse_records가 빈 리스트로 삼켜
+            # 0행 적재가 침묵 성공하는 구멍을 막는다(수집·파싱 행수는 같은 row_tag 기준).
+            if rows_loaded != s.get("rows", rows_loaded):
+                failures.append(
+                    f"{ds.name}: 적재 {rows_loaded}행 ≠ fetch {s['rows']}행 (raw 파싱 유실 의심)"
+                )
+                continue
+            loaded[ds.name] = rows_loaded
         except Exception as exc:  # noqa: BLE001 -- 데이터셋별 격리, 말미 fail loud
-            failures.append(f"{ds.name}: {type(exc).__name__}: {exc}")
+            failures.append(f"{s['name']}: {type(exc).__name__}: {exc}")
     if failures:
         raise RuntimeError("bronze 적재 실패: " + " | ".join(failures))
     return loaded
