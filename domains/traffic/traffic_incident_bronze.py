@@ -15,6 +15,11 @@ if DAG_DIR not in sys.path:
 DOMAINS_DIR = os.path.dirname(DAG_DIR)
 if DOMAINS_DIR not in sys.path:
     sys.path.insert(0, DOMAINS_DIR)
+DAGS_ROOT_DIR = os.path.dirname(DOMAINS_DIR)
+if DAGS_ROOT_DIR not in sys.path:
+    sys.path.insert(0, DAGS_ROOT_DIR)
+
+from common.errors.airflow import problem_failure_callback  # noqa: E402
 
 from _shared.bronze_run_manifest import (  # noqa: E402
     STATUS_FAILED,
@@ -52,6 +57,11 @@ DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
 DAG_ID = "traffic_incident_bronze"
+
+# 공통 에러 모듈 파일럿(#77) — 태스크 최종 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
+# 기존 콜백(manifest 기록·Discord 알림)과 리스트로 나란히 걸어 기존 동작은 바꾸지 않는다.
+record_traffic_problem = problem_failure_callback(
+    domain="traffic", source_system="seoul_topis")
 
 
 def discord_report_date(context) -> str:
@@ -380,6 +390,7 @@ with DAG(
     start_manifest = PythonOperator(
         task_id="record_seoul_traffic_run_started",
         python_callable=record_seoul_traffic_run_started,
+        on_failure_callback=[record_traffic_problem],
     )
 
     land_raw = PythonOperator(
@@ -388,7 +399,7 @@ with DAG(
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
-        on_failure_callback=record_and_notify_seoul_traffic_run_failed,
+        on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
     )
 
     load_bronze = PythonOperator(
@@ -397,14 +408,14 @@ with DAG(
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
-        on_failure_callback=record_and_notify_seoul_traffic_run_failed,
+        on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
     )
 
     verify_bronze = PythonOperator(
         task_id="verify_seoul_traffic_bronze_runtime",
         python_callable=verify_seoul_traffic_bronze_runtime,
         on_success_callback=notify_traffic_bronze_success,
-        on_failure_callback=record_and_notify_seoul_traffic_run_failed,
+        on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
     )
 
     start_manifest >> land_raw >> load_bronze >> verify_bronze
