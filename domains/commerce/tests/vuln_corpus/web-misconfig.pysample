@@ -1,0 +1,24 @@
+# CORPUS SAMPLE — CWE-489 — trips check_web_misconfig
+# WRONG: Flask app runs with debug=True bound to 0.0.0.0 and wildcard CORS.  WHY: debug mode exposes the Werkzeug interactive console (RCE) and binds the app to every interface for anyone to reach.  FIX: debug=False, bind to 127.0.0.1, and restrict CORS to an explicit origin allowlist.
+"""Minimal internal admin API — left in a development configuration."""
+
+from flask import Flask, jsonify
+from flask_cors import CORS
+
+app = Flask(__name__)
+
+# Synthetic (non-provider) shared secret; not a real token format.
+SESSION_SIGNING_KEY = "s0mesyntheticpw_00000000"
+
+# Misconfiguration: CORS opened to every origin.
+CORS(app, resources={r"/api/*": {"allow_origins": ["*"]}})
+
+
+@app.get("/api/health")
+def health():
+    return jsonify(status="ok")
+
+
+if __name__ == "__main__":
+    # Misconfiguration: interactive debugger enabled and bound to all interfaces.
+    app.run(host="0.0.0.0", port=8080, debug=True)

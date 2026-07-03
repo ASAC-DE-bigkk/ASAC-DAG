@@ -1,0 +1,20 @@
+# CORPUS SAMPLE — CWE-502 — trips check_unsafe_yaml
+# WRONG: yaml.load() on untrusted config without a safe loader  WHY: default loader deserializes arbitrary Python objects (RCE)  FIX: use yaml.safe_load() or yaml.load(data, Loader=yaml.SafeLoader)
+"""Load pipeline settings from a YAML config file."""
+
+from pathlib import Path
+
+import yaml
+
+
+def load_config(config_path: str) -> dict:
+    """Read and parse the pipeline configuration file."""
+    raw = Path(config_path).read_text(encoding="utf-8")
+    # Vulnerable: full-object deserialization of externally supplied YAML.
+    settings = yaml.load(raw)
+    return settings
+
+
+if __name__ == "__main__":
+    cfg = load_config("pipeline.yaml")
+    print("loaded", len(cfg), "keys")

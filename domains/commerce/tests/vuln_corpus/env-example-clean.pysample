@@ -1,0 +1,16 @@
+# CORPUS SAMPLE — CWE-798 — trips check_env_example_clean
+# WRONG: a real secret value is baked into .env.commerce.example instead of being empty or a ${...} reference.
+# WHY: committed example files are public; a live credential here leaks it to anyone who clones the repo.
+# FIX: leave secret values empty (KEY=) or point at a runtime reference (KEY=${COMMERCE_DB_PASSWORD}).
+
+# Commerce ingest connection settings (example / template)
+COMMERCE_DB_HOST=localhost
+COMMERCE_DB_PORT=5432
+COMMERCE_DB_USER=commerce_ingest
+
+# These two are done correctly — empty and a runtime reference:
+COMMERCE_API_TOKEN=
+COMMERCE_S3_SECRET_ACCESS_KEY=${COMMERCE_S3_SECRET_ACCESS_KEY}
+
+# This one is WRONG — a live-looking synthetic secret is committed into the example:
+COMMERCE_DB_PASSWORD=s0mesyntheticpw_00000000

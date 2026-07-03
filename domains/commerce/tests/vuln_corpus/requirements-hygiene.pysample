@@ -1,0 +1,19 @@
+# CORPUS SAMPLE — CWE-1104 — trips check_requirements_hygiene
+# WRONG: unpinned deps + plain-HTTP index / trusted-host / git+http source  WHY: unauthenticated, mutable supply chain lets attackers swap package contents  FIX: pin exact versions (==) and fetch only over HTTPS from a verified index
+
+# --- pinned, TLS-fetched deps (these are fine) ---
+requests==2.31.0
+urllib3==2.2.1
+pydantic>=2.6,<3.0
+
+# WRONG: no version operator -> the resolved version can change under us (unpinned)
+boto3
+pandas ; python_version >= "3.10"
+
+# WRONG: plain-HTTP package index — no TLS, response can be tampered in transit
+--index-url http://pypi.internal.corp/simple
+# WRONG: trusted-host disables certificate verification for that host
+--trusted-host pypi.internal.corp
+
+# WRONG: VCS install over plain HTTP — clone is unauthenticated and mutable
+analytics-utils @ git+http://git.internal.corp/team/analytics-utils.git@main

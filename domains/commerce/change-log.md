@@ -7,6 +7,29 @@
 
 ## 2026-07-03
 
+### 27. 취약점 코퍼스 — 정적 detector 20종 발화 증명 + 격리 (feat/96)
+
+request:
+- 보안 플러그인 검증/증명 목적으로 **취약점 코드(코퍼스)** 작성. 자기 프로젝트라 방어적 용도의
+  취약 샘플 생성은 문제 없음. (Q&A) 산출물 형태 = **취약점 코퍼스**(detector 별 취약 샘플 +
+  self-audit 격리 + "스캔하면 N건 검출" e2e 테스트).
+
+response:
+- **격리 설계(무침습)**: 샘플을 `tests/vuln_corpus/*.pysample` 로 저장. self-audit(`_iter_files`)는
+  `.py/.md/...` 확장자만 스캔하므로 `.pysample` 은 **불가시** → 취약 코드가 트리에 있어도 게이트
+  청결 유지(audit.py 수정 0). e2e 테스트가 각 샘플을 tmp 에 실제 파일명(`.py`/`requirements.txt`/
+  `.env.commerce.example`/`.gitignore`)으로 복사해 매핑 detector 발화를 잠근다.
+- **다중 에이전트 워크플로**(map→author→적대적 검증): audit.py 의 `STATIC_CHECKS` 20종을 매핑,
+  detector 별 **읽기 쉬운 취약 샘플**을 병렬 저작하고 각 샘플을 실제 정규식과 대조해 발화 예측 검증.
+  22개 샘플 산출(credential_material 은 PEM·벤더토큰·URL userinfo 3종) → **정적 detector 20종 전수 커버**.
+- **push-safety**: 벤더 토큰(`ghp_…`)·PEM 개인키·bidi 제어문자는 커밋 시 GitHub push protection 을
+  건드리므로 커밋 금지 — 샘플엔 `__ASSEMBLE__` placeholder, 테스트가 조각 결합으로 런타임 조립
+  (pem/ghp_token/bidi). 나머지는 provider 포맷 아닌 **합성 값**이라 커밋 안전(전 파일 push-safe 스캔 통과).
+- **Ground-truth**: 22 샘플을 조립·materialize 해 매핑 detector 실행 → **전수 발화 확인**(fires + detail 일치).
+- **검증**: 전 테스트 **239 통과**(213→+26: 파라미터화 발화 22 + 완전성/격리/게이트청결/통합스캔 4),
+  `python -m security` 차단 0(코퍼스 무누출 확인). `test_every_static_detector_has_a_corpus_sample` 로
+  신규 detector 추가 시 대응 샘플 누락을 자동 강제. 문서: [tests/vuln_corpus/README.md](tests/vuln_corpus/README.md).
+
 ### 26. 보안 플러그인 정밀 리뷰 — opus 구현부 6개 결함 수정 + 회귀 잠금 (feat/96)
 
 request:
