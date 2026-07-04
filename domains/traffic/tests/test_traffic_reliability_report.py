@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from traffic_ingest import reliability_report as report  # noqa: E402
+
+
+ORIGINAL_COLLECT_DAG_RUN_SUMMARY = report.collect_dag_run_summary
 
 
 class RecordingCursor:
@@ -28,8 +32,8 @@ def stub_dag_run_summary(monkeypatch):
     monkeypatch.setattr(
         report,
         "collect_dag_run_summary",
-        lambda dag_id, detected_at, lookback_hours: {
-            "dag_id": dag_id,
+        lambda *args: {
+            "dag_id": args[2],
             "success": 3,
             "failed": 0,
             "running": 1,
@@ -56,6 +60,24 @@ def test_build_traffic_report_passes_for_fresh_complete_data(monkeypatch):
     assert result["traffic"]["parsed_row_count"] == 25
     assert "bronze_seoul_traffic_incident_request_audit" in result["blast_radius"][1]
     assert "current_timestamp - INTERVAL '24' HOUR" in cursor.statements[0]
+
+
+def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
+    cursor = RecordingCursor(rows=[(3, 0, 1)])
+    config = report.report_config()
+
+    result = ORIGINAL_COLLECT_DAG_RUN_SUMMARY(
+        cursor,
+        config,
+        "traffic_incident_bronze",
+        datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result == {"dag_id": "traffic_incident_bronze", "success": 3, "failed": 0, "running": 1}
+    assert "bronze_collection_run_manifest" in cursor.statements[0]
+    assert "dag_id = 'traffic_incident_bronze'" in cursor.statements[0]
 
 
 def test_traffic_report_fails_when_total_exceeds_requested_range(monkeypatch):
@@ -130,7 +152,10 @@ def test_traffic_send_discord_posts_payload(monkeypatch):
 
     assert report.send_discord_message("hello", webhook_url="https://discord.example/webhook") is True
     request, timeout = calls[0]
-    assert request.data == b'{"content": "hello"}'
+    payload = json.loads(request.data.decode("utf-8"))
+    assert "content" not in payload
+    assert payload["embeds"][0]["title"] == "hello"
+    assert payload["embeds"][0]["color"] == report.DISCORD_GREEN
     assert request.get_method() == "POST"
     assert request.headers["User-agent"] == "ask-seoul-traffic-report/1.0"
     assert timeout == 10
