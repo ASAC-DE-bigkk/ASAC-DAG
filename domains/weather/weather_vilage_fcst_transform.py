@@ -66,6 +66,23 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["ask_seoul", "weather", "transform", "silver", "gold", "dbt"],
 ) as dag:
+    dbt_seed_place_mapping = BashOperator(
+        task_id="dbt_seed_place_mapping",
+        bash_command=dbt_command("seed --select weather_place_grid_mapping"),
+        on_failure_callback=record_weather_problem,
+    )
+
+    dbt_test_place_mapping_seed = BashOperator(
+        task_id="dbt_test_place_mapping_seed",
+        bash_command=dbt_command(
+            "test --select "
+            "weather_place_grid_mapping "
+            "assert_weather_place_grid_mapping_major_aliases "
+            "assert_weather_place_grid_mapping_within_collected_grid_scope"
+        ),
+        on_failure_callback=record_weather_problem,
+    )
+
     dbt_run_silver = BashOperator(
         task_id="dbt_run_silver",
         bash_command=dbt_command("run --select silver_kma_vilage_fcst"),
@@ -101,4 +118,31 @@ with DAG(
         on_failure_callback=record_weather_problem,
     )
 
-    dbt_run_silver >> dbt_test_silver >> dbt_run_gold >> dbt_test_gold
+    dbt_run_place_mart = BashOperator(
+        task_id="dbt_run_place_mart",
+        bash_command=dbt_command("run --select dim_weather_place gold_weather_forecast_by_place"),
+        on_failure_callback=record_weather_problem,
+    )
+
+    dbt_test_place_mart = BashOperator(
+        task_id="dbt_test_place_mart",
+        bash_command=dbt_command(
+            "test --select "
+            "dim_weather_place "
+            "gold_weather_forecast_by_place "
+            "assert_gold_weather_forecast_by_place_grain_unique "
+            "assert_gold_weather_forecast_by_place_major_coverage"
+        ),
+        on_failure_callback=record_weather_problem,
+    )
+
+    (
+        dbt_seed_place_mapping
+        >> dbt_test_place_mapping_seed
+        >> dbt_run_silver
+        >> dbt_test_silver
+        >> dbt_run_gold
+        >> dbt_test_gold
+        >> dbt_run_place_mart
+        >> dbt_test_place_mart
+    )
