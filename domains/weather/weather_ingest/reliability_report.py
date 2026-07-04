@@ -19,9 +19,12 @@ LOGGER = logging.getLogger(__name__)
 
 WEATHER_BRONZE_DAG_ID = "weather_vilage_fcst_bronze"
 WEATHER_TABLE = "bronze_kma_vilage_fcst"
+MANIFEST_TABLE = "bronze_collection_run_manifest"
 WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "WEATHER_DISCORD_WEBHOOK_URL")
 SCHEDULE_ENV = "ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
+DISCORD_GREEN = 3066993
+DISCORD_RED = 15158332
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,17 @@ def _qualified(config: WeatherReportConfig, table: str) -> str:
     return f"{config.catalog}.{config.schema}.{table}"
 
 
+def _sql_string(value: object) -> str:
+    if value is None:
+        return "NULL"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _sql_timestamp_utc(value: datetime) -> str:
+    utc_value = value.astimezone(timezone.utc)
+    return "TIMESTAMP " + _sql_string(utc_value.strftime("%Y-%m-%d %H:%M:%S.%f"))
+
+
 def _age_minutes(collected_at: Any, detected_at: datetime) -> int | None:
     if collected_at is None:
         return None
@@ -169,26 +183,37 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
     }
 
 
-def collect_dag_run_summary(dag_id: str, detected_at: datetime, lookback_hours: int) -> dict[str, Any]:
-    from airflow.models.dagrun import DagRun
-    from airflow.settings import Session
-    from sqlalchemy import func
-
-    cutoff = detected_at.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
-    session = Session()
-    try:
-        rows = (
-            session.query(DagRun.state, func.count())
-            .filter(DagRun.dag_id == dag_id, DagRun.run_after >= cutoff)
-            .group_by(DagRun.state)
-            .all()
+def collect_dag_run_summary(
+    cursor,
+    config: WeatherReportConfig,
+    dag_id: str,
+    detected_at: datetime,
+) -> dict[str, Any]:
+    manifest_table = _qualified(config, MANIFEST_TABLE)
+    cutoff = detected_at.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
+    cutoff = cutoff.replace(microsecond=0) - timedelta(hours=config.lookback_hours)
+    row = _fetch_one(
+        cursor,
+        f"""
+        WITH latest AS (
+            SELECT
+                dag_run_id,
+                max_by(status, event_at) AS latest_status
+            FROM {manifest_table}
+            WHERE dag_id = {_sql_string(dag_id)}
+              AND event_at >= {_sql_timestamp_utc(cutoff)}
+            GROUP BY dag_run_id
         )
-    finally:
-        session.close()
+        SELECT
+            coalesce(sum(CASE WHEN latest_status = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS success,
+            coalesce(sum(CASE WHEN latest_status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed,
+            coalesce(sum(CASE WHEN latest_status = 'STARTED' THEN 1 ELSE 0 END), 0) AS running
+        FROM latest
+        """,
+    )
     summary = {"dag_id": dag_id, "success": 0, "failed": 0, "running": 0}
-    for state, count in rows:
-        if state in summary:
-            summary[state] = int(count)
+    if row:
+        summary.update(success=int(row[0] or 0), failed=int(row[1] or 0), running=int(row[2] or 0))
     return summary
 
 
@@ -206,7 +231,7 @@ def build_weather_reliability_report(cursor=None, detected_at: datetime | None =
             "table": _qualified(config, WEATHER_TABLE),
         }
     try:
-        dag_runs = collect_dag_run_summary(WEATHER_BRONZE_DAG_ID, detected_at, config.lookback_hours)
+        dag_runs = collect_dag_run_summary(cursor, config, WEATHER_BRONZE_DAG_ID, detected_at)
     except Exception as exc:
         dag_runs = {
             "dag_id": WEATHER_BRONZE_DAG_ID,
@@ -216,6 +241,7 @@ def build_weather_reliability_report(cursor=None, detected_at: datetime | None =
             "reason": "dag_run_query_failed",
             "error": str(exc),
         }
+    status = weather["status"] if not dag_runs.get("reason") else "FAIL"
 
     return {
         "report_name": "weather_bronze_reliability",
@@ -223,7 +249,7 @@ def build_weather_reliability_report(cursor=None, detected_at: datetime | None =
         "catalog": config.catalog,
         "schema": config.schema,
         "lookback_hours": config.lookback_hours,
-        "status": weather["status"],
+        "status": status,
         "weather": weather,
         "dag_runs": dag_runs,
         "blast_radius": [_qualified(config, WEATHER_TABLE)],
@@ -269,6 +295,7 @@ def format_weather_discord_message(report: dict[str, Any]) -> str:
         "**Checks**",
         f"- weather_coverage={_format_bool(bool(weather.get('coverage_ok')))}",
         f"- weather_freshness={_format_bool(bool(weather.get('freshness_ok')))}",
+        f"- dag_run_summary={_format_bool(not bool(report['dag_runs'].get('reason')))}",
         "",
         "**Blast radius**",
     ]
@@ -279,15 +306,29 @@ def format_weather_discord_message(report: dict[str, Any]) -> str:
     return message
 
 
+def _discord_payload(message: str) -> bytes:
+    lines = message.splitlines()
+    title = lines[0].strip("*") if lines else "Weather Bronze reliability report"
+    description = "\n".join(lines[1:]).strip() or title
+    color = DISCORD_RED if "FAIL" in title else DISCORD_GREEN
+    payload = {
+        "embeds": [{
+            "title": title[:256],
+            "description": description[:4096],
+            "color": color,
+        }]
+    }
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
 def send_discord_message(message: str, webhook_url: str | None = None) -> bool:
     webhook_url = webhook_url or discord_webhook_url()
     if not webhook_url:
         LOGGER.info("Discord webhook is not configured; skip weather report notification.")
         return False
-    payload = json.dumps({"content": message}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         webhook_url,
-        data=payload,
+        data=_discord_payload(message),
         headers={"Content-Type": "application/json", "User-Agent": "ask-seoul-weather-report/1.0"},
         method="POST",
     )

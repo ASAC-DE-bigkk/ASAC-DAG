@@ -20,9 +20,12 @@ LOGGER = logging.getLogger(__name__)
 TRAFFIC_BRONZE_DAG_ID = "traffic_incident_bronze"
 TRAFFIC_TABLE = "bronze_seoul_traffic_incident"
 TRAFFIC_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
+MANIFEST_TABLE = "bronze_collection_run_manifest"
 WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "TRAFFIC_DISCORD_WEBHOOK_URL")
 SCHEDULE_ENV = "ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
+DISCORD_GREEN = 3066993
+DISCORD_RED = 15158332
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,17 @@ def _qualified(config: TrafficReportConfig, table: str) -> str:
     return f"{config.catalog}.{config.schema}.{table}"
 
 
+def _sql_string(value: object) -> str:
+    if value is None:
+        return "NULL"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _sql_timestamp_utc(value: datetime) -> str:
+    utc_value = value.astimezone(timezone.utc)
+    return "TIMESTAMP " + _sql_string(utc_value.strftime("%Y-%m-%d %H:%M:%S.%f"))
+
+
 def _age_minutes(collected_at: Any, detected_at: datetime) -> int | None:
     if collected_at is None:
         return None
@@ -172,26 +186,37 @@ def collect_traffic_summary(cursor, config: TrafficReportConfig, detected_at: da
     }
 
 
-def collect_dag_run_summary(dag_id: str, detected_at: datetime, lookback_hours: int) -> dict[str, Any]:
-    from airflow.models.dagrun import DagRun
-    from airflow.settings import Session
-    from sqlalchemy import func
-
-    cutoff = detected_at.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
-    session = Session()
-    try:
-        rows = (
-            session.query(DagRun.state, func.count())
-            .filter(DagRun.dag_id == dag_id, DagRun.run_after >= cutoff)
-            .group_by(DagRun.state)
-            .all()
+def collect_dag_run_summary(
+    cursor,
+    config: TrafficReportConfig,
+    dag_id: str,
+    detected_at: datetime,
+) -> dict[str, Any]:
+    manifest_table = _qualified(config, MANIFEST_TABLE)
+    cutoff = detected_at.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
+    cutoff = cutoff.replace(microsecond=0) - timedelta(hours=config.lookback_hours)
+    row = _fetch_one(
+        cursor,
+        f"""
+        WITH latest AS (
+            SELECT
+                dag_run_id,
+                max_by(status, event_at) AS latest_status
+            FROM {manifest_table}
+            WHERE dag_id = {_sql_string(dag_id)}
+              AND event_at >= {_sql_timestamp_utc(cutoff)}
+            GROUP BY dag_run_id
         )
-    finally:
-        session.close()
+        SELECT
+            coalesce(sum(CASE WHEN latest_status = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS success,
+            coalesce(sum(CASE WHEN latest_status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed,
+            coalesce(sum(CASE WHEN latest_status = 'STARTED' THEN 1 ELSE 0 END), 0) AS running
+        FROM latest
+        """,
+    )
     summary = {"dag_id": dag_id, "success": 0, "failed": 0, "running": 0}
-    for state, count in rows:
-        if state in summary:
-            summary[state] = int(count)
+    if row:
+        summary.update(success=int(row[0] or 0), failed=int(row[1] or 0), running=int(row[2] or 0))
     return summary
 
 
@@ -210,7 +235,7 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
             "audit_table": _qualified(config, TRAFFIC_AUDIT_TABLE),
         }
     try:
-        dag_runs = collect_dag_run_summary(TRAFFIC_BRONZE_DAG_ID, detected_at, config.lookback_hours)
+        dag_runs = collect_dag_run_summary(cursor, config, TRAFFIC_BRONZE_DAG_ID, detected_at)
     except Exception as exc:
         dag_runs = {
             "dag_id": TRAFFIC_BRONZE_DAG_ID,
@@ -220,6 +245,7 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
             "reason": "dag_run_query_failed",
             "error": str(exc),
         }
+    status = traffic["status"] if not dag_runs.get("reason") else "FAIL"
 
     return {
         "report_name": "traffic_bronze_reliability",
@@ -227,7 +253,7 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
         "catalog": config.catalog,
         "schema": config.schema,
         "lookback_hours": config.lookback_hours,
-        "status": traffic["status"],
+        "status": status,
         "traffic": traffic,
         "dag_runs": dag_runs,
         "blast_radius": [
@@ -258,8 +284,8 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
         (
             f"- status={traffic['status']} freshness={_format_minutes(traffic.get('freshness_minutes'))}"
             f"/{traffic.get('freshness_slo_minutes', 'n/a')}m "
-            f"requests={traffic.get('request_count', 0)} rows={traffic.get('parsed_row_count', 0)}"
-            f"/{traffic.get('list_total_count', 0)} "
+            f"requests={traffic.get('request_count', 0)} parsed_rows={traffic.get('parsed_row_count', 0)} "
+            f"latest_total={traffic.get('list_total_count', 0)} "
             f"requested_end={traffic.get('max_end_index', 0)} zero_row_ok={traffic.get('zero_row_success_count', 0)} "
             f"reason={traffic.get('reason', '-')}"
         ),
@@ -276,6 +302,7 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
         "**Checks**",
         f"- traffic_coverage={_format_bool(bool(traffic.get('coverage_ok')))}",
         f"- traffic_freshness={_format_bool(bool(traffic.get('freshness_ok')))}",
+        f"- dag_run_summary={_format_bool(not bool(report['dag_runs'].get('reason')))}",
         "",
         "**Blast radius**",
     ]
@@ -286,15 +313,29 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
     return message
 
 
+def _discord_payload(message: str) -> bytes:
+    lines = message.splitlines()
+    title = lines[0].strip("*") if lines else "Traffic Bronze reliability report"
+    description = "\n".join(lines[1:]).strip() or title
+    color = DISCORD_RED if "FAIL" in title else DISCORD_GREEN
+    payload = {
+        "embeds": [{
+            "title": title[:256],
+            "description": description[:4096],
+            "color": color,
+        }]
+    }
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
 def send_discord_message(message: str, webhook_url: str | None = None) -> bool:
     webhook_url = webhook_url or discord_webhook_url()
     if not webhook_url:
         LOGGER.info("Discord webhook is not configured; skip traffic report notification.")
         return False
-    payload = json.dumps({"content": message}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         webhook_url,
-        data=payload,
+        data=_discord_payload(message),
         headers={"Content-Type": "application/json", "User-Agent": "ask-seoul-traffic-report/1.0"},
         method="POST",
     )
