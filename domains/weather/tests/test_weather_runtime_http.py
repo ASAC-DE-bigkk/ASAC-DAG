@@ -1,40 +1,34 @@
 import sys
-import urllib.error
-from email.message import Message
 from pathlib import Path
 
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from common.http import TransportResponse  # noqa: E402
+from common.http.errors import HttpProblemError  # noqa: E402
+from common.security import PLACEHOLDER  # noqa: E402
 from weather_ingest.common import runtime  # noqa: E402
 
 
-class FakeResponse:
-    status = 200
+class FakeTransport:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
-
-    def read(self):
-        return b"ok"
+    def send(self, method, url, *, params, headers, timeout):
+        self.calls.append((method, url, dict(params or {}), dict(headers or {}), timeout))
+        return self.responses.pop(0)
 
 
 def test_fetch_url_retries_configured_429(monkeypatch):
-    calls = []
+    transport = FakeTransport(
+        [TransportResponse(status=429, headers={"Retry-After": "0"}), TransportResponse(status=200, content=b"ok")]
+    )
+    monkeypatch.setenv("KMA_SERVICE_KEY", "kma-key-12345")
+    monkeypatch.setattr(runtime._HTTP, "_transport", transport)
+
     sleeps = []
-
-    def fake_urlopen(request, timeout):
-        calls.append((request, timeout))
-        if len(calls) == 1:
-            headers = Message()
-            headers["Retry-After"] = "0"
-            raise urllib.error.HTTPError(request.full_url, 429, "Too Many Requests", headers, None)
-        return FakeResponse()
-
-    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(runtime.time, "sleep", sleeps.append)
 
     assert runtime.fetch_url(
@@ -44,5 +38,30 @@ def test_fetch_url_retries_configured_429(monkeypatch):
         retry_statuses=(429,),
         retry_base_delay_seconds=30,
     ) == (200, b"ok")
-    assert len(calls) == 2
+
+    assert len(transport.calls) == 2
+    assert transport.calls[0][1] == "https://example.test/data"
+    assert transport.calls[0][2] == {"serviceKey": "kma-key-12345"}
+    assert transport.calls[1][2] == {"serviceKey": "kma-key-12345"}
     assert sleeps == [0.0]
+
+
+def test_fetch_url_raises_redacted_metadata_on_retriable_exhaustion(monkeypatch):
+    transport = FakeTransport(
+        [TransportResponse(status=500), TransportResponse(status=500)]
+    )
+    monkeypatch.setenv("KMA_SERVICE_KEY", "kma-secret-key")
+    monkeypatch.setattr(runtime._HTTP, "_transport", transport)
+
+    with pytest.raises(HttpProblemError) as exc_info:
+        runtime.fetch_url(
+            "https://example.test/data",
+            "ask-seoul-test/1.0",
+            max_attempts=2,
+            retry_statuses=(500,),
+            retry_base_delay_seconds=1,
+        )
+
+    request = exc_info.value.problem.request
+    assert PLACEHOLDER in request["url"]
+    assert "kma-secret-key" not in request["url"]

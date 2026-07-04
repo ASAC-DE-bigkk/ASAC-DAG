@@ -1,10 +1,13 @@
 import hashlib
 import os
 import re
+import urllib.parse
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
+
+from common.errors import types as error_types
+from common.http import HttpCore, NoAuth, OK_2XX, QueryKey
+from common.http.errors import HttpProblemError
 
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -76,14 +79,23 @@ def sha256_hex(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def http_retry_delay(exc: urllib.error.HTTPError, attempt: int, base_delay_seconds: float) -> float:
-    retry_after = exc.headers.get("Retry-After")
-    if retry_after:
-        try:
-            return max(0.0, float(retry_after))
-        except ValueError:
-            pass
+_HTTP = HttpCore(source="weather_kma", timeout=30.0, max_attempts=1, rate_limit=None)
+
+
+def http_retry_delay(response_headers: dict[str, str] | None, attempt: int, base_delay_seconds: float) -> float:
+    for key, value in (response_headers or {}).items():
+        if key.lower() == "retry-after":
+            try:
+                return max(0.0, float(value))
+            except ValueError:
+                break
     return min(base_delay_seconds * (2 ** (attempt - 1)), 300.0)
+
+
+def _redacted_request_url(url: str, params: dict[str, str] | None) -> str:
+    if not params:
+        return url
+    return f"{url}?{urllib.parse.urlencode(params, safe='%')}"
 
 
 def fetch_url(
@@ -95,21 +107,54 @@ def fetch_url(
     retry_base_delay_seconds: float = 1.0,
 ) -> tuple[int, bytes]:
     retry_codes = set(retry_statuses)
+    auth = QueryKey("serviceKey", required_env("KMA_SERVICE_KEY"))
     for attempt in range(1, max_attempts + 1):
-        request = urllib.request.Request(url, headers={"User-Agent": user_agent})
+        prepared = auth.apply(
+            url,
+            None,
+            {"User-Agent": user_agent},
+        )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return response.status, response.read()
-        except urllib.error.HTTPError as exc:
-            if exc.code not in retry_codes or attempt >= max_attempts:
-                raise
-            delay = http_retry_delay(exc, attempt, retry_base_delay_seconds)
-            print(
-                f"Source API HTTP {exc.code}; retrying in {delay:.1f}s "
-                f"(attempt {attempt + 1}/{max_attempts})"
+            response = _HTTP.get(
+                prepared.url,
+                params=prepared.params,
+                headers=prepared.headers,
+                auth=NoAuth(),
+                expected_status=tuple(range(200, 600)),
             )
-            time.sleep(delay)
-    raise RuntimeError("unreachable fetch_url retry state")
+        except HttpProblemError:
+            raise
+
+        if response.status in OK_2XX:
+            return response.status, response.content
+        if response.status not in retry_codes:
+            break
+        if attempt >= max_attempts:
+            raise HttpProblemError(
+                error_types.HTTP_ERROR,
+                method="GET",
+                url=_redacted_request_url(prepared.url, prepared.params),
+                status=response.status,
+                detail=f"status={response.status}",
+                attempts=attempt,
+                source_system="weather_kma",
+            )
+
+        delay = http_retry_delay(response.headers, attempt, retry_base_delay_seconds)
+        print(
+            f"Source API HTTP {response.status}; retrying in {delay:.1f}s "
+            f"(attempt {attempt + 1}/{max_attempts})"
+        )
+        time.sleep(delay)
+    raise HttpProblemError(
+        error_types.HTTP_ERROR,
+        method="GET",
+        url=_redacted_request_url(prepared.url, prepared.params),
+        status=response.status,
+        detail=f"status={response.status}",
+        attempts=max_attempts,
+        source_system="weather_kma",
+    )
 
 
 def upload_raw_object(
