@@ -128,6 +128,8 @@ def test_traffic_message_does_not_include_webhook(monkeypatch):
     message = report.format_traffic_discord_message(result)
 
     assert "secret-token" not in message
+    assert message.splitlines()[0].startswith("서울시 돌발정보 Bronze 신뢰성 리포트 -")
+    assert "✅ 리포트 상태: 성공" in message
     assert "success=3 failed=0 running=1" in message
     assert "Bronze" in message
 
@@ -156,6 +158,8 @@ def test_traffic_send_discord_posts_payload(monkeypatch):
     assert "content" not in payload
     assert payload["embeds"][0]["title"] == "hello"
     assert payload["embeds"][0]["color"] == report.DISCORD_GREEN
+    failure_payload = json.loads(report._discord_payload("title\n❌ 리포트 상태: 실패").decode("utf-8"))
+    assert failure_payload["embeds"][0]["color"] == report.DISCORD_RED
     assert request.get_method() == "POST"
     assert request.headers["User-agent"] == "ask-seoul-traffic-report/1.0"
     assert timeout == 10

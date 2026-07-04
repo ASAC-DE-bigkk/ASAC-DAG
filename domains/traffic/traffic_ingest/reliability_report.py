@@ -273,40 +273,47 @@ def _format_minutes(value: int | None) -> str:
     return f"{value}m"
 
 
+def _icon(value: bool) -> str:
+    return "✅" if value else "❌"
+
+
 def format_traffic_discord_message(report: dict[str, Any]) -> str:
     traffic = report["traffic"]
+    detected_date = str(report["detected_at"])[:10]
+    target = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
+    status_ok = report["status"] == "PASS"
+    coverage_ok = bool(traffic.get("coverage_ok"))
+    freshness_ok = bool(traffic.get("freshness_ok"))
+    dag_ok = not bool(report["dag_runs"].get("reason"))
     lines = [
-        f"**서울시 돌발정보 Bronze 신뢰성 리포트: {report['status']}**",
-        f"- detected_at: `{report['detected_at']}`",
-        f"- catalog/schema: `{report['catalog']}.{report['schema']}`",
+        f"서울시 돌발정보 Bronze 신뢰성 리포트 - {detected_date} (target={target})",
+        f"{_icon(status_ok)} 리포트 상태: {'성공' if status_ok else '실패'}",
+        f"{_icon(freshness_ok)} Freshness: {_format_minutes(traffic.get('freshness_minutes'))} / SLO {traffic.get('freshness_slo_minutes', 'n/a')}m",
+        f"{_icon(traffic.get('request_count', 0) > 0)} API 호출건수: {traffic.get('request_count', 0)}회",
+        f"{_icon(traffic.get('parsed_row_count', 0) > 0)} 파싱 행수: {int(traffic.get('parsed_row_count', 0)):,}행",
+        f"{_icon(traffic.get('list_total_count', 0) >= 0)} 최신 응답 전체 건수: {traffic.get('list_total_count', 0)}건",
+        f"{_icon(coverage_ok)} requested_end: {traffic.get('max_end_index', 0)}",
+        f"{_icon(traffic.get('zero_row_success_count', 0) == 0)} zero-row 정상 응답: {traffic.get('zero_row_success_count', 0)}건",
+        f"{_icon(traffic.get('reason', '-') == '-')} reason: {traffic.get('reason', '-')}",
         "",
-        "**Traffic / TOPIS AccInfo**",
+        f"DAG runs / last {report['lookback_hours']}h:",
         (
-            f"- status={traffic['status']} freshness={_format_minutes(traffic.get('freshness_minutes'))}"
-            f"/{traffic.get('freshness_slo_minutes', 'n/a')}m "
-            f"requests={traffic.get('request_count', 0)} parsed_rows={traffic.get('parsed_row_count', 0)} "
-            f"latest_total={traffic.get('list_total_count', 0)} "
-            f"requested_end={traffic.get('max_end_index', 0)} zero_row_ok={traffic.get('zero_row_success_count', 0)} "
-            f"reason={traffic.get('reason', '-')}"
-        ),
-        "",
-        f"**DAG runs / last {report['lookback_hours']}h**",
-        (
-            f"- dag_id=`{report['dag_runs'].get('dag_id')}` "
+            f"`dag_id={report['dag_runs'].get('dag_id')}` "
             f"success={report['dag_runs'].get('success', 0)} "
             f"failed={report['dag_runs'].get('failed', 0)} "
             f"running={report['dag_runs'].get('running', 0)} "
             f"reason={report['dag_runs'].get('reason', '-')}"
         ),
         "",
-        "**Checks**",
-        f"- traffic_coverage={_format_bool(bool(traffic.get('coverage_ok')))}",
-        f"- traffic_freshness={_format_bool(bool(traffic.get('freshness_ok')))}",
-        f"- dag_run_summary={_format_bool(not bool(report['dag_runs'].get('reason')))}",
+        "Checks:",
+        f"{_icon(coverage_ok)} traffic_coverage={_format_bool(coverage_ok)}",
+        f"{_icon(freshness_ok)} traffic_freshness={_format_bool(freshness_ok)}",
+        f"{_icon(dag_ok)} dag_run_summary={_format_bool(dag_ok)}",
         "",
-        "**Blast radius**",
+        "Blast radius:",
     ]
-    lines.extend(f"- `{table}`" for table in report["blast_radius"])
+    lines.extend(f"`{table}`" for table in report["blast_radius"])
+    lines.extend(["", f"detected_at: `{report['detected_at']}`", f"catalog/schema: `{report['catalog']}.{report['schema']}`"])
     message = "\n".join(lines)
     if len(message) > 1900:
         return message[:1890] + "\n...(truncated)"
@@ -317,7 +324,7 @@ def _discord_payload(message: str) -> bytes:
     lines = message.splitlines()
     title = lines[0].strip("*") if lines else "Traffic Bronze reliability report"
     description = "\n".join(lines[1:]).strip() or title
-    color = DISCORD_RED if "FAIL" in title else DISCORD_GREEN
+    color = DISCORD_RED if "FAIL" in title or "리포트 상태: 실패" in message else DISCORD_GREEN
     payload = {
         "embeds": [{
             "title": title[:256],
