@@ -16,10 +16,10 @@ request:
 - dags 쪽 문서를 변경 내용에 맞게 모두 수정하고, **오케스트레이션(transform DAG)도 설정**.
 - 재빌드 시 특정 일자·특정 인허가 API(dataset) 단위 재적재/삭제가 **설정 파일 소폭 수정만으로**
   가능해야 함(dbt 쪽 적재형태·재빌드 정책 + 관리 문서 포함).
-- dags 는 dev 기반 feat/113-commerce-silver-ingest, dbt 는 feat/45-silver-dbt-inget 로 푸시.
+- dags 는 dev 기반 feat/113-commerce-silver-ingest, dbt 는 feat/45-silver-dbt-ingest 로 푸시.
 
 response:
-- **dbt(ASAC-DBT feat/45-silver-dbt-inget)**: silver 2종 재작성(SCD2 제거, 정렬키
+- **dbt(ASAC-DBT feat/45-silver-dbt-ingest)**: silver 2종 재작성(SCD2 제거, 정렬키
   UPDATEDT→LASTMODTS→observed_date→collected_at→content_hash, LASTMODTS 파싱 추가,
   '' → null 결측 규약) + 테스트 개정(행 유니크 grain (dataset,mgtno,collected_at,content_hash),
   인접 중복 0) + 단위 제외 vars 4종(exclude_datasets/observed_dates/load_dates/bronze_run_ids,
