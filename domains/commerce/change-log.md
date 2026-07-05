@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-07-06
+
+### 34. silver 타임존 정책 확정 — timestamp 전부 UTC 일원화(dbt)
+
+request:
+- 번거롭더라도 국제표준에 맞게 silver 적재 시 KST 시각을 **UTC 로 변환**해 일원화.
+  collected_at 은 9시간 차이가 나는 형태이므로 silver 에서 바로 정합하게 넣을 것.
+
+response:
+- (사실관계 정정 후 반영) `collected_at` 은 수집 마커가 처음부터 UTC 로 기록한 값 —
+  UTC 표준에서는 **무보정 통과**가 정답(+9h 는 이중 보정). 보정 대상은 KST 원문인
+  UPDATEDT/LASTMODTS 쪽으로, 파싱 timestamp 에 `- interval '9' hour` 적용.
+- **dbt(feat/45-silver-dbt-ingest)**: `updatedt_ts`/`lastmodts_ts` UTC 변환(-9h, 원문 문자열
+  보존), collected_at 무보정 주석 명시, schema.yml 설명 갱신,
+  timestamps-and-nulls.md §1 을 "silver timestamp 전부 UTC" 정책으로 개정
+  (일별 집계는 KST 날짜 컬럼 기준 — UTC date 절단 금지 등 사용 주의 포함).
+- 날짜 컬럼(observed_date/load_date/APVPERMYMD/DCBYMD)은 시간 정보가 없는 KST 달력
+  날짜라 변환 비대상(정책 문서에 명시). 정렬·인접 dedup·grain 은 고정 오프셋이라 불변.
+- medallion-implementation-plan.md §2.2 타임존 항목을 확정 정책으로 갱신.
+
 ## 2026-07-05
 
 ### 33. silver 암묵 버저닝 확정(dbt) 반영 + transform DAG 신설 + #109 잔재 import 수정
