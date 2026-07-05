@@ -5,6 +5,39 @@
 
 ---
 
+## 2026-07-05
+
+### 33. silver 암묵 버저닝 확정(dbt) 반영 + transform DAG 신설 + #109 잔재 import 수정
+
+request:
+- silver 는 명시 버전 컬럼(version_seq/valid_from/valid_to/is_current) 없이, 키(MGTNO) 안에서
+  **UPDATEDT·LASTMODTS 내림차순 정렬이 곧 버전 순서**(암묵 버저닝)가 되도록 확정.
+  current 는 그 정렬의 최신 1행. gold 가 나중에 이 정렬로 현재 상태 갱신만 수행.
+- dags 쪽 문서를 변경 내용에 맞게 모두 수정하고, **오케스트레이션(transform DAG)도 설정**.
+- 재빌드 시 특정 일자·특정 인허가 API(dataset) 단위 재적재/삭제가 **설정 파일 소폭 수정만으로**
+  가능해야 함(dbt 쪽 적재형태·재빌드 정책 + 관리 문서 포함).
+- dags 는 dev 기반 feat/113-commerce-silver-ingest, dbt 는 feat/45-silver-dbt-inget 로 푸시.
+
+response:
+- **dbt(ASAC-DBT feat/45-silver-dbt-inget)**: silver 2종 재작성(SCD2 제거, 정렬키
+  UPDATEDT→LASTMODTS→observed_date→collected_at→content_hash, LASTMODTS 파싱 추가,
+  '' → null 결측 규약) + 테스트 개정(행 유니크 grain (dataset,mgtno,collected_at,content_hash),
+  인접 중복 0) + 단위 제외 vars 4종(exclude_datasets/observed_dates/load_dates/bronze_run_ids,
+  macros/exclusions.sql) + 문서 4종(rebuild-and-ops·timestamps-and-nulls·dataset-columns·README).
+- **transform DAG 신설**: `commerce_localdata_transform.py` — 05:00 KST(적재 04:00 이후),
+  BashOperator 2단(dbt run silver → test silver), common_dbt_smoke 와 동일 dbt venv/env 계약,
+  무상태(전량 재빌드 오케스트레이션만). `.env.commerce.example` 에
+  COMMERCE_DBT_PROJECT_DIR/COMMERCE_DBT_TARGET 항목 추가.
+- **#109 잔재 import 수정(파싱 불능 해소)**: `commerce_load_bronze.py`(common.env/registry/
+  settings/storage → commerce_core.*, dags-root sys.path 부트스트랩 추가) ·
+  `bronze/load_plan.py`(common→commerce_core paths) · `bronze/warehouse.py`(hashing/settings) ·
+  `tests/test_load_plan.py`. 적재 라인 단위테스트 27 통과 재확인.
+- **문서 갱신**: medallion-implementation-plan.md(§2 표, §2.2 계약 개정, Step 6·10 상태,
+  §6 요약, §7-9 결정 반영), 번들 README(데이터 흐름 3단 DAG 라인·구조도).
+- 단위 재적재/삭제 운영 계약: 재적재 = bronze 워터마크 파일(`_watermark.json`) 수정 →
+  `commerce_load_bronze` → 자동 반영(전량 재빌드) / 삭제·복원 = dbt vars 수정 → `dbt run`.
+  절차 문서: `dbt/domains/commerce/docs/rebuild-and-ops.md`.
+
 ## 2026-07-04
 
 ### 32. 적재 엔진 기준 = 첫 파일(순서), 크기/legacy 아님 — 07-01 증분 오분류 수정

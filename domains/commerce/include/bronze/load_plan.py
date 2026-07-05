@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 
 from bronze import load_state, markers
-from common import paths
+from commerce_core import paths
 from common.storage import Storage
 
 log = logging.getLogger(__name__)

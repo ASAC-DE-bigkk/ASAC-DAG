@@ -9,7 +9,7 @@ identical(파일없음)은 적재 없이 전진.
 import json
 
 from bronze import load_plan
-from common import paths
+from commerce_core import paths
 
 
 class _FakeStorage:

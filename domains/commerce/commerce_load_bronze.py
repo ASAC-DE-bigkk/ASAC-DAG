@@ -21,8 +21,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "include"))
+# 공통 패키지(dags/common) — commerce_core.storage 가 common.storage 를 쓴다(#109).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from common.env import load_commerce_env  # noqa: E402
+from commerce_core.env import load_commerce_env  # noqa: E402
 
 load_commerce_env()
 
@@ -38,9 +40,9 @@ from airflow.models.param import Param  # noqa: E402
 from airflow.utils.trigger_rule import TriggerRule  # noqa: E402
 
 from bronze import load_plan, load_state, warehouse  # noqa: E402
-from common import registry  # noqa: E402
-from common.settings import get_settings  # noqa: E402
-from common.storage import get_storage  # noqa: E402
+from commerce_core import registry  # noqa: E402
+from commerce_core.settings import get_settings  # noqa: E402
+from commerce_core.storage import get_storage  # noqa: E402
 
 log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
