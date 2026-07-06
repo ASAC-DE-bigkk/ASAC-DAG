@@ -40,6 +40,20 @@ env인 `ASK_SEOUL_KMA_NX`, `ASK_SEOUL_KMA_NY`, `ASK_SEOUL_KMA_PLACE_ID`는 기�
 JSON의 `response.header.resultCode == "00"`이면 성공으로 본다. 그 외 result code는
 Airflow task 실패로 드러낸다.
 
+## Pagination and `totalCount`
+
+`response.body.totalCount`는 API 호출 횟수나 grid 수가 아니다. 같은 `base_date`, `base_time`,
+`nx`, `ny` 요청 조건에 대해 KMA가 응답할 수 있는 `items.item` 전체 row 수다.
+
+기본 `numOfRows=1000`에서 `totalCount=1052`가 오면 page 1에는 최대 1000개만 들어오고,
+나머지 52개는 `pageNo=2`로 다시 요청해야 한다. Bronze의 `item_count`는 해당 raw page에서
+실제로 파싱한 row 수이므로, page 1에서는 `item_count=1000`, page 2에서는 `item_count=52`가
+될 수 있다.
+
+Bronze load는 grid별 모든 raw page의 parsed row 합이 `totalCount` 이상이고 기대 `pageNo`가
+모두 존재할 때만 insert한다. 이 조건을 만족하지 못하면 Airflow task를 실패시켜 partial forecast
+row가 Bronze나 이후 parsed data로 넘어가지 않게 막는다.
+
 ## R2 raw object
 
 raw는 API 응답 JSON bytes를 그대로 저장한다. 겉으로 폴더처럼 보이는 구조는 R2/S3의

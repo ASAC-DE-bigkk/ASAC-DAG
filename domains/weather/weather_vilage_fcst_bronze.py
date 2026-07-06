@@ -50,6 +50,8 @@ from weather_ingest.kma import (  # noqa: E402
     build_kma_url,
     build_raw_object_key,
     kma_base_datetime_from_conf,
+    kma_num_of_rows,
+    kma_page_numbers,
     load_kma_grids,
     parse_kma_response,
     resolve_kma_base_datetime,
@@ -100,6 +102,17 @@ def is_missing_r2_object_error(exc: Exception) -> bool:
 
 def raw_object_grid_key(raw_object: dict) -> tuple[int, int]:
     return int(raw_object["nx"]), int(raw_object["ny"])
+
+
+def raw_object_page_no(raw_object: dict) -> int:
+    return int(raw_object.get("page_no") or 1)
+
+
+def checkpoint_by_grid_page(raw_objects: list[dict]) -> dict[tuple[int, int], dict[int, dict]]:
+    grouped: dict[tuple[int, int], dict[int, dict]] = {}
+    for raw_object in raw_objects:
+        grouped.setdefault(raw_object_grid_key(raw_object), {})[raw_object_page_no(raw_object)] = raw_object
+    return grouped
 
 
 def load_kma_landing_checkpoint(checkpoint_key: str, base_date: str, base_time: str) -> list[dict]:
@@ -198,6 +211,7 @@ def notify_weather_bronze_success(context) -> None:
     ingest_result = ti.xcom_pull(task_ids="load_kma_bronze") or {}
     raw_keys = ingest_result.get("raw_object_keys") or []
     api_call_count = ingest_result.get("api_call_count", len(raw_keys))
+    api_request_count = ingest_result.get("api_request_count", "N/A")
     run_id = context["run_id"]
     send_weather_discord(
         f"기상청 단기예보 수집 리포트 - {discord_report_date(context)} (target={target_name()})",
@@ -205,7 +219,8 @@ def notify_weather_bronze_success(context) -> None:
             [
                 "✅ 수집 상태: 성공",
                 f"✅ 예보 발표시각: {ingest_result.get('base_date', 'N/A')} {ingest_result.get('base_time', 'N/A')}",
-                f"✅ API 호출건수: {api_call_count}회",
+                f"✅ raw page: {api_call_count}개",
+                f"✅ actual API requests: {api_request_count}회",
                 f"✅ 서울 격자 커버리지: {ingest_result.get('grid_count', 'N/A')}개 grid",
                 f"✅ raw JSON: {len(raw_keys)}개",
                 f"✅ Bronze 적재: {int(ingest_result.get('inserted', 0)):,}행",
@@ -253,25 +268,30 @@ def land_kma_raw(**context) -> dict:
         or resolve_kma_base_datetime()
     )
     grids = load_kma_grids()
+    num_of_rows = kma_num_of_rows()
     checkpoint_key = kma_landing_checkpoint_key(context, base_date, base_time)
     checkpoint_raw_objects = load_kma_landing_checkpoint(checkpoint_key, base_date, base_time)
-    checkpoint_by_grid = {raw_object_grid_key(item): item for item in checkpoint_raw_objects}
+    checkpoint_pages = checkpoint_by_grid_page(checkpoint_raw_objects)
     raw_objects = []
     api_request_count = 0
     reused_raw_object_count = 0
-    for grid in grids:
+
+    def fetch_raw_page(grid: dict, page_no: int) -> dict:
+        nonlocal api_request_count
         nx = int(grid["nx"])
         ny = int(grid["ny"])
-        existing_raw_object = checkpoint_by_grid.get((nx, ny))
-        if existing_raw_object:
-            raw_objects.append(existing_raw_object)
-            reused_raw_object_count += 1
-            continue
         if api_request_count:
             time.sleep(KMA_REQUEST_DELAY_SECONDS)
         collected_at = datetime.now(timezone.utc)
         request_id = str(uuid.uuid4())
-        url = build_kma_url(base_date=base_date, base_time=base_time, nx=nx, ny=ny)
+        url = build_kma_url(
+            base_date=base_date,
+            base_time=base_time,
+            nx=nx,
+            ny=ny,
+            page_no=page_no,
+            num_of_rows=num_of_rows,
+        )
         http_status, raw_bytes = fetch_url(
             url,
             "ask-seoul-kma-bronze/1.0",
@@ -279,7 +299,7 @@ def land_kma_raw(**context) -> dict:
             retry_statuses=KMA_RETRY_STATUSES,
             retry_base_delay_seconds=30,
         )
-        parse_kma_response(raw_bytes)
+        metadata, rows = parse_kma_response(raw_bytes)
         raw_hash = sha256_hex(raw_bytes)
         raw_object_key = build_raw_object_key(
             collected_at=collected_at,
@@ -295,7 +315,8 @@ def land_kma_raw(**context) -> dict:
             content_type="application/json; charset=utf-8",
             log_label="KMA raw payload",
         )
-        raw_object = {
+        api_request_count += 1
+        return {
             "request_id": request_id,
             "raw_object_key": raw_object_key,
             "raw_hash": raw_hash,
@@ -306,16 +327,62 @@ def land_kma_raw(**context) -> dict:
             "base_time": base_time,
             "nx": nx,
             "ny": ny,
+            "page_no": page_no,
+            "num_of_rows": num_of_rows,
+            "total_count": int(metadata.get("total_count") or len(rows)),
+            "row_count": len(rows),
         }
-        raw_objects.append(raw_object)
-        api_request_count += 1
-        save_kma_landing_checkpoint(
-            checkpoint_key,
-            context=context,
-            base_date=base_date,
-            base_time=base_time,
-            raw_objects=raw_objects,
-        )
+
+    def ensure_page_metadata(raw_object: dict, default_page_no: int) -> dict:
+        raw_object.setdefault("page_no", default_page_no)
+        raw_object.setdefault("num_of_rows", num_of_rows)
+        if raw_object.get("total_count") is None or raw_object.get("row_count") is None:
+            raw_bytes = download_raw_object(raw_object["raw_object_key"], "KMA raw payload")
+            metadata, rows = parse_kma_response(raw_bytes)
+            raw_object["total_count"] = int(metadata.get("total_count") or len(rows))
+            raw_object["row_count"] = len(rows)
+        return raw_object
+
+    for grid in grids:
+        nx = int(grid["nx"])
+        ny = int(grid["ny"])
+        existing_pages = checkpoint_pages.get((nx, ny), {})
+        page_one = existing_pages.get(1)
+        page_one_reused = page_one is not None
+        if page_one_reused:
+            page_one = ensure_page_metadata(page_one, 1)
+            reused_raw_object_count += 1
+        else:
+            page_one = fetch_raw_page(grid, 1)
+        page_numbers = kma_page_numbers(page_one["total_count"], int(page_one.get("num_of_rows") or num_of_rows))
+        page_one["page_count"] = len(page_numbers)
+        raw_objects.append(page_one)
+        if not page_one_reused:
+            save_kma_landing_checkpoint(
+                checkpoint_key,
+                context=context,
+                base_date=base_date,
+                base_time=base_time,
+                raw_objects=raw_objects,
+            )
+        for page_no in page_numbers[1:]:
+            existing_raw_object = existing_pages.get(page_no)
+            if existing_raw_object:
+                existing_raw_object = ensure_page_metadata(existing_raw_object, page_no)
+                existing_raw_object["page_count"] = len(page_numbers)
+                raw_objects.append(existing_raw_object)
+                reused_raw_object_count += 1
+                continue
+            raw_object = fetch_raw_page(grid, page_no)
+            raw_object["page_count"] = len(page_numbers)
+            raw_objects.append(raw_object)
+            save_kma_landing_checkpoint(
+                checkpoint_key,
+                context=context,
+                base_date=base_date,
+                base_time=base_time,
+                raw_objects=raw_objects,
+            )
     print(
         f"Landed {len(raw_objects)} KMA raw objects for {len(grids)} grids "
         f"(reused={reused_raw_object_count}, api_requests={api_request_count})"
@@ -328,6 +395,8 @@ def land_kma_raw(**context) -> dict:
         "api_call_count": len(raw_objects),
         "api_request_count": api_request_count,
         "reused_raw_object_count": reused_raw_object_count,
+        "raw_page_count": len(raw_objects),
+        "expected_raw_object_count": len(raw_objects),
         "base_date": base_date,
         "base_time": base_time,
     }
@@ -340,19 +409,79 @@ def load_kma_bronze(**context) -> dict:
         raise RuntimeError("KMA raw landing result is empty; cannot load bronze rows.")
     cursor, catalog, schema = trino_cursor()
     qualified_table = create_kma_bronze_table(cursor, catalog, schema)
-    inserted = 0
-    expected_rows = 0
+    parsed_pages = []
+    grid_summaries = {}
     raw_object_keys = []
     for raw_object in raw_objects:
         raw_bytes = download_raw_object(raw_object["raw_object_key"], "KMA raw payload")
         metadata, rows = parse_kma_response(raw_bytes)
-        expected_rows += int(metadata.get("total_count") or len(rows))
+        metadata = dict(metadata)
+        page_no = raw_object_page_no(raw_object)
+        num_of_rows = int(raw_object.get("num_of_rows") or kma_num_of_rows())
+        metadata["page_no"] = page_no
+        metadata["num_of_rows"] = num_of_rows
+        total_count = int(metadata.get("total_count") or len(rows))
+        grid_key = (
+            raw_object["base_date"],
+            raw_object["base_time"],
+            int(raw_object["nx"]),
+            int(raw_object["ny"]),
+        )
+        summary = grid_summaries.setdefault(
+            grid_key,
+            {"total_count": total_count, "parsed_rows": 0, "pages": set(), "num_of_rows": num_of_rows},
+        )
+        summary["total_count"] = max(int(summary["total_count"]), total_count)
+        summary["parsed_rows"] = int(summary["parsed_rows"]) + len(rows)
+        summary["pages"].add(page_no)
+        summary["num_of_rows"] = max(int(summary["num_of_rows"]), num_of_rows)
         collected_at = datetime.fromisoformat(raw_object["collected_at"])
+        parsed_pages.append(
+            {
+                "raw_object": raw_object,
+                "metadata": metadata,
+                "rows": rows,
+                "collected_at": collected_at,
+                "page_no": page_no,
+                "num_of_rows": num_of_rows,
+                "grid_key": grid_key,
+            }
+        )
+        raw_object_keys.append(raw_object["raw_object_key"])
+
+    for grid_key, summary in grid_summaries.items():
+        expected_pages = set(kma_page_numbers(summary["total_count"], summary["num_of_rows"]))
+        parsed_rows = int(summary["parsed_rows"])
+        total_count = int(summary["total_count"])
+        if not expected_pages.issubset(summary["pages"]) or parsed_rows < total_count:
+            base_date, base_time, nx, ny = grid_key
+            raise RuntimeError(
+                "KMA bronze pagination incomplete: "
+                f"base_date={base_date}, base_time={base_time}, nx={nx}, ny={ny}, "
+                f"total_count={total_count}, parsed_rows={parsed_rows}, "
+                f"expected_pages={sorted(expected_pages)}, actual_pages={sorted(summary['pages'])}"
+            )
+
+    inserted = 0
+    deleted_grids = set()
+    for page in sorted(
+        parsed_pages,
+        key=lambda item: (
+            item["grid_key"][0],
+            item["grid_key"][1],
+            item["grid_key"][2],
+            item["grid_key"][3],
+            item["page_no"],
+        ),
+    ):
+        raw_object = page["raw_object"]
+        grid_key = page["grid_key"]
+        delete_existing = grid_key not in deleted_grids
         inserted += insert_kma_bronze_rows(
             cursor=cursor,
             qualified_table=qualified_table,
-            rows=rows,
-            metadata=metadata,
+            rows=page["rows"],
+            metadata=page["metadata"],
             request_id=raw_object["request_id"],
             place_id=raw_object["place_id"],
             base_date=raw_object["base_date"],
@@ -362,10 +491,15 @@ def load_kma_bronze(**context) -> dict:
             raw_object_key=raw_object["raw_object_key"],
             raw_hash=raw_object["raw_hash"],
             http_status=int(raw_object["http_status"]),
-            collected_at=collected_at,
+            collected_at=page["collected_at"],
             dag_run_id=context["run_id"],
+            page_no=page["page_no"],
+            num_of_rows=page["num_of_rows"],
+            delete_existing=delete_existing,
+            allow_partial_page=True,
         )
-        raw_object_keys.append(raw_object["raw_object_key"])
+        deleted_grids.add(grid_key)
+    expected_rows = sum(int(summary["total_count"]) for summary in grid_summaries.values())
     print(f"Inserted {inserted} KMA rows for {len(raw_objects)} raw objects into {qualified_table}")
     return {
         "source_id": SOURCE_ID,
@@ -374,6 +508,10 @@ def load_kma_bronze(**context) -> dict:
         "expected_rows": expected_rows,
         "grid_count": int(raw_result.get("grid_count", len(raw_objects))),
         "api_call_count": int(raw_result.get("api_call_count", len(raw_objects))),
+        "api_request_count": int(raw_result.get("api_request_count", 0)),
+        "reused_raw_object_count": int(raw_result.get("reused_raw_object_count", 0)),
+        "raw_page_count": len(raw_objects),
+        "expected_raw_object_count": len(raw_objects),
         "base_date": raw_result.get("base_date"),
         "base_time": raw_result.get("base_time"),
     }
@@ -395,6 +533,11 @@ def record_kma_run_started(**context) -> str:
 
 def record_kma_run_failed(context) -> None:
     try:
+        ti = context.get("ti") or context.get("task_instance")
+        raw_result = {}
+        if ti is not None:
+            raw_result = ti.xcom_pull(task_ids="land_kma_raw") or {}
+        raw_keys = raw_result.get("raw_object_keys") or []
         cursor, catalog, schema = trino_cursor()
         record_bronze_run_event(
             cursor,
@@ -404,6 +547,12 @@ def record_kma_run_failed(context) -> None:
             dag_id=current_dag_id(context),
             dag_run_id=context["run_id"],
             status=STATUS_FAILED,
+            expected_raw_objects=(
+                int(raw_result["expected_raw_object_count"])
+                if raw_result.get("expected_raw_object_count") is not None
+                else (len(raw_keys) or None)
+            ),
+            actual_raw_objects=(len(raw_keys) or None),
             failure_reason=failure_reason_from_context(context),
         )
     except Exception as exc:
@@ -421,7 +570,7 @@ def verify_kma_bronze_runtime(**context) -> int:
         raw_object_keys=ingest_result["raw_object_keys"],
         dag_run_id=context["run_id"],
         expected_rows=int(ingest_result["inserted"]),
-        expected_raw_objects=int(ingest_result["grid_count"]),
+        expected_raw_objects=int(ingest_result["expected_raw_object_count"]),
     )
     cursor, catalog, schema = trino_cursor()
     record_bronze_run_event(
@@ -435,7 +584,7 @@ def verify_kma_bronze_runtime(**context) -> int:
         is_publishable=True,
         expected_rows=int(ingest_result["expected_rows"]),
         actual_rows=verified_rows,
-        expected_raw_objects=int(ingest_result["grid_count"]),
+        expected_raw_objects=int(ingest_result["expected_raw_object_count"]),
         actual_raw_objects=len(ingest_result["raw_object_keys"]),
     )
     return verified_rows

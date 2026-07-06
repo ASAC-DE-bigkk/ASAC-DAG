@@ -1,5 +1,6 @@
 import csv
 import json
+import math
 import os
 import urllib.parse
 from datetime import datetime, timedelta
@@ -20,6 +21,7 @@ SOURCE_ID = "kma_vilage_fcst"
 SOURCE_DOMAIN = "weather_forecast"
 DEFAULT_GRID_CSV = Path(__file__).resolve().parents[1] / "config" / "seoul_kma_grids.csv"
 DEFAULT_EXPECTED_GRID_COUNT = 80
+DEFAULT_NUM_OF_ROWS = 1000
 
 
 def build_raw_object_key(
@@ -69,7 +71,48 @@ def load_kma_grids(path: str | None = None, expected_grid_count: int | None = No
     return grids
 
 
-def request_params_json(base_date: str, base_time: str, nx: int, ny: int) -> str:
+def kma_num_of_rows() -> int:
+    num_of_rows = int(os.environ.get("KMA_NUM_OF_ROWS", str(DEFAULT_NUM_OF_ROWS)))
+    if num_of_rows < 1:
+        raise ValueError(f"KMA_NUM_OF_ROWS must be positive: {num_of_rows}")
+    return num_of_rows
+
+
+def kma_page_no() -> int:
+    page_no = int(os.environ.get("KMA_PAGE_NO", "1"))
+    if page_no < 1:
+        raise ValueError(f"KMA_PAGE_NO must be positive: {page_no}")
+    return page_no
+
+
+def kma_page_count(total_count: object, num_of_rows: int | None = None) -> int:
+    total = int(total_count or 0)
+    if total < 0:
+        raise ValueError(f"KMA total_count must be non-negative: {total}")
+    rows_per_page = kma_num_of_rows() if num_of_rows is None else int(num_of_rows)
+    if rows_per_page < 1:
+        raise ValueError(f"KMA num_of_rows must be positive: {rows_per_page}")
+    return max(1, math.ceil(total / rows_per_page))
+
+
+def kma_page_numbers(total_count: object, num_of_rows: int | None = None) -> list[int]:
+    return list(range(1, kma_page_count(total_count, num_of_rows) + 1))
+
+
+def request_params_json(
+    base_date: str,
+    base_time: str,
+    nx: int,
+    ny: int,
+    page_no: int | None = None,
+    num_of_rows: int | None = None,
+) -> str:
+    actual_page_no = kma_page_no() if page_no is None else int(page_no)
+    actual_num_of_rows = kma_num_of_rows() if num_of_rows is None else int(num_of_rows)
+    if actual_page_no < 1:
+        raise ValueError(f"KMA page_no must be positive: {actual_page_no}")
+    if actual_num_of_rows < 1:
+        raise ValueError(f"KMA num_of_rows must be positive: {actual_num_of_rows}")
     return json.dumps(
         {
             "api": "getVilageFcst",
@@ -78,8 +121,8 @@ def request_params_json(base_date: str, base_time: str, nx: int, ny: int) -> str
             "base_time": base_time,
             "nx": nx,
             "ny": ny,
-            "numOfRows": os.environ.get("KMA_NUM_OF_ROWS", "1000"),
-            "pageNo": os.environ.get("KMA_PAGE_NO", "1"),
+            "numOfRows": str(actual_num_of_rows),
+            "pageNo": str(actual_page_no),
         },
         ensure_ascii=True,
         sort_keys=True,
@@ -127,10 +170,23 @@ def resolve_kma_base_datetime() -> tuple[str, str]:
     return previous_day.strftime("%Y%m%d"), KMA_BASE_TIMES[-1]
 
 
-def build_kma_url(base_date: str, base_time: str, nx: int, ny: int) -> str:
+def build_kma_url(
+    base_date: str,
+    base_time: str,
+    nx: int,
+    ny: int,
+    page_no: int | None = None,
+    num_of_rows: int | None = None,
+) -> str:
+    actual_page_no = kma_page_no() if page_no is None else int(page_no)
+    actual_num_of_rows = kma_num_of_rows() if num_of_rows is None else int(num_of_rows)
+    if actual_page_no < 1:
+        raise ValueError(f"KMA page_no must be positive: {actual_page_no}")
+    if actual_num_of_rows < 1:
+        raise ValueError(f"KMA num_of_rows must be positive: {actual_num_of_rows}")
     params = {
-        "numOfRows": os.environ.get("KMA_NUM_OF_ROWS", "1000"),
-        "pageNo": os.environ.get("KMA_PAGE_NO", "1"),
+        "numOfRows": str(actual_num_of_rows),
+        "pageNo": str(actual_page_no),
         "dataType": "JSON",
         "base_date": base_date,
         "base_time": base_time,

@@ -48,6 +48,16 @@ raw와 bronze를 둘 다 남기는 이유는 역할이 다르기 때문이다.
 webhook 미설정이나 Discord 전송 실패는 no-op/best-effort로 처리하며, 수집/검증 판정을 덮어쓰지 않는다.
 webhook URL은 코드, 로그, 리포트 메시지에 원문으로 남기지 않는다.
 
+### Reliability report count terms
+
+- `base_time_count`: 최근 lookback window 안에 Bronze에 반영된 KMA 발표시각 수다. 24시간 기본값이면 기대값은 8회다.
+- `grid_slot_count`: Bronze에 반영된 `base_time * Seoul grid` 수다. 80개 grid와 8회 발표시각이면 기대값은 640이다.
+- `raw_object_count` / `Bronze raw pages`: Bronze row가 참조하는 distinct raw JSON object 수다. KMA pagination이 필요하면 grid 수보다 커질 수 있다.
+- `actual API requests`: 해당 DAG task attempt에서 실제로 KMA에 새로 요청한 횟수다. checkpoint reuse가 있으면 raw page 수보다 작을 수 있다.
+
+따라서 report의 480은 "API 호출 480회"로 단정하지 않는다. 현재 Bronze에 반영된 raw page 또는 grid slot 집계이며,
+실제 API 요청 수는 landing task의 `api_request_count`와 manifest raw page 집계를 함께 봐야 한다.
+
 ## Bronze metadata 결정 이유
 
 | 컬럼 | 이유 |
@@ -71,7 +81,9 @@ webhook URL은 코드, 로그, 리포트 메시지에 원문으로 남기지 않
 
 서울 전체 커버리지는 사용자별 API 호출이 아니라 서울을 덮는 KMA grid를 미리 수집하는 방식이다.
 현재 grid 목록은 `nx=56..65`, `ny=123..130`의 80개 격자로, 보수적인 bounding box라 일부 서울 외곽
-격자를 포함한다. dev 기본 스케줄 기준 호출량은 하루 `80 * 8 = 640`회다.
+격자를 포함한다. dev 기본 스케줄 기준 최소 grid request slot은 하루 `80 * 8 = 640`개다.
+KMA `totalCount`가 `numOfRows`를 넘는 발표시각에는 추가 `pageNo` 요청이 생겨 실제 raw page/API request 수가
+640보다 커질 수 있다.
 
 ## 의도적으로 제외한 것
 

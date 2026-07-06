@@ -72,13 +72,20 @@ def metadata_int(metadata: dict, key: str) -> int:
     return int(value)
 
 
-def validate_kma_row_count(rows: list[dict], metadata: dict, nx: int, ny: int) -> None:
+def validate_kma_row_count(
+    rows: list[dict],
+    metadata: dict,
+    nx: int,
+    ny: int,
+    *,
+    allow_partial_page: bool = False,
+) -> None:
     if not rows:
         raise RuntimeError("KMA API returned no forecast rows.")
 
     total_count = metadata_int(metadata, "total_count")
     parsed_count = len(rows)
-    if total_count > parsed_count:
+    if total_count > parsed_count and not allow_partial_page:
         raise RuntimeError(
             "KMA bronze validation failed: "
             f"total_count={total_count}, parsed row_count={parsed_count}, nx={nx}, ny={ny}"
@@ -101,23 +108,35 @@ def insert_kma_bronze_rows(
     http_status: int,
     collected_at: datetime,
     dag_run_id: str,
+    page_no: int | None = None,
+    num_of_rows: int | None = None,
+    delete_existing: bool = True,
+    allow_partial_page: bool = False,
 ) -> int:
-    validate_kma_row_count(rows, metadata, nx, ny)
+    validate_kma_row_count(rows, metadata, nx, ny, allow_partial_page=allow_partial_page)
 
-    cursor.execute(
-        f"""
-        DELETE FROM {qualified_table}
-        WHERE source_id = {sql_string(SOURCE_ID)}
-            AND dag_run_id = {sql_string(dag_run_id)}
-            AND base_date = {sql_string(base_date)}
-            AND base_time = {sql_string(base_time)}
-            AND nx = {sql_int(nx)}
-            AND ny = {sql_int(ny)}
-        """
-    )
+    if delete_existing:
+        cursor.execute(
+            f"""
+            DELETE FROM {qualified_table}
+            WHERE source_id = {sql_string(SOURCE_ID)}
+                AND dag_run_id = {sql_string(dag_run_id)}
+                AND base_date = {sql_string(base_date)}
+                AND base_time = {sql_string(base_time)}
+                AND nx = {sql_int(nx)}
+                AND ny = {sql_int(ny)}
+            """
+        )
 
     load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
-    request_params = request_params_json(base_date, base_time, nx, ny)
+    request_params = request_params_json(
+        base_date,
+        base_time,
+        nx,
+        ny,
+        page_no=page_no,
+        num_of_rows=num_of_rows,
+    )
     values = []
     for row in rows:
         values.append(
