@@ -46,6 +46,14 @@ class FakeParam:
         self.schema = schema
 
 
+class FakeAsset:
+    def __init__(self, uri):
+        self.uri = uri
+
+    def __eq__(self, other):
+        return isinstance(other, FakeAsset) and self.uri == other.uri
+
+
 def install_airflow_fakes():
     airflow = types.ModuleType("airflow")
     airflow.DAG = FakeDAG
@@ -59,6 +67,8 @@ def install_airflow_fakes():
     airflow_operators = types.ModuleType("airflow.providers.standard.operators")
     airflow_bash = types.ModuleType("airflow.providers.standard.operators.bash")
     airflow_bash.BashOperator = FakeBashOperator
+    airflow_sdk = types.ModuleType("airflow.sdk")
+    airflow_sdk.Asset = FakeAsset
 
     sys.modules.update(
         {
@@ -69,6 +79,7 @@ def install_airflow_fakes():
             "airflow.providers.standard": airflow_standard,
             "airflow.providers.standard.operators": airflow_operators,
             "airflow.providers.standard.operators.bash": airflow_bash,
+            "airflow.sdk": airflow_sdk,
         }
     )
 
@@ -89,6 +100,7 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
 
     expected_task_order = [
         "dbt_deps",
+        "dbt_source_freshness",
         "dbt_seed_asac_axes",
         "dbt_seed_place_mapping",
         "dbt_test_place_mapping_seed",
@@ -110,6 +122,7 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
     }
 
     assert "deps" in task_commands["dbt_deps"]
+    assert "source freshness" in task_commands["dbt_source_freshness"]
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
     assert "seed --select weather_place_grid_mapping" in task_commands["dbt_seed_place_mapping"]
     assert "--target '{{ params.target }}'" in task_commands["dbt_deps"]
@@ -138,6 +151,12 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
         "assert_gold_weather_forecast_by_place_latest_silver_record"
         in task_commands["dbt_test_place_mart"]
     )
+
+
+def test_weather_transform_subscribes_to_bronze_asset_by_default():
+    module = load_transform_module()
+
+    assert module.dag.kwargs["schedule"] == [FakeAsset(module.WEATHER_BRONZE_ASSET)]
 
 
 def test_weather_transform_limits_target_param_to_dev_or_prod():

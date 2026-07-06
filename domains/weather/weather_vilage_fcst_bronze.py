@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from airflow import DAG
+from airflow.sdk import Asset
 from airflow.providers.standard.operators.python import PythonOperator
 
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +24,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 
 from _shared.bronze_run_manifest import (  # noqa: E402
     STATUS_FAILED,
@@ -719,6 +721,7 @@ def build_kma_bronze_dag(dag_id: str, schedule: str | None, description: str, ta
             python_callable=verify_kma_bronze_runtime,
             on_success_callback=notify_weather_bronze_success,
             on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+            outlets=[Asset(WEATHER_BRONZE_ASSET)],
         )
 
         start_manifest >> land_raw >> load_bronze >> verify_bronze
@@ -761,6 +764,7 @@ def build_kma_bronze_backfill_dag():
             task_id="verify_kma_bronze_runtime",
             python_callable=verify_kma_bronze_runtime,
             on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+            outlets=[Asset(WEATHER_BRONZE_ASSET)],
         )
 
         start_manifest >> land_raw >> load_bronze >> verify_bronze

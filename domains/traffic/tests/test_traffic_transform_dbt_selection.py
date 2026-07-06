@@ -46,6 +46,14 @@ class FakeParam:
         self.schema = schema
 
 
+class FakeAsset:
+    def __init__(self, uri):
+        self.uri = uri
+
+    def __eq__(self, other):
+        return isinstance(other, FakeAsset) and self.uri == other.uri
+
+
 def install_airflow_fakes():
     airflow = types.ModuleType("airflow")
     airflow.DAG = FakeDAG
@@ -59,6 +67,8 @@ def install_airflow_fakes():
     airflow_operators = types.ModuleType("airflow.providers.standard.operators")
     airflow_bash = types.ModuleType("airflow.providers.standard.operators.bash")
     airflow_bash.BashOperator = FakeBashOperator
+    airflow_sdk = types.ModuleType("airflow.sdk")
+    airflow_sdk.Asset = FakeAsset
 
     sys.modules.update(
         {
@@ -69,6 +79,7 @@ def install_airflow_fakes():
             "airflow.providers.standard": airflow_standard,
             "airflow.providers.standard.operators": airflow_operators,
             "airflow.providers.standard.operators.bash": airflow_bash,
+            "airflow.sdk": airflow_sdk,
         }
     )
 
@@ -89,6 +100,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
 
     expected_task_order = [
         "dbt_deps",
+        "dbt_source_freshness",
         "dbt_seed_asac_axes",
         "dbt_run_silver",
         "dbt_test_silver",
@@ -106,6 +118,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     }
 
     assert "deps" in task_commands["dbt_deps"]
+    assert "source freshness" in task_commands["dbt_source_freshness"]
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
     assert "run --select silver_seoul_traffic_incident" in task_commands["dbt_run_silver"]
     assert "--target '{{ params.target }}'" in task_commands["dbt_deps"]
@@ -117,6 +130,12 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     assert "assert_silver_traffic_admin_axis_consistent" in task_commands["dbt_test_silver"]
     assert "assert_silver_traffic_admin_axis_coverage" in task_commands["dbt_test_silver"]
     assert "assert_silver_traffic_latest_publishable_record" in task_commands["dbt_test_silver"]
+
+
+def test_traffic_transform_subscribes_to_bronze_asset_by_default():
+    module = load_transform_module()
+
+    assert module.dag.kwargs["schedule"] == [FakeAsset(module.TRAFFIC_BRONZE_ASSET)]
 
 
 def test_traffic_transform_limits_target_param_to_dev_or_prod():
