@@ -53,12 +53,14 @@ _STRUCTURAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # URL userinfo 자격증명(scheme://<userinfo>@host)의 userinfo 전체 → 통째 마스킹.
     # `user:pass` 뿐 아니라 **토큰 단독**(user 없는 https://TOKEN@host)도 가린다.
     (re.compile(r"(?<=://)[^/@\s]{1,256}(?=@)"), PLACEHOLDER),
-    # 이름있는 시크릿 할당/쿼리: secret=…, token=…, api_key=…, access_key_id=…, password=…
+    # 이름있는 시크릿 할당/쿼리: secret=…, token=…, api_key=…, access_key_id=…, password=…,
+    # serviceKey=…(공공데이터포털/KMA 쿼리 키 — #78 리뷰에서 누락 발견)
     # 선행 \b 를 두지 않는다 → aws_secret_access_key 처럼 _ 로 이어붙은 이름도 잡는다.
     # (이름 직후의 =/: 앵커가 secretary= 같은 부분일치 오탐을 막는다.)
     (re.compile(
-        r"(?i)((?:api[_-]?key|access[_-]?key[_-]?id|secret[_-]?access[_-]?key|access[_-]?key|"
-        r"credential|signature|password|passwd|secret|token|pwd)\s*[=:]\s*[\"']?)([^\s\"'&;]+)"),
+        r"(?i)((?:service[_-]?key|api[_-]?key|access[_-]?key[_-]?id|secret[_-]?access[_-]?key|"
+        r"access[_-]?key|credential|signature|password|passwd|secret|token|pwd)"
+        r"\s*[=:]\s*[\"']?)([^\s\"'&;]+)"),
      r"\1" + PLACEHOLDER),
 ]
 

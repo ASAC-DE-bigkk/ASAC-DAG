@@ -5,6 +5,7 @@ commerce 도메인 데이터 계약과 원천 수집(bronze) 실호출 분석. �
 | 문서 | 내용 |
 |---|---|
 | [common_info.md](common_info.md) | **공통 19컬럼·`UPDATEDT` 검증·저장/마커 계약·39종 카탈로그·재수집(backfill)·서비스명 채우기** |
+| [medallion-implementation-plan.md](medallion-implementation-plan.md) | **medallion 구현 계획(제안)** — raw→bronze(Iceberg)→silver→gold 레이어 역할·단계별 구현 방법·**주소 기반 좌표 보정(geocode)** 설계 |
 | [non-license-datasets.md](non-license-datasets.md) | **인허가 외 격리 2종** — 위치정보·현황(비-LOCALDATA, 수집 대상 아님, monthly/irregular DAG 비활성) |
 | [bronze/](bronze/) | **원천 수집 실호출 분석** — 페이지네이션 정렬 · API 호출량 · 영업상태 추적 모델 · 수집 불가 원인·해소 |
 

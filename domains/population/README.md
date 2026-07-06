@@ -14,7 +14,7 @@ domains/population/
 ├─ ppltn_ingest/                  # import 전용 패키지 (DAG 스캔 제외, import만)
 │  ├─ common/                     #   도메인 무관 얇은 helper (이슈 #16)
 │  │  ├─ config.py                #     R2/env(dev·prod)·RunContext·redact_secret·raw 경로 규칙
-│  │  ├─ http.py                  #     낮은 수준 HTTP GET (urllib) + 결과 dataclass
+│  │  ├─ http.py                  #     낮은 수준 HTTP GET (공통 HttpCore #78 위임) + 결과 dataclass
 │  │  ├─ trino.py                 #     Trino 연결·카탈로그/스키마·SQL 식별자 검증
 │  │  ├─ bronze.py                #     ★ payload+메타데이터 bronze DDL/INSERT (멱등)
 │  │  └─ landing.py               #     R2/로컬 raw 적재 싱크

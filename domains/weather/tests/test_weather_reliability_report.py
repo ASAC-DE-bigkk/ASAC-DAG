@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from weather_ingest import reliability_report as report  # noqa: E402
+
+
+ORIGINAL_COLLECT_DAG_RUN_SUMMARY = report.collect_dag_run_summary
 
 
 class RecordingCursor:
@@ -28,8 +32,8 @@ def stub_dag_run_summary(monkeypatch):
     monkeypatch.setattr(
         report,
         "collect_dag_run_summary",
-        lambda dag_id, detected_at, lookback_hours: {
-            "dag_id": dag_id,
+        lambda *args: {
+            "dag_id": args[2],
             "success": 2,
             "failed": 1,
             "running": 0,
@@ -42,7 +46,7 @@ def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
     cursor = RecordingCursor(
         rows=[
-            ("20260702", "0800", 80, 80, 6400, datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
+            (8, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
         ]
     )
 
@@ -53,16 +57,37 @@ def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
 
     assert result["status"] == "PASS"
     assert result["dag_runs"] == {"dag_id": "weather_vilage_fcst_bronze", "success": 2, "failed": 1, "running": 0}
-    assert result["weather"]["grid_count"] == 80
+    assert result["weather"]["base_time_count"] == 8
+    assert result["weather"]["raw_object_count"] == 640
+    assert result["weather"]["latest_base_time"] == "0800"
     assert result["blast_radius"] == ["iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst"]
     assert "current_timestamp - INTERVAL '24' HOUR" in cursor.statements[0]
+    assert "FROM by_base" in cursor.statements[0]
+
+
+def test_weather_dag_run_summary_uses_manifest_table(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
+    cursor = RecordingCursor(rows=[(2, 1, 0)])
+    config = report.report_config()
+
+    result = ORIGINAL_COLLECT_DAG_RUN_SUMMARY(
+        cursor,
+        config,
+        "weather_vilage_fcst_bronze",
+        datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result == {"dag_id": "weather_vilage_fcst_bronze", "success": 2, "failed": 1, "running": 0}
+    assert "bronze_collection_run_manifest" in cursor.statements[0]
+    assert "dag_id = 'weather_vilage_fcst_bronze'" in cursor.statements[0]
 
 
 def test_weather_report_fails_when_grid_coverage_is_incomplete(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     cursor = RecordingCursor(
         rows=[
-            ("20260702", "0800", 79, 79, 6320, datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
+            (8, 639, 511200, 79, 80, 7, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
         ]
     )
 
@@ -73,6 +98,25 @@ def test_weather_report_fails_when_grid_coverage_is_incomplete(monkeypatch):
 
     assert result["status"] == "FAIL"
     assert result["weather"]["coverage_ok"] is False
+
+
+def test_weather_report_fails_when_24h_base_time_coverage_is_incomplete(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(
+        rows=[
+            (6, 480, 426800, 80, 80, 6, "20260706", "0800", datetime(2026, 7, 6, 8, 20, tzinfo=timezone.utc)),
+        ]
+    )
+
+    result = report.build_weather_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["weather"]["coverage_ok"] is False
+    assert result["weather"]["base_time_count"] == 6
+    assert result["weather"]["expected_base_time_count"] == 8
 
 
 def test_weather_report_schedule_requires_dev_target_and_webhook(monkeypatch):
@@ -95,7 +139,7 @@ def test_weather_message_does_not_include_webhook(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/secret-token")
     cursor = RecordingCursor(
         rows=[
-            ("20260702", "0800", 80, 80, 6400, datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
+            (8, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
         ]
     )
     result = report.build_weather_reliability_report(
@@ -106,6 +150,8 @@ def test_weather_message_does_not_include_webhook(monkeypatch):
     message = report.format_weather_discord_message(result)
 
     assert "secret-token" not in message
+    assert message.splitlines()[0].startswith("기상청 단기예보 Bronze 신뢰성 리포트 -")
+    assert "✅ 리포트 상태: 성공" in message
     assert "success=2 failed=1 running=0" in message
     assert "Bronze" in message
 
@@ -130,7 +176,12 @@ def test_weather_send_discord_posts_payload(monkeypatch):
 
     assert report.send_discord_message("hello", webhook_url="https://discord.example/webhook") is True
     request, timeout = calls[0]
-    assert request.data == b'{"content": "hello"}'
+    payload = json.loads(request.data.decode("utf-8"))
+    assert "content" not in payload
+    assert payload["embeds"][0]["title"] == "hello"
+    assert payload["embeds"][0]["color"] == report.DISCORD_GREEN
+    failure_payload = json.loads(report._discord_payload("title\n❌ 리포트 상태: 실패").decode("utf-8"))
+    assert failure_payload["embeds"][0]["color"] == report.DISCORD_RED
     assert request.get_method() == "POST"
     assert request.headers["User-agent"] == "ask-seoul-weather-report/1.0"
     assert timeout == 10

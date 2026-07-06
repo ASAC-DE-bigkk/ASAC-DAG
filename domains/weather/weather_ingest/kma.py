@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from weather_ingest.common.runtime import raw_prefix, required_env
+from weather_ingest.common.runtime import raw_prefix
 
 
 KMA_BASE_URL = os.environ.get(
@@ -129,7 +129,6 @@ def resolve_kma_base_datetime() -> tuple[str, str]:
 
 def build_kma_url(base_date: str, base_time: str, nx: int, ny: int) -> str:
     params = {
-        "serviceKey": required_env("KMA_SERVICE_KEY"),
         "numOfRows": os.environ.get("KMA_NUM_OF_ROWS", "1000"),
         "pageNo": os.environ.get("KMA_PAGE_NO", "1"),
         "dataType": "JSON",

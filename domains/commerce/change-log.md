@@ -5,7 +5,168 @@
 
 ---
 
-## 2026-07-03
+## 2026-07-04
+
+### 32. 적재 엔진 기준 = 첫 파일(순서), 크기/legacy 아님 — 07-01 증분 오분류 수정
+
+request:
+- (지적) 엔진을 파일 크기로 판단하지 말 것. **첫 파일이라 큰 것**이지 크기가 기준이 아니다.
+  첫 파일이니 전체 재적재이고, 이후 파일을 PyIceberg 로 돌리면 안 된다.
+
+response:
+- **근거 확인**: 07-01 general_restaurant 파일은 row-NDJSON **280건(293KB)** 짜리 증분인데, 이전
+  코드가 마커 `rows_total`(=534,748, API 전체수)을 파일 건수로 오독하고 `increment_mode` 없음을
+  legacy 전량으로 취급해 PyIceberg 로 잘못 분류했다(06-30 은 page-NDJSON 534,680건 진짜 full).
+- **수정(순서 기준)**: `resolve_load_plan` — 데이터셋 bronze 최초 적재(워터마크 없음)의 **첫 파일 =
+  전체 재적재(PyIceberg)**, 그 이후 모든 파일 = **증분(Trino)**. 파일 크기/legacy 로 판단하지 않는다.
+  기대 건수는 마커 `increment_count`(신뢰 가능)만 사용, `rows_total` 절대 미사용(없으면 rows>0 판정).
+  (앞서 잠깐 넣었던 파일-크기 기준 및 `Storage.size` 추가는 되돌림 — abstract 메서드가 테스트 파손도 유발.)
+- **검증(실데이터)**: 워터마크 06-30 상태에서 계획 = 27유닛 전부 Trino 증분·PyIceberg 0.
+  general_restaurant 07-01 을 Trino 로 실적재 → **280건**(534K 아님), 534,680 → 534,960(+280).
+  단위테스트 **266 통과**, security 차단 0.
+
+### 31. commerce_load_bronze 통합 검증 — 이미지 리빌드 + 동시성/receipt 수정 (전 39종 적재 성공)
+
+request:
+- 리빌드까지 진행하고 검증. 실패하면 조치하고 성공할 때까지 반복.
+
+response:
+- **이미지**: `feat/7-dockerfile-pyiceburg` 의 pyiceberg[s3fs] 0.11.1 로 이미지 리빌드·재기동 →
+  pyiceberg/pyarrow/trino 임포트 확인.
+- **통합 검증 중 발견·수정 2건**:
+  1. `load_state.write_receipt` 가 `bronze_run_id` 키를 찾다 KeyError(load_unit 결과는 `run_id`) →
+     `run_id` 폴백 추가.
+  2. **Iceberg 동시 커밋 충돌**: 39 load_one 이 동일 테이블에 병렬 append → `CommitFailedException`
+     (낙관적 동시성)으로 28/39 실패. → `load_one` **직렬화**(`max_active_tis_per_dagrun=1`) +
+     `load_unit_pyiceberg` 를 **트랜잭션 1커밋**(delete+청크 append 묶음, 스냅샷 폭증/충돌창 제거).
+- **재적재 가능 검증**: bronze 테이블 drop + 상태파일 삭제 → 워터마크 없음(전체 재적재 조건) 확인 후
+  재실행. (사용자 "iceberg/parquet + 상태 삭제 후 재적재 가능" 설계 실증.)
+- **결과(dev, max_dates=1, 06-30 legacy 전량)**: **load_one 39/39 성공·0 실패**, bronze
+  **1,342,222행 / 39종 / 1,341,784 유니크 mgtno**, manifest 39 전부 publishable, 워터마크 39·pending 0·
+  receipt 39. record_json `json_extract_scalar` 파싱 정상(BPLCNM·TRDSTATENM) → silver 준비 완료.
+  단위테스트 **264 통과**, security 차단 0. (직렬 백필 ~17분 — 대부분 general_restaurant 53만건.
+  일일 증분은 소량이라 빠름. 07-01 이후는 재실행이 catch-up.)
+
+### 30. commerce_load_bronze 크래시 수정 — page-NDJSON(과거 데이터) 적재 지원
+
+request:
+- commerce_load_bronze 첫 실행이 죽음. 원인 분석 요청. (판단) 과거 데이터를 스킵하지 말고
+  **현재 코드로 읽어 적재**하도록 변경. pyiceberg 는 최신 stable(0.11.1)로 이미지 반영(별도 host 브랜치).
+
+response:
+- **원인**: 워터마크 없는 첫 실행이 raw 를 처음부터 스캔 → `2026-06-30`·`2026-07-01` run 이
+  **feat/58 이전 page-NDJSON**(줄=API 페이지 응답, 마커에 increment_mode 없음). 로더가 이를
+  스킵하지 않고 **ValueError 로 태스크를 죽임**(계획은 스킵인데 구현이 raise). 게다가 35/39
+  데이터셋은 row-NDJSON 증분 파일이 없어(07-02/03 identical) 스킵만으론 bronze 가 빈다.
+- **수정(과거 데이터 적재)**: `iter_increment_rows` 를 **두 포맷 모두 지원**으로 변경 —
+  row-NDJSON(줄=레코드) + page-NDJSON(줄=페이지 응답 → `parse_page(...).rows`, service_name 필요).
+  `resolve_load_plan` 은 워터마크 이후 **완료 run 을 시간순 전부 적재**(legacy 전량=PyIceberg,
+  changed=Trino, identical=적재없이 전진). diff_target 우회/legacy 스킵 제거.
+- **검증**: 실제 데이터 드라이런 — 66 유닛(legacy 62 PyIceberg + changed 4 Trino), general_restaurant
+  06-30 legacy 파일에서 실제 레코드 파싱 확인(534,680건, 전체 인허가 컬럼). 단위테스트 **263 통과**,
+  `python -m security` 차단 0.
+- **pyiceberg**: 이미지에 미설치 확인(trino·pyarrow 는 있음) → host repo `feat/7-dockerfile-pyiceburg`
+  브랜치에서 `Dockerfile.airflow` 에 `pyiceberg[s3fs]>=0.11.1,<0.12` 추가(별도 작업). requirements.txt 동기화.
+
+### 29. bronze 적재 — 수집과 분리된 commerce_load_bronze DAG(PyIceberg/Trino) + 파일 상태 (Step 2~3)
+
+request:
+- medallion(#28) Step 2~6 구현. dags=ASAC-DAG `feat/113-commerce-bronze`, dbt=ASAC-DBT
+  `feat/38-commerce-Bronze-Layer-ingest`.
+- (재설계 지시) 수집 DAG 에 적재를 직결하지 말 것 — 대용량에서 Trino OOM. raw 와 bronze 를 분리,
+  적재는 어느 raw 를 읽었는지 이력관리(재적재 가능·raw 와 격리된 공간). complete 없어 못 읽은
+  일자·대상은 기록 후 다음 실행 재시도(현재-2일 재감시, 3일 폐기). 어느 날짜까지 적재했는지 파일로
+  관리(없으면 처음부터 전체 재적재). **전체 재적재는 PyIceberg, 그 외는 Trino 증분**(한 번에 모든
+  날짜 X). **RDB 사용 금지.** 로더 content_hash dedup 은 증분 경로에서 무의미 → 미적용.
+
+response:
+- **수집·적재 분리**: `commerce_raw.py` 는 raw-only 로 복원(이전 결합 되돌림 — Trino 무의존).
+  신규 **[commerce_load_bronze.py](commerce_load_bronze.py)** DAG 가 적재 전담
+  (`resolve_plan → plan_units → ensure_warehouse → load_one.expand → finalize`).
+- **적재 엔진 [include/bronze/warehouse.py](include/bronze/warehouse.py)**: mode=first(전체 스냅샷)
+  → **PyIceberg**(R2 Data Catalog REST + R2 S3 FileIO, `delete`+Arrow `append`, 커밋 1회 — Trino
+  코디네이터 우회로 OOM 회피), mode=changed(소량) → **Trino** 증분(`?` 파라미터 바인딩). 단일 테이블
+  `commerce.bronze_localdata_license`(39종 dataset 컬럼 구분) + `bronze_collection_run_manifest`
+  (데이터셋별 발행 게이트). row-NDJSON 라인 스트리밍, canonical sha256 content_hash(컬럼 보존, 로더
+  dedup 없음). 식별자만 assert_identifier 보간(allow-sql).
+- **파일 상태(RDB 없음) [include/bronze/load_state.py](include/bronze/load_state.py)**: raw 와 격리된
+  `{prefix}/commerce_bronze_state/`(commerce_ prefix) 에 워터마크(데이터셋별 마지막 적재 run) +
+  pending(complete 없는 (date, short), 현재-2일 재감시·3일 폐기) + receipt(적재 감사 로그).
+  **[load_plan.py](include/bronze/load_plan.py)**: `resolve_load_plan`(무손실 skip — diff-target 은
+  완료 run 에서만 전진하므로 incomplete 건너뛰어도 무손실), `commit_watermark`(적재 성공분까지만
+  전진, 실패 run 직전 정지 → 다음 실행 재시도). 실행당 `COMMERCE_LOAD_MAX_DATES`(기본 3) 바운드.
+- **격리·명명**: Iceberg 물리 저장은 R2 Data Catalog 관리(폴더=UUID, 클라이언트 지정 불가) —
+  구분 핸들은 논리 스키마 `commerce`. 상태/이력 파일만 `commerce_` prefix 로 직접 관리.
+- **env/deps**: `.env.commerce.example`(COMMERCE_SCHEMA·COMMERCE_BRONZE_STATE_LAYER·
+  COMMERCE_LOAD_MAX_DATES·TRINO_*·R2 Data Catalog), `requirements.txt` 에 `trino`·`pyiceberg[s3fs]`
+  추가(**이미지 추가 필요**).
+- **테스트**: `test_warehouse.py`·`test_load_state.py`·`test_load_plan.py` 신규 — 전체 **260 통과**
+  (239→+21), `python -m security` 차단 0. 두 DAG(collect raw-only / load) 파싱·배선 검증.
+  PyIceberg/Trino 실제 왕복은 이미지 통합(Step 4).
+- **silver/gold(dbt)** 는 ASAC-DBT `feat/38` 에 별도 구현(Step 5~6): `dbt/domains/commerce/`
+  (sources·silver_license_history SCD2·silver_license_current·테스트). Step 4/7 백필,
+  Step 8 좌표 보정, transform DAG(Step 10)는 후속.
+
+### 28. medallion 구현 계획 문서 — raw→bronze(Iceberg)→silver→gold + 좌표 보정 설계 (제안)
+
+request:
+- python/airflow/iceberg/dbt/trino/R2 환경에서 bronze·silver·gold 역할 분담과 "raw 적재를
+  bronze 레이어로 통합할지"를 검토하고, 단계별 to-do 의 **구현 방법까지 정의한 docs** 요청.
+- 추가 요구: 업장 좌표(중부원점 TM 추정)와 주소 기반 **재보정 위경도**를 silver 에서 조인하도록
+  설계 포함(어떤 로직/API 로 보정할지 확인 필요). 제약: `dbt/` 하위 타 도메인 폴더는 타인
+  작업물이라 의존·병합하지 않음, dbt commerce 프로젝트는 미구현 상태에서 신규 설계.
+
+response:
+- **[docs/pipeline/medallion-implementation-plan.md](docs/pipeline/medallion-implementation-plan.md) 신설**(제안·승인 대기 항목 포함):
+  raw=R2 랜딩(현행 유지, #75/#21 결정 준수) / bronze=Iceberg `commerce.bronze_localdata_license`
+  단일 변경로그 테이블(record_json 통짜 + 계보 컬럼, `load_date` 파티션, delete-then-insert 멱등,
+  dataset 단위 manifest 발행 게이트) / silver=dbt SCD2(`silver_license_history`·
+  `silver_license_current`, 전순서 버전 정렬 + 연속 중복 제거로 A→B→A 원복 보존) /
+  gold=`gold_commerce_license_status_current`(현황 스냅샷, 일별 추이는 phase-2). **raw→bronze 통합 안 함**
+  (Trino 는 iceberg 커넥터뿐이라 JSONL 직질의 불가 — 부족한 것은 적재 단계).
+- 백필·분기 정합성 복구는 `_diff_target` 전체본 기반 `mode=full_reconcile` 단일 코드 경로.
+- **좌표 보정 설계**: 원천엔 X/Y(좌표계 미표기)뿐, 위경도 없음 확인 → 2트랙(좌표 변환 pyproj
+  ·주소 지오코딩 API)+EPSG(2097 vs 5174) 실측 판별, `commerce_geocode_collect` 신규 수집 라인
+  (raw 보존 → `bronze_geocode_address`, address_key 멱등·증분), silver 에서 LEFT JOIN 으로
+  `lon/lat_corrected`·`location_source`·`location_quality` 산출. API 후보(VWorld/Kakao/Naver/juso)
+  비교·약관/쿼터 체크리스트는 확정 전 조사 항목으로 명시.
+- Step 1~10 순차 to-do(각 구현 방법·완료 기준) + 결정 대기 7건(§7) 정리.
+  인덱스 갱신: docs/pipeline/README.md · docs/README.md 문서 맵.
+
+### 30. HTTP 호출 경계를 공통 클라이언트로 전환 (#78)
+
+request:
+- 소스 API 호출을 `dags/common/http`(#78 HttpCore)로 통합. 단, commerce 는 §20 보안
+  게이트가 `netio.http_request` 사용을 명시하므로 그 커버리지(SSRF 가드·응답 상한·TLS
+  강제·예외 마스킹)를 잃지 않을 것.
+
+response:
+- `include/bronze/clients.py` 의 `SeoulOpenApiClient` 수동 재시도 루프를 HttpCore 로 대체.
+  **netio 를 HttpCore 의 Transport(`_NetioTransport`)로 감싸** §20 커버리지를 그대로 유지하고,
+  그 위에 통합 재시도(429/5xx+연결오류)·redaction 로깅·rate limit·typed 예외(HttpProblemError)를
+  얹음(합성 — HttpCore Transport 계약의 의도된 확장점).
+- **업무 오류 분류(INFO-000/100/200 등, `parse_page`)는 도메인에 그대로 유지** — HTTP 200
+  응답 본문에서 판정, HttpCore 는 전송/HTTP 상태만 담당. 재시도 소진/HTTP 오류는
+  `SeoulApiError("ERROR-NETWORK", redact(...))` 로 변환해 bronze 마커 계약 보존.
+- `rate_limit=None` — 기존 `SEOUL_REQUEST_DELAY_SECONDS` 간격 유지(이중 지연 방지).
+- (#78 코드리뷰 반영) `security/redaction.py` structural 패턴에 `serviceKey=` 쿼리 키 추가
+  (공공데이터포털/KMA 형식 — dags/common/security 로 재복사), `parse_page` 의 비정수
+  `list_total_count` 를 `SeoulApiError("ERROR-PARSE")` 로 래핑(원시 ValueError 누출 차단),
+  `bronze/resolve.py` CLI 에 dags 루트 부트스트랩 추가(`python -m bronze.resolve` 복구).
+- 검증: commerce 241 테스트 통과, 오프라인 스모크(성공·재시도·소진·업무오류 4경로) 통과,
+  URL 경로 키가 HttpCore 로그에서 마스킹 확인.
+
+### 29. 서울 base URL env 이름 통일 — SEOUL_OPEN_API_BASE_URL (#78)
+
+request:
+- 루트 `.env` 통합 원칙(#72)에 따라 base URL env 이름도 루트 이름
+  `SEOUL_OPEN_API_BASE_URL`로 통일할 것 — 사용자 결정.
+
+response:
+- `settings.py` 읽기 훅 `SEOUL_OPENAPI_BASE_URL` → `SEOUL_OPEN_API_BASE_URL` 개명,
+  configuration.md·test_security.py 예시 동반 개명. 실환경 값 이관 불필요 — #72 때
+  `.env.commerce` 항목은 이미 삭제(코드 기본값과 동일)돼 코드 훅만 남아 있었음.
+- 공용 서울 어댑터(`dags/common/http/seoul.py`)도 같은 이름 하나만 읽는다.
 
 ### 28. include/common → include/commerce_core 개명 + storage 승격 (#109)
 

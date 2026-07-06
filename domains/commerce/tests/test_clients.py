@@ -39,3 +39,14 @@ def test_parse_non_auth_error_raises_apierror():
 def test_parse_invalid_json_raises():
     with pytest.raises(SeoulApiError):
         parse_page(b"not json", "S")
+
+
+def test_parse_non_numeric_total_raises_apierror_not_valueerror():
+    """스키마 드리프트(list_total_count 비정수)도 SeoulApiError 계약 유지(#78 리뷰).
+
+    원시 ValueError 가 새면 resolve.py 의 `except SeoulApiError` 를 관통해 CLI 가 죽는다.
+    """
+    raw = _env("S", [{"A": "1"}], total="N/A")
+    with pytest.raises(SeoulApiError) as ei:
+        parse_page(raw, "S")
+    assert ei.value.code == "ERROR-PARSE"
