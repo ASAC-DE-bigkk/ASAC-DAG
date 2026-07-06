@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import urllib.request
 import uuid
@@ -59,6 +60,12 @@ DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
 DAG_ID = "traffic_incident_bronze"
 RECOLLECT_DAG_ID = "traffic_incident_recollect"
+BACKFILL_DAG_ID = "traffic_incident_bronze_backfill"
+TRAFFIC_RAW_KEY_RE = re.compile(
+    r"/load_date=(?P<load_date>\d{4}-\d{2}-\d{2})/"
+    r"(?P<collected>\d{8}T\d{6})KST_AccInfo-(?P<start_index>\d+)-(?P<end_index>\d+)_"
+    r"(?P<request_id>[^/]+)\.xml$"
+)
 
 # 공통 에러 모듈 파일럿(#77) — 태스크 최종 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 # 기존 콜백(manifest 기록·Discord 알림)과 리스트로 나란히 걸어 기존 동작은 바꾸지 않는다.
@@ -70,6 +77,18 @@ def dag_run_conf(context: dict) -> dict:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
     return conf if isinstance(conf, dict) else {}
+
+
+def raw_object_keys_from_conf(context: dict) -> list[str]:
+    raw_keys = dag_run_conf(context).get("raw_object_keys")
+    if isinstance(raw_keys, str):
+        raw_keys = [raw_keys]
+    if not isinstance(raw_keys, list):
+        raise RuntimeError("dag_run.conf.raw_object_keys must be a non-empty string or list.")
+    cleaned = [str(key).strip() for key in raw_keys if str(key).strip()]
+    if not cleaned:
+        raise RuntimeError("dag_run.conf.raw_object_keys must not be empty.")
+    return cleaned
 
 
 def current_dag_id(context: dict) -> str:
@@ -268,6 +287,54 @@ def land_seoul_traffic_raw(**context) -> dict:
     }
 
 
+def land_seoul_traffic_raw_object_keys(**context) -> dict:
+    raw_objects = []
+    page_summaries = []
+    list_total_count = 0
+    result_code = "N/A"
+    for raw_object_key in raw_object_keys_from_conf(context):
+        match = TRAFFIC_RAW_KEY_RE.search(raw_object_key)
+        if not match:
+            raise RuntimeError(f"Unsupported Seoul traffic raw_object_key format: {raw_object_key}")
+        raw_bytes = download_raw_object(raw_object_key, "Seoul traffic raw payload")
+        metadata, rows = parse_seoul_acc_info_response(raw_bytes)
+        start_index = int(match.group("start_index"))
+        end_index = int(match.group("end_index"))
+        result_code = metadata.get("result_code") or result_code
+        list_total_count = max(list_total_count, metadata_total_count(metadata))
+        collected_at = datetime.strptime(match.group("collected"), "%Y%m%dT%H%M%S").replace(tzinfo=KST)
+        raw_objects.append(
+            {
+                "request_id": match.group("request_id"),
+                "raw_object_key": raw_object_key,
+                "raw_hash": sha256_hex(raw_bytes),
+                "http_status": 200,
+                "collected_at": collected_at.isoformat(),
+                "start_index": start_index,
+                "end_index": end_index,
+            }
+        )
+        page_summaries.append(
+            {
+                "start_index": start_index,
+                "end_index": end_index,
+                "row_count": len(rows),
+                "list_total_count": metadata_total_count(metadata),
+                "raw_object_key": raw_object_key,
+            }
+        )
+    return {
+        "source_id": SOURCE_ID,
+        "raw_objects": raw_objects,
+        "raw_object_keys": [item["raw_object_key"] for item in raw_objects],
+        "result_code": result_code,
+        "list_total_count": list_total_count,
+        "page_count": len(raw_objects),
+        "requested_end_index": max(item["end_index"] for item in raw_objects),
+        "pages": page_summaries,
+    }
+
+
 def load_seoul_traffic_bronze(**context) -> dict:
     raw_result = context["ti"].xcom_pull(task_ids="land_seoul_traffic_raw") or {}
     raw_objects = raw_result.get("raw_objects") or []
@@ -336,6 +403,20 @@ def record_seoul_traffic_run_started(**context) -> str:
         dag_id=current_dag_id(context),
         dag_run_id=context["run_id"],
         status=STATUS_STARTED,
+    )
+
+
+def record_seoul_traffic_backfill_run_started(**context) -> str:
+    cursor, catalog, schema = trino_cursor()
+    return record_bronze_run_event(
+        cursor,
+        catalog,
+        schema,
+        source_id=SOURCE_ID,
+        dag_id=current_dag_id(context),
+        dag_run_id=context["run_id"],
+        status=STATUS_STARTED,
+        expected_raw_objects=len(raw_object_keys_from_conf(context)),
     )
 
 
@@ -433,6 +514,48 @@ def build_traffic_bronze_dag(dag_id: str, schedule: str | None, description: str
     return built_dag
 
 
+def build_traffic_bronze_backfill_dag():
+    with DAG(
+        dag_id=BACKFILL_DAG_ID,
+        description="Loads existing Seoul TOPIS AccInfo raw_object_keys into Iceberg bronze without API calls.",
+        start_date=datetime(2026, 1, 1, tzinfo=KST),
+        schedule=None,
+        catchup=False,
+        max_active_runs=1,
+        on_failure_callback=record_seoul_traffic_run_failed,
+        tags=["ask_seoul", "traffic", "bronze", "backfill", "r2", "iceberg"],
+    ) as built_dag:
+        start_manifest = PythonOperator(
+            task_id="record_seoul_traffic_run_started",
+            python_callable=record_seoul_traffic_backfill_run_started,
+            on_failure_callback=[record_traffic_problem],
+        )
+
+        land_raw = PythonOperator(
+            task_id="land_seoul_traffic_raw",
+            python_callable=land_seoul_traffic_raw_object_keys,
+            on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
+        )
+
+        load_bronze = PythonOperator(
+            task_id="load_seoul_traffic_bronze",
+            python_callable=load_seoul_traffic_bronze,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
+            on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
+        )
+
+        verify_bronze = PythonOperator(
+            task_id="verify_seoul_traffic_bronze_runtime",
+            python_callable=verify_seoul_traffic_bronze_runtime,
+            on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
+        )
+
+        start_manifest >> land_raw >> load_bronze >> verify_bronze
+    return built_dag
+
+
 dag = build_traffic_bronze_dag(
     DAG_ID,
     traffic_dag_schedule(),
@@ -446,3 +569,5 @@ recollect_dag = build_traffic_bronze_dag(
     "Manually recollects Seoul TOPIS AccInfo page windows through the Bronze contract.",
     ["ask_seoul", "traffic", "bronze", "recollect", "r2", "iceberg"],
 )
+
+backfill_dag = build_traffic_bronze_backfill_dag()

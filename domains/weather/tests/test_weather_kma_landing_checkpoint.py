@@ -31,13 +31,15 @@ class TaskInstance:
         return self.raw_result
 
 
-def kma_payload(total_count: int = 1, item_count: int = 1) -> bytes:
+def kma_payload(total_count: int = 1, item_count: int = 1, page_no: int = 1, num_of_rows: int = 1000) -> bytes:
     return json.dumps(
         {
             "response": {
                 "header": {"resultCode": "00", "resultMsg": "OK"},
                 "body": {
                     "items": {"item": [{"category": "TMP", "seq": seq} for seq in range(item_count)]},
+                    "pageNo": page_no,
+                    "numOfRows": num_of_rows,
                     "totalCount": total_count,
                 },
             }
@@ -159,6 +161,36 @@ def test_land_kma_raw_fetches_all_pages_when_total_count_exceeds_page_size(monke
     assert result["raw_page_count"] == 2
     assert result["api_request_count"] == 2
     assert [upload["log_label"] for upload in uploads].count("KMA raw payload") == 2
+
+
+def test_land_kma_raw_object_keys_rebuilds_loader_input(monkeypatch):
+    raw_key = (
+        "raw/weather_forecast/kma_vilage_fcst/load_date=2026-07-05/"
+        "nx=56/ny=130/20260705T082000KST_base-202607050800_request-1.json"
+    )
+
+    class BackfillDagRun:
+        conf = {"raw_object_keys": [raw_key]}
+
+    monkeypatch.setattr(dag_module, "load_kma_grids", lambda: [{"place_id": "first", "nx": 56, "ny": 130}])
+    monkeypatch.setattr(
+        dag_module,
+        "download_raw_object",
+        lambda object_key, _log_label: kma_payload(total_count=1001, item_count=1000, page_no=1, num_of_rows=1000),
+    )
+
+    result = dag_module.land_kma_raw_object_keys(
+        dag=Dag(),
+        dag_run=BackfillDagRun(),
+        run_id="manual__backfill",
+    )
+
+    assert result["api_request_count"] == 0
+    assert result["expected_raw_object_count"] == 1
+    assert result["raw_objects"][0]["request_id"] == "request-1"
+    assert result["raw_objects"][0]["place_id"] == "first"
+    assert result["raw_objects"][0]["page_no"] == 1
+    assert result["raw_objects"][0]["num_of_rows"] == 1000
 
 
 def test_land_kma_raw_fails_when_kma_response_result_code_is_not_ok(monkeypatch):
