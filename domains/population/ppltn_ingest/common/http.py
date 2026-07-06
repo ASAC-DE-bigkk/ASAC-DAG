@@ -22,9 +22,11 @@ from common.http import HttpCore
 DEFAULT_TIMEOUT = 30
 DEFAULT_USER_AGENT = "ask-seoul-bronze/1.0"
 
-# 기존 urllib 구현은 호출당 1회 시도였다(자체 재시도 루프 없음 — 재시도는
-# Airflow 태스크 retries 몫). 동작 보존을 위해 HttpCore 도 1회로 고정한다.
-MAX_ATTEMPTS = 1
+# 실시간 API라 타임아웃으로 놓친 슬라이스는 다음 run(5분 뒤)엔 이미 다음 값이라
+# 복구 불가 → **같은 run 안에서 즉시 재시도**해야 그 시각(ppltn_time) 값이 들어온다.
+# HttpCore가 멱등 GET의 타임아웃/연결오류·429·5xx를 지수 백오프+jitter로 재시도하므로
+# 2회(=1회 재시도)로 둔다. 실패는 드물어(≈1/121) 순차 fetch도 5분 안에 끝난다.
+MAX_ATTEMPTS = 2
 
 _CORE: HttpCore | None = None
 
