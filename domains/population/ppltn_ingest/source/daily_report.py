@@ -69,13 +69,17 @@ def aggregate_day(load_date: str, *, target: str = "dev", env_file: str | None =
     area_failures: Counter = Counter()
     total_area_failures = 0
     failed_runs: list[tuple[str, list[str]]] = []  # (ingest_ts, [area_nm...])
+    slo_breached: list[tuple[str, float]] = []  # (ingest_ts, coverage_pct) — landed>0인데 SLO 미달
 
     for r in reports:
         cov = r.get("coverage", {})
         landed = cov.get("landed", 0)
+        cov_pct = cov.get("coverage_pct", 0.0)
         if landed == 0:
             fully_failed += 1
-        coverage_pcts.append(cov.get("coverage_pct", 0.0))
+        elif cov_pct < source_config.COVERAGE_SLO_PCT:
+            slo_breached.append((r.get("ingest_ts", ""), cov_pct))
+        coverage_pcts.append(cov_pct)
         total_area_failures += cov.get("failed", 0)
         fails = r.get("failures", [])
         for f in fails:
@@ -84,6 +88,7 @@ def aggregate_day(load_date: str, *, target: str = "dev", env_file: str | None =
             failed_runs.append((r.get("ingest_ts", ""), [f.get("area_nm", "?") for f in fails]))
 
     failed_runs.sort()  # 시각 순
+    slo_breached.sort()
     avg_cov = round(sum(coverage_pcts) / total_runs, 1) if total_runs else 0.0
     return {
         "load_date": load_date,
@@ -94,6 +99,8 @@ def aggregate_day(load_date: str, *, target: str = "dev", env_file: str | None =
         "total_area_failures": total_area_failures,
         "top_failing_areas": area_failures.most_common(8),
         "failed_runs": failed_runs,
+        "slo_threshold_pct": source_config.COVERAGE_SLO_PCT,
+        "slo_breached_runs": slo_breached,
     }
 
 
@@ -109,10 +116,12 @@ def format_message(summary: dict) -> str:
         return "\n".join(lines)
 
     ok_runs = s["total_runs"] - s["fully_failed_runs"]
-    status = "✅" if s["fully_failed_runs"] == 0 else "⚠️"
+    breached = s.get("slo_breached_runs", [])
+    slo_pct = s.get("slo_threshold_pct", 95.0)
+    status = "✅" if s["fully_failed_runs"] == 0 and not breached else "⚠️"
     lines += [
-        f"{status} 수집 run: **{s['total_runs']}회** (정상 {ok_runs} · 완전실패 {s['fully_failed_runs']})",
-        f"📈 평균 장소 커버리지: **{s['avg_coverage_pct']}%**",
+        f"{status} 수집 run: **{s['total_runs']}회** (정상 {ok_runs} · 완전실패 {s['fully_failed_runs']} · SLO미달 {len(breached)})",
+        f"📈 평균 장소 커버리지: **{s['avg_coverage_pct']}%** (SLO {slo_pct}%)",
         f"❌ 장소 수집 실패 누계: **{s['total_area_failures']}건**",
     ]
     if s["top_failing_areas"]:
@@ -124,4 +133,10 @@ def format_message(summary: dict) -> str:
             lines.append(f"  {_kst_hm(ts)} — {', '.join(areas)}")
         if len(s["failed_runs"]) > 12:
             lines.append(f"  …외 {len(s['failed_runs']) - 12}개 run 실패")
+    if breached:
+        lines += ["", f"🚨 **SLO 미달 run** (커버리지 < {slo_pct}%):"]
+        for ts, pct in breached[:12]:
+            lines.append(f"  {_kst_hm(ts)} — {pct}%")
+        if len(breached) > 12:
+            lines.append(f"  …외 {len(breached) - 12}개 run")
     return "\n".join(lines)

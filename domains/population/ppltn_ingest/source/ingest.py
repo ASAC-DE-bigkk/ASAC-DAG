@@ -212,6 +212,7 @@ def build_run_report(results: list[dict], ctx: RunContext, *, inserted: int, dry
     landed = [r for r in results if r["ok"]]
     failed = [r for r in results if not r["ok"]]
     expected = len(results)
+    coverage_pct = round(100.0 * len(landed) / expected, 1) if expected else 0.0
     return {
         "domain": source_config.SOURCE_DOMAIN,
         "source_id": source_config.SOURCE_ID,
@@ -224,11 +225,13 @@ def build_run_report(results: list[dict], ctx: RunContext, *, inserted: int, dry
             "expected": expected,
             "landed": len(landed),
             "failed": len(failed),
-            "coverage_pct": round(100.0 * len(landed) / expected, 1) if expected else 0.0,
+            "coverage_pct": coverage_pct,
         },
         "bronze_rows_inserted": inserted,
         "failures": failed,
-        "slo_passed": bool(landed) and not failed,
+        "slo_threshold_pct": source_config.COVERAGE_SLO_PCT,
+        # SLO: 부분 실패도 잡도록 "실패 0건"이 아니라 "coverage ≥ 임계치"로 판정.
+        "slo_passed": coverage_pct >= source_config.COVERAGE_SLO_PCT,
     }
 
 

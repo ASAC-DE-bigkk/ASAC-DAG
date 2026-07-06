@@ -29,6 +29,10 @@ SEOUL_OPEN_API_BASE_URL = os.environ.get(
 PPLTN_CONTAINER_KEY = "SeoulRtd.citydata_ppltn"
 SEOUL_OK_CODES = ("INFO-000",)
 
+# 수집 커버리지 SLO 임계치(%). coverage_pct가 이 값 미만이면 SLO 미달(부분 실패)로 본다.
+# 평소 ~99.9%라 95%는 평상시엔 조용하고 실질 장애(다수 장소 누락)만 잡는 선이다.
+COVERAGE_SLO_PCT = 95.0
+
 
 def source_api_key(env_file: str | None = None) -> str:
     """환경변수(+선택적 .env)에서 서울 API 인증키를 읽어 온다."""

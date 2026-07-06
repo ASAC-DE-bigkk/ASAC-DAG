@@ -66,7 +66,7 @@ def _send_report(**context) -> None:
 
 
 with DAG(
-    dag_id="population_report",
+    dag_id="population_daily_report",
     description="Daily Discord report of population collection (success/failure) at 09:00 KST.",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
     schedule="0 9 * * *",
