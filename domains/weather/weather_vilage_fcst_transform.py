@@ -98,7 +98,8 @@ with DAG(
             "test --select "
             "weather_place_grid_mapping "
             "assert_weather_place_grid_mapping_major_aliases "
-            "assert_weather_place_grid_mapping_within_collected_grid_scope"
+            "assert_weather_place_grid_mapping_within_collected_grid_scope "
+            "assert_weather_place_grid_mapping_alias_unique_except_allowed"
         ),
         on_failure_callback=record_weather_problem,
     )
@@ -116,7 +117,8 @@ with DAG(
             "silver_kma_vilage_fcst "
             "assert_silver_kma_vilage_fcst_grain_unique "
             "assert_silver_kma_vilage_fcst_grid_coverage "
-            "assert_silver_kma_uses_publishable_runs"
+            "assert_silver_kma_uses_publishable_runs "
+            "assert_silver_kma_event_at_matches_forecast_at"
         ),
         on_failure_callback=record_weather_problem,
     )
@@ -151,7 +153,9 @@ with DAG(
             "dim_weather_place "
             "gold_weather_forecast_by_place "
             "assert_gold_weather_forecast_by_place_grain_unique "
-            "assert_gold_weather_forecast_by_place_major_coverage"
+            "assert_gold_weather_forecast_by_place_major_coverage "
+            "assert_dim_weather_place_admin_axis_consistent "
+            "assert_gold_weather_forecast_by_place_event_at_matches_forecast_at"
         ),
         on_failure_callback=record_weather_problem,
     )

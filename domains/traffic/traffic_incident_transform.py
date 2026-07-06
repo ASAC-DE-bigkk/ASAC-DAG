@@ -100,7 +100,12 @@ with DAG(
             "assert_silver_traffic_uses_publishable_runs "
             "assert_silver_traffic_location_contract "
             "assert_traffic_audit_covers_latest_total_count "
-            "assert_silver_seoul_traffic_incident_grain_unique"
+            "assert_silver_seoul_traffic_incident_grain_unique "
+            "assert_silver_traffic_event_at_matches_occurred_at "
+            "assert_silver_traffic_wgs84_required_when_source_coordinate_available "
+            "assert_silver_traffic_admin_axis_consistent "
+            "assert_silver_traffic_admin_axis_coverage "
+            "assert_silver_traffic_latest_publishable_record"
         ),
         on_failure_callback=record_traffic_problem,
     )

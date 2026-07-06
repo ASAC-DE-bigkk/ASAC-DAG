@@ -109,6 +109,14 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
     assert "run --select silver_seoul_traffic_incident" in task_commands["dbt_run_silver"]
     assert "--target '{{ params.target }}'" in task_commands["dbt_deps"]
+    assert "assert_silver_traffic_event_at_matches_occurred_at" in task_commands["dbt_test_silver"]
+    assert (
+        "assert_silver_traffic_wgs84_required_when_source_coordinate_available"
+        in task_commands["dbt_test_silver"]
+    )
+    assert "assert_silver_traffic_admin_axis_consistent" in task_commands["dbt_test_silver"]
+    assert "assert_silver_traffic_admin_axis_coverage" in task_commands["dbt_test_silver"]
+    assert "assert_silver_traffic_latest_publishable_record" in task_commands["dbt_test_silver"]
 
 
 def test_traffic_transform_limits_target_param_to_dev_or_prod():

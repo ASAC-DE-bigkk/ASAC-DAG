@@ -119,11 +119,21 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
         "assert_weather_place_grid_mapping_within_collected_grid_scope"
         in task_commands["dbt_test_place_mapping_seed"]
     )
+    assert (
+        "assert_weather_place_grid_mapping_alias_unique_except_allowed"
+        in task_commands["dbt_test_place_mapping_seed"]
+    )
+    assert "assert_silver_kma_event_at_matches_forecast_at" in task_commands["dbt_test_silver"]
     assert "run --select dim_weather_place gold_weather_forecast_by_place" in task_commands["dbt_run_place_mart"]
     assert "dim_weather_place" in task_commands["dbt_test_place_mart"]
     assert "gold_weather_forecast_by_place" in task_commands["dbt_test_place_mart"]
     assert "assert_gold_weather_forecast_by_place_grain_unique" in task_commands["dbt_test_place_mart"]
     assert "assert_gold_weather_forecast_by_place_major_coverage" in task_commands["dbt_test_place_mart"]
+    assert "assert_dim_weather_place_admin_axis_consistent" in task_commands["dbt_test_place_mart"]
+    assert (
+        "assert_gold_weather_forecast_by_place_event_at_matches_forecast_at"
+        in task_commands["dbt_test_place_mart"]
+    )
 
 
 def test_weather_transform_limits_target_param_to_dev_or_prod():
