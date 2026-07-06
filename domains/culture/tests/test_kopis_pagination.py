@@ -41,6 +41,7 @@ class _FakeSession:
 def _client(responses: dict[int, _Resp]) -> KopisClient:
     c = KopisClient(service_key="test-key")
     c.session = _FakeSession(responses)
+    c.retry_delay_sec = 0  # #146 재시도 대기 제거(테스트 속도)
     return c
 
 
@@ -51,7 +52,8 @@ def test_overshoot_400_after_full_pages_ends_list():
                  3: _Resp(400)})
     pages = list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
     assert [p.row_count for p in pages] == [2, 2]
-    assert c.session.calls == [1, 2, 3]  # 오버슛 조회까지는 감
+    # #146: 400 은 1회 재시도로 '지속' 확인 후 목록 끝 판정 → 3페이지 2회 조회
+    assert c.session.calls == [1, 2, 3, 3]
 
 
 def test_first_page_400_still_raises():

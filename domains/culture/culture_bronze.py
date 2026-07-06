@@ -117,11 +117,13 @@ def _plan(**context) -> list[dict]:
         date_from = end.in_timezone(KST).subtract(days=int(params["lookback_days"])).strftime("%Y%m%d")
 
     # 데이터셋 필터: include_detail 꺼지면 상세 제외, datasets 지정 시 그 부분집합만.
+    # 상세(kopis_detail)는 마지막으로 정렬(#146) — 목록이 먼저 랜딩될 확률을 높여
+    # detail 의 "랜딩된 raw 에서 id 재사용" 경로(목록 API 재조회 생략)를 살린다.
     include_detail = bool(params["include_detail"])
     wanted = set(params.get("datasets") or [])
     names = [
         ds.name
-        for ds in enabled_datasets()
+        for ds in sorted(enabled_datasets(), key=lambda d: d.kind == "kopis_detail")
         if (include_detail or ds.kind != "kopis_detail")
         and (not wanted or ds.name in wanted)
     ]
