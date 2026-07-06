@@ -25,6 +25,7 @@ SCHEDULE_ENV = "ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
+KMA_BASE_INTERVAL_HOURS = 3
 
 
 @dataclass(frozen=True)
@@ -135,45 +136,86 @@ def _age_minutes(collected_at: Any, detected_at: datetime) -> int | None:
 
 def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: datetime) -> dict[str, Any]:
     table = _qualified(config, WEATHER_TABLE)
+    expected_base_time_count = max(1, config.lookback_hours // KMA_BASE_INTERVAL_HOURS)
+    expected_raw_object_count = config.expected_kma_grids * expected_base_time_count
     row = _fetch_one(
         cursor,
         f"""
+        WITH by_base AS (
+            SELECT
+                base_date,
+                base_time,
+                count(DISTINCT concat(cast(nx AS varchar), ':', cast(ny AS varchar))) AS grid_count,
+                count(DISTINCT raw_object_key) AS raw_object_count,
+                count(*) AS row_count,
+                max(collected_at) AS last_collected_at
+            FROM {table}
+            WHERE source_id = 'kma_vilage_fcst'
+              AND collected_at >= current_timestamp - INTERVAL '{config.lookback_hours}' HOUR
+            GROUP BY base_date, base_time
+        )
         SELECT
-            base_date,
-            base_time,
-            count(DISTINCT concat(cast(nx AS varchar), ':', cast(ny AS varchar))) AS grid_count,
-            count(DISTINCT raw_object_key) AS raw_object_count,
-            count(*) AS row_count,
-            max(collected_at) AS last_collected_at
-        FROM {table}
-        WHERE source_id = 'kma_vilage_fcst'
-          AND collected_at >= current_timestamp - INTERVAL '{config.lookback_hours}' HOUR
-        GROUP BY base_date, base_time
-        ORDER BY base_date DESC, base_time DESC
-        LIMIT 1
+            count(*) AS base_time_count,
+            coalesce(sum(raw_object_count), 0) AS raw_object_count,
+            coalesce(sum(row_count), 0) AS row_count,
+            coalesce(min(grid_count), 0) AS min_grid_count,
+            coalesce(max(grid_count), 0) AS max_grid_count,
+            coalesce(sum(CASE WHEN grid_count >= {config.expected_kma_grids} THEN 1 ELSE 0 END), 0) AS complete_base_time_count,
+            max_by(base_date, concat(base_date, base_time)) AS latest_base_date,
+            max_by(base_time, concat(base_date, base_time)) AS latest_base_time,
+            max(last_collected_at) AS last_collected_at
+        FROM by_base
         """,
     )
-    if not row:
+    if not row or int(row[0] or 0) == 0:
         return {
             "status": "FAIL",
             "reason": "no_weather_rows",
             "table": table,
             "grid_count": 0,
             "expected_grid_count": config.expected_kma_grids,
+            "base_time_count": 0,
+            "expected_base_time_count": expected_base_time_count,
+            "raw_object_count": 0,
+            "expected_raw_object_count": expected_raw_object_count,
         }
 
-    base_date, base_time, grid_count, raw_object_count, row_count, last_collected_at = row
+    (
+        base_time_count,
+        raw_object_count,
+        row_count,
+        min_grid_count,
+        max_grid_count,
+        complete_base_time_count,
+        latest_base_date,
+        latest_base_time,
+        last_collected_at,
+    ) = row
+    base_time_count = int(base_time_count or 0)
+    complete_base_time_count = int(complete_base_time_count or 0)
     freshness_minutes = _age_minutes(last_collected_at, detected_at)
-    coverage_ok = int(grid_count) >= config.expected_kma_grids
+    coverage_ok = (
+        base_time_count >= expected_base_time_count
+        and complete_base_time_count >= expected_base_time_count
+        and int(raw_object_count or 0) >= expected_raw_object_count
+    )
     freshness_ok = freshness_minutes is not None and freshness_minutes <= config.freshness_minutes
     return {
         "status": "PASS" if coverage_ok and freshness_ok else "FAIL",
         "table": table,
-        "base_date": base_date,
-        "base_time": base_time,
-        "grid_count": int(grid_count),
+        "base_date": latest_base_date,
+        "base_time": latest_base_time,
+        "latest_base_date": latest_base_date,
+        "latest_base_time": latest_base_time,
+        "base_time_count": base_time_count,
+        "expected_base_time_count": expected_base_time_count,
+        "complete_base_time_count": complete_base_time_count,
+        "grid_count": int(min_grid_count or 0),
+        "min_grid_count": int(min_grid_count or 0),
+        "max_grid_count": int(max_grid_count or 0),
         "expected_grid_count": config.expected_kma_grids,
         "raw_object_count": int(raw_object_count),
+        "expected_raw_object_count": expected_raw_object_count,
         "row_count": int(row_count),
         "last_collected_at": str(last_collected_at),
         "freshness_minutes": freshness_minutes,
@@ -282,11 +324,12 @@ def format_weather_discord_message(report: dict[str, Any]) -> str:
         f"기상청 단기예보 Bronze 신뢰성 리포트 - {detected_date} (target={target})",
         f"{_icon(status_ok)} 리포트 상태: {'성공' if status_ok else '실패'}",
         f"{_icon(freshness_ok)} Freshness: {_format_minutes(weather.get('freshness_minutes'))} / SLO {weather.get('freshness_slo_minutes', 'n/a')}m",
-        f"{_icon(coverage_ok)} 서울 격자 커버리지: {weather.get('grid_count', 0)}/{weather.get('expected_grid_count', 0)}개 grid",
-        f"{_icon(weather.get('raw_object_count', 0) > 0)} API 호출건수: {weather.get('raw_object_count', 0)}회",
+        f"{_icon(coverage_ok)} 발표시각 커버리지: {weather.get('base_time_count', 0)}/{weather.get('expected_base_time_count', 0)}회",
+        f"{_icon(coverage_ok)} 서울 격자 커버리지: {weather.get('complete_base_time_count', 0)}/{weather.get('expected_base_time_count', 0)}회 complete ({weather.get('expected_grid_count', 0)}개 grid 기준)",
+        f"{_icon(weather.get('raw_object_count', 0) > 0)} API 호출건수: {weather.get('raw_object_count', 0)}/{weather.get('expected_raw_object_count', 0)}회",
         f"{_icon(weather.get('raw_object_count', 0) > 0)} raw JSON: {weather.get('raw_object_count', 0)}개",
         f"{_icon(weather.get('row_count', 0) > 0)} Bronze 적재: {int(weather.get('row_count', 0)):,}행",
-        f"{_icon(bool(weather.get('base_date')))} 예보 발표시각: {weather.get('base_date', 'N/A')} {weather.get('base_time', '')}",
+        f"{_icon(bool(weather.get('latest_base_date')))} 최신 예보 발표시각: {weather.get('latest_base_date', 'N/A')} {weather.get('latest_base_time', '')}",
         f"{_icon(weather.get('reason', '-') == '-')} reason: {weather.get('reason', '-')}",
         "",
         f"DAG runs / last {report['lookback_hours']}h:",
