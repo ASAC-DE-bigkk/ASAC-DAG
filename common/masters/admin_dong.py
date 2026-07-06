@@ -9,8 +9,8 @@ currentCount < perPage** 로 한다. 최신 개정일자는 page1(perPage=1000)�
 max(개정일자)로 탐지한다(데이터가 최신 개정부터 정렬돼 있음을 실측 확인, max 로 이중 안전).
 
 보안:
-- 인증키는 env 에서만 로드(load_service_key). PUBLIC_DATA_API_KEY 우선,
-  없으면 PUBLIC_DATA_API_KEY_BUS 폴백.
+- 인증키는 env 에서만 로드(load_service_key). PUBLIC_DATA_API_KEY 단일 이름
+  (버스 API 와 같은 공공데이터포털 계정 키를 공용, #154 — 구 PUBLIC_DATA_API_KEY_BUS 일괄 전환).
 - serviceKey 는 QueryKey 전략으로 **params 로만** 전달한다. HttpCore 는 로그/예외에
   URL 만(redact 후) 남기고 params 는 로깅하지 않으므로(core.py request()) 키가 로그에
   남지 않는다. 방어 심화로 redaction 의 named-key 패턴이 'serviceKey' 도 커버한다
@@ -42,20 +42,17 @@ DEFAULT_PER_PAGE = 1000
 # 무한 페이지네이션(비용/rate 폭주) 방지. 40 초과 시 RuntimeError.
 _MAX_PAGES = 40
 
-# 인증키 env 이름 폴백 체인(현 루트 .env 엔 BUS 만 존재 — 후속으로 이름 정리 명시).
-_KEY_ENV_NAMES = ("PUBLIC_DATA_API_KEY", "PUBLIC_DATA_API_KEY_BUS")
+# 인증키 env 이름 — 공공데이터포털 공용 키(#154, 구 PUBLIC_DATA_API_KEY_BUS 일괄 전환).
+_KEY_ENV_NAME = "PUBLIC_DATA_API_KEY"
 
 
 def load_service_key() -> str:
-    """공공데이터포털 인증키 로드 — 폴백 체인, 없으면 RuntimeError."""
-    for name in _KEY_ENV_NAMES:
-        value = os.environ.get(name)
-        if value:
-            return value
+    """공공데이터포털 인증키 로드 — PUBLIC_DATA_API_KEY, 없으면 RuntimeError."""
+    value = os.environ.get(_KEY_ENV_NAME)
+    if value:
+        return value
     raise RuntimeError(
-        "공공데이터포털 인증키 없음 — "
-        + " 또는 ".join(_KEY_ENV_NAMES)
-        + " 환경변수를 설정하세요"
+        f"공공데이터포털 인증키 없음 — {_KEY_ENV_NAME} 환경변수를 설정하세요"
     )
 
 

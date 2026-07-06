@@ -1,6 +1,7 @@
 """행정동 마스터 수집 순수 로직 단위 테스트 (#154).
 
 가짜 Transport(공통 HttpCore 주입) + 가짜 Storage 로 실호출 없이 검증:
+- load_service_key: PUBLIC_DATA_API_KEY 단일 이름 계약(#154, 폴백 폐지)
 - latest_revision: max(개정일자) 판정
 - iter_snapshot: currentCount < perPage 종료, 페이지 폭주 가드
 - land_snapshot: R2 경로 규약 + manifest
@@ -94,6 +95,26 @@ def _row(rev, sido="서울특별시", dong="역삼동"):
 
 def _core(transport):
     return admin_dong.build_core(transport=transport)
+
+
+# ── load_service_key 단일 이름 계약 (#154) ────────────────────────────────────────
+def test_load_service_key_uses_public_data_api_key(monkeypatch):
+    monkeypatch.setenv("PUBLIC_DATA_API_KEY", _KEY)
+    assert admin_dong.load_service_key() == _KEY
+
+
+def test_load_service_key_missing_raises(monkeypatch):
+    monkeypatch.delenv("PUBLIC_DATA_API_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        admin_dong.load_service_key()
+
+
+def test_load_service_key_ignores_old_bus_name(monkeypatch):
+    # 폴백 폐지(#154): 구 PUBLIC_DATA_API_KEY_BUS 만 있으면 인식하지 않고 RuntimeError.
+    monkeypatch.delenv("PUBLIC_DATA_API_KEY", raising=False)
+    monkeypatch.setenv("PUBLIC_DATA_API_KEY_BUS", _KEY)
+    with pytest.raises(RuntimeError):
+        admin_dong.load_service_key()
 
 
 # ── latest_revision ─────────────────────────────────────────────────────────────
