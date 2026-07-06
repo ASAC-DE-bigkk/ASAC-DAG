@@ -134,6 +134,10 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
         "assert_gold_weather_forecast_by_place_event_at_matches_forecast_at"
         in task_commands["dbt_test_place_mart"]
     )
+    assert (
+        "assert_gold_weather_forecast_by_place_latest_silver_record"
+        in task_commands["dbt_test_place_mart"]
+    )
 
 
 def test_weather_transform_limits_target_param_to_dev_or_prod():
