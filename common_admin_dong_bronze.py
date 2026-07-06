@@ -274,7 +274,7 @@ with DAG(
     dag_id="common_admin_dong_bronze",
     description="공공데이터포털 행정동 마스터 최신 스냅샷을 R2 랜딩 후 Iceberg 브론즈에 멱등 적재.",
     start_date=datetime(2026, 1, 1),
-    schedule="@monthly",
+    schedule="@weekly",
     catchup=False,
     max_active_runs=1,
     tags=["common", "master", "admin_dong", "bronze"],
