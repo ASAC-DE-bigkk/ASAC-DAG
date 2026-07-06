@@ -37,6 +37,8 @@ def stub_dag_run_summary(monkeypatch):
             "success": 2,
             "failed": 1,
             "running": 0,
+            "expected_raw_objects": 160,
+            "actual_raw_objects": 160,
         },
     )
 
@@ -46,7 +48,7 @@ def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
     cursor = RecordingCursor(
         rows=[
-            (8, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
+            (8, 640, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
         ]
     )
 
@@ -56,8 +58,16 @@ def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
     )
 
     assert result["status"] == "PASS"
-    assert result["dag_runs"] == {"dag_id": "weather_vilage_fcst_bronze", "success": 2, "failed": 1, "running": 0}
+    assert result["dag_runs"] == {
+        "dag_id": "weather_vilage_fcst_bronze",
+        "success": 2,
+        "failed": 1,
+        "running": 0,
+        "expected_raw_objects": 160,
+        "actual_raw_objects": 160,
+    }
     assert result["weather"]["base_time_count"] == 8
+    assert result["weather"]["grid_slot_count"] == 640
     assert result["weather"]["raw_object_count"] == 640
     assert result["weather"]["latest_base_time"] == "0800"
     assert result["blast_radius"] == ["iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst"]
@@ -68,7 +78,7 @@ def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
 def test_weather_dag_run_summary_uses_manifest_table(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
-    cursor = RecordingCursor(rows=[(2, 1, 0)])
+    cursor = RecordingCursor(rows=[(2, 1, 0, 160, 120)])
     config = report.report_config()
 
     result = ORIGINAL_COLLECT_DAG_RUN_SUMMARY(
@@ -78,7 +88,14 @@ def test_weather_dag_run_summary_uses_manifest_table(monkeypatch):
         datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc),
     )
 
-    assert result == {"dag_id": "weather_vilage_fcst_bronze", "success": 2, "failed": 1, "running": 0}
+    assert result == {
+        "dag_id": "weather_vilage_fcst_bronze",
+        "success": 2,
+        "failed": 1,
+        "running": 0,
+        "expected_raw_objects": 160,
+        "actual_raw_objects": 120,
+    }
     assert "bronze_collection_run_manifest" in cursor.statements[0]
     assert "dag_id = 'weather_vilage_fcst_bronze'" in cursor.statements[0]
 
@@ -87,7 +104,7 @@ def test_weather_report_fails_when_grid_coverage_is_incomplete(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     cursor = RecordingCursor(
         rows=[
-            (8, 639, 511200, 79, 80, 7, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
+            (8, 639, 639, 511200, 79, 80, 7, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
         ]
     )
 
@@ -104,7 +121,7 @@ def test_weather_report_fails_when_24h_base_time_coverage_is_incomplete(monkeypa
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     cursor = RecordingCursor(
         rows=[
-            (6, 480, 426800, 80, 80, 6, "20260706", "0800", datetime(2026, 7, 6, 8, 20, tzinfo=timezone.utc)),
+            (6, 480, 480, 426800, 80, 80, 6, "20260706", "0800", datetime(2026, 7, 6, 8, 20, tzinfo=timezone.utc)),
         ]
     )
 
@@ -139,7 +156,7 @@ def test_weather_message_does_not_include_webhook(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/secret-token")
     cursor = RecordingCursor(
         rows=[
-            (8, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
+            (8, 640, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
         ]
     )
     result = report.build_weather_reliability_report(
@@ -153,6 +170,9 @@ def test_weather_message_does_not_include_webhook(monkeypatch):
     assert message.splitlines()[0].startswith("기상청 단기예보 Bronze 신뢰성 리포트 -")
     assert "✅ 리포트 상태: 성공" in message
     assert "success=2 failed=1 running=0" in message
+    assert "API 호출건수" not in message
+    assert "Bronze grid slots: 640/640개" in message
+    assert "Bronze raw pages: 640개" in message
     assert "Bronze" in message
 
 

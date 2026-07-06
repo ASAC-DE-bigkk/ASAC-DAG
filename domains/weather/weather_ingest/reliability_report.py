@@ -137,7 +137,8 @@ def _age_minutes(collected_at: Any, detected_at: datetime) -> int | None:
 def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: datetime) -> dict[str, Any]:
     table = _qualified(config, WEATHER_TABLE)
     expected_base_time_count = max(1, config.lookback_hours // KMA_BASE_INTERVAL_HOURS)
-    expected_raw_object_count = config.expected_kma_grids * expected_base_time_count
+    expected_grid_slot_count = config.expected_kma_grids * expected_base_time_count
+    expected_raw_object_count = expected_grid_slot_count
     row = _fetch_one(
         cursor,
         f"""
@@ -156,6 +157,7 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
         )
         SELECT
             count(*) AS base_time_count,
+            coalesce(sum(grid_count), 0) AS grid_slot_count,
             coalesce(sum(raw_object_count), 0) AS raw_object_count,
             coalesce(sum(row_count), 0) AS row_count,
             coalesce(min(grid_count), 0) AS min_grid_count,
@@ -176,12 +178,15 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
             "expected_grid_count": config.expected_kma_grids,
             "base_time_count": 0,
             "expected_base_time_count": expected_base_time_count,
+            "grid_slot_count": 0,
+            "expected_grid_slot_count": expected_grid_slot_count,
             "raw_object_count": 0,
             "expected_raw_object_count": expected_raw_object_count,
         }
 
     (
         base_time_count,
+        grid_slot_count,
         raw_object_count,
         row_count,
         min_grid_count,
@@ -193,11 +198,15 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
     ) = row
     base_time_count = int(base_time_count or 0)
     complete_base_time_count = int(complete_base_time_count or 0)
+    grid_slot_count = int(grid_slot_count or 0)
+    raw_object_count = int(raw_object_count or 0)
     freshness_minutes = _age_minutes(last_collected_at, detected_at)
+    raw_pages_ok = raw_object_count >= grid_slot_count and raw_object_count > 0
     coverage_ok = (
         base_time_count >= expected_base_time_count
         and complete_base_time_count >= expected_base_time_count
-        and int(raw_object_count or 0) >= expected_raw_object_count
+        and grid_slot_count >= expected_grid_slot_count
+        and raw_pages_ok
     )
     freshness_ok = freshness_minutes is not None and freshness_minutes <= config.freshness_minutes
     return {
@@ -214,8 +223,11 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
         "min_grid_count": int(min_grid_count or 0),
         "max_grid_count": int(max_grid_count or 0),
         "expected_grid_count": config.expected_kma_grids,
-        "raw_object_count": int(raw_object_count),
+        "grid_slot_count": grid_slot_count,
+        "expected_grid_slot_count": expected_grid_slot_count,
+        "raw_object_count": raw_object_count,
         "expected_raw_object_count": expected_raw_object_count,
+        "raw_pages_ok": raw_pages_ok,
         "row_count": int(row_count),
         "last_collected_at": str(last_collected_at),
         "freshness_minutes": freshness_minutes,
@@ -240,7 +252,9 @@ def collect_dag_run_summary(
         WITH latest AS (
             SELECT
                 dag_run_id,
-                max_by(status, event_at) AS latest_status
+                max_by(status, event_at) AS latest_status,
+                max_by(expected_raw_objects, event_at) AS expected_raw_objects,
+                max_by(actual_raw_objects, event_at) AS actual_raw_objects
             FROM {manifest_table}
             WHERE dag_id = {_sql_string(dag_id)}
               AND event_at >= {_sql_timestamp_utc(cutoff)}
@@ -249,13 +263,28 @@ def collect_dag_run_summary(
         SELECT
             coalesce(sum(CASE WHEN latest_status = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS success,
             coalesce(sum(CASE WHEN latest_status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed,
-            coalesce(sum(CASE WHEN latest_status = 'STARTED' THEN 1 ELSE 0 END), 0) AS running
+            coalesce(sum(CASE WHEN latest_status = 'STARTED' THEN 1 ELSE 0 END), 0) AS running,
+            coalesce(sum(expected_raw_objects), 0) AS expected_raw_objects,
+            coalesce(sum(actual_raw_objects), 0) AS actual_raw_objects
         FROM latest
         """,
     )
-    summary = {"dag_id": dag_id, "success": 0, "failed": 0, "running": 0}
+    summary = {
+        "dag_id": dag_id,
+        "success": 0,
+        "failed": 0,
+        "running": 0,
+        "expected_raw_objects": 0,
+        "actual_raw_objects": 0,
+    }
     if row:
-        summary.update(success=int(row[0] or 0), failed=int(row[1] or 0), running=int(row[2] or 0))
+        summary.update(
+            success=int(row[0] or 0),
+            failed=int(row[1] or 0),
+            running=int(row[2] or 0),
+            expected_raw_objects=int(row[3] or 0),
+            actual_raw_objects=int(row[4] or 0),
+        )
     return summary
 
 
@@ -326,8 +355,8 @@ def format_weather_discord_message(report: dict[str, Any]) -> str:
         f"{_icon(freshness_ok)} Freshness: {_format_minutes(weather.get('freshness_minutes'))} / SLO {weather.get('freshness_slo_minutes', 'n/a')}m",
         f"{_icon(coverage_ok)} 발표시각 커버리지: {weather.get('base_time_count', 0)}/{weather.get('expected_base_time_count', 0)}회",
         f"{_icon(coverage_ok)} 서울 격자 커버리지: {weather.get('complete_base_time_count', 0)}/{weather.get('expected_base_time_count', 0)}회 complete ({weather.get('expected_grid_count', 0)}개 grid 기준)",
-        f"{_icon(weather.get('raw_object_count', 0) > 0)} API 호출건수: {weather.get('raw_object_count', 0)}/{weather.get('expected_raw_object_count', 0)}회",
-        f"{_icon(weather.get('raw_object_count', 0) > 0)} raw JSON: {weather.get('raw_object_count', 0)}개",
+        f"{_icon(coverage_ok)} Bronze grid slots: {weather.get('grid_slot_count', 0)}/{weather.get('expected_grid_slot_count', 0)}개",
+        f"{_icon(weather.get('raw_pages_ok', False))} Bronze raw pages: {weather.get('raw_object_count', 0)}개",
         f"{_icon(weather.get('row_count', 0) > 0)} Bronze 적재: {int(weather.get('row_count', 0)):,}행",
         f"{_icon(bool(weather.get('latest_base_date')))} 최신 예보 발표시각: {weather.get('latest_base_date', 'N/A')} {weather.get('latest_base_time', '')}",
         f"{_icon(weather.get('reason', '-') == '-')} reason: {weather.get('reason', '-')}",
@@ -338,6 +367,7 @@ def format_weather_discord_message(report: dict[str, Any]) -> str:
             f"success={report['dag_runs'].get('success', 0)} "
             f"failed={report['dag_runs'].get('failed', 0)} "
             f"running={report['dag_runs'].get('running', 0)} "
+            f"raw_pages={report['dag_runs'].get('actual_raw_objects', 0)}/{report['dag_runs'].get('expected_raw_objects', 0)} "
             f"reason={report['dag_runs'].get('reason', '-')}"
         ),
         "",

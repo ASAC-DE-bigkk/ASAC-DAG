@@ -109,3 +109,46 @@ def test_kma_insert_fails_before_delete_when_response_is_partial():
         )
 
     assert cursor.statements == []
+
+
+def test_kma_insert_allows_partial_page_only_when_dag_aggregate_was_checked():
+    cursor = RecordingCursor()
+
+    inserted = insert_kma_bronze_rows(
+        cursor=cursor,
+        qualified_table="iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst",
+        rows=[
+            {
+                "baseDate": "20260701",
+                "baseTime": "1700",
+                "nx": "60",
+                "ny": "127",
+                "category": "TMP",
+                "fcstDate": "20260701",
+                "fcstTime": "1800",
+                "fcstValue": "25",
+            }
+        ],
+        metadata={"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 1001, "row_count": 1},
+        request_id="request-page-2",
+        place_id="seoul-test-grid",
+        base_date="20260701",
+        base_time="1700",
+        nx=60,
+        ny=127,
+        raw_object_key="raw/weather/kma/request-page-2.json",
+        raw_hash="def456",
+        http_status=200,
+        collected_at=datetime(2026, 7, 1, 8, 20, tzinfo=timezone.utc),
+        dag_run_id="scheduled__2026-07-01T17:20:00+09:00",
+        page_no=2,
+        num_of_rows=1000,
+        delete_existing=False,
+        allow_partial_page=True,
+    )
+
+    assert inserted == 1
+    assert len(cursor.statements) == 1
+    assert cursor.statements[0].startswith("INSERT INTO iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst")
+    assert '"pageNo": "2"' in cursor.statements[0]
+    assert '"numOfRows": "1000"' in cursor.statements[0]
