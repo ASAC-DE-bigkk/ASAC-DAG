@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import time
 
 import requests
 
@@ -38,26 +40,38 @@ class SeoulError(RuntimeError):
 class KopisClient:
     """KOPIS 공연예술통합전산망 open API (XML)."""
 
-    def __init__(self, service_key: str, timeout: int = 30):
+    def __init__(self, service_key: str, timeout: int = 30, retry_delay_sec: float = 2.0):
         self.service_key = service_key
         self.timeout = timeout
+        self.retry_delay_sec = retry_delay_sec  # 400/429 1회 재시도 전 대기(+jitter)
         self.session = build_session()
 
     def _get(self, path: str, params: dict) -> bytes:
-        # 모든 요청에 인증키(service)를 붙이고, 응답 앞부분에 에러 태그가 있으면 예외.
+        """단일 GET. 400/429 는 **1회 백오프 재시도**로 '일시(자정 rate-limit)'와
+        '지속(진짜 범위 밖/오류)'을 구분한다(#146) — 자정 rate-limit 400 이 #84 오버슛
+        처리에 '목록 끝'으로 오인돼 목록이 1페이지에서 절단된 실증(7/4·7/5) 대응.
+        지속 400 은 그대로 전파되어 기존 의미(오버슛=끝, 1페이지=오류)를 유지한다.
+        """
         params = {"service": self.service_key, **params}
-        resp = self.session.get(f"{KOPIS_BASE}/{path}", params=params, timeout=self.timeout)
-        try:
-            resp.raise_for_status()
-        except requests.HTTPError as exc:
-            # HTTPError 메시지엔 `service=<키>` 가 박힌 URL 이 들어간다(#144 라이브 누출) —
-            # 예외가 어디로 전파되든(로그·리포트·알림) 키가 남지 않게 args 를 여기서 마스킹.
-            raise scrub_exception(exc)
-        body = resp.content
-        text = body[:600].decode("utf-8", "ignore")
-        if "<errmsg>" in text or "<returncode>" in text:
-            raise KopisError(redact(f"KOPIS error for {path}: {text}"))
-        return body
+        for attempt in (1, 2):
+            resp = self.session.get(f"{KOPIS_BASE}/{path}", params=params, timeout=self.timeout)
+            try:
+                resp.raise_for_status()
+            except requests.HTTPError as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if attempt == 1 and status in (400, 429):
+                    if self.retry_delay_sec:
+                        time.sleep(self.retry_delay_sec + random.uniform(0, 0.5))
+                    continue
+                # HTTPError 메시지엔 `service=<키>` 가 박힌 URL 이 들어간다(#144) —
+                # 예외가 어디로 전파되든 키가 남지 않게 args 를 여기서 마스킹.
+                raise scrub_exception(exc)
+            body = resp.content
+            text = body[:600].decode("utf-8", "ignore")
+            if "<errmsg>" in text or "<returncode>" in text:
+                raise KopisError(redact(f"KOPIS error for {path}: {text}"))
+            return body
+        raise AssertionError("unreachable")  # pragma: no cover
 
     @staticmethod
     def _count(body: bytes) -> int:

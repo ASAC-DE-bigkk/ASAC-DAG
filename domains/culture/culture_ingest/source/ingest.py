@@ -33,7 +33,7 @@ from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_set
 
 from . import config as culture_config
 from .clients import KopisClient, KopisError, SeoulClient
-from .datasets import BY_NAME, Dataset, select
+from .datasets import ALL_DATASETS, BY_NAME, Dataset, select
 
 
 @dataclass(frozen=True)
@@ -92,6 +92,37 @@ def _manifest(ds: Dataset, ctx: RunContext, result: DatasetResult, params: dict)
         "object_keys": result.object_keys,
         "checks": result.checks,  # 수집 검증 결과(완전성·드리프트·freshness)
     }
+
+
+def _ids_from_landed_list(ds: Dataset, landing: Landing, limit: int) -> list[str] | None:
+    """같은 run 에 이미 랜딩된 sibling 목록 raw 에서 상세 크롤용 id 를 추출한다(#146).
+
+    detail 이 목록을 API 로 **재조회**하던 것을 제거해 자정 KOPIS 호출을 줄인다.
+    매니페스트(모든 페이지 기록 후 작성 = 완료 마커)가 없으면 None — 부분 랜딩된
+    페이지로 id 를 덜 뽑는 침묵 절단을 막고, 호출측이 기존 API 경로로 폴백한다.
+    """
+    list_ds = next(
+        (d for d in ALL_DATASETS if d.kind == "kopis_list" and d.endpoint == ds.id_source_endpoint),
+        None,
+    )
+    if list_ds is None:
+        return None
+    prefix = landing.prefix_for(list_ds.source, list_ds.name)
+    try:
+        manifest = json.loads(landing.sink.get(f"{prefix}/_manifest.json"))
+    except Exception:  # noqa: BLE001 -- 목록이 이 run 에 아직 없음(순서/부분실행) → 폴백
+        return None
+    id_re = re.compile(rf"<{ds.id_field}>(.*?)</{ds.id_field}>")
+    ids: list[str] = []
+    for key in manifest.get("object_keys") or []:
+        try:
+            body = landing.sink.get(key)
+        except Exception:  # noqa: BLE001 -- 페이지 유실 = 신뢰 불가 → 폴백
+            return None
+        ids.extend(id_re.findall(body.decode("utf-8", "ignore")))
+        if len(ids) >= limit:
+            break
+    return ids[:limit]
 
 
 def ingest_dataset(
@@ -153,8 +184,14 @@ def ingest_dataset(
             if not opts.include_detail:
                 result.error = "skipped (include_detail=False)"  # 옵션 꺼져 있으면 건너뜀
                 return result
-            id_params = _with_date_window(ds.id_source_endpoint, ds.base_params, opts)
-            ids = clients.kopis.list_ids(ds.id_source_endpoint, id_params, ds.id_field, opts.max_detail)
+            # 목록 재조회 제거(#146): 같은 run 에 랜딩된 목록 raw 에서 id 재사용.
+            ids = _ids_from_landed_list(ds, landing, opts.max_detail)
+            if ids is None:
+                # 폴백: 목록이 아직 안 랜딩된 실행 문맥(단독 실행·순서 역전)만 API 재조회.
+                id_params = _with_date_window(ds.id_source_endpoint, ds.base_params, opts)
+                ids = clients.kopis.list_ids(ds.id_source_endpoint, id_params, ds.id_field, opts.max_detail)
+            else:
+                print(f"  [detail] {ds.name}: 목록 재조회 생략 — 랜딩된 raw 에서 id {len(ids)}개 재사용(#146)")
             detail_errors: list[str] = []
             for identifier in ids:
                 try:
