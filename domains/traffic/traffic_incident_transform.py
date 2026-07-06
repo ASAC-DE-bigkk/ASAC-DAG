@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from airflow import DAG
 from airflow.models.param import Param
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import Asset
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,6 +25,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.assets import TRAFFIC_BRONZE_ASSET  # noqa: E402
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -37,20 +39,14 @@ DEFAULT_PARAMS = {
         description="dbt target profile name.",
     )
 }
-DEFAULT_TRANSFORM_CRON_KST = "*/15 * * * *"
-
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
-def is_dev_target() -> bool:
-    return os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod")) == "dev"
-
-
-def transform_schedule() -> str | None:
+def transform_schedule() -> str | list[Asset] | None:
     if "ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE" in os.environ:
         return os.environ["ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE"] or None
-    return DEFAULT_TRANSFORM_CRON_KST if is_dev_target() else None
+    return [Asset(TRAFFIC_BRONZE_ASSET)]
 
 
 def dbt_command(args: str) -> str:
@@ -77,6 +73,12 @@ with DAG(
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=dbt_command("deps"),
+        on_failure_callback=record_traffic_problem,
+    )
+
+    dbt_source_freshness = BashOperator(
+        task_id="dbt_source_freshness",
+        bash_command=dbt_command("source freshness"),
         on_failure_callback=record_traffic_problem,
     )
 
@@ -127,4 +129,12 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     )
 
-    dbt_deps >> dbt_seed_asac_axes >> dbt_run_silver >> dbt_test_silver >> dbt_run_gold >> dbt_test_gold
+    (
+        dbt_deps
+        >> dbt_source_freshness
+        >> dbt_seed_asac_axes
+        >> dbt_run_silver
+        >> dbt_test_silver
+        >> dbt_run_gold
+        >> dbt_test_gold
+    )

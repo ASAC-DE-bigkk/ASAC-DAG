@@ -1,4 +1,4 @@
-"""Airflow DAG: daily/weekly Iceberg maintenance for weather/traffic bronze tables."""
+"""Airflow DAG: weekly Iceberg maintenance for weather/traffic pipeline tables."""
 
 from __future__ import annotations
 
@@ -26,6 +26,12 @@ DEFAULT_PARAMS = {
         "bronze_seoul_traffic_incident",
         "bronze_seoul_traffic_incident_request_audit",
         "bronze_collection_run_manifest",
+        "silver_kma_vilage_fcst",
+        "gold_weather_forecast_summary",
+        "dim_weather_place",
+        "gold_weather_forecast_by_place",
+        "silver_seoul_traffic_incident",
+        "gold_traffic_incident_summary",
     ),
 }
 
@@ -51,14 +57,14 @@ def _default_schedule() -> str | None:
 
 with DAG(
     dag_id="ask_seoul_iceberg_maintenance",
-    description="Weekly metadata cleanup for weather/traffic Iceberg bronze tables.",
+    description="Weekly metadata cleanup for weather/traffic Iceberg bronze/silver/gold tables.",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
     schedule=_default_schedule(),
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=10)},
     params=DEFAULT_PARAMS,
-    tags=["maintenance", "ask_seoul", "iceberg", "weather", "traffic", "bronze"],
+    tags=["maintenance", "ask_seoul", "iceberg", "weather", "traffic", "bronze", "silver", "gold"],
 ) as dag:
     PythonOperator(
         task_id="maintain",
