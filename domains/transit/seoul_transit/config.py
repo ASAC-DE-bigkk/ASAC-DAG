@@ -46,7 +46,7 @@ def load_key(var: str = "SEOUL_API_KEY_TRAN") -> str:
     return value
 
 
-def load_bus_key(var: str = "PUBLIC_DATA_API_KEY_BUS") -> str:
+def load_bus_key(var: str = "PUBLIC_DATA_API_KEY") -> str:
     """버스(공공데이터포털 Decoding) 키 → URL 인코딩해서 반환.
 
     Decoding 키(`/`·`==` 포함)는 그대로 쓰면 ACCESS DENIED → quote 필수.
