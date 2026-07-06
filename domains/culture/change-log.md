@@ -3,6 +3,20 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-06 — culture_maintenance DAG (#157)
+
+- **주간 Iceberg 유지보수 DAG 신설** (#157) — `maintain >> storage_cleanup`, 일요일 04:30 KST
+  (population 04:00·_shared 04:00과 시차). 대상 = bronze 12(레지스트리 파생) + **silver 9·gold 3
+  선등록**(재설계 전 'skipped (missing)', 테이블 생기면 자동 편입). → `culture_maintenance.py`
+- **maintain은 자체 HTTP 클라이언트로** — #155 `_shared/maintenance.py`와 같은 작업(optimize/
+  expire_snapshots/remove_orphan_files)이지만, Airflow 이미지 전 컨테이너에 `trino` 패키지가
+  없어(실측) _shared의 `trino.dbapi`가 ImportError → `TrinoClient`(HTTP)로 우회. retention은
+  SQL 삽입이라 형식 강제(`^[0-9]+[dhm]$`). → `culture_ingest/common/maintenance.py`
+- **storage_cleanup(#156 population 적응)** — R2 카탈로그가 원리상 못 잡는 ①옛 metadata.json
+  증식(delete-after-commit 무효) ②버려진 디렉터리(`__dbt_tmp` — 7/6 수동 GC 102폴더의 자동화판)
+  를 boto3로 정리. 판정은 순수 함수 `_classify`(테스트 대상), culture UUID 프리픽스로 범위 제한,
+  `dry_run` 지원. **dev 실증: 옛 metadata 760개/51MB 정리, 2회차 0건(멱등), 테이블 무손상.**
+
 ## 2026-07-03 — culture_transform DAG (#103)
 
 - **Asset 트리거 dbt 변환 DAG 신설** (#103) — `schedule=[Asset("iceberg://culture/bronze")]`로
