@@ -42,11 +42,13 @@ def freshness_age_hours(ingest_ts: str, now: datetime | None = None) -> float | 
     return round((now - stamped).total_seconds() / 3600.0, 3)
 
 
-def evaluate_landing(ds, rows: int, observed_fields: list[str], ingest_ts: str) -> dict:
+def evaluate_landing(ds, rows: int, observed_fields: list[str], ingest_ts: str,
+                     *, baseline_rows: int | None = None) -> dict:
     """한 데이터셋 적재 결과를 계약에 비춰 점검하고 checks dict를 만든다.
 
     ``ds``는 Dataset(min_rows·freshness_sla_hours·key_fields 보유). 반환 dict는
-    매니페스트와 run 리포트에 그대로 실린다.
+    매니페스트와 run 리포트에 그대로 실린다. ``baseline_rows``는 직전 good 런의
+    행 수(HWM) — 없으면(첫 런/리포트 유실) 볼륨 검사는 생략한다.
     """
     violations: list[str] = []
 
@@ -54,6 +56,17 @@ def evaluate_landing(ds, rows: int, observed_fields: list[str], ingest_ts: str) 
     complete = rows >= ds.min_rows
     if not complete:
         violations.append(f"completeness: rows={rows} < min_rows={ds.min_rows} (빈/부분 적재 의심)")
+
+    # 1b) 볼륨 HWM(#147) — "초록불 대량 누락"(truncation) 감지. min_rows 는 빈 랜딩만
+    # 잡지만, 이 검사는 어제의 나 대비 급락을 잡는다(7/1 event 3925/19377 실증).
+    threshold = getattr(ds, "volume_drop_threshold", None)
+    volume_ok = True
+    if threshold and baseline_rows and rows < threshold * baseline_rows:
+        volume_ok = False
+        violations.append(
+            f"volume: rows={rows} < {threshold:.0%} of baseline={baseline_rows} "
+            f"(truncation/부분 적재 의심 — 당일 재시도 대상)"
+        )
 
     # 2) 드리프트 (계약 필드 누락) ---------------------------------------------
     missing = [f for f in ds.key_fields if f not in observed_fields] if observed_fields else []
@@ -71,8 +84,11 @@ def evaluate_landing(ds, rows: int, observed_fields: list[str], ingest_ts: str) 
             "min_rows": ds.min_rows,
             "freshness_sla_hours": ds.freshness_sla_hours,
             "key_fields": list(ds.key_fields),
+            "volume_drop_threshold": threshold,
         },
         "completeness_ok": complete,
+        "volume_ok": volume_ok,
+        "baseline_rows": baseline_rows,
         "drift_ok": not missing,
         "freshness_ok": bool(fresh),
         "freshness_age_hours": age,

@@ -150,6 +150,12 @@ class SeoulClient:
         ``max_rows``가 주어지면 **첫 윈도우부터** 그 상한을 지킨다 — 샘플/드라이런이
         1000행을 통째로 받지 않게 한다. (``list_total_count``는 윈도우 크기와 무관하게
         전체 건수를 주므로, 첫 윈도우를 줄여도 남은 페이징 계산엔 영향이 없다.)
+
+        ``list_total_count``는 **신뢰하지 않는다**(#147): 서버가 간헐적으로 축소된
+        총량을 INFO-000(정상)으로 반환하는 truncation 이 실측됐다(7/1 event 3925/19377,
+        -80% 조용한 누락). 주장된 총량까지 소진한 뒤 그 **너머 창을 1회 더 요청**해
+        (probe-beyond-end) 행이 오면 거짓말로 판정, 빈 창이 나올 때까지 계속 페이징한다.
+        정직한 총량일 때 비용은 데이터셋당 INFO-200 요청 1회다.
         """
         # 첫 윈도우도 max_rows를 존중(없으면 1000). 응답이 전체 건수도 알려준다.
         first_end = SEOUL_WINDOW if max_rows is None else min(SEOUL_WINDOW, max_rows)
@@ -169,5 +175,25 @@ class SeoulClient:
             rows = container.get("row", []) or []
             if not rows:
                 return
+            yield Page(index=start, body=body, row_count=len(rows), ext="json")
+            start = end + 1
+
+        if max_rows is not None:
+            return  # 캡이 걸린 실행은 의도된 절단 — probe 생략
+
+        # probe-beyond-end: total 주장 너머를 빈 창(INFO-200)이 나올 때까지 소진.
+        probed = 0
+        while True:
+            end = start + SEOUL_WINDOW - 1
+            body, container = self._get_window(service, start, end)
+            rows = container.get("row", []) or []
+            if not rows:
+                if probed:
+                    log.warning(
+                        "[seoul] %s: list_total_count=%d 축소 반환 — probe 로 %d행 추가 회수(#147)",
+                        service, total, probed,
+                    )
+                return
+            probed += len(rows)
             yield Page(index=start, body=body, row_count=len(rows), ext="json")
             start = end + 1

@@ -13,6 +13,7 @@ fetch(원본 박제)와 load(bronze 적재)를 분리한 두 계열의 진입점
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,6 +47,9 @@ class IngestOptions:
     max_rows: int | None = None  # 서울 행 수 상한 (None = 전체)
     max_detail: int = 200  # KOPIS 상세 엔드포인트에서 크롤할 id 상한
     include_detail: bool = False  # kopis_detail 데이터셋 실행 여부
+    # 볼륨 HWM 계약(#147)용: {dataset: 직전 good 런 rows}. plan 이 직전 run_report 에서
+    # 읽어 주입한다. None/미포함 데이터셋은 볼륨 검사 생략.
+    baselines: dict | None = None
 
 
 @dataclass
@@ -192,12 +196,21 @@ def ingest_dataset(
             result.error = f"unknown kind: {ds.kind}"
             return result
 
-        # 수집 검증 (계약 v0): 완전성·드리프트·freshness 점검 후 매니페스트에 동봉.
+        # 수집 검증 (계약 v0): 완전성·드리프트·freshness·볼륨HWM 점검 후 매니페스트에 동봉.
         observed = extract_record_fields(ds.source, sample_body, ds.row_tag, ds.endpoint) if sample_body else []
-        result.checks = evaluate_landing(ds, result.rows, observed, landing.ctx.ingest_ts)
+        baseline = (opts.baselines or {}).get(ds.name)
+        result.checks = evaluate_landing(
+            ds, result.rows, observed, landing.ctx.ingest_ts, baseline_rows=baseline
+        )
         if result.checks["violations"]:
             print(f"  [contract] {ds.name}: " + " | ".join(result.checks["violations"]))
         landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params))
+        # 볼륨 급락(#147)은 warn 이 아니라 **실패로 승격** — fetch_raw 태스크가 빨개져
+        # 기존 retries 가 당일 재시도한다(서울은 당일만 복구 가능). 다른 위반(v0)은 현행
+        # 유지(리포트 surface 만).
+        volume_violations = [v for v in result.checks["violations"] if v.startswith("volume")]
+        if volume_violations:
+            result.error = volume_violations[0]
     except Exception as exc:  # noqa: BLE001 -- 데이터셋별로 잡아 두고 배치는 계속 진행
         # 2차 방어(#144): clients 의 scrub 을 우회한 예외(URL 키 포함 가능)도 여기서 마스킹 —
         # result.error 는 리포트·알림·태스크 로그로 퍼지는 문자열이라 항상 redact 를 거친다.
@@ -302,6 +315,49 @@ def write_run_report(
 
 
 # --- 런타임 빌더 ---------------------------------------------------------------
+
+def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
+    """직전 run_report 에서 {dataset: rows} 볼륨 HWM 을 읽는다(#147).
+
+    ``before_ingest_ts`` 이전(=이번 실행보다 과거)의 리포트 중 최신 1건을 쓴다 —
+    리포트 경로의 ingest_ts 는 UTC 문자열이라 사전순 = 시간순. error 가 있던
+    데이터셋은 제외(실패 런의 부분 rows 로 기준선을 끌어내리지 않기 위해).
+    리포트가 없거나 읽기 실패 시 {} — 첫 런/사고 시 볼륨 검사가 조용히 생략될 뿐
+    수집 자체는 막지 않는다(fail-open).
+    """
+    try:
+        keys = sink.list(f"{root}/_reports/")
+        report_keys = [k for k in keys if k.endswith("run_report.json")]
+        candidates = []
+        for k in report_keys:
+            m = re.search(r"ingest_ts=([0-9TZ]+)", k)
+            if m and m.group(1) < before_ingest_ts:
+                candidates.append((m.group(1), k))
+        if not candidates:
+            return {}
+        _, latest_key = max(candidates)
+        report = json.loads(sink.get(latest_key))
+        return {
+            s["name"]: int(s["rows"])
+            for s in report.get("datasets", [])
+            if s.get("rows") and not s.get("error")
+        }
+    except Exception as exc:  # noqa: BLE001 -- baseline 은 보조 신호, 수집을 막지 않는다
+        print(f"[baselines] 직전 리포트 조회 실패(볼륨 검사 생략): {type(exc).__name__}")
+        return {}
+
+
+def load_baselines_for_target(
+    target: str, *, before_ingest_ts: str, env_file: str | None = None
+) -> dict[str, int]:
+    """R2(target)에서 직전 리포트 기반 볼륨 HWM 을 읽는다 — DAG plan 용 편의 래퍼."""
+    settings = build_r2_settings(target, env_file)
+    if missing_r2(settings):
+        return {}
+    return load_baselines(
+        R2Sink(settings), culture_config.LANDING_ROOT, before_ingest_ts=before_ingest_ts
+    )
+
 
 def build_clients(env_file: str | None = None) -> Clients:
     """인증키를 읽어 검증한 뒤 KOPIS/서울 클라이언트를 만든다.

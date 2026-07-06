@@ -29,6 +29,10 @@ class Sink:
         """적재해 둔 원본 객체를 다시 읽는다(load_bronze의 입력은 raw뿐)."""
         raise NotImplementedError
 
+    def list(self, prefix: str) -> list[str]:  # pragma: no cover
+        """prefix 아래 객체 키 목록(#147 — 직전 run_report 조회용)."""
+        raise NotImplementedError
+
     def describe(self) -> str:  # pragma: no cover
         raise NotImplementedError
 
@@ -54,6 +58,19 @@ class R2Sink(Sink):
     def get(self, key: str) -> bytes:
         return self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
 
+    def list(self, prefix: str) -> list[str]:
+        keys: list[str] = []
+        token = None
+        while True:
+            kwargs = {"Bucket": self.bucket, "Prefix": prefix, "MaxKeys": 1000}
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = self.client.list_objects_v2(**kwargs)
+            keys += [o["Key"] for o in resp.get("Contents", [])]
+            if not resp.get("IsTruncated"):
+                return keys
+            token = resp["NextContinuationToken"]
+
     def describe(self) -> str:
         return f"r2://{self.bucket}"
 
@@ -74,6 +91,16 @@ class LocalSink(Sink):
         path = os.path.join(self.root_dir, key.replace("/", os.sep))
         with open(path, "rb") as handle:
             return handle.read()
+
+    def list(self, prefix: str) -> list[str]:
+        base = os.path.join(self.root_dir, prefix.replace("/", os.sep))
+        keys: list[str] = []
+        for dirpath, _dirs, files in os.walk(base):
+            for fname in files:
+                full = os.path.join(dirpath, fname)
+                rel = os.path.relpath(full, self.root_dir)
+                keys.append(rel.replace(os.sep, "/"))
+        return sorted(keys)
 
     def describe(self) -> str:
         return f"file://{self.root_dir}"
