@@ -53,6 +53,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     build_run_report,
     ingest_one,
+    load_baselines,
     load_bronze,
     normalize_mapped_results,
     write_run_report,
@@ -124,7 +125,12 @@ def _plan(**context) -> list[dict]:
         if (include_detail or ds.kind != "kopis_detail")
         and (not wanted or ds.name in wanted)
     ]
-    print(f"plan: {len(names)} datasets, window {date_from}~{date_to}, ingest_ts={ingest_ts}")
+    # 볼륨 HWM(#147): 직전 run_report 의 데이터셋별 rows 를 기준선으로 로드(fail-open).
+    baselines = load_baselines_for_target(target, before_ingest_ts=ingest_ts)
+    print(
+        f"plan: {len(names)} datasets, window {date_from}~{date_to}, ingest_ts={ingest_ts}, "
+        f"baselines={len(baselines)}개"
+    )
     return [
         {
             "name": name,
@@ -137,6 +143,7 @@ def _plan(**context) -> list[dict]:
             "include_detail": include_detail,
             "max_detail": int(params["max_detail"]),
             "kopis_rows": int(params["kopis_rows"]),
+            "baseline_rows": baselines.get(name),
         }
         for name in names
     ]
@@ -153,10 +160,12 @@ def _fetch_raw(
     include_detail: bool,
     max_detail: int,
     kopis_rows: int,
+    baseline_rows: int | None = None,
     **context,
 ) -> dict:
     """데이터셋 1개의 원본을 R2 raw에 박제 (매핑 태스크 1개, bronze 적재는 load_bronze가).
-    실패 시 AirflowException으로 그 태스크만 실패."""
+    실패 시 AirflowException으로 그 태스크만 실패 — 볼륨 급락(#147)도 여기 포함되어
+    retries 가 같은 ingest_ts 로 당일 재시도한다."""
     ctx = RunContext(load_date=load_date, ingest_ts=ingest_ts, run_id=run_id)
     opts = IngestOptions(
         date_from=date_from,
@@ -164,6 +173,7 @@ def _fetch_raw(
         kopis_rows=kopis_rows,
         max_detail=max_detail,
         include_detail=include_detail,
+        baselines={name: baseline_rows} if baseline_rows else None,
     )
     result = ingest_one(name, ctx=ctx, opts=opts, target=target)
     print(

@@ -32,6 +32,13 @@ class Dataset:
     min_rows: int = 1  # 완전성 하한: 정상 적재라면 최소 이만큼은 와야 함(미만 = 경고)
     freshness_sla_hours: float = 30.0  # freshness 목표: 마지막 적재가 이 시간 이내여야
     key_fields: tuple = ()  # 드리프트 기준: 원본 레코드에 반드시 있어야 하는 필드/태그
+    # 볼륨 HWM 계약(#147): 직전 good 런 rows 대비 이 비율 미만이면 위반 → task 실패로
+    # 승격(→기존 retry 가 당일 재시도). "초록불 -80% 누락"(서울 truncation 실증 7/1,
+    # KOPIS 1페이지 절단 실증 7/4·7/5)을 잡는 유일한 검사. None = 검사 안 함(detail 은
+    # 자체 과반 게이트 보유 + max_detail 캡으로 상수라 부가가치 없음).
+    # 값은 6/29~7/6 실측 일간 변동 기반: 안정 카탈로그 0.8 / 목록 0.7 / 예약류(자연
+    # churn -23% 실측)·boxoffice(고정 50) 0.5.
+    volume_drop_threshold: float | None = None
 
 
 # --- KOPIS (XML) -- 공연예술통합전산망 --------------------------------------------
@@ -46,6 +53,7 @@ KOPIS_DATASETS = [
         uses_date_window=True,
         base_params={"signgucode": "11"},  # 11 = 서울 (도메인 = 서울 도시데이터)
         key_fields=("mt20id", "prfnm"),
+        volume_drop_threshold=0.7,
     ),
     Dataset(
         name="kopis_performance_detail",
@@ -69,6 +77,7 @@ KOPIS_DATASETS = [
         base_params={"signgucode": "11"},  # 11 = 서울
         freshness_sla_hours=24 * 8,  # 공연장은 SCD2 차원(느린 변화) → freshness 여유
         key_fields=("mt10id", "fcltynm"),
+        volume_drop_threshold=0.8,
     ),
     Dataset(
         name="kopis_facility_detail",
@@ -93,6 +102,7 @@ KOPIS_DATASETS = [
         uses_date_window=True,
         base_params={"signgucode": "11"},  # 11 = 서울
         key_fields=("mt20id", "prfnm"),
+        volume_drop_threshold=0.7,
     ),
     Dataset(
         name="kopis_boxoffice",
@@ -106,6 +116,7 @@ KOPIS_DATASETS = [
         row_tag="boxof",
         key_fields=("prfnm",),
         note="기간 랭킹(top 50) 스냅샷. 페이징 없음(cpage 무시). 파라미터=stdate/eddate/area/catecode/srchseatscale. ⚠️ stdate~eddate 최대 31일(초과 시 returncode 05). 일배치 DAG는 ≤31일 롤링창 사용.",
+        volume_drop_threshold=0.5,
     ),
 ]
 
@@ -118,6 +129,7 @@ SEOUL_DATASETS = [
         endpoint="culturalEventInfo",
         load_pattern="interval_append",
         title="문화행사정보(OA-15486)",
+        volume_drop_threshold=0.8,
     ),
     Dataset(
         name="seoul_cultural_space",
@@ -126,6 +138,7 @@ SEOUL_DATASETS = [
         endpoint="culturalSpaceInfo",
         load_pattern="scd2_dim",
         title="문화공간(OA-15487)",
+        volume_drop_threshold=0.8,
     ),
     Dataset(
         name="seoul_culture_reservation",
@@ -134,6 +147,7 @@ SEOUL_DATASETS = [
         endpoint="ListPublicReservationCulture",
         load_pattern="snapshot_append",
         title="문화행사 예약(OA-2269)",
+        volume_drop_threshold=0.6,
     ),
     Dataset(
         name="seoul_sports_reservation",
@@ -143,6 +157,7 @@ SEOUL_DATASETS = [
         load_pattern="snapshot_append",
         title="공공체육시설 예약(OA-21779 계열)",
         note="OA-21779 매핑 재확인 권장(예약 서비스로 적재 중).",
+        volume_drop_threshold=0.5,
     ),
     Dataset(
         name="seoul_sema_exhibition",
@@ -151,6 +166,7 @@ SEOUL_DATASETS = [
         endpoint="ListExhibitionOfSeoulMOAInfo",
         load_pattern="interval_append",
         title="시립미술관 전시(OA-15323)",
+        volume_drop_threshold=0.8,
     ),
     Dataset(
         name="seoul_sejong",
@@ -160,6 +176,7 @@ SEOUL_DATASETS = [
         load_pattern="interval_append",
         title="세종문화회관 공연/전시(OA-2708)",
         note="서비스명=SJWPerform (API 가이드 xls 확인). 선택 파라미터 PERFORM_IDX로 상세 조회 가능.",
+        volume_drop_threshold=0.8,
     ),
 ]
 
