@@ -14,6 +14,7 @@ import re
 import requests
 
 from culture_ingest.common.http import Page, build_session
+from culture_ingest.common.security import redact, scrub_exception
 
 log = logging.getLogger(__name__)
 
@@ -46,11 +47,16 @@ class KopisClient:
         # 모든 요청에 인증키(service)를 붙이고, 응답 앞부분에 에러 태그가 있으면 예외.
         params = {"service": self.service_key, **params}
         resp = self.session.get(f"{KOPIS_BASE}/{path}", params=params, timeout=self.timeout)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            # HTTPError 메시지엔 `service=<키>` 가 박힌 URL 이 들어간다(#144 라이브 누출) —
+            # 예외가 어디로 전파되든(로그·리포트·알림) 키가 남지 않게 args 를 여기서 마스킹.
+            raise scrub_exception(exc)
         body = resp.content
         text = body[:600].decode("utf-8", "ignore")
         if "<errmsg>" in text or "<returncode>" in text:
-            raise KopisError(f"KOPIS error for {path}: {text}")
+            raise KopisError(redact(f"KOPIS error for {path}: {text}"))
         return body
 
     @staticmethod
@@ -121,7 +127,11 @@ class SeoulClient:
     def _get_window(self, service: str, start: int, end: int) -> tuple[bytes, dict]:
         url = f"{SEOUL_BASE}/{self.api_key}/json/{service}/{start}/{end}/"
         resp = self.session.get(url, timeout=self.timeout)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            # 서울 키는 URL 경로에 박힌다 — HTTPError 메시지 전파 전 마스킹(#144).
+            raise scrub_exception(exc)
         body = resp.content
         payload = json.loads(body.decode("utf-8", "ignore"))
         if service in payload:
@@ -131,7 +141,7 @@ class SeoulClient:
         code = result.get("CODE", "")
         # INFO-000 = 정상, INFO-200 = 데이터 없음(정상 종료로 간주).
         if code not in ("INFO-000", "INFO-200"):
-            raise SeoulError(f"Seoul error for {service}: {result}")
+            raise SeoulError(redact(f"Seoul error for {service}: {result}"))
         return body, payload.get(service, {})
 
     def list_pages(self, service: str, max_rows: int | None):

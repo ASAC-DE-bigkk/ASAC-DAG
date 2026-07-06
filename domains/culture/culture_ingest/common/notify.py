@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from culture_ingest.common.security import redact
 from culture_ingest.source.datasets import BY_NAME
 
 log = logging.getLogger(__name__)
@@ -169,7 +170,9 @@ def build_report_payload(report: dict) -> dict:
 
     desc = " · ".join(parts) + "\n\n" + "\n".join(lines)
 
-    return {
+    # 외부(디스코드 서버)로 나가는 최종 경계 — error/위반 문자열에 시크릿이 남지 않게
+    # 통째 마스킹(#144). 리포트가 이미 redact 됐어도 우회 경로(수동 조립 등)를 방어한다.
+    return redact({
         "embeds": [{
             "title": f"culture raw 적재 리포트 · {report.get('load_date', '')} (KST)",
             "color": COLOR_PASS if passed else COLOR_FAIL,
@@ -178,4 +181,4 @@ def build_report_payload(report: dict) -> dict:
                 "text": f"수집 {start} → 완료 {finish} KST · run_id={report.get('run_id', '')} · @daily"
             },
         }]
-    }
+    })
