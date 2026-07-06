@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -68,6 +69,12 @@ DISCORD_RED = 15158332
 LOGGER = logging.getLogger(__name__)
 DAG_ID = "weather_vilage_fcst_bronze"
 RECOLLECT_DAG_ID = "weather_vilage_fcst_recollect"
+BACKFILL_DAG_ID = "weather_vilage_fcst_bronze_backfill"
+KMA_RAW_KEY_RE = re.compile(
+    r"/load_date=(?P<load_date>\d{4}-\d{2}-\d{2})/nx=(?P<nx>\d+)/ny=(?P<ny>\d+)/"
+    r"(?P<collected>\d{8}T\d{6})KST_base-(?P<base_date>\d{8})(?P<base_time>\d{4})_"
+    r"(?P<request_id>[^/]+)\.json$"
+)
 
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 record_weather_problem = problem_failure_callback(domain="weather", source_system=SOURCE_ID)
@@ -77,6 +84,18 @@ def dag_run_conf(context: dict) -> dict:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
     return conf if isinstance(conf, dict) else {}
+
+
+def raw_object_keys_from_conf(context: dict) -> list[str]:
+    raw_keys = dag_run_conf(context).get("raw_object_keys")
+    if isinstance(raw_keys, str):
+        raw_keys = [raw_keys]
+    if not isinstance(raw_keys, list):
+        raise RuntimeError("dag_run.conf.raw_object_keys must be a non-empty string or list.")
+    cleaned = [str(key).strip() for key in raw_keys if str(key).strip()]
+    if not cleaned:
+        raise RuntimeError("dag_run.conf.raw_object_keys must not be empty.")
+    return cleaned
 
 
 def current_dag_id(context: dict) -> str:
@@ -107,6 +126,12 @@ def raw_object_grid_key(raw_object: dict) -> tuple[int, int]:
 
 def raw_object_page_no(raw_object: dict) -> int:
     return int(raw_object.get("page_no") or 1)
+
+
+def kma_response_page_info(raw_bytes: bytes) -> tuple[int, int]:
+    payload = json.loads(raw_bytes.decode("utf-8"))
+    body = (payload.get("response") or {}).get("body") or {}
+    return int(body.get("pageNo") or 1), int(body.get("numOfRows") or kma_num_of_rows())
 
 
 def checkpoint_by_grid_page(raw_objects: list[dict]) -> dict[tuple[int, int], dict[int, dict]]:
@@ -403,6 +428,54 @@ def land_kma_raw(**context) -> dict:
     }
 
 
+def land_kma_raw_object_keys(**context) -> dict:
+    grid_place_ids = {(int(grid["nx"]), int(grid["ny"])): str(grid["place_id"]) for grid in load_kma_grids()}
+    raw_objects = []
+    for raw_object_key in raw_object_keys_from_conf(context):
+        match = KMA_RAW_KEY_RE.search(raw_object_key)
+        if not match:
+            raise RuntimeError(f"Unsupported KMA raw_object_key format: {raw_object_key}")
+        raw_bytes = download_raw_object(raw_object_key, "KMA raw payload")
+        metadata, rows = parse_kma_response(raw_bytes)
+        page_no, num_of_rows = kma_response_page_info(raw_bytes)
+        nx = int(match.group("nx"))
+        ny = int(match.group("ny"))
+        collected_at = datetime.strptime(match.group("collected"), "%Y%m%dT%H%M%S").replace(tzinfo=KST)
+        raw_objects.append(
+            {
+                "request_id": match.group("request_id"),
+                "raw_object_key": raw_object_key,
+                "raw_hash": sha256_hex(raw_bytes),
+                "http_status": 200,
+                "collected_at": collected_at.isoformat(),
+                "place_id": grid_place_ids.get((nx, ny), f"kma_{nx}_{ny}"),
+                "base_date": match.group("base_date"),
+                "base_time": match.group("base_time"),
+                "nx": nx,
+                "ny": ny,
+                "page_no": page_no,
+                "num_of_rows": num_of_rows,
+                "total_count": int(metadata.get("total_count") or len(rows)),
+                "row_count": len(rows),
+            }
+        )
+    base_date = raw_objects[0]["base_date"]
+    base_time = raw_objects[0]["base_time"]
+    return {
+        "source_id": SOURCE_ID,
+        "raw_objects": raw_objects,
+        "raw_object_keys": [item["raw_object_key"] for item in raw_objects],
+        "grid_count": len({(item["nx"], item["ny"]) for item in raw_objects}),
+        "api_call_count": len(raw_objects),
+        "api_request_count": 0,
+        "reused_raw_object_count": len(raw_objects),
+        "raw_page_count": len(raw_objects),
+        "expected_raw_object_count": len(raw_objects),
+        "base_date": base_date,
+        "base_time": base_time,
+    }
+
+
 def load_kma_bronze(**context) -> dict:
     raw_result = context["ti"].xcom_pull(task_ids="land_kma_raw") or {}
     raw_objects = raw_result.get("raw_objects") or []
@@ -533,6 +606,20 @@ def record_kma_run_started(**context) -> str:
     )
 
 
+def record_kma_backfill_run_started(**context) -> str:
+    cursor, catalog, schema = trino_cursor()
+    return record_bronze_run_event(
+        cursor,
+        catalog,
+        schema,
+        source_id=SOURCE_ID,
+        dag_id=current_dag_id(context),
+        dag_run_id=context["run_id"],
+        status=STATUS_STARTED,
+        expected_raw_objects=len(raw_object_keys_from_conf(context)),
+    )
+
+
 def record_kma_run_failed(context) -> None:
     try:
         ti = context.get("ti") or context.get("task_instance")
@@ -638,6 +725,48 @@ def build_kma_bronze_dag(dag_id: str, schedule: str | None, description: str, ta
     return built_dag
 
 
+def build_kma_bronze_backfill_dag():
+    with DAG(
+        dag_id=BACKFILL_DAG_ID,
+        description="Loads existing KMA getVilageFcst raw_object_keys into Iceberg bronze without API calls.",
+        start_date=datetime(2026, 1, 1, tzinfo=KST),
+        schedule=None,
+        catchup=False,
+        max_active_runs=1,
+        on_failure_callback=record_kma_run_failed,
+        tags=["ask_seoul", "kma", "bronze", "backfill", "r2", "iceberg"],
+    ) as built_dag:
+        start_manifest = PythonOperator(
+            task_id="record_kma_run_started",
+            python_callable=record_kma_backfill_run_started,
+            on_failure_callback=record_weather_problem,
+        )
+
+        land_raw = PythonOperator(
+            task_id="land_kma_raw",
+            python_callable=land_kma_raw_object_keys,
+            on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+        )
+
+        load_bronze = PythonOperator(
+            task_id="load_kma_bronze",
+            python_callable=load_kma_bronze,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
+            on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+        )
+
+        verify_bronze = PythonOperator(
+            task_id="verify_kma_bronze_runtime",
+            python_callable=verify_kma_bronze_runtime,
+            on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
+        )
+
+        start_manifest >> land_raw >> load_bronze >> verify_bronze
+    return built_dag
+
+
 dag = build_kma_bronze_dag(
     DAG_ID,
     kma_dag_schedule(),
@@ -651,3 +780,5 @@ recollect_dag = build_kma_bronze_dag(
     "Manually recollects a KMA getVilageFcst base_date/base_time through the Bronze contract.",
     ["ask_seoul", "kma", "bronze", "recollect", "r2", "iceberg"],
 )
+
+backfill_dag = build_kma_bronze_backfill_dag()
