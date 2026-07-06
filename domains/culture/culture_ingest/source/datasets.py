@@ -53,6 +53,7 @@ KOPIS_DATASETS = [
         uses_date_window=True,
         base_params={"signgucode": "11"},  # 11 = 서울 (도메인 = 서울 도시데이터)
         key_fields=("mt20id", "prfnm"),
+        min_rows=800,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.7,
     ),
     Dataset(
@@ -77,6 +78,7 @@ KOPIS_DATASETS = [
         base_params={"signgucode": "11"},  # 11 = 서울
         freshness_sla_hours=24 * 8,  # 공연장은 SCD2 차원(느린 변화) → freshness 여유
         key_fields=("mt10id", "fcltynm"),
+        min_rows=1300,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.8,
     ),
     Dataset(
@@ -102,6 +104,7 @@ KOPIS_DATASETS = [
         uses_date_window=True,
         base_params={"signgucode": "11"},  # 11 = 서울
         key_fields=("mt20id", "prfnm"),
+        min_rows=100,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.7,
     ),
     Dataset(
@@ -116,6 +119,7 @@ KOPIS_DATASETS = [
         row_tag="boxof",
         key_fields=("prfnm",),
         note="기간 랭킹(top 50) 스냅샷. 페이징 없음(cpage 무시). 파라미터=stdate/eddate/area/catecode/srchseatscale. ⚠️ stdate~eddate 최대 31일(초과 시 returncode 05). 일배치 DAG는 ≤31일 롤링창 사용.",
+        min_rows=30,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.5,
     ),
 ]
@@ -129,6 +133,7 @@ SEOUL_DATASETS = [
         endpoint="culturalEventInfo",
         load_pattern="interval_append",
         title="문화행사정보(OA-15486)",
+        min_rows=15000,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.8,
     ),
     Dataset(
@@ -138,6 +143,7 @@ SEOUL_DATASETS = [
         endpoint="culturalSpaceInfo",
         load_pattern="scd2_dim",
         title="문화공간(OA-15487)",
+        min_rows=800,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.8,
     ),
     Dataset(
@@ -147,6 +153,7 @@ SEOUL_DATASETS = [
         endpoint="ListPublicReservationCulture",
         load_pattern="snapshot_append",
         title="문화행사 예약(OA-2269)",
+        min_rows=600,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.6,
     ),
     Dataset(
@@ -157,6 +164,7 @@ SEOUL_DATASETS = [
         load_pattern="snapshot_append",
         title="공공체육시설 예약(OA-21779 계열)",
         note="OA-21779 매핑 재확인 권장(예약 서비스로 적재 중).",
+        min_rows=400,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.5,
     ),
     Dataset(
@@ -166,6 +174,7 @@ SEOUL_DATASETS = [
         endpoint="ListExhibitionOfSeoulMOAInfo",
         load_pattern="interval_append",
         title="시립미술관 전시(OA-15323)",
+        min_rows=600,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.8,
     ),
     Dataset(
@@ -176,6 +185,7 @@ SEOUL_DATASETS = [
         load_pattern="interval_append",
         title="세종문화회관 공연/전시(OA-2708)",
         note="서비스명=SJWPerform (API 가이드 xls 확인). 선택 파라미터 PERFORM_IDX로 상세 조회 가능.",
+        min_rows=13000,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.8,
     ),
 ]

@@ -23,13 +23,19 @@ from culture_ingest.common.records import parse_records
 _INGEST_TS_RE = re.compile(r"^(\d{8})T(\d{6})Z$")
 
 
-def extract_record_fields(source: str, body: bytes, row_tag: str, endpoint: str) -> list[str]:
-    """원본 페이지 1장에서 레코드 한 건의 필드(태그/키) 이름 목록을 뽑는다.
+def extract_record_fields(source: str, body: bytes, row_tag: str, endpoint: str,
+                          sample_size: int = 25) -> list[str]:
+    """원본 페이지 1장에서 관측된 스키마(필드/태그 이름 목록)를 뽑는다.
 
-    드리프트 감지의 기준이 되는 "관측된 스키마". 첫 레코드의 키를 본다.
+    드리프트 감지 기준. 첫 레코드 1건만 보면 optional 결측이 스키마를 좁히고
+    뒤쪽 레코드만의 드리프트를 놓친다(#150) — 앞 ``sample_size``건의 키 **union**
+    으로 구성한다(전수 스캔은 초대형 페이지 비용 때문에 상한).
     """
     records = parse_records(source, body, row_tag, endpoint)
-    return sorted(records[0].keys()) if records else []
+    keys: set[str] = set()
+    for rec in records[:sample_size]:
+        keys.update(rec.keys())
+    return sorted(keys)
 
 
 def freshness_age_hours(ingest_ts: str, now: datetime | None = None) -> float | None:
