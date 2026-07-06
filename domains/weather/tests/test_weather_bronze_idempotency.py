@@ -7,7 +7,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from weather_ingest.bronze import create_kma_bronze_table, insert_kma_bronze_rows  # noqa: E402
+from weather_ingest.bronze import (  # noqa: E402
+    create_kma_bronze_table,
+    insert_kma_bronze_row_batches,
+    insert_kma_bronze_rows,
+)
 
 
 class RecordingCursor:
@@ -152,3 +156,94 @@ def test_kma_insert_allows_partial_page_only_when_dag_aggregate_was_checked():
     assert cursor.statements[0].startswith("INSERT INTO iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst")
     assert '"pageNo": "2"' in cursor.statements[0]
     assert '"numOfRows": "1000"' in cursor.statements[0]
+
+
+def test_kma_insert_batches_deletes_once_and_inserts_all_rows():
+    cursor = RecordingCursor()
+
+    inserted = insert_kma_bronze_row_batches(
+        cursor=cursor,
+        qualified_table="iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst",
+        dag_run_id="manual__batch",
+        row_batches=[
+            {
+                "metadata": {"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 2, "row_count": 2},
+                "rows": [
+                    {
+                        "baseDate": "20260701",
+                        "baseTime": "0800",
+                        "nx": "60",
+                        "ny": "127",
+                        "category": "TMP",
+                        "fcstDate": "20260701",
+                        "fcstTime": "0900",
+                        "fcstValue": "25",
+                    },
+                    {
+                        "baseDate": "20260701",
+                        "baseTime": "0800",
+                        "nx": "60",
+                        "ny": "127",
+                        "category": "REH",
+                        "fcstDate": "20260701",
+                        "fcstTime": "0900",
+                        "fcstValue": "70",
+                    },
+                ],
+                "request_id": "request-page-1",
+                "place_id": "seoul-test-grid",
+                "base_date": "20260701",
+                "base_time": "0800",
+                "nx": 60,
+                "ny": 127,
+                "raw_object_key": "raw/weather/kma/request-1.json",
+                "raw_hash": "abc",
+                "http_status": 200,
+                "collected_at": datetime(2026, 7, 1, 0, 20, tzinfo=timezone.utc),
+                "page_no": 1,
+                "num_of_rows": 1000,
+            },
+            {
+                "metadata": {"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 2, "row_count": 1},
+                "rows": [
+                    {
+                        "baseDate": "20260701",
+                        "baseTime": "0800",
+                        "nx": "60",
+                        "ny": "127",
+                        "category": "TMP",
+                        "fcstDate": "20260702",
+                        "fcstTime": "0900",
+                        "fcstValue": "23",
+                    }
+                ],
+                "request_id": "request-page-2",
+                "place_id": "seoul-test-grid",
+                "base_date": "20260701",
+                "base_time": "0800",
+                "nx": 60,
+                "ny": 127,
+                "raw_object_key": "raw/weather/kma/request-2.json",
+                "raw_hash": "def",
+                "http_status": 200,
+                "collected_at": datetime(2026, 7, 1, 0, 21, tzinfo=timezone.utc),
+                "page_no": 2,
+                "num_of_rows": 1000,
+            },
+        ],
+    )
+
+    assert inserted == 3
+    assert len(cursor.statements) == 2
+    delete_sql, insert_sql = cursor.statements
+    assert delete_sql.startswith("DELETE FROM iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst WHERE")
+    assert "source_id = 'kma_vilage_fcst'" in delete_sql
+    assert "dag_run_id = 'manual__batch'" in delete_sql
+    assert "base_date = '20260701'" in delete_sql
+    assert "base_time = '0800'" in delete_sql
+    assert "nx = 60" in delete_sql
+    assert "ny = 127" in delete_sql
+    assert "((base_date = '20260701'" in delete_sql
+    assert "nx = 60" in delete_sql
+    assert "ny = 127" in delete_sql
+    assert insert_sql.startswith("INSERT INTO iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst")

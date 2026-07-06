@@ -198,6 +198,124 @@ def insert_kma_bronze_rows(
     return len(rows)
 
 
+def insert_kma_bronze_row_batches(
+    cursor,
+    qualified_table: str,
+    row_batches: list[dict],
+    dag_run_id: str,
+    *,
+    delete_existing: bool = True,
+) -> int:
+    if not row_batches:
+        return 0
+
+    values: list[str] = []
+    grid_filters = []
+    inserted = 0
+
+    for batch in row_batches:
+        metadata = batch["metadata"]
+        rows = batch["rows"]
+        request_id = batch["request_id"]
+        place_id = batch["place_id"]
+        base_date = batch["base_date"]
+        base_time = batch["base_time"]
+        nx = int(batch["nx"])
+        ny = int(batch["ny"])
+        raw_object_key = batch["raw_object_key"]
+        raw_hash = batch["raw_hash"]
+        http_status = int(batch["http_status"])
+        collected_at = batch["collected_at"]
+        page_no = batch.get("page_no")
+        num_of_rows = batch.get("num_of_rows")
+
+        validate_kma_row_count(rows, metadata, nx, ny, allow_partial_page=True)
+
+        request_params = request_params_json(
+            base_date,
+            base_time,
+            nx,
+            ny,
+            page_no=page_no,
+            num_of_rows=num_of_rows,
+        )
+        inserted += len(rows)
+        for row in rows:
+            values.append(
+                "("
+                f"{sql_string(request_id)}, "
+                f"{sql_string(SOURCE_ID)}, "
+                f"{sql_string(request_params)}, "
+                f"{sql_string(place_id)}, "
+                f"{sql_string(row.get('baseDate'))}, "
+                f"{sql_string(row.get('baseTime'))}, "
+                f"{sql_int(row.get('nx'))}, "
+                f"{sql_int(row.get('ny'))}, "
+                f"{sql_string(row.get('category'))}, "
+                f"{sql_string(row.get('fcstDate'))}, "
+                f"{sql_string(row.get('fcstTime'))}, "
+                f"{sql_string(row.get('fcstValue'))}, "
+                f"{sql_string(raw_object_key)}, "
+                f"{sql_string(raw_hash)}, "
+                f"{sql_int(http_status)}, "
+                f"{sql_string(metadata.get('result_code'))}, "
+                f"{sql_string(metadata.get('result_msg'))}, "
+                f"{sql_int(metadata.get('total_count'))}, "
+                f"{sql_int(metadata.get('row_count'))}, "
+                f"{sql_timestamp(collected_at)}, "
+                f"{sql_string(collected_at.astimezone(KST).strftime('%Y-%m-%d'))}, "
+                f"{sql_string(dag_run_id)}"
+                ")"
+            )
+
+        load_date_filter = collected_at.astimezone(KST).strftime("%Y-%m-%d")
+        grid_filters.append(
+            f"(base_date = {sql_string(base_date)} AND base_time = {sql_string(base_time)} "
+            f"AND nx = {sql_int(nx)} AND ny = {sql_int(ny)})"
+        )
+
+    if delete_existing:
+        cursor.execute(
+            f"""
+            DELETE FROM {qualified_table}
+            WHERE source_id = {sql_string(SOURCE_ID)}
+                AND dag_run_id = {sql_string(dag_run_id)}
+                AND ({' OR '.join(sorted(set(grid_filters)))})
+            """
+        )
+
+    cursor.execute(
+        f"""
+        INSERT INTO {qualified_table} (
+            request_id,
+            source_id,
+            request_params_json,
+            place_id,
+            base_date,
+            base_time,
+            nx,
+            ny,
+            category,
+            fcst_date,
+            fcst_time,
+            fcst_value,
+            raw_object_key,
+            payload_hash,
+            http_status,
+            result_code,
+            result_msg,
+            total_count,
+            item_count,
+            collected_at,
+            load_date,
+            dag_run_id
+        )
+        VALUES {', '.join(values)}
+        """
+    )
+    return inserted
+
+
 def verify_kma_bronze_runtime(
     raw_object_key: str | None = None,
     raw_object_keys: list[str] | None = None,
