@@ -7,6 +7,41 @@
 
 ## 2026-07-06
 
+### 36. silver 주소·행정구역·좌표 보강 — Juso 지번 채움 + 행정동↔법정동 매핑 + EPSG:5174→WGS84
+
+request:
+- bronze 확인 결과 주소는 전체 문자열(시군구·동 분리 필드 없음), 행안부 법정동코드 미제공 →
+  ① lodging 처럼 지번 필드가 비는 경우 도로명으로 지번을 채울 것(Juso API, 결과 안 나오면
+  정규식 케이스를 늘려 결과가 나올 때까지 복합 처리). null 이었던 규모와 API 호출 횟수를
+  로그로 남길 것. ② district→gu rename + gu_code 추가, 동은 법정동/행정동 판별해
+  legal_dong/admin_dong 에 넣고 반대쪽은 R2 `raw/common/admin_dong` 최신본 매핑으로 채울 것
+  (legal_code/admin_code 포함). ③ 중부원점 X/Y → 위경도 계산 컬럼 추가(순수 계산이면 그걸로 마무리).
+
+response:
+- **enrich 태스크 2종 신설**(`include/silver/enrich_tasks.py`, transform DAG 이
+  `[enrich_admin_dong_ref, enrich_fill_jibun] → dbt run → dbt test` 로 배선):
+  - `bronze_ref_admin_dong` — R2 raw/common/admin_dong 최신(load_date→ingest_ts 최대) 페이지를
+    파싱해 **서울만**(전국 2.1만 행은 Iceberg INSERT 커밋 비용 과다 — `ADMIN_DONG_SIDO_FILTER`)
+    전량 교체 적재(769행). 코드값 문자열 고정, `sgg_code`=법정동코드 앞 5자리.
+  - `bronze_address_enrichment` — 지번(SITEWHLADDR·LOTNO_ADDR 모두) 결측 도로명(유니크)만
+    Juso 조회 후 캐시(키 delete-then-insert, filled 영구/not_found 래더판 스킵/error 재시도,
+    500건 주기 플러시). 감사: 행 단위 pattern_id/attempts/api_calls/status +
+    `jibun_fill_run` log_event(null_jibun_rows/distinct_addresses/api_calls/filled/...).
+- **Juso 클라이언트**(`include/silver/juso.py`) — 정규화 래더 p1 괄호절단 → p2 콤마절단 →
+  p3 도로명+번호 접두 → p4 '<구> <로> <번호>' 재조립 → p5 시도 생략. 첫 totalCount≥1 에서
+  중단. `LADDER_VERSION` 갱신 시 not_found 재시도. 보안: netio.http_get(타임아웃·응답 캡),
+  키는 env `JUSO_CONFM_KEY`(.env.commerce, 자동 마스킹). 단위테스트 13종(`tests/test_juso.py`).
+- **dbt silver**(ASAC-DBT feat/45): 지번 채움 coalesce(원천→LOTNO_ADDR→Juso) +
+  `jibun_address_source` 계보, `district`→`gu` rename + `gu_code`,
+  동 토큰 법정동 우선 판별 → `legal_dong/legal_code/admin_dong/admin_code`(다대다는
+  결정적 근사 — 숫자 제거 동명 우선·코드 오름차순), **EPSG:5174→WGS84 순수 계산**
+  (`latitude/longitude`, 한반도 bbox 밖 null). 좌표계는 시청·GFC 랜드마크 실측으로
+  5174 판별(42~90m vs 2097 230~251m). 규약 문서: dbt `docs/address-and-geo.md`.
+- **transform DAG `_dbt_command` 수정**: 호스트 전역 `DBT_PROJECT_DIR`(smoke 프로젝트)이
+  cwd 보다 우선해 프로필 오류를 내던 잠재 버그 — 커맨드에 `DBT_PROJECT_DIR` 명시 고정.
+- 검증: pytest 281 통과 · security 게이트 PASS · DAG import OK · dbt run(134만 행)/test 13종
+  통과 · 랜드마크 좌표 소수 7자리 일치(37.5665851, 126.9782039) · 동 매핑률 98.6%.
+
 ### 35. silver 타임존 정책 재확정 — timestamp 전부 KST 일원화(dbt) — #34 뒤집음
 
 request:
