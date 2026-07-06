@@ -27,6 +27,7 @@ from culture_ingest.common.config import (
 )
 from culture_ingest.common.landing import DatasetResult, Landing, LocalSink, R2Sink
 from culture_ingest.common.records import parse_records
+from culture_ingest.common.security import redact, refresh_env_secrets, register_secret
 from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_settings
 
 from . import config as culture_config
@@ -198,7 +199,9 @@ def ingest_dataset(
             print(f"  [contract] {ds.name}: " + " | ".join(result.checks["violations"]))
         landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params))
     except Exception as exc:  # noqa: BLE001 -- 데이터셋별로 잡아 두고 배치는 계속 진행
-        result.error = f"{type(exc).__name__}: {exc}"
+        # 2차 방어(#144): clients 의 scrub 을 우회한 예외(URL 키 포함 가능)도 여기서 마스킹 —
+        # result.error 는 리포트·알림·태스크 로그로 퍼지는 문자열이라 항상 redact 를 거친다.
+        result.error = redact(f"{type(exc).__name__}: {exc}")
     finally:
         result.duration_sec = round(time.monotonic() - t0, 1)
         result.finished_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -247,7 +250,8 @@ def build_run_report(
 
     # run 단위 SLO: 수집 실패 0 + 계약 위반 0 + bronze 적재 성공이면 통과
     slo_passed = not failed and not violations and not load_failed
-    return {
+    # 리포트는 R2·XCom·알림으로 퍼진다 — error 문자열 등에 시크릿이 남지 않게 통째 마스킹(#144).
+    return redact({
         "domain": "culture",
         "layer": "bronze",
         "load_date": ctx.load_date,
@@ -269,7 +273,7 @@ def build_run_report(
         "failed_datasets": [{"dataset": s["name"], "error": s["error"]} for s in failed],
         "slo_passed": slo_passed,
         "datasets": rows,
-    }
+    })
 
 
 def write_run_report(
@@ -300,11 +304,19 @@ def write_run_report(
 # --- 런타임 빌더 ---------------------------------------------------------------
 
 def build_clients(env_file: str | None = None) -> Clients:
-    """인증키를 읽어 검증한 뒤 KOPIS/서울 클라이언트를 만든다."""
+    """인증키를 읽어 검증한 뒤 KOPIS/서울 클라이언트를 만든다.
+
+    읽은 키는 redactor 에 **literal 등록**한다(#144) — KOPIS 의 bare `service=` 쿼리는
+    공통 structural 패턴에 안 걸리고(실측), env_file 로 읽은 키는 os.environ 스캔
+    (refresh_env_secrets)도 못 보므로, 값 자체 등록이 유일하게 확실한 방어다.
+    """
     keys = culture_config.source_keys(env_file)
     missing = culture_config.missing_keys(keys)
     if missing:
         raise RuntimeError(f"Missing culture source keys: {', '.join(missing)}")
+    register_secret(keys.kopis)
+    register_secret(keys.seoul)
+    refresh_env_secrets()  # R2 자격증명 등 이름 기반 env 시크릿도 함께 등록
     return Clients(kopis=KopisClient(keys.kopis), seoul=SeoulClient(keys.seoul))
 
 
@@ -369,7 +381,7 @@ def load_bronze_from_raw(
                 continue
             loaded[ds.name] = warehouse.load(ds, ctx, records)
         except Exception as exc:  # noqa: BLE001 -- 데이터셋별 격리, 말미 fail loud
-            failures.append(f"{s['name']}: {type(exc).__name__}: {exc}")
+            failures.append(redact(f"{s['name']}: {type(exc).__name__}: {exc}"))
     if failures:
         raise RuntimeError("bronze 적재 실패: " + " | ".join(failures))
     return loaded
