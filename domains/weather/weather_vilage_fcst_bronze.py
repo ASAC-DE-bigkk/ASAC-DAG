@@ -32,6 +32,7 @@ from _shared.bronze_run_manifest import (  # noqa: E402
 )
 from weather_ingest.bronze import (  # noqa: E402
     create_kma_bronze_table,
+    insert_kma_bronze_row_batches,
     insert_kma_bronze_rows,
     verify_kma_bronze_runtime as verify_kma_bronze_rows,
 )
@@ -462,8 +463,7 @@ def load_kma_bronze(**context) -> dict:
                 f"expected_pages={sorted(expected_pages)}, actual_pages={sorted(summary['pages'])}"
             )
 
-    inserted = 0
-    deleted_grids = set()
+    batch_inputs = []
     for page in sorted(
         parsed_pages,
         key=lambda item: (
@@ -475,30 +475,32 @@ def load_kma_bronze(**context) -> dict:
         ),
     ):
         raw_object = page["raw_object"]
-        grid_key = page["grid_key"]
-        delete_existing = grid_key not in deleted_grids
-        inserted += insert_kma_bronze_rows(
-            cursor=cursor,
-            qualified_table=qualified_table,
-            rows=page["rows"],
-            metadata=page["metadata"],
-            request_id=raw_object["request_id"],
-            place_id=raw_object["place_id"],
-            base_date=raw_object["base_date"],
-            base_time=raw_object["base_time"],
-            nx=int(raw_object["nx"]),
-            ny=int(raw_object["ny"]),
-            raw_object_key=raw_object["raw_object_key"],
-            raw_hash=raw_object["raw_hash"],
-            http_status=int(raw_object["http_status"]),
-            collected_at=page["collected_at"],
-            dag_run_id=context["run_id"],
-            page_no=page["page_no"],
-            num_of_rows=page["num_of_rows"],
-            delete_existing=delete_existing,
-            allow_partial_page=True,
+        batch_inputs.append(
+            {
+                "metadata": page["metadata"],
+                "rows": page["rows"],
+                "request_id": raw_object["request_id"],
+                "place_id": raw_object["place_id"],
+                "base_date": raw_object["base_date"],
+                "base_time": raw_object["base_time"],
+                "nx": int(raw_object["nx"]),
+                "ny": int(raw_object["ny"]),
+                "raw_object_key": raw_object["raw_object_key"],
+                "raw_hash": raw_object["raw_hash"],
+                "http_status": int(raw_object["http_status"]),
+                "collected_at": page["collected_at"],
+                "page_no": page["page_no"],
+                "num_of_rows": page["num_of_rows"],
+            }
         )
-        deleted_grids.add(grid_key)
+
+    inserted = insert_kma_bronze_row_batches(
+        cursor=cursor,
+        qualified_table=qualified_table,
+        row_batches=batch_inputs,
+        dag_run_id=context["run_id"],
+        delete_existing=True,
+    )
     expected_rows = sum(int(summary["total_count"]) for summary in grid_summaries.values())
     print(f"Inserted {inserted} KMA rows for {len(raw_objects)} raw objects into {qualified_table}")
     return {

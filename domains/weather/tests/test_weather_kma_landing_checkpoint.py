@@ -211,7 +211,11 @@ def test_load_kma_bronze_fails_before_insert_when_expected_page_is_missing(monke
         "download_raw_object",
         lambda _object_key, _log_label: kma_payload(total_count=1001, item_count=1000),
     )
-    monkeypatch.setattr(dag_module, "insert_kma_bronze_rows", lambda **kwargs: insert_calls.append(kwargs))
+    monkeypatch.setattr(
+        dag_module,
+        "insert_kma_bronze_row_batches",
+        lambda **kwargs: insert_calls.append(kwargs),
+    )
 
     with pytest.raises(RuntimeError, match="KMA bronze pagination incomplete"):
         dag_module.load_kma_bronze(ti=TaskInstance(raw_result), run_id="manual__load:missing-page")
@@ -266,18 +270,32 @@ def test_load_kma_bronze_inserts_pages_after_aggregate_count_matches(monkeypatch
             return kma_payload(total_count=1001, item_count=1000)
         return kma_payload(total_count=1001, item_count=1)
 
-    def fake_insert_kma_bronze_rows(**kwargs):
-        insert_calls.append((kwargs["page_no"], kwargs["delete_existing"], len(kwargs["rows"])))
-        return len(kwargs["rows"])
+    def fake_insert_kma_bronze_row_batches(**kwargs):
+        row_batches = kwargs["row_batches"]
+        insert_calls.append(
+            {
+                "dag_run_id": kwargs["dag_run_id"],
+                "delete_existing": kwargs["delete_existing"],
+                "batch_count": len(row_batches),
+                "row_counts": [len(batch["rows"]) for batch in row_batches],
+                "page_nos": [batch["page_no"] for batch in row_batches],
+            }
+        )
+        return sum(len(batch["rows"]) for batch in row_batches)
 
     monkeypatch.setattr(dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev"))
     monkeypatch.setattr(dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze")
     monkeypatch.setattr(dag_module, "download_raw_object", fake_download_raw_object)
-    monkeypatch.setattr(dag_module, "insert_kma_bronze_rows", fake_insert_kma_bronze_rows)
+    monkeypatch.setattr(dag_module, "insert_kma_bronze_row_batches", fake_insert_kma_bronze_row_batches)
 
     result = dag_module.load_kma_bronze(ti=TaskInstance(raw_result), run_id="manual__load:all-pages")
 
-    assert insert_calls == [(1, True, 1000), (2, False, 1)]
+    assert len(insert_calls) == 1
+    assert insert_calls[0]["dag_run_id"] == "manual__load:all-pages"
+    assert insert_calls[0]["delete_existing"] is True
+    assert insert_calls[0]["batch_count"] == 2
+    assert insert_calls[0]["row_counts"] == [1000, 1]
+    assert insert_calls[0]["page_nos"] == [1, 2]
     assert result["inserted"] == 1001
     assert result["expected_rows"] == 1001
     assert result["expected_raw_object_count"] == 2
