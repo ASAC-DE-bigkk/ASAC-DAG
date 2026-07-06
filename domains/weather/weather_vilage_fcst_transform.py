@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
+from airflow.models.param import Param
 from airflow.providers.standard.operators.bash import BashOperator
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
@@ -27,7 +28,14 @@ from common.errors.airflow import problem_failure_callback  # noqa: E402
 KST = ZoneInfo("Asia/Seoul")
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/weather"
-DEFAULT_PARAMS = {"target": "dev"}
+DEFAULT_PARAMS = {
+    "target": Param(
+        default="dev",
+        type="string",
+        enum=["dev", "prod"],
+        description="dbt target profile name.",
+    )
+}
 DEFAULT_TRANSFORM_CRON_KST = "35 2,5,8,11,14,17,20,23 * * *"
 
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
@@ -51,7 +59,7 @@ def dbt_command(args: str) -> str:
         "set -euo pipefail\n"
         f"cd {project}\n"
         f"export DBT_PROFILES_DIR={project} DBT_PROJECT_DIR={project}\n"
-        f"{shlex.quote(DBT_BIN)} {args} --target {{{{ params.target }}}} --no-use-colors"
+        f"{shlex.quote(DBT_BIN)} {args} --target '{{{{ params.target }}}}' --no-use-colors"
     )
 
 
@@ -66,6 +74,18 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["ask_seoul", "weather", "transform", "silver", "gold", "dbt"],
 ) as dag:
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=dbt_command("deps"),
+        on_failure_callback=record_weather_problem,
+    )
+
+    dbt_seed_asac_axes = BashOperator(
+        task_id="dbt_seed_asac_axes",
+        bash_command=dbt_command("seed --select asac_axes"),
+        on_failure_callback=record_weather_problem,
+    )
+
     dbt_seed_place_mapping = BashOperator(
         task_id="dbt_seed_place_mapping",
         bash_command=dbt_command("seed --select weather_place_grid_mapping"),
@@ -137,7 +157,9 @@ with DAG(
     )
 
     (
-        dbt_seed_place_mapping
+        dbt_deps
+        >> dbt_seed_asac_axes
+        >> dbt_seed_place_mapping
         >> dbt_test_place_mapping_seed
         >> dbt_run_silver
         >> dbt_test_silver
