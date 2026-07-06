@@ -7,6 +7,24 @@
 
 ## 2026-07-06
 
+### 35. silver 타임존 정책 재확정 — timestamp 전부 KST 일원화(dbt) — #34 뒤집음
+
+request:
+- silver 레이어에 저장되는 시각을 **모두 KST 기준**으로 표기(기존 UTC → KST 변환).
+  특히 collect time(`collected_at`)은 UTC 로 기록돼 다른 시각과 다르게 보였는데, silver 로 갈 때
+  **KST 로 완전히 변환**되어 파일로 저장되어야 함.
+- dags 브랜치 `feat/113` → `feat/133-commerce-silver-ingest` 로 rename 후 작업·push.
+
+response:
+- 직전 #34(UTC 일원화)를 **뒤집어** silver timestamp 전부 **KST** 로 재확정.
+- **dbt(feat/45-silver-dbt-ingest)**: `updatedt_ts`/`lastmodts_ts` 의 `- interval '9' hour` 제거
+  (원문이 이미 KST 라 파싱만·무변환), `collected_at` 은 bronze UTC 값을 `+ interval '9' hour` 하여
+  KST 로 변환. `schema.yml`·`timestamps-and-nulls.md` §1·`beginner-guide.md` 를 KST 정책으로 개정.
+- **bronze 는 UTC 원본 유지**(소스 진실) — 변환은 silver 표기 계층에서만. `warehouse._to_naive_utc()`
+  및 source freshness(bronze `collected_at` 기준)는 변경 없음.
+- 전 시각 컬럼이 동일 +9h 시프트라 정렬키·인접 dedup·grain 불변(dbt 테스트 4종 영향 없음).
+- `medallion-implementation-plan.md` §2.2 타임존 항목을 KST 정책으로 갱신.
+
 ### 34. silver 타임존 정책 확정 — timestamp 전부 UTC 일원화(dbt)
 
 request:

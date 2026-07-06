@@ -120,11 +120,11 @@ Iceberg 테이블 + 이 상태파일을 삭제해도 raw 는 불변이라 **전�
   bronze 워터마크 파일(§2.1.1)과 dbt vars(`exclude_datasets`/`exclude_observed_dates`/
   `exclude_load_dates`/`exclude_bronze_run_ids`)로 제어 — 운영 가이드:
   `dbt/domains/commerce/docs/rebuild-and-ops.md`.
-- **타임존 정책(2026-07-06 확정 — UTC 일원화)**: silver 의 timestamp 컬럼은 **전부 UTC(naive)**.
-  `updatedt_ts`/`lastmodts_ts` 는 KST 원문 파싱 후 **-9h 변환**(원문 문자열은 보존),
-  `collected_at` 은 원래 UTC 라 **무보정**(+9h 금지 — 이중 보정). 날짜 컬럼(`observed_date`/
-  `load_date`/인허가·폐업일)은 시간 정보가 없는 KST 달력 날짜로 유지 — 일별 집계는 날짜 컬럼
-  기준(UTC date 로 자르면 경계 어긋남). 정리: `dbt/domains/commerce/docs/timestamps-and-nulls.md`.
+- **타임존 정책(2026-07-06 재확정 — KST 일원화, 직전 #34 UTC 정책을 뒤집음)**: silver 의 timestamp
+  컬럼은 **전부 KST(naive)**. `updatedt_ts`/`lastmodts_ts` 는 KST 원문 파싱 후 **무변환**(원문 문자열도
+  보존), `collected_at` 은 bronze 의 UTC 값을 **+9h 하여 KST 로 변환**(bronze 는 UTC 원본 유지 —
+  소스 진실). 날짜 컬럼(`observed_date`/`load_date`/인허가·폐업일)은 시간 정보가 없는 KST 달력 날짜로
+  유지 — 전 컬럼이 KST 라 일별 집계는 `date(ts)` 가 곧 KST 날짜. 정리: `dbt/domains/commerce/docs/timestamps-and-nulls.md`.
 
 ## 3. 단계별 구현 방법 (to-do)
 
