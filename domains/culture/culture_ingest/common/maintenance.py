@@ -1,8 +1,14 @@
-"""culture Iceberg 유지보수 — R2 카탈로그가 못 잡는 잔재의 boto3 직접 정리 (#157).
+"""culture Iceberg 유지보수 — Trino 3종 정리 + R2 잔재 boto3 직접 정리 (#157).
 
-population #156 의 적응. R2 Data Catalog 환경에서 Trino 유지보수(optimize /
-expire_snapshots / remove_orphan_files — ``domains/_shared/maintenance.py`` 재사용)가
-**원리상 못 잡는 2가지**를 ``run_storage_cleanup`` 이 정리한다:
+``run_maintenance`` 는 optimize / expire_snapshots / remove_orphan_files 를 테이블별로
+실행한다. ``domains/_shared/maintenance.py``(#155)와 같은 일이지만 **전송만 다르다**:
+_shared 는 ``trino.dbapi`` 를 쓰는데 이 모듈이 Airflow 이미지(스케줄러·워커 전 컨테이너)에
+없어 런타임 ImportError — culture 는 자체 HTTP 클라이언트(``TrinoClient``)로 우회한다
+(warehouse.py 가 같은 이유로 HTTP 를 쓴다). _shared 재사용은 이미지에 trino 패키지가
+추가되면 재검토.
+
+population #156 의 적응인 ``run_storage_cleanup`` 은 R2 Data Catalog 환경에서 Trino
+유지보수가 **원리상 못 잡는 2가지**를 정리한다:
 
 1. **살아있는 테이블의 옛 metadata.json** — ``write.metadata.delete-after-commit`` 이
    R2 관리형 카탈로그에선 무효(속성만 저장, 실행 안 됨) → 커밋마다 무한 증식.
@@ -47,6 +53,48 @@ MAINTAINED_TABLES: tuple[str, ...] = (
 _META_PATH_RE = re.compile(
     r"^s3://[^/]+/(?P<prefix>__r2_data_catalog/[^/]+)/(?P<dir>[^/]+)/metadata/(?P<name>[^/]+)$"
 )
+
+# retention 은 SQL 문자열에 들어가므로 형식을 강제한다 (예: '7d', '12h', '30m')
+_RETENTION_RE = re.compile(r"^[0-9]+[dhm]$")
+
+
+def run_maintenance(
+    target: str = "dev",
+    *,
+    tables: tuple[str, ...] = MAINTAINED_TABLES,
+    retention: str = "7d",
+    client: TrinoClient | None = None,
+) -> dict[str, str]:
+    """대상 테이블에 optimize + expire_snapshots + remove_orphan_files 실행.
+
+    없는 테이블은 'skipped (missing)' — silver/gold 선등록분이 재설계 전까지 여기 해당.
+    반환: {테이블명: 'ok' | 'skipped (missing)' | 'error: ...'} — 테이블별 격리.
+    ``client`` 는 테스트 주입용(생략 시 target 설정으로 생성).
+    """
+    if not _RETENTION_RE.match(retention):
+        raise ValueError(f"invalid retention: {retention!r} (expected e.g. '7d', '12h')")
+    ws = build_warehouse_settings(target)
+    if client is None:
+        client = TrinoClient(ws, timeout=120)
+    ws_catalog, ws_schema = ws.catalog, ws.schema
+    existing = {row[0] for row in client.execute(f"SHOW TABLES FROM {_ident(ws_catalog)}.{_ident(ws_schema)}")}
+    results: dict[str, str] = {}
+    for tbl in tables:
+        if tbl not in existing:
+            results[tbl] = "skipped (missing)"
+            continue
+        qualified = f"{_ident(ws_catalog)}.{_ident(ws_schema)}.{_ident(tbl)}"
+        try:
+            for op in (
+                "optimize",
+                f"expire_snapshots(retention_threshold => '{retention}')",
+                f"remove_orphan_files(retention_threshold => '{retention}')",
+            ):
+                client.execute(f"ALTER TABLE {qualified} EXECUTE {op}")
+            results[tbl] = "ok"
+        except Exception as exc:  # noqa: BLE001 -- 테이블별 격리, 배치는 계속
+            results[tbl] = f"error: {type(exc).__name__}: {exc}"
+    return results
 
 
 def _classify(key: str, last_modified: datetime, cutoff: datetime,

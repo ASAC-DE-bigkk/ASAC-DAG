@@ -5,7 +5,8 @@ delete-then-insert 로 스냅샷·옛 metadata 를 쌓고, silver/gold(재설계
 ``__dbt_tmp`` 잔재를 남기므로 정기 정리가 필요하다.
 
   1. ``maintain``         Trino ``optimize`` + ``expire_snapshots`` + ``remove_orphan_files``
-                          — ``domains/_shared/maintenance.py`` 재사용 (#155, schema='culture').
+                          (#155 와 같은 작업 — 단 Airflow 이미지에 ``trino`` 패키지가 없어
+                          _shared 대신 culture 자체 HTTP 클라이언트로 실행).
                           silver/gold 는 선등록: 재설계 머지 전엔 'skipped (missing)',
                           테이블이 생기면 자동 편입.
   2. ``storage_cleanup``  boto3 로 R2 카탈로그가 못 잡는 잔재 정리 (#156 population 적응) —
@@ -42,9 +43,11 @@ if _DAGS_ROOT not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 
-from domains._shared.maintenance import run_maintenance  # noqa: E402
-
-from culture_ingest.common.maintenance import MAINTAINED_TABLES, run_storage_cleanup  # noqa: E402
+from culture_ingest.common.maintenance import (  # noqa: E402
+    MAINTAINED_TABLES,
+    run_maintenance,
+    run_storage_cleanup,
+)
 
 KST = "Asia/Seoul"
 
@@ -59,7 +62,6 @@ def _maintain(**context) -> None:
         params["target"],
         tables=MAINTAINED_TABLES,
         retention=str(params.get("retention", "7d")),
-        schema="culture",
     )
     for tbl, status in results.items():
         print(f"[culture maintenance] {tbl}: {status}")

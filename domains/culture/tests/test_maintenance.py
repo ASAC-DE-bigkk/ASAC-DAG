@@ -11,7 +11,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from culture_ingest.common.maintenance import MAINTAINED_TABLES, _META_PATH_RE, _classify
+import pytest
+
+from culture_ingest.common.maintenance import (
+    MAINTAINED_TABLES,
+    _META_PATH_RE,
+    _classify,
+    run_maintenance,
+)
 from culture_ingest.source.datasets import ALL_DATASETS
 
 CUTOFF = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
@@ -75,6 +82,53 @@ def test_data_files_in_live_dir_kept():
 
 def test_short_keys_ignored():
     assert _classify("__r2_data_catalog/uuid-only", OLD, CUTOFF, LIVE, KEEP) is None
+
+
+# ── run_maintenance (HTTP TrinoClient 경유 — 스텁 주입) ──────────────────────
+
+class _StubTrino:
+    """SHOW TABLES 결과와 ALTER 실행 기록만 갖는 TrinoClient 스텁."""
+
+    def __init__(self, existing: list[str], fail_on: str | None = None):
+        self._existing = existing
+        self._fail_on = fail_on
+        self.alters: list[str] = []
+
+    def execute(self, sql: str) -> list[list]:
+        if sql.startswith("SHOW TABLES"):
+            return [[t] for t in self._existing]
+        assert sql.startswith("ALTER TABLE"), sql
+        if self._fail_on and self._fail_on in sql:
+            raise RuntimeError("Trino error: boom")
+        self.alters.append(sql)
+        return []
+
+
+def test_run_maintenance_skips_missing_and_runs_three_ops():
+    stub = _StubTrino(existing=["bronze_seoul_cultural_event"])
+    res = run_maintenance("dev", tables=("bronze_seoul_cultural_event", "silver_culture_event"),
+                          retention="7d", client=stub)
+    assert res["bronze_seoul_cultural_event"] == "ok"
+    assert res["silver_culture_event"] == "skipped (missing)"
+    ops = [a.split("EXECUTE ", 1)[1] for a in stub.alters]
+    assert ops == ["optimize",
+                   "expire_snapshots(retention_threshold => '7d')",
+                   "remove_orphan_files(retention_threshold => '7d')"]
+
+
+def test_run_maintenance_isolates_table_errors():
+    stub = _StubTrino(existing=["bronze_kopis_boxoffice", "bronze_kopis_festival"],
+                      fail_on="bronze_kopis_boxoffice")
+    res = run_maintenance("dev", tables=("bronze_kopis_boxoffice", "bronze_kopis_festival"),
+                          client=stub)
+    assert res["bronze_kopis_boxoffice"].startswith("error:")
+    assert res["bronze_kopis_festival"] == "ok"  # 앞 테이블 실패에도 계속
+
+
+def test_run_maintenance_rejects_bad_retention():
+    """retention 은 SQL 에 삽입되므로 형식 강제 (인젝션 가드)."""
+    with pytest.raises(ValueError):
+        run_maintenance("dev", retention="7d'; DROP TABLE x; --", client=_StubTrino([]))
 
 
 # ── metadata 경로 정규식 ──────────────────────────────────────────────────────

@@ -26,11 +26,11 @@ def _trino_catalog(host_target: str = "dev") -> str:
     return value
 
 
-def _ask_seoul_schema(override: str | None = None) -> str:
+def _ask_seoul_schema() -> str:
     import os
     import re
 
-    value = override or os.environ.get("ASK_SEOUL_SCHEMA", "ask_seoul")
+    value = os.environ.get("ASK_SEOUL_SCHEMA", "ask_seoul")
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", value):
         raise ValueError(f"invalid schema name: {value}")
     return value
@@ -60,16 +60,12 @@ def run_maintenance(
     *,
     retention: str = "7d",
     ignore_missing: bool = True,
-    schema: str | None = None,
 ) -> dict[str, str]:
-    """Execute optimize + expire_snapshots + remove_orphan_files for each table.
-
-    ``schema``: 도메인 스키마 오버라이드(예: 'culture'). 생략 시 기존 동작(ASK_SEOUL_SCHEMA).
-    """
+    """Execute optimize + expire_snapshots + remove_orphan_files for each table."""
 
     tables = tuple(tables)
     catalog = _trino_catalog(target)
-    schema = _ask_seoul_schema(schema)
+    schema = _ask_seoul_schema()
     fq_schema = f"{catalog}.{schema}"
     cursor = _connect_trino().cursor()
     results: dict[str, str] = {}
