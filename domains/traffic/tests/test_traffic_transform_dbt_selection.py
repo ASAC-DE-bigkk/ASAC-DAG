@@ -75,29 +75,25 @@ def install_airflow_fakes():
 
 def load_transform_module():
     install_airflow_fakes()
-    module_path = Path(__file__).resolve().parents[1] / "weather_vilage_fcst_transform.py"
-    spec = importlib.util.spec_from_file_location("weather_vilage_fcst_transform_under_test", module_path)
+    module_path = Path(__file__).resolve().parents[1] / "traffic_incident_transform.py"
+    spec = importlib.util.spec_from_file_location("traffic_incident_transform_under_test", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
 
-def test_weather_transform_runs_place_mapping_seed_and_mart():
+def test_traffic_transform_bootstraps_asac_axes_before_silver():
     module = load_transform_module()
     dag = module.dag
 
     expected_task_order = [
         "dbt_deps",
         "dbt_seed_asac_axes",
-        "dbt_seed_place_mapping",
-        "dbt_test_place_mapping_seed",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",
         "dbt_test_gold",
-        "dbt_run_place_mart",
-        "dbt_test_place_mart",
     ]
 
     assert set(expected_task_order) <= set(dag.task_ids)
@@ -111,22 +107,11 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
 
     assert "deps" in task_commands["dbt_deps"]
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
-    assert "seed --select weather_place_grid_mapping" in task_commands["dbt_seed_place_mapping"]
+    assert "run --select silver_seoul_traffic_incident" in task_commands["dbt_run_silver"]
     assert "--target '{{ params.target }}'" in task_commands["dbt_deps"]
-    assert "weather_place_grid_mapping" in task_commands["dbt_test_place_mapping_seed"]
-    assert "assert_weather_place_grid_mapping_major_aliases" in task_commands["dbt_test_place_mapping_seed"]
-    assert (
-        "assert_weather_place_grid_mapping_within_collected_grid_scope"
-        in task_commands["dbt_test_place_mapping_seed"]
-    )
-    assert "run --select dim_weather_place gold_weather_forecast_by_place" in task_commands["dbt_run_place_mart"]
-    assert "dim_weather_place" in task_commands["dbt_test_place_mart"]
-    assert "gold_weather_forecast_by_place" in task_commands["dbt_test_place_mart"]
-    assert "assert_gold_weather_forecast_by_place_grain_unique" in task_commands["dbt_test_place_mart"]
-    assert "assert_gold_weather_forecast_by_place_major_coverage" in task_commands["dbt_test_place_mart"]
 
 
-def test_weather_transform_limits_target_param_to_dev_or_prod():
+def test_traffic_transform_limits_target_param_to_dev_or_prod():
     module = load_transform_module()
 
     target_param = module.DEFAULT_PARAMS["target"]
