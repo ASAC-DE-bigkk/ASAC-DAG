@@ -5,9 +5,32 @@
 
 ---
 
-## 2026-07-06
+## 2026-07-07
 
-### 36. silver 주소·행정구역·좌표 보강 — Juso 지번 채움 + 행정동↔법정동 매핑 + EPSG:5174→WGS84
+### 37. 지번 보강 완료 알림 연결 + 업소 식별키에 opnsfteamcode 반영(MGTNO 재판정)
+
+request:
+- ① Juso 로도 못 찾는 비정형 주소(미해결)의 수집 시 로그 + 처리 결과 값을 **성공/완료 알람
+  인터페이스로 연결**할 것. ② MGTNO 충돌 378건 재검토 — 승계·개명이면 같은 MGTNO 에 업장명이
+  바뀌는 게 정상 아닌가(MGTNO 가 키, 업장명은 키가 아님)라는 문제 제기.
+
+response:
+- ① **알림 연결**: `commerce_core/notify.py` 에 `WebhookNotifier`(discord|generic,
+  `COMMERCE_NOTIFY_WEBHOOK_URL/KIND` env 팩토리 — URL 은 register_secret 마스킹 등록,
+  전송은 netio.http_post) + `notify_completion()`(성공=info/미해결 있으면 warning,
+  처리 결과 값 + 미해결 상위 10건) 추가. `enrich_fill_jibun` 종료 시
+  `jibun_fill_unresolved` log_event(미해결 주소·행수·샘플 20건) 기록 후 notify_completion
+  호출로 배선. URL 미설정이면 기존과 동일한 no-op(로그만). 테스트 8종 추가(총 286 통과).
+- ② **재판정(사용자 지적 타당)**: 같은 MGTNO 의 업장명·상태 변경은 U 증분의 정상 버전
+  이력이 맞음(키 충돌 아님). 378건 분해 실측 —
+  - 323건(rest_restaurant): 같은 스냅샷 안 **공백 변형 중복**(주소 끝 공백 차이, 이름·시각
+    동일) → 같은 업소, current 가 1행 선택으로 이미 무해.
+  - **55건(tour_restaurant 54·optical_shop 1): 서로 다른 구청(OPNSFTEAMCODE)이 같은 MGTNO
+    발급** — MGTNO 는 자치단체 안에서만 유니크. 별개 업소가 병합되던 실 손실 케이스.
+- ② 수정(dbt feat/45): silver 에 `opnsfteamcode` 추출 + 업소 식별키를
+  **(dataset, opnsfteamcode, mgtno)** 로 확장(history dedup 파티션·current row_number·
+  grain 테스트 3종·schema/README/가이드 갱신). 재빌드 후 current +119행(교차 구청 업소 보존,
+  예: CDFI3261042006000001 → 7개 구 7개 업소 각 1행), dbt 테스트 15/15 통과.
 
 request:
 - bronze 확인 결과 주소는 전체 문자열(시군구·동 분리 필드 없음), 행안부 법정동코드 미제공 →

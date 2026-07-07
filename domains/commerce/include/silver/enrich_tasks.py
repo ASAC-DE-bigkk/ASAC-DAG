@@ -22,6 +22,7 @@ import re
 from datetime import datetime, timezone
 
 from bronze.warehouse import _connect, _qualified
+from commerce_core.notify import notify_completion
 from commerce_core.storage import get_storage
 from security import log_event
 from silver import juso
@@ -271,12 +272,14 @@ def fill_jibun_from_road() -> dict:
 
         results: list[dict] = []
         pending: list[dict] = []
+        row_counts: dict[str, int] = {}          # 주소 키 → 결측 행수(미해결 보고용)
         api_calls = 0
         flush_every = max(_INSERT_BATCH, int(os.getenv("JUSO_FLUSH_EVERY", "500") or 500))
         for idx, (norm_key, sample_road, row_cnt) in enumerate(targets, start=1):
             row = juso.fill_one(sample_road or norm_key, confm_key=confm_key,
                                 url=juso_url, delay_seconds=delay)
             row["road_address_norm"] = norm_key      # 조인 키는 bronze 정규화 결과로 고정
+            row_counts[norm_key] = int(row_cnt)
             api_calls += row["api_calls"]
             results.append(row)
             pending.append(row)
@@ -302,4 +305,18 @@ def fill_jibun_from_road() -> dict:
                         api_calls=api_calls, filled=filled, not_found=not_found,
                         errors=errors, ladder_version=juso.LADDER_VERSION,
                         capped=bool(cap is not None and len(missing) - skipped > len(targets)))
+
+    # 미해결(못 채운) 주소 — 수집 시 명시 로그 + 성공/완료 알림 인터페이스로 결과 전달.
+    # Juso 전량 실패(비정형 주소 등) 케이스는 여기 남는다. 전체 상세는 enrichment 테이블
+    # (status/pattern_id/attempts) — 로그에는 상위 20건 샘플만 싣는다.
+    unresolved = [{"road_address_norm": r["road_address_norm"], "status": r["status"],
+                   "rows": row_counts.get(r["road_address_norm"], 0)}
+                  for r in results if r["status"] != "filled"]
+    if unresolved:
+        log_event("jibun_fill_unresolved", where="enrich_tasks", level="warning",
+                  unresolved_addresses=len(unresolved),
+                  unresolved_rows=sum(u["rows"] for u in unresolved),
+                  samples=unresolved[:20])
+    notify_completion(where="commerce_localdata_transform.enrich_fill_jibun",
+                      summary=summary, unresolved=unresolved)
     return summary
