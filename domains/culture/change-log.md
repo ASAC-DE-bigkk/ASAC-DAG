@@ -3,6 +3,16 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-07 — 자정런 전멸 핫픽스 + DAG 배선 정적 검증 (#182)
+
+- **culture_bronze import 누락 수정** (#182) — #148이 `_plan`에 `load_baselines_for_target`
+  호출을 넣으며 import는 `load_baselines`로 남겨 7/7 자정런이 NameError로 전멸(bronze 12테이블
+  0행, report가 all_done 리프라 run은 success로 위장). → `culture_bronze.py`
+- **회귀 그물: DAG 전역 이름 배선 정적 검증** — DAG 파싱은 함수 몸통을 실행하지 않아 이 부류
+  ("import한 이름 ≠ 호출한 이름")를 못 잡는다. 호스트 pytest(airflow 없음)에서 소스를 compile만
+  하고 바이트코드 LOAD_GLOBAL ⊆ 모듈 바인딩∪builtins 를 검사 — culture DAG 3파일 전부 커버.
+  → `tests/test_dag_global_wiring.py`
+
 ## 2026-07-06 — silver/gold 재설계 완료 (ASAC-DBT#50 · PR ASAC-DBT#52)
 
 - **silver 9모델 + gold 3마트 재구축** — #48 공통축 canonical(공간 5컬럼·KST 시간·계보 사전) 전면 적용.
