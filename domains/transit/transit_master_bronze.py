@@ -43,8 +43,15 @@ _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Trino VALUES 배치 크기 — QUERY_TEXT_TOO_LARGE 회피(admin_dong/traffic 교훈). 500 보수적.
 _INSERT_BATCH = 500
 
-# 계보 컬럼(원천 필드 뒤에 공통으로 붙는다). collected_at 만 timestamp(6), 나머지 varchar.
-_LINEAGE_COLUMNS = ["raw_object_key", "source_system", "collected_at", "load_date", "dag_run_id"]
+# 계보 컬럼(원천 필드 뒤에 공통으로 붙는다) — 이름→Iceberg 타입. collected_at 만
+# timestamp(6), 나머지 varchar. 컬럼 이름 리스트와 DDL 타입을 여기 한 곳에서 파생한다.
+_LINEAGE_COLUMNS: dict[str, str] = {
+    "raw_object_key": "varchar",
+    "source_system": "varchar",
+    "collected_at": "timestamp(6)",
+    "load_date": "varchar",
+    "dag_run_id": "varchar",
+}
 
 
 # ── env / SQL 헬퍼 (admin_dong/traffic runtime 관례 이식) ─────────────────────────
@@ -106,7 +113,7 @@ def _qualified_table(catalog: str, schema: str, spec: MasterSpec) -> str:
 
 
 def _all_columns(spec: MasterSpec) -> list[str]:
-    return masters.column_names(spec) + _LINEAGE_COLUMNS
+    return masters.column_names(spec) + list(_LINEAGE_COLUMNS)
 
 
 def _ensure_table(cursor, catalog: str, schema: str, spec: MasterSpec) -> str:
@@ -117,15 +124,9 @@ def _ensure_table(cursor, catalog: str, schema: str, spec: MasterSpec) -> str:
     except Exception as exc:  # noqa: BLE001
         if "already exists" not in str(exc).lower():
             raise
-    # 원천 필드는 전부 varchar(코드류 선행 0 보존), collected_at 만 timestamp(6).
+    # 원천 필드는 전부 varchar(코드류 선행 0 보존), 계보 컬럼 타입은 _LINEAGE_COLUMNS 파생.
     column_defs = [f"{sql_identifier(c)} varchar" for c in masters.column_names(spec)]
-    column_defs += [
-        "raw_object_key varchar",
-        "source_system varchar",
-        "collected_at timestamp(6)",
-        "load_date varchar",
-        "dag_run_id varchar",
-    ]
+    column_defs += [f"{name} {sqltype}" for name, sqltype in _LINEAGE_COLUMNS.items()]
     cursor.execute(
         f"CREATE TABLE IF NOT EXISTS {qualified_table} (\n  "
         + ",\n  ".join(column_defs)
@@ -165,22 +166,37 @@ def load_master(spec_key: str, **context) -> dict:
     landed = ti.xcom_pull(task_ids=f"land_{spec.dataset}")
     object_keys = landed["object_keys"]
     load_date = landed["load_date"]
+    landed_rows = landed["rows"]
     dag_run_id = str(context.get("run_id") or current_dag_run_id())
 
     cursor, catalog, schema = _trino_cursor()
     qualified_table = _ensure_table(cursor, catalog, schema, spec)
 
-    # 멱등: 이미 이 load_date 가 적재됐으면 skip(admin_dong revision_date 멱등과 동형).
+    # 멱등/자가치유: 이 load_date 의 기존 행수를 이번 랜딩 행수와 비교한다.
+    #   existing == landed_rows : 진짜 멱등 재실행 → skip.
+    #   existing >  0 && != landed_rows : partial(배치 중간 실패) 또는 당일 원천 행수 변동
+    #       → DELETE 후 재적재(self-heal, Iceberg DELETE 지원). verify 영구 실패 방지.
+    #   existing == 0 : 최초 적재 → 그대로 진행.
     cursor.execute(
         f"SELECT count(*) FROM {qualified_table} WHERE load_date = {sql_string(load_date)}"
     )
     existing = cursor.fetchone()[0]
-    if existing:
+    action = masters.load_action(existing, landed_rows)
+    if action == "skip":
         LOGGER.info(
-            "멱등 skip [%s] — load_date=%s 는 이미 %d행 적재됨(재적재 안 함)",
+            "멱등 skip [%s] — load_date=%s 는 이미 %d행 적재됨(랜딩 행수와 일치, 재적재 안 함)",
             spec.dataset, load_date, existing,
         )
         return {"dataset": spec.dataset, "inserted": 0, "skipped": True, "existing": existing}
+    if action == "reload":
+        LOGGER.info(
+            "self-heal 재적재 [%s] — load_date=%s 기존 %d행 != 랜딩 %d행 "
+            "(partial/원천변동 의심) → DELETE 후 재적재",
+            spec.dataset, load_date, existing, landed_rows,
+        )
+        cursor.execute(
+            f"DELETE FROM {qualified_table} WHERE load_date = {sql_string(load_date)}"
+        )
 
     store = masters.build_r2_storage()
     collected_at = datetime.now(timezone.utc)
@@ -238,16 +254,11 @@ def verify_master(spec_key: str, **context) -> dict:
     )
     total = cursor.fetchone()[0]
 
-    if spec.expected_rows is not None:
-        LOGGER.info(
-            "검증 [%s] — load_date=%s trino_count=%d 수집rows=%d (기대 ~%d)",
-            spec.dataset, load_date, total, expected_rows, spec.expected_rows,
-        )
-    else:
-        LOGGER.info(
-            "검증 [%s] — load_date=%s trino_count=%d 수집rows=%d",
-            spec.dataset, load_date, total, expected_rows,
-        )
+    suffix = f" (기대 ~{spec.expected_rows})" if spec.expected_rows is not None else ""
+    LOGGER.info(
+        "검증 [%s] — load_date=%s trino_count=%d 수집rows=%d%s",
+        spec.dataset, load_date, total, expected_rows, suffix,
+    )
     if total != expected_rows:
         raise RuntimeError(
             f"검증 실패 [{spec.dataset}] — load_date={load_date} "

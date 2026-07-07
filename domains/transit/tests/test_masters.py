@@ -2,8 +2,10 @@
 
 가짜 Transport(공통 HttpCore 주입) + 가짜 Storage 로 실호출 없이 검증:
 - iter_master: collected>=list_total_count / short page 종료, 페이지 폭주 가드
-- RESULT.CODE 처리: INFO-200(데이터 없음) 종료, 그 외 코드 RuntimeError
-- land_master: R2 경로 규약(raw/transit/<dataset>/…) + manifest
+- RESULT.CODE 처리: INFO-200(데이터 없음) 종료, 그 외 코드 RuntimeError(코드+메시지 노출)
+- 최상위 RESULT(서비스 엔벨로프 없음): INFO-200→빈 스냅샷 종료, 그 외→코드 포함 raise
+- land_master: R2 경로 규약(raw/transit/<source_system>/<dataset>/…) + manifest, 빈 스냅샷 raise
+- load_action: load_date 멱등/자가치유 결정(insert/skip/reload)
 - column_names: 원천 필드(대문자) → 소문자 스네이크 컬럼
 - 경로 키(PathKey) 가 로그/예외에서 redact 되고 manifest 에 남지 않음
 - 실제 스펙(subwayStationMaster·GetParkInfo) 계약 회귀
@@ -98,6 +100,14 @@ def _page(rows, *, total, code="INFO-000", service=_SPEC.service):
                              content=json.dumps(body, ensure_ascii=False).encode("utf-8"))
 
 
+def _top_level_result(code, message="처리 결과", *, service=_SPEC.service):
+    """서비스 엔벨로프({service:{...}}) 없이 **최상위** RESULT 만 있는 응답(인증/데이터없음)."""
+    body = {"RESULT": {"CODE": code, "MESSAGE": message}}
+    assert service not in body  # 서비스 키가 정말로 없어야 최상위 경로를 탄다
+    return TransportResponse(status=200,
+                             content=json.dumps(body, ensure_ascii=False).encode("utf-8"))
+
+
 def _row(cd, nm="주차장", lat="37.5", lot="127.0"):
     return {"PKLT_CD": cd, "PKLT_NM": nm, "LAT": lat, "LOT": lot}
 
@@ -172,6 +182,55 @@ def test_iter_master_error_code_raises():
         list(masters.iter_master(client, _SPEC, per_page=2))
 
 
+def test_iter_master_error_code_exposes_message():
+    # 엔벨로프 내부 RESULT 오류코드는 MESSAGE 도 예외에 노출돼야 한다(운영 진단용).
+    body = {_SPEC.service: {"list_total_count": 0,
+                            "RESULT": {"CODE": "ERROR-500", "MESSAGE": "서버 오류"},
+                            "row": []}}
+    resp = TransportResponse(status=200,
+                             content=json.dumps(body, ensure_ascii=False).encode("utf-8"))
+    client = _client(FakeTransport([resp]))
+    with pytest.raises(RuntimeError, match="MESSAGE=서버 오류"):
+        list(masters.iter_master(client, _SPEC, per_page=2))
+
+
+# ── 최상위 RESULT(서비스 엔벨로프 부재) 처리 ─────────────────────────────────────
+def test_iter_master_top_level_no_data_stops_empty():
+    # 서비스 엔벨로프 없이 최상위 RESULT INFO-200 → 빈 스냅샷으로 조용히 종료.
+    client = _client(FakeTransport([_top_level_result("INFO-200", "데이터가 없습니다")]))
+    assert list(masters.iter_master(client, _SPEC, per_page=2)) == []
+
+
+def test_iter_master_top_level_error_raises_with_code_and_message():
+    # 최상위 RESULT 인증오류(INFO-100) → 코드+메시지 포함 RuntimeError(엔벨로프 없음 아님).
+    client = _client(FakeTransport([_top_level_result("INFO-100", "인증키가 유효하지 않습니다")]))
+    with pytest.raises(RuntimeError, match=r"INFO-100.*인증키가 유효하지 않습니다"):
+        list(masters.iter_master(client, _SPEC, per_page=2))
+
+
+def test_iter_master_formless_response_raises_envelope_missing():
+    # 서비스 키도, 최상위 RESULT.CODE 도 없는 완전 무형식 → 기존 '엔벨로프 없음' 에러 유지.
+    resp = TransportResponse(status=200, content=b'{"unexpected": true}')
+    client = _client(FakeTransport([resp]))
+    with pytest.raises(RuntimeError, match="엔벨로프 없음"):
+        list(masters.iter_master(client, _SPEC, per_page=2))
+
+
+# ── load_action: load_date 멱등/자가치유 결정 ────────────────────────────────────
+def test_load_action_first_load_inserts():
+    assert masters.load_action(existing_rows=0, landed_rows=784) == "insert"
+
+
+def test_load_action_true_idempotent_skips():
+    assert masters.load_action(existing_rows=784, landed_rows=784) == "skip"
+
+
+def test_load_action_partial_or_drift_reloads():
+    # partial(배치 중간 실패로 300행만 남음) 또는 당일 원천 변동(2204→2210) → reload.
+    assert masters.load_action(existing_rows=300, landed_rows=784) == "reload"
+    assert masters.load_action(existing_rows=2204, landed_rows=2210) == "reload"
+
+
 # ── land_master 경로 규약 + manifest ─────────────────────────────────────────────
 def test_land_master_path_convention_and_manifest():
     store = FakeStorage()
@@ -183,7 +242,9 @@ def test_land_master_path_convention_and_manifest():
         iter(pages), _SPEC, run_id="run-xyz",
         storage=store, load_date="2026-07-06", ingest_ts="20260706T120000Z",
     )
-    base = "raw/transit/unit_master/load_date=2026-07-06/ingest_ts=20260706T120000Z"
+    # transit 문서 규약: raw/transit/<source_system>/<dataset>/… (source 세그먼트 포함).
+    base = ("raw/transit/seoul_parking/unit_master"
+            "/load_date=2026-07-06/ingest_ts=20260706T120000Z")
     assert result["object_keys"] == [f"{base}/page-0001.json", f"{base}/page-0002.json"]
     assert result["manifest_key"] == f"{base}/_manifest.json"
     assert result["rows"] == 3
@@ -196,6 +257,18 @@ def test_land_master_path_convention_and_manifest():
     assert manifest["rows"] == 3
     assert manifest["run_id"] == "run-xyz"
     assert manifest["object_keys"] == result["object_keys"]
+
+
+def test_land_master_empty_snapshot_raises():
+    # 마스터는 절대 0행일 수 없다 — 빈 스냅샷은 원천 이상 신호 → RuntimeError, manifest 미기록.
+    store = FakeStorage()
+    with pytest.raises(RuntimeError, match="빈 마스터 스냅샷"):
+        masters.land_master(
+            iter([(1, b'{"row": []}', [])]), _SPEC, run_id="run-empty",
+            storage=store, load_date="2026-07-06", ingest_ts="20260706T120000Z",
+        )
+    # 빈 스냅샷은 _manifest.json 도 남기지 않아야 한다(green 오염 방지).
+    assert not any(k.endswith("_manifest.json") for k in store.objects)
 
 
 # ── rows_from_document ────────────────────────────────────────────────────────────
@@ -226,7 +299,8 @@ def test_path_key_is_redacted_in_url():
 def test_key_not_in_manifest():
     store = FakeStorage()
     masters.land_master(
-        iter([(1, b'{"row": []}', [])]), _SPEC, run_id="run-1", storage=store,
+        iter([(1, b'{"row": [{"PKLT_CD": "1"}]}', [{"PKLT_CD": "1"}])]),
+        _SPEC, run_id="run-1", storage=store,
     )
     blob = b"".join(store.objects.values())
     assert _KEY.encode("utf-8") not in blob

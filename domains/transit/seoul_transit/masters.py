@@ -137,12 +137,23 @@ def fetch_page(
 
 
 def _envelope(document: dict, spec: MasterSpec) -> dict:
+    """응답에서 서비스 엔벨로프를 꺼낸다.
+
+    서울 OpenAPI는 인증오류/데이터없음 시 서비스 엔벨로프({service:{...}}) 없이 **최상위
+    ``{"RESULT": {"CODE": ...}}``** 만 돌려준다(commerce/culture clients 동형). 이 경우
+    최상위 RESULT 를 빈 엔벨로프(row=[])로 승격해, 상위(iter_master)의 RESULT.CODE 분기
+    (INFO-200 조용히 종료 / 그 외 코드는 raise)가 그대로 동작하게 한다. 서비스 키도
+    최상위 RESULT.CODE 도 없는 **완전 무형식** 응답만 기존 '엔벨로프 없음' 에러를 유지한다.
+    """
     env = document.get(spec.service)
-    if not isinstance(env, dict):
-        raise RuntimeError(
-            f"{spec.service} 응답 엔벨로프 없음 — 서비스명/권한 확인 필요"
-        )
-    return env
+    if isinstance(env, dict):
+        return env
+    result = document.get("RESULT")
+    if isinstance(result, dict) and result.get("CODE"):
+        return {"RESULT": result, "row": [], "list_total_count": 0}
+    raise RuntimeError(
+        f"{spec.service} 응답 엔벨로프 없음 — 서비스명/권한 확인 필요"
+    )
 
 
 def iter_master(
@@ -176,7 +187,10 @@ def iter_master(
         if code and code != _OK_CODE:
             if code == _NO_DATA_CODE:
                 break
-            raise RuntimeError(f"{spec.service} API 오류 — RESULT.CODE={code}")
+            message = (env.get("RESULT") or {}).get("MESSAGE")
+            raise RuntimeError(
+                f"{spec.service} API 오류 — RESULT.CODE={code} MESSAGE={message}"
+            )
 
         yield page, raw, rows
         collected += len(rows)
@@ -186,6 +200,27 @@ def iter_master(
         if len(rows) < per_page:
             break
         page += 1
+
+
+# ── load_date 멱등/자가치유 결정 (순수 로직 — DAG load 태스크가 소비) ──────────────
+def load_action(existing_rows: int, landed_rows: int) -> str:
+    """이 load_date 재적재 여부를 결정한다 — 순수 함수(테스트 대상).
+
+    existing_rows: 이 load_date 로 브론즈에 이미 적재된 행수.
+    landed_rows:   이번 런에서 R2 로 랜딩된 행수.
+
+    반환:
+      "insert" — existing==0(최초 적재).
+      "skip"   — existing>0 이고 landed 와 정확히 일치(진짜 멱등 재실행).
+      "reload" — existing>0 이지만 landed 와 불일치. 배치 중간 실패로 남은 partial 이거나
+                 당일 재실행에서 원천 행수가 바뀐 경우 → DELETE 후 재적재(self-heal).
+                 (기존 'existing 있으면 무조건 skip' 은 이 두 경우 verify 를 영구 실패시켰다.)
+    """
+    if existing_rows == 0:
+        return "insert"
+    if existing_rows == landed_rows:
+        return "skip"
+    return "reload"
 
 
 # ── R2 랜딩 (common.storage #109) ────────────────────────────────────────────────
@@ -224,17 +259,21 @@ def land_master(
 ) -> dict:
     """마스터 페이지들을 R2 에 랜딩 + _manifest.json.
 
-    경로 규약(마스터용 — #162 권장):
-        raw/transit/<dataset>/load_date=YYYY-MM-DD/ingest_ts=YYYYMMDDTHHMMSSZ/page-NNNN.json
+    경로 규약(transit 문서 규약 — source_system 세그먼트 포함):
+        raw/transit/<source_system>/<dataset>/load_date=YYYY-MM-DD/ingest_ts=YYYYMMDDTHHMMSSZ/page-NNNN.json
         + .../_manifest.json
 
     storage 주입 가능(테스트) — 미지정 시 build_r2_storage(). 반환: 랜딩 결과 dict.
+    마스터는 절대 0행일 수 없으므로 랜딩 결과가 0행이면 RuntimeError(빈 스냅샷 방치 방지).
     """
     store = storage if storage is not None else build_r2_storage()
     now = datetime.now(timezone.utc)
     load_date = load_date or now.strftime("%Y-%m-%d")
     ingest_ts = ingest_ts or now.strftime("%Y%m%dT%H%M%SZ")
-    base = f"raw/transit/{spec.dataset}/load_date={load_date}/ingest_ts={ingest_ts}"
+    base = (
+        f"raw/transit/{spec.source_system}/{spec.dataset}"
+        f"/load_date={load_date}/ingest_ts={ingest_ts}"
+    )
 
     object_keys: list[str] = []
     total_rows = 0
@@ -245,6 +284,13 @@ def land_master(
         object_keys.append(object_key)
         total_rows += len(rows)
         total_bytes += len(raw)
+
+    if total_rows == 0:
+        # 마스터 스냅샷이 0행 — 원천 이상(인증 만료·서비스 장애) 의심. 빈 스냅샷을
+        # green 으로 흘리면 다운스트림이 조용히 비므로 여기서 끊는다(이전 스냅샷 유지됨).
+        raise RuntimeError(
+            f"빈 마스터 스냅샷 [{spec.dataset}] — 원천 이상 의심, 이전 스냅샷 유지됨 (rows=0)"
+        )
 
     manifest = {
         "dataset": spec.dataset,
@@ -262,14 +308,11 @@ def land_master(
     store.write_json(manifest_key, manifest)
 
     return {
-        "dataset": spec.dataset,
         "object_keys": object_keys,
         "manifest_key": manifest_key,
         "rows": total_rows,
         "bytes": total_bytes,
         "load_date": load_date,
-        "ingest_ts": ingest_ts,
-        "base": base,
     }
 
 
