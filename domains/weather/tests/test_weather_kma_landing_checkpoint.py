@@ -245,7 +245,7 @@ def test_load_kma_bronze_fails_before_insert_when_expected_page_is_missing(monke
     )
     monkeypatch.setattr(
         dag_module,
-        "insert_kma_bronze_row_batches",
+        "append_kma_bronze_row_batches_pyiceberg",
         lambda **kwargs: insert_calls.append(kwargs),
     )
 
@@ -318,7 +318,7 @@ def test_load_kma_bronze_inserts_pages_after_aggregate_count_matches(monkeypatch
     monkeypatch.setattr(dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev"))
     monkeypatch.setattr(dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze")
     monkeypatch.setattr(dag_module, "download_raw_object", fake_download_raw_object)
-    monkeypatch.setattr(dag_module, "insert_kma_bronze_row_batches", fake_insert_kma_bronze_row_batches)
+    monkeypatch.setattr(dag_module, "append_kma_bronze_row_batches_pyiceberg", fake_insert_kma_bronze_row_batches)
 
     result = dag_module.load_kma_bronze(ti=TaskInstance(raw_result), run_id="manual__load:all-pages")
 

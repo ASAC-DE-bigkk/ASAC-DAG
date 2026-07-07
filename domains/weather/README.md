@@ -12,7 +12,7 @@ bronze 테이블에 조회 가능한 row와 metadata를 적재하는 것이다.
 | `weather_vilage_fcst_bronze.py` | Airflow DAG 엔트리포인트. task 순서와 실행 흐름만 잡고 세부 로직은 domain package에 위임한다. |
 | `weather_reliability_report.py` | 매일 09:00 KST 기준 weather Bronze freshness/coverage를 조회하고 Discord로 알리는 read-only 리포트 DAG다. |
 | `weather_ingest/kma.py` | KMA 요청 URL, 발표 시각 계산, raw object key, 응답 파싱, redacted request metadata를 담당한다. |
-| `weather_ingest/bronze.py` | Iceberg bronze table DDL, schema evolution, insert, runtime verify SQL을 담당한다. |
+| `weather_ingest/bronze.py` | Iceberg bronze table DDL, PyIceberg append, runtime verify SQL을 담당한다. |
 | `weather_ingest/reliability_report.py` | 리포트 DAG의 Trino query, 메시지 포맷, Discord 전송(no-op/best-effort)을 담당한다. |
 | `weather_ingest/common/runtime.py` | weather 도메인 내부에서만 쓰는 env, HTTP, R2, Trino, SQL literal helper다. |
 | `config/seoul_kma_grids.csv` | 서울 bounding box를 보수적으로 덮는 KMA `nx, ny` 80개 목록이다. |
@@ -27,7 +27,8 @@ Airflow DAG
   -> KMA getVilageFcst를 grid별 호출
   -> 응답 JSON 성공 여부 검증
   -> R2 raw object로 grid별 원본 bytes 저장
-  -> Trino SQL로 Iceberg bronze table 생성/insert
+  -> Trino SQL로 Iceberg bronze table 생성
+  -> PyIceberg transaction으로 bronze row append
   -> Trino count query로 적재 확인
 ```
 

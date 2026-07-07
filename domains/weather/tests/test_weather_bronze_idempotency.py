@@ -7,7 +7,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import weather_ingest.bronze as bronze  # noqa: E402
 from weather_ingest.bronze import (  # noqa: E402
+    append_kma_bronze_row_batches_pyiceberg,
     create_kma_bronze_table,
     insert_kma_bronze_row_batches,
     insert_kma_bronze_rows,
@@ -22,6 +24,35 @@ class RecordingCursor:
         self.statements.append(" ".join(sql.split()))
 
 
+class RecordingTransaction:
+    def __init__(self):
+        self.events = []
+        self.commits = 0
+
+    def __enter__(self):
+        self.events.append(("enter", None))
+        return self
+
+    def __exit__(self, exc_type, _exc, _tb):
+        if exc_type is None:
+            self.commits += 1
+        self.events.append(("exit", exc_type))
+
+    def delete(self, predicate):
+        self.events.append(("delete", predicate))
+
+    def append(self, arrow_table):
+        self.events.append(("append", arrow_table))
+
+
+class RecordingTable:
+    def __init__(self):
+        self.txn = RecordingTransaction()
+
+    def transaction(self):
+        return self.txn
+
+
 def test_kma_create_table_uses_load_date_partitioning_for_fresh_tables():
     cursor = RecordingCursor()
 
@@ -32,6 +63,57 @@ def test_kma_create_table_uses_load_date_partitioning_for_fresh_tables():
     assert cursor.statements[0] == "CREATE SCHEMA IF NOT EXISTS iceberg_dev.dev_masondev1024"
     assert "CREATE TABLE IF NOT EXISTS iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst" in cursor.statements[1]
     assert "partitioning = ARRAY['load_date']" in cursor.statements[1]
+
+
+def test_kma_pyiceberg_batches_delete_and_appends_in_one_transaction(monkeypatch):
+    table = RecordingTable()
+    monkeypatch.setattr(bronze, "_kma_pyiceberg_delete_filter", lambda run_id: ("same-run", run_id))
+    monkeypatch.setattr(bronze, "_arrow_table", lambda rows: [dict(row) for row in rows])
+
+    inserted = append_kma_bronze_row_batches_pyiceberg(
+        schema="dev_masondev1024",
+        dag_run_id="manual__pyiceberg",
+        chunk_rows=2,
+        table=table,
+        row_batches=[
+            {
+                "metadata": {"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 3, "row_count": 3},
+                "rows": [
+                    {
+                        "baseDate": "20260701",
+                        "baseTime": "0800",
+                        "nx": "60",
+                        "ny": "127",
+                        "category": category,
+                        "fcstDate": "20260701",
+                        "fcstTime": "0900",
+                        "fcstValue": "25",
+                    }
+                    for category in ("TMP", "REH", "WSD")
+                ],
+                "request_id": "request-page-1",
+                "place_id": "seoul-test-grid",
+                "base_date": "20260701",
+                "base_time": "0800",
+                "nx": 60,
+                "ny": 127,
+                "raw_object_key": "raw/weather/kma/request-1.json",
+                "raw_hash": "abc",
+                "http_status": 200,
+                "collected_at": datetime(2026, 7, 1, 0, 20, tzinfo=timezone.utc),
+                "page_no": 1,
+                "num_of_rows": 1000,
+            }
+        ],
+    )
+
+    appends = [event for event in table.txn.events if event[0] == "append"]
+    assert inserted == 3
+    assert table.txn.commits == 1
+    assert table.txn.events[1] == ("delete", ("same-run", "manual__pyiceberg"))
+    assert len(appends) == 2
+    assert len(appends[0][1]) == 2
+    assert len(appends[1][1]) == 1
 
 
 def test_kma_insert_replaces_same_retry_scope_before_append():
