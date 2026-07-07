@@ -11,7 +11,7 @@
 | 서비스 | 엔드포인트 | 비고 | 우리 사용 |
 |--------|-----------|------|:--:|
 | 공영주차장 **실시간 점유** (`GetParkingInfo`) | `openapi.seoul.go.kr:8088/{KEY}/json/GetParkingInfo/1/N/` | 123개, JSON, **단일 호출 전체** | ✅ |
-| 공영주차장 **마스터** (`GetParkInfo`) | `…/GetParkInfo/1/N/` | 2,204개, 정적(좌표·요금) | ⏳ 후속(좌표 보강) |
+| 공영주차장 **마스터** (`GetParkInfo`) | `…/GetParkInfo/1/N/` | 2,204행, 정적(좌표·요금) | ✅ `transit_master_bronze` @weekly (#162, [master_source.md](master_source.md)) |
 
 > ⚠️ 코드 주의(검증됨): citydata `PRK_CD` ≠ 공영 `PKLT_CD`(다른 체계·다른 집합). 실시간 잔여 진짜 소스 = `GetParkingInfo`.
 
@@ -55,7 +55,8 @@ raw/transit/seoul_parking/parking/load_date=…/ingest_ts=…/page-0001.json   #
 **Iceberg** `iceberg_dev.dev_codingpoppy94.bronze_parking` — 주차장당 1행:
 `source` / `ts_source`(=`NOW_PRK_VHCL_UPDT_TM`) / `ts_collected` / `lat`·`lon`(NULL) / `raw`(주차장 행 JSON) / `ingested_at` / `dag_run_id`.
 
-## silver 로의 함의 (메모)
-- 파싱: `raw`(JSON) → 점유(`NOW_PRK_VHCL_CNT`/`TPKCT`) + 요금/운영 분해.
-- 점유율·staleness(`ts_collected - ts_source`) 파생.
-- 좌표·전체 주차장은 마스터(`GetParkInfo`) SCD2 정적 적재 후 `PKLT_CD` 조인.
+## silver 반영 상태 (ASAC-DBT #51 구현 기준)
+- **`slv_transit_parking` 구현 완료**: grain = (`PKLT_CD`, `NOW_PRK_VHCL_UPDT_TM`→`event_at` KST),
+  `dim_transit_parking`(마스터 최신 load_date 스냅샷 — SCD2 아님) `PKLT_CD` 조인으로 좌표·`admin_dong_code` 부착.
+- 마스터 좌표 결손이 많아 dim 커버리지는 낮음(실시간 사용 주차장은 대부분 유효 — silver 커버리지 0.96). 좌표 보강(지오코딩)은 후속.
+- 점유율(`NOW_PRK_VHCL_CNT`/`TPKCT`)·staleness 파생은 gold/후속.
