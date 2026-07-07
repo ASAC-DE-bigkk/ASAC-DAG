@@ -1,19 +1,21 @@
-"""commerce_localdata_transform — silver 보강 + dbt 변환 오케스트레이션.
+"""commerce_load_silver — silver 보강 + dbt 변환 오케스트레이션.
 
 bronze 적재(commerce_load_bronze, 04:00 KST) 이후 ① silver 사전 보강(행정동↔법정동 참조
-전량 교체 + 지번 결측 Juso 보강 캐시) ② dbt/domains/commerce 의 silver 모델 전량 재빌드
+전량 교체 + 지번 결측 Juso 보강 캐시) ② dbt/domains/commerce 의 silver 모델 증분 반영
 ③ 테스트 순으로 실행한다. dbt 는 Airflow 이미지의 별도 venv(`DBT_BIN`, 기본
 /home/airflow/dbt-venv/bin/dbt — common_dbt_smoke 와 동일 계약)로 실행한다.
 
 정책(재빌드·단위 제어 — dbt/domains/commerce/docs/rebuild-and-ops.md):
-- silver 는 bronze 의 순수 함수(materialized=table 전량 재빌드) → 이 DAG 는 상태가 없고
-  몇 번을 재실행해도 결과가 같다(멱등). 실패 시 그냥 재실행.
+- silver history 는 incremental append 로 bronze_run_id marker 를 기준으로 아직 반영되지 않은
+  publishable run 만 처리한다. DONE marker 는 dbt test 통과 후 `silver_load_run_marker` 에 기록한다.
+  marker table/target 이 없거나 `--full-refresh` 를 주면 해당 bronze 경로 전체를 백필한다.
   (보강 테이블도 멱등 — 참조는 전량 교체, Juso 는 키 단위 delete-then-insert 캐시.)
 - 특정 데이터셋/일자/run 제외(삭제)는 dbt 프로젝트의 vars(exclude_*)로, 특정 데이터셋
-  재적재는 bronze 워터마크 파일로 제어한다 — 이 DAG 는 항상 "현재 설정대로 전량"만 수행.
+  재적재는 bronze 워터마크 파일 또는 dbt `--full-refresh` 로 제어한다.
 - gold 단계는 Step 9 구현 시 run/test 태스크 2개를 뒤에 추가한다.
 
-  [enrich_admin_dong_ref, enrich_fill_jibun] ─> dbt_run_silver ─> dbt_test_silver
+  [enrich_admin_dong_ref, enrich_fill_jibun, ensure_silver_marker] ─> dbt_run_silver
+    ─> notify_masked_address_summary ─> dbt_test_silver ─> mark_silver_done
 
 보강 규약(주소·동·좌표): dbt/domains/commerce/docs/address-and-geo.md
 """
@@ -67,11 +69,11 @@ def _dbt_command(args: str) -> str:
     )
 
 
-@dag(dag_id="commerce_localdata_transform", schedule="0 5 * * *",
+@dag(dag_id="commerce_load_silver", schedule="0 5 * * *",
      start_date=pendulum.datetime(2024, 1, 1, tz="Asia/Seoul"), catchup=False,
      max_active_runs=1, default_args=_DEFAULT_ARGS,
      tags=["seoul", "commerce", "silver", "dbt"], doc_md=__doc__)
-def commerce_localdata_transform():
+def commerce_load_silver():
     @task
     def enrich_admin_dong_ref() -> dict:
         """행정동↔법정동 참조(raw/common/admin_dong 최신본) → Iceberg 전량 교체."""
@@ -86,6 +88,27 @@ def commerce_localdata_transform():
 
         return enrich_tasks.fill_jibun_from_road()
 
+    @task
+    def ensure_silver_marker() -> dict:
+        """silver DONE marker 테이블 생성 + 기존 history marker 부트스트랩."""
+        from silver import silver_markers
+
+        return silver_markers.ensure_silver_marker_table()
+
+    @task
+    def mark_silver_done() -> dict:
+        """dbt test 통과 후 silver history run 을 DONE marker 로 기록."""
+        from silver import silver_markers
+
+        return silver_markers.mark_silver_runs_done()
+
+    @task
+    def notify_masked_address_summary() -> dict:
+        """마스킹 주소 동단위 매핑 스킵 건수를 warning 알림으로 집계."""
+        from silver import quality_tasks
+
+        return quality_tasks.notify_masked_address_dong_skip_summary()
+
     run_silver = BashOperator(
         task_id="dbt_run_silver",
         bash_command=_dbt_command(f"run --select {SILVER_SELECT}"),
@@ -94,7 +117,8 @@ def commerce_localdata_transform():
         task_id="dbt_test_silver",
         bash_command=_dbt_command(f"test --select {SILVER_SELECT}"),
     )
-    [enrich_admin_dong_ref(), enrich_fill_jibun()] >> run_silver >> test_silver
+    [enrich_admin_dong_ref(), enrich_fill_jibun(), ensure_silver_marker()] >> run_silver
+    run_silver >> notify_masked_address_summary() >> test_silver >> mark_silver_done()
 
 
-commerce_localdata_transform()
+commerce_load_silver()

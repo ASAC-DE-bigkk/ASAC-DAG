@@ -3,6 +3,8 @@ import json
 
 from commerce_core import registry
 from commerce_core.schemas import COMMON_COLUMNS
+from silver import enrich_tasks
+from silver import quality_tasks
 from silver import silver_tasks
 from silver.validators import validate_normalized
 
@@ -32,6 +34,60 @@ def test_validate_normalized_reports_ok_and_missing():
     bad = [{c: "v" for c in COMMON_COLUMNS if c != "UPDATEDT"}]
     rep = validate_normalized(bad)
     assert rep["ok"] is False and "UPDATEDT" in rep["missing_columns"]
+
+
+def test_sgg_prefix_mismatch_detects_admin_legal_code_disagreement():
+    rows = [
+        {"sgg_code": "11110", "legal_dong_code": "1111010100",
+         "admin_dong_code": "1111051500", "sgg_name": "종로구"},
+        {"sgg_code": "11110", "legal_dong_code": "1111010100",
+         "admin_dong_code": "1168051500", "sgg_name": "종로구"},
+    ]
+    mismatches = enrich_tasks._sgg_prefix_mismatches(rows)
+    assert len(mismatches) == 1
+    assert mismatches[0]["legal_prefix"] == "11110"
+    assert mismatches[0]["admin_prefix"] == "11680"
+
+
+def test_masked_address_quality_summary_logs_warning_and_notifies(monkeypatch):
+    sent = []
+    executed = []
+
+    class Cursor:
+        def execute(self, sql):
+            executed.append(sql)
+
+        def fetchall(self):
+            return [(100, 5, 5.0, 4, 0)]
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        quality_tasks, "_qualified",
+        lambda: ("iceberg_dev", "commerce", "iceberg_dev.commerce"),
+    )
+    monkeypatch.setattr(quality_tasks, "_connect", lambda _catalog, _schema: Conn())
+    monkeypatch.setattr(
+        quality_tasks, "log_event",
+        lambda event, **kwargs: {"event": event, **kwargs},
+    )
+    monkeypatch.setattr(quality_tasks, "notify_quality_event", lambda **kwargs: sent.append(kwargs))
+
+    summary = quality_tasks.notify_masked_address_dong_skip_summary()
+
+    assert summary["event"] == "masked_address_dong_mapping_skipped"
+    assert summary["level"] == "warning"
+    assert summary["affected_rows"] == 5
+    assert summary["settled_rows"] == 100
+    assert sent[0]["task"] == quality_tasks.MASKED_ADDRESS_TASK
+    assert sent[0]["level"] == "warning"
+    assert sent[0]["metrics"]["affected_ratio_pct"] == 5
+    assert "silver_license_current" in executed[0]
 
 
 def test_build_silver_reads_ndjson_and_writes_parquet(tmp_path, monkeypatch):
