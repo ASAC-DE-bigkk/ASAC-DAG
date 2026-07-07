@@ -149,3 +149,26 @@ def notify_completion(*, where: str, summary: dict, unresolved: list[dict] | Non
                             level=lvl, context=redact({"where": where}))
     except Exception:  # 알림 실패가 본 파이프라인을 막지 않게(best-effort)
         log.exception("notify_completion 전송 실패(무시): where=%s", where)
+
+
+def notify_quality_event(*, task: str, level: str, title: str, description: str,
+                         metrics: dict, context: dict | None = None) -> None:
+    """사전 인지 품질 이슈를 [작업>레벨] 단위로 묶어 알림 채널로 전송한다."""
+    lvl = level if level in LEVELS else "warning"
+    metric_lines = [f"- {k}={v}" for k, v in metrics.items()]
+    message = (
+        f"작업: {task}\n"
+        f"레벨: {lvl}\n"
+        f"설명: {description}\n\n"
+        "지표:\n" + "\n".join(metric_lines)
+    )
+    safe_context = redact({"task": task, **(context or {})})
+    try:
+        get_notifier().send(
+            subject=f"[commerce][{task}>{lvl}] {title}",
+            message=redact(message),
+            level=lvl,
+            context=safe_context,
+        )
+    except Exception:  # 알림 실패가 본 파이프라인을 막지 않게(best-effort)
+        log.exception("notify_quality_event 전송 실패(무시): task=%s level=%s", task, lvl)

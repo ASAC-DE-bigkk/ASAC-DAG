@@ -1,6 +1,6 @@
 """silver 사전 보강 태스크 — ① 행정동↔법정동 참조 적재 ② 지번주소 결측 Juso 보강.
 
-commerce_localdata_transform DAG 이 dbt run **이전에** 실행한다. 두 테이블 모두
+commerce_load_silver DAG 이 dbt run **이전에** 실행한다. 두 테이블 모두
 Iceberg `<catalog>.commerce`(bronze 층 — 시각은 UTC(naive), silver 가 KST 변환):
 
 - ``bronze_ref_admin_dong``: 행안부 행정동↔법정동 매핑 최신 스냅샷(전량 교체).
@@ -133,6 +133,30 @@ def _parse_admin_dong_page(data: bytes) -> list[dict]:
     return rows
 
 
+def _sgg_prefix_mismatches(rows: list[dict]) -> list[dict]:
+    """법정동/행정동 코드 앞 5자리(시군구 코드)가 서로 다른 행을 찾는다."""
+    mismatches = []
+    for r in rows:
+        legal_prefix = (r.get("legal_dong_code") or "")[:5]
+        admin_prefix = (r.get("admin_dong_code") or "")[:5]
+        sgg_code = r.get("sgg_code") or legal_prefix
+        if not legal_prefix or not admin_prefix:
+            continue
+        if legal_prefix != admin_prefix or sgg_code != legal_prefix:
+            mismatches.append({
+                "sido_name": r.get("sido_name"),
+                "sgg_name": r.get("sgg_name"),
+                "sgg_code": sgg_code,
+                "legal_prefix": legal_prefix,
+                "admin_prefix": admin_prefix,
+                "legal_dong_code": r.get("legal_dong_code"),
+                "admin_dong_code": r.get("admin_dong_code"),
+                "legal_dong_name": r.get("legal_dong_name"),
+                "admin_dong_name": r.get("admin_dong_name"),
+            })
+    return mismatches
+
+
 def load_admin_dong_ref() -> dict:
     """R2 raw(common/admin_dong) 최신 스냅샷 → bronze_ref_admin_dong 전량 교체(멱등)."""
     ensure_enrich_tables()
@@ -143,6 +167,23 @@ def load_admin_dong_ref() -> dict:
         rows.extend(_parse_admin_dong_page(storage.read_bytes(key)))
     if not rows:
         raise RuntimeError(f"admin_dong 페이지 파싱 0행: load_date={load_date} ingest_ts={ingest_ts}")
+
+    mismatches = _sgg_prefix_mismatches(rows)
+    if mismatches:
+        summary = log_event("admin_dong_sgg_prefix_mismatch", where="enrich_tasks",
+                            level="error", source_load_date=load_date,
+                            source_ingest_ts=ingest_ts, rows=len(rows),
+                            mismatch_count=len(mismatches), samples=mismatches[:20])
+        notify_completion(
+            where="commerce_load_silver.enrich_admin_dong_ref.sgg_prefix_mismatch",
+            summary=summary,
+            unresolved=[{"road_address_norm": (
+                            f"{m.get('sgg_name')} legal={m.get('legal_dong_code')} "
+                            f"admin={m.get('admin_dong_code')}"),
+                         "status": "sgg_prefix_mismatch", "rows": 1}
+                        for m in mismatches[:10]],
+            level="error",
+        )
 
     loaded_at = _utcnow_ts()
     catalog, schema, qschema = _qualified()
@@ -317,6 +358,6 @@ def fill_jibun_from_road() -> dict:
                   unresolved_addresses=len(unresolved),
                   unresolved_rows=sum(u["rows"] for u in unresolved),
                   samples=unresolved[:20])
-    notify_completion(where="commerce_localdata_transform.enrich_fill_jibun",
+    notify_completion(where="commerce_load_silver.enrich_fill_jibun",
                       summary=summary, unresolved=unresolved)
     return summary
