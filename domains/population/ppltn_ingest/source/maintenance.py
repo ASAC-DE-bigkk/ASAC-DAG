@@ -33,11 +33,21 @@ from datetime import datetime, timedelta, timezone
 from ..common.config import build_r2_settings
 from ..common.trino import build_trino_settings, connect, sql_identifier
 
-# 유지보수 대상 테이블(도메인 스키마 내). 참조 seed는 정적이라 제외.
+# 유지보수 대상 테이블(도메인 스키마 내). 참조 seed·dim(121행 정적)은 제외.
 MAINTAINED_TABLES: tuple[str, ...] = (
     "bronze_seoul_ppltn",
     "silver_seoul_ppltn",
     "gold_seoul_ppltn_by_time",
+    "gold_seoul_ppltn_daily",
+    # citydata 계열 (#192/#69) — 10분 주기 증분 merge 가 스냅샷을 쌓으므로 필수.
+    "bronze_seoul_citydata",
+    "silver_citydata_cmrcl",
+    "silver_citydata_cmrcl_rsb",
+    "silver_citydata_transit_ppltn",
+    "silver_citydata_sbike",
+    "silver_citydata_air",
+    "gold_citydata_place_latest",
+    "gold_citydata_cmrcl_daily",
 )
 
 # metadata 파일 경로: s3://<bucket>/__r2_data_catalog/<schema-uuid>/<table-dir>/metadata/<name>
