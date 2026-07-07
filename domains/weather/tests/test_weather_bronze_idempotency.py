@@ -79,6 +79,53 @@ def test_kma_insert_replaces_same_retry_scope_before_append():
     assert insert_sql.startswith("INSERT INTO iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst")
 
 
+def test_kma_insert_batches_chunks_large_insert_without_repeating_delete():
+    cursor = RecordingCursor()
+
+    inserted = insert_kma_bronze_row_batches(
+        cursor=cursor,
+        qualified_table="iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst",
+        dag_run_id="manual__chunk",
+        max_insert_query_chars=1400,
+        row_batches=[
+            {
+                "metadata": {"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 4, "row_count": 4},
+                "rows": [
+                    {
+                        "baseDate": "20260701",
+                        "baseTime": "0800",
+                        "nx": "60",
+                        "ny": "127",
+                        "category": f"T{i}",
+                        "fcstDate": "20260701",
+                        "fcstTime": "0900",
+                        "fcstValue": "25",
+                    }
+                    for i in range(4)
+                ],
+                "request_id": "request-page-1",
+                "place_id": "seoul-test-grid",
+                "base_date": "20260701",
+                "base_time": "0800",
+                "nx": 60,
+                "ny": 127,
+                "raw_object_key": "raw/weather/kma/request-1.json",
+                "raw_hash": "abc",
+                "http_status": 200,
+                "collected_at": datetime(2026, 7, 1, 0, 20, tzinfo=timezone.utc),
+                "page_no": 1,
+                "num_of_rows": 1000,
+            }
+        ],
+    )
+
+    delete_statements = [sql for sql in cursor.statements if sql.startswith("DELETE")]
+    insert_statements = [sql for sql in cursor.statements if sql.startswith("INSERT")]
+    assert inserted == 4
+    assert len(delete_statements) == 1
+    assert len(insert_statements) > 1
+
+
 def test_kma_insert_fails_before_delete_when_response_is_partial():
     cursor = RecordingCursor()
 

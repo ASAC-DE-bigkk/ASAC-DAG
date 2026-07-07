@@ -13,6 +13,7 @@ from weather_ingest.kma import SOURCE_ID, request_params_json
 
 BRONZE_TABLE = "bronze_kma_vilage_fcst"
 KST = ZoneInfo("Asia/Seoul")
+MAX_KMA_INSERT_QUERY_CHARS = 900_000
 
 
 def ensure_kma_bronze_schema(cursor, qualified_table: str) -> None:
@@ -205,6 +206,7 @@ def insert_kma_bronze_row_batches(
     dag_run_id: str,
     *,
     delete_existing: bool = True,
+    max_insert_query_chars: int = MAX_KMA_INSERT_QUERY_CHARS,
 ) -> int:
     if not row_batches:
         return 0
@@ -284,8 +286,7 @@ def insert_kma_bronze_row_batches(
             """
         )
 
-    cursor.execute(
-        f"""
+    insert_prefix = f"""
         INSERT INTO {qualified_table} (
             request_id,
             source_id,
@@ -310,9 +311,21 @@ def insert_kma_bronze_row_batches(
             load_date,
             dag_run_id
         )
-        VALUES {', '.join(values)}
-        """
-    )
+        VALUES """
+    max_values_chars = max(1, max_insert_query_chars - len(insert_prefix))
+    chunk: list[str] = []
+    chunk_chars = 0
+    for value in values:
+        value_chars = len(value) + (2 if chunk else 0)
+        if chunk and chunk_chars + value_chars > max_values_chars:
+            cursor.execute(f"{insert_prefix}{', '.join(chunk)}")
+            chunk = []
+            chunk_chars = 0
+            value_chars = len(value)
+        chunk.append(value)
+        chunk_chars += value_chars
+    if chunk:
+        cursor.execute(f"{insert_prefix}{', '.join(chunk)}")
     return inserted
 
 
