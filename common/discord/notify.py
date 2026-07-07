@@ -65,7 +65,12 @@ def _post(webhook: str, payload: dict) -> bool:
     request = urllib.request.Request(
         webhook,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            # urllib 기본 UA(Python-urllib/x.y)는 Discord 앞단 Cloudflare 가
+            # 403(error 1010)으로 차단한다 — 식별 가능한 UA 필수.
+            "User-Agent": "asac-elt-notify/1.0",
+        },
         method="POST",
     )
     try:

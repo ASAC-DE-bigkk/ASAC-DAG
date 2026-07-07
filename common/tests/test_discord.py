@@ -5,6 +5,7 @@ redaction 검증은 test_errors.py 선례를 따른다: 키가 박힌 메시지�
 실제 전송 없이 payload 만 검사한다.
 """
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,14 @@ from common.security import PLACEHOLDER  # noqa: E402
 
 _WEBHOOK = "https://discord.example/api/webhooks/123/abc"
 _KEY = "abcdEFGH1234567890abcdEFGH1234567890zzzz"  # 가짜 인증키(40자)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_webhook_env(monkeypatch):
+    """실행 환경(.env 주입 컨테이너 등)의 실제 webhook env 가 테스트에 새지 않게 격리."""
+    for name in list(os.environ):
+        if name.endswith("DISCORD_WEBHOOK_URL"):
+            monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture()
