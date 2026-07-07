@@ -41,7 +41,7 @@ raw와 bronze를 둘 다 남기는 이유는 역할이 다르기 때문이다.
 `weather_bronze_reliability_report`는 Bronze table을 read-only로 조회해 최근 24시간 KMA 발표시각별
 서울 grid coverage, row/raw object 통합 수, freshness를 Discord에 보고한다. 최신 발표시각은
 보조 정보로 함께 표시한다. 실제 전송은
-`ASK_SEOUL_DISCORD_WEBHOOK_URL`이 있을 때만 활성화된다.
+`ASK_SEOUL_DISCORD_WEBHOOK_URL` 또는 `WEATHER_DISCORD_WEBHOOK_URL`이 있을 때만 활성화된다.
 
 기본 스케줄은 dev target에서 webhook env가 있을 때 `0 9 * * *`다. `ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE`
 또는 공통 `ASK_SEOUL_REPORT_DAG_SCHEDULE`로 override할 수 있고, 빈 문자열이면 schedule을 끈다.
