@@ -41,7 +41,7 @@ traffic은 실시간성 있는 변수로 쓸 수 있어 dev에서는 커버리�
 
 `traffic_bronze_reliability_report`는 request audit table을 read-only로 조회해 최근 수집 freshness,
 request 수, parsed row 수, `list_total_count` 대비 coverage, 정상 zero-row 응답 수를 Discord에 보고한다.
-실제 전송은 `ASK_SEOUL_DISCORD_WEBHOOK_URL` 또는 `TRAFFIC_DISCORD_WEBHOOK_URL`이 있을 때만 활성화된다.
+실제 전송은 `ASK_SEOUL_DISCORD_WEBHOOK_URL`이 있을 때만 활성화된다.
 
 기본 스케줄은 dev target에서 webhook env가 있을 때 `0 9 * * *`다. `ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE`
 또는 공통 `ASK_SEOUL_REPORT_DAG_SCHEDULE`로 override할 수 있고, 빈 문자열이면 schedule을 끈다.
