@@ -5,6 +5,164 @@
 
 ---
 
+## 2026-07-07
+
+### 39. 버전 정렬 1순위에 LASTMODTS 폴백 — UPDATEDT 결측 시 최종수정시점으로 정렬
+
+request:
+- UPDATEDT 가 없으면 "MODDT"(최종수정시점)로도 정렬되게 할 것 + MODDT 전건 존재 여부 확인.
+
+response:
+- 컬럼 확인: 원천 날짜/수정 컬럼은 UPDATEDT·LASTMODTS·APVPERMYMD·DCBYMD·APVCANCELYMD·
+  CLGSTDT/CLGENDDT·ROPNYMD. "MODDT"에 해당하는 것은 **LASTMODTS**(별도 MODDT 컬럼 없음).
+- 커버리지 실측: history 1,344,765행 전부 updatedt_ts·lastmodts_ts **100% 존재**(결측 0) →
+  현재 UPDATEDT 결측 0건이라 폴백 필요 행 없음(순수 방어적 개선).
+- dbt silver(feat/45): `updatedt_sort` 를 `coalesce(updatedt_ts, lastmodts_ts, epoch)` 로 변경
+  (기존 `coalesce(updatedt_ts, epoch)`). UPDATEDT 없는 행이 epoch(최하위)로 밀리지 않고 LASTMODTS 로
+  정렬됨. lastmodts_sort(2순위)·grain·dedup 불변. 재빌드 행수·테스트 15/15 **동일**(무영향 확인).
+  schema.yml·timestamps-and-nulls.md 갱신.
+
+### 38. silver gu/동 파싱 — 시도 접두 변형(서울시·무공백 결합형) 대응
+
+request:
+- 원천 주소 검증 결과 지번 동은 **법정동**(98.3% 매치)으로 확인 — silver 법정동 우선 분류가 정합.
+  미매치 원인 중 `서울`(단축 접두)도 함께 대응해 달라는 요청.
+
+response:
+- 실측 접두 변형: `서울특별시`(표준·공백) 외 `서울시`(82) + **무공백 결합형**
+  `서울특별시마포구`·`서울시노원구공릉1동`(구/동이 시도에 붙음)이 존재.
+- dbt silver(feat/45) gu/동 regex 를 관대화: 접두 `서울(?:특별시|시)?` + `\s*`(공백 0개 이상),
+  구는 lazy `[가-힣]+?구`(구로구구로동 결합형에서 첫 '구'까지만), 동은 `[가-힣]+\d*(?:동|가)` 로
+  **번지 앞 정지**(공덕2동461 → 공덕2동). 비서울·마스킹(`당산동*가`) 주소는 여전히 null(정상).
+- 효과(재빌드 실측): gu 98.6→**99.72%**, legal_dong 98.68→**99.06%**(+5,127행). dbt 15/15 통과.
+- 남은 null(~0.9%)은 원천 마스킹(56%)·비서울 주소(28%) 등 **원천 한계**(코드 결함 아님).
+- 규약 문서 갱신: dbt `docs/address-and-geo.md` §2(gu/동 regex·접두 변형 대응).
+
+request:
+- ① Juso 로도 못 찾는 비정형 주소(미해결)의 수집 시 로그 + 처리 결과 값을 **성공/완료 알람
+  인터페이스로 연결**할 것. ② MGTNO 충돌 378건 재검토 — 승계·개명이면 같은 MGTNO 에 업장명이
+  바뀌는 게 정상 아닌가(MGTNO 가 키, 업장명은 키가 아님)라는 문제 제기.
+
+response:
+- ① **알림 연결**: `commerce_core/notify.py` 에 `WebhookNotifier`(discord|generic,
+  `COMMERCE_NOTIFY_WEBHOOK_URL/KIND` env 팩토리 — URL 은 register_secret 마스킹 등록,
+  전송은 netio.http_post) + `notify_completion()`(성공=info/미해결 있으면 warning,
+  처리 결과 값 + 미해결 상위 10건) 추가. `enrich_fill_jibun` 종료 시
+  `jibun_fill_unresolved` log_event(미해결 주소·행수·샘플 20건) 기록 후 notify_completion
+  호출로 배선. URL 미설정이면 기존과 동일한 no-op(로그만). 테스트 8종 추가(총 286 통과).
+- ② **재판정(사용자 지적 타당)**: 같은 MGTNO 의 업장명·상태 변경은 U 증분의 정상 버전
+  이력이 맞음(키 충돌 아님). 378건 분해 실측 —
+  - 323건(rest_restaurant): 같은 스냅샷 안 **공백 변형 중복**(주소 끝 공백 차이, 이름·시각
+    동일) → 같은 업소, current 가 1행 선택으로 이미 무해.
+  - **55건(tour_restaurant 54·optical_shop 1): 서로 다른 구청(OPNSFTEAMCODE)이 같은 MGTNO
+    발급** — MGTNO 는 자치단체 안에서만 유니크. 별개 업소가 병합되던 실 손실 케이스.
+- ② 수정(dbt feat/45): silver 에 `opnsfteamcode` 추출 + 업소 식별키를
+  **(dataset, opnsfteamcode, mgtno)** 로 확장(history dedup 파티션·current row_number·
+  grain 테스트 3종·schema/README/가이드 갱신). 재빌드 후 current +119행(교차 구청 업소 보존,
+  예: CDFI3261042006000001 → 7개 구 7개 업소 각 1행), dbt 테스트 15/15 통과.
+
+request:
+- bronze 확인 결과 주소는 전체 문자열(시군구·동 분리 필드 없음), 행안부 법정동코드 미제공 →
+  ① lodging 처럼 지번 필드가 비는 경우 도로명으로 지번을 채울 것(Juso API, 결과 안 나오면
+  정규식 케이스를 늘려 결과가 나올 때까지 복합 처리). null 이었던 규모와 API 호출 횟수를
+  로그로 남길 것. ② district→gu rename + gu_code 추가, 동은 법정동/행정동 판별해
+  legal_dong/admin_dong 에 넣고 반대쪽은 R2 `raw/common/admin_dong` 최신본 매핑으로 채울 것
+  (legal_code/admin_code 포함). ③ 중부원점 X/Y → 위경도 계산 컬럼 추가(순수 계산이면 그걸로 마무리).
+
+response:
+- **enrich 태스크 2종 신설**(`include/silver/enrich_tasks.py`, transform DAG 이
+  `[enrich_admin_dong_ref, enrich_fill_jibun] → dbt run → dbt test` 로 배선):
+  - `bronze_ref_admin_dong` — R2 raw/common/admin_dong 최신(load_date→ingest_ts 최대) 페이지를
+    파싱해 **서울만**(전국 2.1만 행은 Iceberg INSERT 커밋 비용 과다 — `ADMIN_DONG_SIDO_FILTER`)
+    전량 교체 적재(769행). 코드값 문자열 고정, `sgg_code`=법정동코드 앞 5자리.
+  - `bronze_address_enrichment` — 지번(SITEWHLADDR·LOTNO_ADDR 모두) 결측 도로명(유니크)만
+    Juso 조회 후 캐시(키 delete-then-insert, filled 영구/not_found 래더판 스킵/error 재시도,
+    500건 주기 플러시). 감사: 행 단위 pattern_id/attempts/api_calls/status +
+    `jibun_fill_run` log_event(null_jibun_rows/distinct_addresses/api_calls/filled/...).
+- **Juso 클라이언트**(`include/silver/juso.py`) — 정규화 래더 p1 괄호절단 → p2 콤마절단 →
+  p3 도로명+번호 접두 → p4 '<구> <로> <번호>' 재조립 → p5 시도 생략. 첫 totalCount≥1 에서
+  중단. `LADDER_VERSION` 갱신 시 not_found 재시도. 보안: netio.http_get(타임아웃·응답 캡),
+  키는 env `JUSO_CONFM_KEY`(.env.commerce, 자동 마스킹). 단위테스트 13종(`tests/test_juso.py`).
+- **dbt silver**(ASAC-DBT feat/45): 지번 채움 coalesce(원천→LOTNO_ADDR→Juso) +
+  `jibun_address_source` 계보, `district`→`gu` rename + `gu_code`,
+  동 토큰 법정동 우선 판별 → `legal_dong/legal_code/admin_dong/admin_code`(다대다는
+  결정적 근사 — 숫자 제거 동명 우선·코드 오름차순), **EPSG:5174→WGS84 순수 계산**
+  (`latitude/longitude`, 한반도 bbox 밖 null). 좌표계는 시청·GFC 랜드마크 실측으로
+  5174 판별(42~90m vs 2097 230~251m). 규약 문서: dbt `docs/address-and-geo.md`.
+- **transform DAG `_dbt_command` 수정**: 호스트 전역 `DBT_PROJECT_DIR`(smoke 프로젝트)이
+  cwd 보다 우선해 프로필 오류를 내던 잠재 버그 — 커맨드에 `DBT_PROJECT_DIR` 명시 고정.
+- 검증: pytest 281 통과 · security 게이트 PASS · DAG import OK · dbt run(134만 행)/test 13종
+  통과 · 랜드마크 좌표 소수 7자리 일치(37.5665851, 126.9782039) · 동 매핑률 98.6%.
+
+### 35. silver 타임존 정책 재확정 — timestamp 전부 KST 일원화(dbt) — #34 뒤집음
+
+request:
+- silver 레이어에 저장되는 시각을 **모두 KST 기준**으로 표기(기존 UTC → KST 변환).
+  특히 collect time(`collected_at`)은 UTC 로 기록돼 다른 시각과 다르게 보였는데, silver 로 갈 때
+  **KST 로 완전히 변환**되어 파일로 저장되어야 함.
+- dags 브랜치 `feat/113` → `feat/133-commerce-silver-ingest` 로 rename 후 작업·push.
+
+response:
+- 직전 #34(UTC 일원화)를 **뒤집어** silver timestamp 전부 **KST** 로 재확정.
+- **dbt(feat/45-silver-dbt-ingest)**: `updatedt_ts`/`lastmodts_ts` 의 `- interval '9' hour` 제거
+  (원문이 이미 KST 라 파싱만·무변환), `collected_at` 은 bronze UTC 값을 `+ interval '9' hour` 하여
+  KST 로 변환. `schema.yml`·`timestamps-and-nulls.md` §1·`beginner-guide.md` 를 KST 정책으로 개정.
+- **bronze 는 UTC 원본 유지**(소스 진실) — 변환은 silver 표기 계층에서만. `warehouse._to_naive_utc()`
+  및 source freshness(bronze `collected_at` 기준)는 변경 없음.
+- 전 시각 컬럼이 동일 +9h 시프트라 정렬키·인접 dedup·grain 불변(dbt 테스트 4종 영향 없음).
+- `medallion-implementation-plan.md` §2.2 타임존 항목을 KST 정책으로 갱신.
+
+### 34. silver 타임존 정책 확정 — timestamp 전부 UTC 일원화(dbt)
+
+request:
+- 번거롭더라도 국제표준에 맞게 silver 적재 시 KST 시각을 **UTC 로 변환**해 일원화.
+  collected_at 은 9시간 차이가 나는 형태이므로 silver 에서 바로 정합하게 넣을 것.
+
+response:
+- (사실관계 정정 후 반영) `collected_at` 은 수집 마커가 처음부터 UTC 로 기록한 값 —
+  UTC 표준에서는 **무보정 통과**가 정답(+9h 는 이중 보정). 보정 대상은 KST 원문인
+  UPDATEDT/LASTMODTS 쪽으로, 파싱 timestamp 에 `- interval '9' hour` 적용.
+- **dbt(feat/45-silver-dbt-ingest)**: `updatedt_ts`/`lastmodts_ts` UTC 변환(-9h, 원문 문자열
+  보존), collected_at 무보정 주석 명시, schema.yml 설명 갱신,
+  timestamps-and-nulls.md §1 을 "silver timestamp 전부 UTC" 정책으로 개정
+  (일별 집계는 KST 날짜 컬럼 기준 — UTC date 절단 금지 등 사용 주의 포함).
+- 날짜 컬럼(observed_date/load_date/APVPERMYMD/DCBYMD)은 시간 정보가 없는 KST 달력
+  날짜라 변환 비대상(정책 문서에 명시). 정렬·인접 dedup·grain 은 고정 오프셋이라 불변.
+- medallion-implementation-plan.md §2.2 타임존 항목을 확정 정책으로 갱신.
+
+## 2026-07-05
+
+### 33. silver 암묵 버저닝 확정(dbt) 반영 + transform DAG 신설 + #109 잔재 import 수정
+
+request:
+- silver 는 명시 버전 컬럼(version_seq/valid_from/valid_to/is_current) 없이, 키(MGTNO) 안에서
+  **UPDATEDT·LASTMODTS 내림차순 정렬이 곧 버전 순서**(암묵 버저닝)가 되도록 확정.
+  current 는 그 정렬의 최신 1행. gold 가 나중에 이 정렬로 현재 상태 갱신만 수행.
+- dags 쪽 문서를 변경 내용에 맞게 모두 수정하고, **오케스트레이션(transform DAG)도 설정**.
+- 재빌드 시 특정 일자·특정 인허가 API(dataset) 단위 재적재/삭제가 **설정 파일 소폭 수정만으로**
+  가능해야 함(dbt 쪽 적재형태·재빌드 정책 + 관리 문서 포함).
+- dags 는 dev 기반 feat/113-commerce-silver-ingest, dbt 는 feat/45-silver-dbt-ingest 로 푸시.
+
+response:
+- **dbt(ASAC-DBT feat/45-silver-dbt-ingest)**: silver 2종 재작성(SCD2 제거, 정렬키
+  UPDATEDT→LASTMODTS→observed_date→collected_at→content_hash, LASTMODTS 파싱 추가,
+  '' → null 결측 규약) + 테스트 개정(행 유니크 grain (dataset,mgtno,collected_at,content_hash),
+  인접 중복 0) + 단위 제외 vars 4종(exclude_datasets/observed_dates/load_dates/bronze_run_ids,
+  macros/exclusions.sql) + 문서 4종(rebuild-and-ops·timestamps-and-nulls·dataset-columns·README).
+- **transform DAG 신설**: `commerce_localdata_transform.py` — 05:00 KST(적재 04:00 이후),
+  BashOperator 2단(dbt run silver → test silver), common_dbt_smoke 와 동일 dbt venv/env 계약,
+  무상태(전량 재빌드 오케스트레이션만). `.env.commerce.example` 에
+  COMMERCE_DBT_PROJECT_DIR/COMMERCE_DBT_TARGET 항목 추가.
+- **#109 잔재 import 수정(파싱 불능 해소)**: `commerce_load_bronze.py`(common.env/registry/
+  settings/storage → commerce_core.*, dags-root sys.path 부트스트랩 추가) ·
+  `bronze/load_plan.py`(common→commerce_core paths) · `bronze/warehouse.py`(hashing/settings) ·
+  `tests/test_load_plan.py`. 적재 라인 단위테스트 27 통과 재확인.
+- **문서 갱신**: medallion-implementation-plan.md(§2 표, §2.2 계약 개정, Step 6·10 상태,
+  §6 요약, §7-9 결정 반영), 번들 README(데이터 흐름 3단 DAG 라인·구조도).
+- 단위 재적재/삭제 운영 계약: 재적재 = bronze 워터마크 파일(`_watermark.json`) 수정 →
+  `commerce_load_bronze` → 자동 반영(전량 재빌드) / 삭제·복원 = dbt vars 수정 → `dbt run`.
+  절차 문서: `dbt/domains/commerce/docs/rebuild-and-ops.md`.
+
 ## 2026-07-04
 
 ### 32. 적재 엔진 기준 = 첫 파일(순서), 크기/legacy 아님 — 07-01 증분 오분류 수정

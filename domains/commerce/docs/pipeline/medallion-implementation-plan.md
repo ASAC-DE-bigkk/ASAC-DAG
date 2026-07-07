@@ -1,6 +1,7 @@
 # Medallion 구현 계획 — raw → bronze(Iceberg) → silver → gold + 좌표 보정
 
-작성일 2026-07-03 · 상태 **제안(초안, 멘토 승인 대기 항목 포함 — §7)**
+작성일 2026-07-03 · 상태 **제안(초안, 멘토 승인 대기 항목 포함 — §7)** ·
+갱신 2026-07-05 — silver **암묵 버저닝** 확정(SCD2 컬럼 제거, §2.2) + transform DAG 구현(Step 10)
 선행 결정: raw/bronze 용어 확정(`dags/docs/plans/2026-07-02-feat-r2-raw-prefix.md`, #75) ·
 원천 레이어 리네임([change-log #21](../../change-log.md)) · 증분 저장 흐름([change-log #22](../../change-log.md)).
 
@@ -33,12 +34,12 @@
 |---|---|---|---|
 | raw | R2 `{prefix}/raw/commerce/YYYY/MM/DD/run_id=.../`(내부에 `_markers/`) + 레이어 루트 `{prefix}/raw/commerce/_diff_target/`(run 무관 롤링 전체본) | 불변 원본·수집 상태·롤링 전체본. 재처리의 유일한 원천. **일절 변경 금지, Trino/dbt 직접 읽기 금지** | 기존 DAG (변경 없음) |
 | bronze | Iceberg `<catalog>.commerce.bronze_localdata_license` | raw 증분의 append-only **변경로그**. `record_json` 통짜 보존(schema-on-read) + 계보 컬럼. 파싱·정제 금지 | **`commerce_load_bronze` DAG**(수집과 분리, PyIceberg/Trino) |
-| silver | dbt `silver_license_history` · `silver_license_current` · `silver_geocode_address` | 파싱(19컬럼+파생)·형변환·중복제거·**SCD2 버저닝**·**좌표 보정 병합** | dbt/domains/commerce |
+| silver | dbt `silver_license_history` · `silver_license_current` · `silver_geocode_address` | 파싱(19컬럼+파생)·형변환·중복제거·**암묵 버저닝(정렬키 기반)**·**좌표 보정 병합** | dbt/domains/commerce |
 | gold | dbt `gold_commerce_license_status_current` | silver 만 참조하는 얇은 집계(자치구×업종×영업상태 현황) | dbt/domains/commerce |
 
 "같은 key(MGTNO), 달라지는 value" 버저닝: 일별 스냅샷 전체를 쌓지 않고(1GB×365 낭비),
-bronze 변경로그 + silver `(dataset, mgtno, content_hash)` 변경 감지 → SCD2
-(`valid_from`/`valid_to`/`is_current`) 로 처리한다.
+bronze 변경로그 + silver `content_hash` 변경 감지 → **암묵 버저닝**으로 처리한다
+(명시 버전 컬럼 없음 — 정렬키 내림차순이 곧 버전 순서. 2026-07-05 사용자 확정, §2.2).
 
 ### 2.1 bronze 테이블 계약
 
@@ -92,26 +93,38 @@ Iceberg 테이블 + 이 상태파일을 삭제해도 raw 는 불변이라 **전�
 - **바운드**: 한 번에 모든 날짜를 적재하지 않고 실행당 최대 날짜 수(`COMMERCE_LOAD_MAX_DATES`)로 제한,
   backfill catch-up 은 재실행이 이어감.
 
-### 2.2 silver / gold 계약
+### 2.2 silver / gold 계약 (2026-07-05 개정 — 암묵 버저닝, 사용자 확정)
 
-- **버전 정렬키(전순서, 상시 적용)**: `coalesce(parsed_updatedt_ts, epoch), observed_date,
-  collected_at, content_hash` — 타이브레이커를 폴백이 아니라 **항상** 포함해 UPDATEDT
-  null·비정형·동률·역행 모두에서 결정적 순서를 보장(역행 시 관측 순서 우선 여부는 §7 결정 항목).
-- `silver_license_history` — grain `(dataset, mgtno, version_seq)`(정렬키 순번).
-  publishable 필터(데이터셋별 게이트, §2.1) → **연속 중복 제거**:
+- **버전 정렬키(전순서, 상시 적용)**: `coalesce(updatedt_ts, epoch), coalesce(lastmodts_ts,
+  epoch), observed_date, collected_at, content_hash` — **UPDATEDT 1순위 + LASTMODTS 2순위**,
+  타이브레이커를 폴백이 아니라 **항상** 포함해 null·비정형·동률·역행 모두에서 결정적 순서 보장.
+  (§7-9 결정: 역행도 소스 시각 순서를 따른다 — 관측 순서 우선 아님.)
+- **명시적 버전 컬럼 없음**: `version_seq`/`valid_from`/`valid_to`/`is_current` 를 두지 않는다.
+  history 는 정제된 변경로그이며 (dataset, mgtno) 안에서 위 정렬키 **내림차순이 곧 버전 순서**
+  (**암묵 버저닝**). 버전 순서가 필요한 소비처(gold 의 현재 상태 갱신 포함)는 이 정렬을 재현한다.
+- `silver_license_history` — 행 식별 grain `(dataset, mgtno, collected_at, content_hash)`.
+  publishable 필터(데이터셋별 게이트, §2.1) → 파싱(공통 19 중 사용 필드 + LASTMODTS,
+  빈 문자열 → null) → **연속 중복 제거**:
   `lag(content_hash) over (partition by dataset, mgtno order by <버전 정렬키>) = content_hash`
   인 행만 제거. diff 재유입·reconcile 재방출(직전 버전과 동일 → 인접 중복)은 걸러내되
-  **정당한 원복(A→B→A)은 보존**한다 — 전역 `(dataset, mgtno, content_hash)` dedup 금지
-  → `lead()` 로 `valid_from/valid_to/is_current`. `valid_from` 은 정렬키에서 파생한
-  timestamp(`coalesce(parsed_updatedt_ts, observed_date+collected_at)`).
-  파생 컬럼: 자치구 `district`(주소 파싱 — 이력 집계를 위해 history 에 둠), 주소 키 2종(§4.5).
-- `silver_license_current` — grain `(dataset, mgtno)`. history 의 `is_current` 슬라이스 +
-  좌표 보정 컬럼(§4.5, geocode 조인).
+  **정당한 원복(A→B→A)은 보존**한다 — 전역 `(dataset, mgtno, content_hash)` dedup 금지.
+  파생 컬럼: 자치구 `district`(주소 파싱 — 이력 집계를 위해 history 에 둠), 주소 키 2종(§4.5),
+  `updatedt_ts`/`lastmodts_ts`(+정렬 전용 `*_sort`, 결측=epoch).
+- `silver_license_current` — grain `(dataset, mgtno)`. history 정렬 **내림차순 최상위 1행**
+  (`row_number()=1`) + 좌표 보정 컬럼(§4.5, geocode 조인).
 - `gold_commerce_license_status_current` — **current 기준 스냅샷 집계**(grain
   `(district, dataset, trdstategbn)`). silver `ref()` 만, 신규 파싱·중복제거 금지.
   일별 추이/상태 전이 gold 는 date-spine 설계가 필요해 phase-2 로 이연.
-- materialization 은 전부 `table` 전량 재빌드(입력이 변경로그라 소형).
-  incremental 은 R2 Data Catalog 이슈로 당분간 보류(후속 이슈).
+- materialization 은 전부 `table` 전량 재빌드 — **silver 는 bronze 의 순수 함수**(멱등·재처리
+  자동). incremental 은 R2 Data Catalog 이슈로 당분간 보류(후속 이슈). **단위 재적재/삭제**는
+  bronze 워터마크 파일(§2.1.1)과 dbt vars(`exclude_datasets`/`exclude_observed_dates`/
+  `exclude_load_dates`/`exclude_bronze_run_ids`)로 제어 — 운영 가이드:
+  `dbt/domains/commerce/docs/rebuild-and-ops.md`.
+- **타임존 정책(2026-07-06 재확정 — KST 일원화, 직전 #34 UTC 정책을 뒤집음)**: silver 의 timestamp
+  컬럼은 **전부 KST(naive)**. `updatedt_ts`/`lastmodts_ts` 는 KST 원문 파싱 후 **무변환**(원문 문자열도
+  보존), `collected_at` 은 bronze 의 UTC 값을 **+9h 하여 KST 로 변환**(bronze 는 UTC 원본 유지 —
+  소스 진실). 날짜 컬럼(`observed_date`/`load_date`/인허가·폐업일)은 시간 정보가 없는 KST 달력 날짜로
+  유지 — 전 컬럼이 KST 라 일별 집계는 `date(ts)` 가 곧 KST 날짜. 정리: `dbt/domains/commerce/docs/timestamps-and-nulls.md`.
 
 ## 3. 단계별 구현 방법 (to-do)
 
@@ -178,16 +191,17 @@ Iceberg 테이블 + 이 상태파일을 삭제해도 raw 는 불변이라 **전�
 - **완료 기준**: `dbt parse` 성공, Step 4 데이터로 source 조회·freshness **실행** 확인
   (freshness pass 는 일일 적재 가동 상태에 의존하므로 완료 조건으로 삼지 않음).
 
-### Step 6. silver 모델 + 테스트
+### Step 6. silver 모델 + 테스트 *(구현 완료 — 2026-07-05 암묵 버저닝으로 개정)*
 
 - **방법**: §2.2 계약대로 `models/silver/silver_license_history.sql`,
   `silver_license_current.sql`. 파싱은 `json_extract_scalar(record_json, '$.FIELD')` →
-  19 공통 컬럼 + `district`(정규식 `서울특별시\s+(\S+구)`, 도로명 우선·지번 폴백)·주소 키
-  2종 파생(모두 history 에서). 테스트: grain unique 2종 ·
-  `assert_uses_publishable_runs`(dataset 단위 게이트) · history 기간 겹침 0건 ·
-  **flip-flop 픽스처**(A→B→A 원복 보존 + 인접 중복 제거 확인).
-- **완료 기준**: 소형 데이터셋으로 `dbt run+test` 전체 PASS,
-  current 행수 = 활성 MGTNO 유니크 수.
+  공통 컬럼(+LASTMODTS, '' → null) + `district`(정규식 `서울특별시\s+(\S+구)`, 도로명
+  우선·지번 폴백)·주소 키 2종 파생(모두 history 에서). 테스트: 행 유니크
+  (dataset, mgtno, collected_at, content_hash) · current grain unique ·
+  `assert_uses_publishable_runs`(dataset 단위 게이트) ·
+  인접 중복 0건(A→B→A 원복 보존 확인 포함).
+- **완료 기준**: `dbt run+test` 전체 PASS, current 행수 = 활성 MGTNO 유니크 수.
+  (구 SCD2 형태로 dev 실측 완료 이력 있음 — 개정 후 재검증은 transform DAG 첫 가동으로.)
 
 ### Step 7. 전체 39종 백필 + 전수 검증
 
@@ -215,15 +229,17 @@ Iceberg 테이블 + 이 상태파일을 삭제해도 raw 는 불변이라 **전�
   (일별 추이·상태 전이 gold 는 date-spine 설계와 함께 phase-2.)
 - **완료 기준**: `dbt run+test` PASS, gold 는 `ref(silver)` 만 참조.
 
-### Step 10. transform DAG + 마무리
+### Step 10. transform DAG + 마무리 *(DAG 구현 완료 2026-07-05 — 잔여 문서 정리 후속)*
 
-- **방법**: `commerce_localdata_transform` DAG(명칭은 §7-5 논의 항목 — #73 준수안이나 수집
-  DAG 명명 계열과 갈림. BashOperator 4단: dbt run silver → test silver →
-  run gold → test gold, `common_dbt_smoke.py` 와 동일한 dbt venv/env 계약, 수집·적재 이후 cron).
-  기존 pandas silver([silver_tasks.py](../../include/silver/silver_tasks.py)) deprecated 표기,
-  [storage.md](../architecture/storage.md) 의 구식 기술("전체 페이지 NDJSON") 갱신,
-  [incremental-sort-diff.md](bronze/incremental-sort-diff.md) §6 오픈 이슈 종결,
-  분기별 full_reconcile 운영 캘린더 문서화, change-log 기록.
+- **구현됨**: `commerce_localdata_transform` DAG — schedule 05:00 KST(적재 04:00 이후),
+  BashOperator 2단: dbt run silver → test silver (gold 단계는 Step 9 구현 시 2단 추가).
+  `common_dbt_smoke.py` 와 동일한 dbt venv/env 계약(`DBT_BIN`=이미지 dbt venv,
+  target 기본 dev — `.env.commerce` 의 `COMMERCE_DBT_TARGET`/`COMMERCE_DBT_PROJECT_DIR`).
+  DAG 는 무상태(전량 재빌드 오케스트레이션만) — 재실행 항상 안전.
+- **잔여(후속)**: 기존 pandas silver([silver_tasks.py](../../include/silver/silver_tasks.py))
+  deprecated 표기, [storage.md](../architecture/storage.md) 의 구식 기술("전체 페이지 NDJSON")
+  갱신, [incremental-sort-diff.md](bronze/incremental-sort-diff.md) §6 오픈 이슈 종결,
+  분기별 full_reconcile 운영 캘린더 문서화.
 - **완료 기준**: dev 에서 수집 → bronze 적재 → geocode → transform 이 하루 사이클로
   end-to-end 성공. 기존 R2-parquet silver 경로에 신규 기록 없음.
 
@@ -370,8 +386,8 @@ CREATE TABLE IF NOT EXISTS <catalog>.commerce.bronze_geocode_address (
 
 ```text
 [Step 1 문서] → [2 적재 엔진·상태 ✓] → [3 적재 DAG ✓] → [4 소형 백필(이미지 통합)] → [5 dbt 골격 ✓]
-→ [6 silver+테스트 ✓] → [7 전체 백필] → [8a API·EPSG 확정 → 8b geocode 수집 → 8c 조인 → 8d 주소 백필]
-→ [9 gold] → [10 transform DAG + 마무리]
+→ [6 silver+테스트 ✓(07-05 암묵 버저닝 개정)] → [7 전체 백필] → [8a API·EPSG 확정 → 8b geocode 수집
+→ 8c 조인 → 8d 주소 백필] → [9 gold] → [10 transform DAG ✓ + 잔여 문서 정리]
 ```
 (✓ = 코드 구현 완료. 4·7 백필과 dbt run/test 는 Trino·PyIceberg·dbt-trino 설치된 이미지에서 검증.)
 
@@ -389,4 +405,4 @@ Step 8a(API 조사·좌표계 판별)는 Step 2~7 과 독립이므로 **병행 �
 | 6 | (해결) 수집·적재 **분리** — `commerce_load_bronze` 별도 DAG. 수집 DAG 는 Trino 무의존(raw-only 복원) | 반영 완료 |
 | 7 | prod 버킷 명칭 정리(`seoul-prod` 문서 vs 호스트 실제 `seoul`) — prod 전환 전 | 호스트 측 정리 |
 | 8 | `dbt/domains/commerce/` 신설 — 번들 밖·별도 git 저장소(dbt) 작업, 브랜치/PR 절차 준수 | 사전 합의 |
-| 9 | UPDATEDT 역행(정정으로 과거값 재등장) 시 버전 순서 — 관측 순서 우선 여부(§2.2 정렬키) | 모델링 결정 |
+| 9 | (결정 2026-07-05) UPDATEDT 역행 시 버전 순서 — **소스 시각 우선**(UPDATEDT→LASTMODTS 정렬, 사용자 확정. §2.2) | 반영 완료 |

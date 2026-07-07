@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 from typing import Iterable, Iterator
 
 from bronze import load_state
-from common.hashing import sha256_hex
-from common.settings import get_settings
+from commerce_core.hashing import sha256_hex
+from commerce_core.settings import get_settings
 from common.storage import Storage
 from security import assert_identifier
 

@@ -16,13 +16,17 @@ Airflow 카테고리 번들이다. **서빙 DB·외부 매니페스트 없이** 
 ## 데이터 흐름
 
 ```text
-bronze  {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl   # API당 1파일(원본 페이지 NDJSON)
+raw     {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl   # API당 1파일(원본 row-NDJSON 증분)
 state   .../run_id=<...>/_markers/<short>.completed|.incomplete + _RUN.*                        # 수집 결과 마커(DB·매니페스트 대체)
-silver  {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet  # 공통 19컬럼 정규화 (로직만 보존·DAG 미와이어링)
+bronze  Iceberg <catalog>.commerce.bronze_localdata_license (+ collection_run_manifest)         # raw 증분의 append-only 변경로그 (commerce_load_bronze)
+silver  dbt/domains/commerce — silver_license_history · silver_license_current                  # 파싱·정제·암묵 버저닝 (commerce_localdata_transform)
 ```
 
-- **현 DAG 라인은 bronze(원본 수집) 전용**이다. silver 가공 로직은 [include/silver/](include/silver/)
-  에 보존되어 있으나 DAG 오케스트레이션에서 분리되어 있다(별도 silver DAG 없음).
+- **DAG 라인 3단**: 수집(`commerce_collect_raw`/`commerce_recollect_raw`) →
+  Iceberg 적재(`commerce_load_bronze`, 04:00 KST) → dbt silver 변환
+  (`commerce_localdata_transform`, 05:00 KST). 설계: [docs/pipeline/medallion-implementation-plan.md](docs/pipeline/medallion-implementation-plan.md).
+- 구 pandas silver 로직([include/silver/](include/silver/), R2 parquet 경로)은 보존만 —
+  silver 산출은 dbt(Trino/Iceberg)가 담당한다.
 - **전체 순회 + 완전성 점검**: 1회 ≤1000건(`SEOUL_PAGE_SIZE`)씩 마지막 페이지까지 순회하고
   수집건수 == `list_total_count` 를 확인해야 `completed` 마커. 불완전은 `incomplete` 마커.
 - **DAG 실행 1회 = run_id 폴더 1개**, bronze 는 그 폴더 안에서만 파일 생성.
@@ -63,7 +67,8 @@ DAG 임포트 시 [include/commerce_core/env.py](include/commerce_core/env.py) �
 ```bash
 docker compose up -d                # 루트의 docker-compose.yml (postgres/trino/airflow×4)
 # UI: http://localhost:30585
-# DAG: commerce_collect_raw(전체 수집) · commerce_recollect_raw(미완료만 6h 재수집) — UI 에서 토글 ON
+# DAG: commerce_collect_raw(전체 수집) · commerce_recollect_raw(미완료만 6h 재수집)
+#      · commerce_load_bronze(Iceberg 적재 04:00) · commerce_localdata_transform(dbt silver 05:00) — UI 에서 토글 ON
 # Grid/Graph 에서 ingest_one[<API>] 매핑으로 API별 성공/실패/대기 확인(map_index 라벨)
 ```
 
@@ -92,6 +97,8 @@ dags/
 └─ domains/
    └─ commerce/                  # ★ 카테고리 자립 단위
       ├─ commerce_raw.py     # DAG: commerce_collect_raw · commerce_recollect_raw (sys.path+env 부트스트랩)
+      ├─ commerce_load_bronze.py        # DAG: raw 증분 → Iceberg bronze 적재(워터마크·manifest)
+      ├─ commerce_localdata_transform.py # DAG: dbt silver run→test 오케스트레이션
       ├─ include/                 # PYTHONPATH 루트 (common/bronze/silver 가 top-level)
       │  ├─ common/               # settings · env · storage · paths · schemas · hashing · registry · notify(알림 IF)
       │  ├─ bronze/               # clients · validators · bronze_tasks(NDJSON+마커) · markers(재수집) · resolve
