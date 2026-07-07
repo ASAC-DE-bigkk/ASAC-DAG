@@ -33,6 +33,7 @@ from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 
 from common.errors.airflow import problem_failure_callback
+from common.runmetrics import track
 
 from seoul_transit import masters
 from seoul_transit.masters import SPECS, MasterSpec
@@ -282,21 +283,22 @@ with DAG(
         _record_problem = problem_failure_callback(
             domain="transit", source_system=_spec.source_system
         )
+        # 실행 메트릭(#188) — 콜러블을 track 으로 래핑(레코드는 dags/metrics/ 에 적재).
         _land = PythonOperator(
             task_id=f"land_{_spec.dataset}",
-            python_callable=land_master,
+            python_callable=track(layer="bronze", domain="transit")(land_master),
             op_kwargs={"spec_key": _spec.dataset},
             on_failure_callback=[_record_problem],
         )
         _load = PythonOperator(
             task_id=f"load_{_spec.dataset}",
-            python_callable=load_master,
+            python_callable=track(layer="bronze", domain="transit")(load_master),
             op_kwargs={"spec_key": _spec.dataset},
             on_failure_callback=[_record_problem],
         )
         _verify = PythonOperator(
             task_id=f"verify_{_spec.dataset}",
-            python_callable=verify_master,
+            python_callable=track(layer="bronze", domain="transit")(verify_master),
             op_kwargs={"spec_key": _spec.dataset},
             on_failure_callback=[_record_problem],
         )
