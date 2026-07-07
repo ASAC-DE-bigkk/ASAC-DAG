@@ -1,18 +1,25 @@
-"""#146 — KOPIS 자정 대량 400 대응 2건.
+"""#146 — KOPIS 자정 대량 400 대응 2건 (+#152 common.http 전환 후 재시도 분담).
 
-① 400/429 1회 백오프 재시도: '일시(자정 rate-limit)'와 '지속(진짜 범위 밖/오류)'을
-   구분한다. 7/4·7/5 실증: rate-limit 400 이 #84 오버슛 처리에 '목록 끝'으로 오인돼
-   목록이 1페이지(100행)에서 조용히 절단됐다.
+① 400 1회 백오프 재시도(도메인 판정): '일시(자정 rate-limit)'와 '지속(진짜 범위
+   밖/오류)'을 구분한다. 7/4·7/5 실증: rate-limit 400 이 #84 오버슛 처리에 '목록
+   끝'으로 오인돼 목록이 1페이지(100행)에서 조용히 절단됐다.
+   **429/5xx 는 #152 부터 common HttpCore 소관**(backoff+jitter+Retry-After) —
+   culture 는 core 가 정당하게 비재시도 처리하는 400 만 도메인 지식으로 1회 재시도.
 ② detail 크롤의 목록 재조회 제거: 같은 run 에 이미 랜딩된 sibling 목록 raw 에서
    id 를 재사용(자정 호출 감축). 목록이 아직 안 랜딩됐으면 기존 API 재조회로 폴백.
+
+스텁 경계는 Transport(#152) — 진짜 HttpCore 를 통과시켜 core 재시도와 도메인
+재시도의 상호작용까지 실제 경로로 검증한다.
 """
 from __future__ import annotations
 
 import json
 
 import pytest
-import requests
 
+from common.http.contract import TransportResponse
+from common.http.core import HttpCore
+from common.http.errors import HttpProblemError
 from culture_ingest.common.config import RunContext
 from culture_ingest.common.http import Page
 from culture_ingest.common.landing import Landing, LocalSink
@@ -26,79 +33,74 @@ def _xml_page(*ids: str) -> bytes:
     return f"<dbs>{rows}</dbs>".encode()
 
 
-class _Resp:
-    def __init__(self, status: int, body: bytes = b""):
-        self.status_code = status
-        self.content = body
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            err = requests.HTTPError(f"{self.status_code} Client Error")
-            err.response = self
-            raise err
+def _resp(status: int, body: bytes = b"") -> TransportResponse:
+    return TransportResponse(status=status, content=body)
 
 
-class _SeqSession:
-    """cpage 별 응답 '시퀀스'를 돌려주는 스텁 — 같은 페이지 재요청 시 다음 원소."""
+class _SeqTransport:
+    """cpage 별 응답 '시퀀스'를 돌려주는 Transport 스텁 — 같은 페이지 재요청 시 다음 원소."""
 
-    def __init__(self, sequences: dict[int, list[_Resp]]):
+    def __init__(self, sequences: dict[int, list[TransportResponse]]):
         self._seq = {k: list(v) for k, v in sequences.items()}
         self.calls: list[int] = []
 
-    def get(self, url, params=None, timeout=None):
+    def send(self, method, url, *, params, headers, timeout):
         page = params["cpage"]
         self.calls.append(page)
         seq = self._seq[page]
         return seq.pop(0) if len(seq) > 1 else seq[0]
 
 
-def _client(sequences: dict[int, list[_Resp]]) -> KopisClient:
-    c = KopisClient(service_key="test-key-123")
-    c.session = _SeqSession(sequences)
-    c.retry_delay_sec = 0  # 테스트에서 sleep 제거
-    return c
+def _client(sequences: dict[int, list[TransportResponse]]) -> tuple[KopisClient, _SeqTransport]:
+    transport = _SeqTransport(sequences)
+    core = HttpCore(source="kopis", transport=transport, rate_limit=None,
+                    sleep=lambda s: None)  # 테스트에서 core 백오프 sleep 제거
+    c = KopisClient(service_key="test-key-123", retry_delay_sec=0, core=core)
+    return c, transport
 
 
-# ── ① 400 재시도 (일시 vs 지속 구분) ──────────────────────────────────────────
+# ── ① 400 재시도 (일시 vs 지속 구분 — 도메인 소관) ────────────────────────────
 
 def test_transient_400_retried_and_list_continues():
     """자정 rate-limit 흉내: 2페이지 첫 요청 400 → 재시도 성공 → 목록이 계속된다."""
-    c = _client({
-        1: [_Resp(200, _xml_page("A", "B"))],
-        2: [_Resp(400), _Resp(200, _xml_page("C", "D"))],  # 일시 400 후 회복
-        3: [_Resp(200, _xml_page("E"))],                    # 짧은 페이지 = 끝
+    c, transport = _client({
+        1: [_resp(200, _xml_page("A", "B"))],
+        2: [_resp(400), _resp(200, _xml_page("C", "D"))],  # 일시 400 후 회복
+        3: [_resp(200, _xml_page("E"))],                    # 짧은 페이지 = 끝
     })
     pages = list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
     assert [p.row_count for p in pages] == [2, 2, 1], "일시 400 이 목록을 끊으면 안 됨"
-    assert c.session.calls == [1, 2, 2, 3]
+    assert transport.calls == [1, 2, 2, 3]
 
 
 def test_persistent_overshoot_400_still_ends_list():
     """진짜 범위 밖(지속 400)은 재시도 후에도 400 → #84 대로 목록 끝."""
-    c = _client({
-        1: [_Resp(200, _xml_page("A", "B"))],
-        2: [_Resp(200, _xml_page("C", "D"))],
-        3: [_Resp(400)],  # 지속 400 (재요청에도 같은 응답)
+    c, transport = _client({
+        1: [_resp(200, _xml_page("A", "B"))],
+        2: [_resp(200, _xml_page("C", "D"))],
+        3: [_resp(400)],  # 지속 400 (재요청에도 같은 응답)
     })
     pages = list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
     assert [p.row_count for p in pages] == [2, 2]
-    assert c.session.calls == [1, 2, 3, 3]  # 재시도로 2회 확인 후 종료
+    assert transport.calls == [1, 2, 3, 3]  # 재시도로 2회 확인 후 종료
 
 
 def test_first_page_persistent_400_raises():
     """1페이지 지속 400 = 잘못된 파라미터/키 — 재시도 후에도 실패면 raise."""
-    c = _client({1: [_Resp(400)]})
-    with pytest.raises(requests.HTTPError):
+    c, transport = _client({1: [_resp(400)]})
+    with pytest.raises(HttpProblemError):
         list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
-    assert c.session.calls == [1, 1]
+    assert transport.calls == [1, 1]
 
 
-def test_transient_429_also_retried():
-    c = _client({
-        1: [_Resp(429), _Resp(200, _xml_page("A"))],
+def test_transient_429_retried_by_core():
+    """429 는 core 소관(#152) — 같은 core.get 안에서 backoff 재시도로 회복돼야 한다."""
+    c, transport = _client({
+        1: [_resp(429), _resp(200, _xml_page("A"))],
     })
     pages = list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
     assert [p.row_count for p in pages] == [1]
+    assert transport.calls == [1, 1]  # core 내부 재시도 — 도메인 400 재시도와 무관
 
 
 # ── ② detail 목록 재조회 제거 (랜딩된 raw 재사용 + API 폴백) ──────────────────

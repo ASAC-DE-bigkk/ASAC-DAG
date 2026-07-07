@@ -3,6 +3,18 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-07 — HTTP 전송 계층 common.http 전환 (#152)
+
+- **culture 가 루트 `common/http`(#78) 소비자로** (#152) — 6/6 도메인 완성, 마지막 잔여 중복 해소.
+  KOPIS = `HttpCore`+`QueryKey`(키가 URL 문자열에서 사라져 #144 노출 표면 자체 제거),
+  서울 = `SeoulOpenApiClient`(PathKey) 합성. 예외는 `requests.HTTPError` →
+  `HttpProblemError`(자체 redact + #77 typed 적재). → `source/clients.py` · `common/http.py`
+- **재시도 분담 정리** — 429/5xx·연결 오류 = core(backoff+jitter+Retry-After, 기존 1회보다
+  강화) / **자정 rate-limit 400 1회 재시도(#146)만 도메인 잔류**(core 는 400 을 정당하게
+  비재시도). 페이징·probe(#147)·오버슛=끝(#84)·행 카운트는 culture 유지. 테스트 스텁은
+  session → **Transport 경계**로 이전(진짜 HttpCore 통과). detail 단건 관용 경계에
+  `HttpProblemError` 추가. → `source/ingest.py` · `tests/`
+
 ## 2026-07-07 — 자정런 전멸 핫픽스 + DAG 배선 정적 검증 (#182)
 
 - **culture_bronze import 누락 수정** (#182) — #148이 `_plan`에 `load_baselines_for_target`
