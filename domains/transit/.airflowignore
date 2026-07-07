@@ -1,0 +1,4 @@
+# Airflow 3.x uses glob syntax for DAG ignore files.
+seoul_transit/**
+docs/**
+tests/**
