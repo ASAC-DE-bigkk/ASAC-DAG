@@ -19,6 +19,8 @@ class Dataset:
     # endpoint: KOPIS 경로(예: "pblprfr") 또는 서울 서비스명(예: "culturalEventInfo")
     endpoint: str
     load_pattern: str  # "interval_append"(구간) | "snapshot_append"(스냅샷) | "scd2_dim"(차원)
+    # ※ scd2_dim 은 설계 의도 — silver v1(ASAC-DBT#50)은 최신본 dim 으로 보류(bronze 가
+    # 이력 박제, 소급 구축 가능).
     title: str
     uses_date_window: bool = False  # stdate/eddate 날짜창을 받는 엔드포인트인지
     # 아래 둘은 detail 종류에서만 사용: id를 어디서 수집할지

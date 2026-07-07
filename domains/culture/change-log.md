@@ -3,6 +3,16 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-06 — silver/gold 재설계 완료 (ASAC-DBT#50 · PR ASAC-DBT#52)
+
+- **silver 9모델 + gold 3마트 재구축** — #48 공통축 canonical(공간 5컬럼·KST 시간·계보 사전) 전면 적용.
+  dedup 은 `load_date desc` 우선(proxy/백필 관측 역전 방지 — 7/1 proxy 라이브 검증). 설계·계획 문서는
+  `docs/design/2026-07-06-culture-silver-gold-redesign*.md`.
+- **culture_transform 에 `--exclude package:asac_axes`** — 패키지 자체 dim 이 타 레포 로더(#154) 의존이라
+  미적재 환경에서 ERROR → culture 는 자기 모델만 빌드/테스트(패키지 seed·매크로·제네릭 테스트는 사용).
+  → `culture_transform.py`
+- **datasets.py scd2_dim 주석 갱신** — silver v1 은 최신본 dim 보류(설계 §3-C), bronze 박제로 소급 가능.
+
 ## 2026-07-06 — culture_maintenance DAG (#157)
 
 - **주간 Iceberg 유지보수 DAG 신설** (#157) — `maintain >> storage_cleanup`, 일요일 04:30 KST

@@ -5,7 +5,7 @@
 
 체인: dbt_source_freshness → dbt_seed → dbt_run → dbt_test
   * source freshness — sources.yml의 계약(경고 30h/에러 48h)을 실측. error만 실패.
-  * seed — sema_branch_gu(시립미술관 분관→자치구). 작아서 매 run 멱등 갱신.
+  * seed — sema_branch_location(분관 좌표)·sejong_location + asac_axes 패키지 seed(행정동 크로스워크·경계).
   * run/test — silver 9종 + gold 3종 빌드 후 계약 테스트.
 
 dbt 프로젝트는 compose가 마운트한 ``/opt/airflow/dbt/domains/culture``(ASAC-DBT),
@@ -80,10 +80,14 @@ with DAG(
     seed = BashOperator(task_id="dbt_seed", bash_command=_dbt("seed"),
                         on_failure_callback=record_culture_problem)
 
-    run_models = BashOperator(task_id="dbt_run", bash_command=_dbt("run"),
+    # asac_axes 패키지 자체 모델(dim_admin_dong)은 타 레포 로더(#154) 의존이라 이 환경에서 ERROR —
+    # culture 변환은 자기 모델만 빌드/테스트한다 (패키지 seed·매크로·제네릭 테스트는 계속 사용).
+    run_models = BashOperator(task_id="dbt_run",
+                              bash_command=_dbt("run --exclude package:asac_axes"),
                               on_failure_callback=record_culture_problem)
 
-    test_models = BashOperator(task_id="dbt_test", bash_command=_dbt("test"),
+    test_models = BashOperator(task_id="dbt_test",
+                               bash_command=_dbt("test --exclude package:asac_axes"),
                                on_failure_callback=record_culture_problem)
 
     freshness >> seed >> run_models >> test_models
