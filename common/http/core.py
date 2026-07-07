@@ -24,6 +24,17 @@ from common.http.errors import HttpProblemError
 from common.errors import types as error_types
 from common.security import redact
 
+# 실행 메트릭(#188) 카운터 훅 — 컬렉터가 활성일 때만 요청/재시도를 집계한다(비활성 기본 no-op).
+# runmetrics 부재/오류 시에도 core 동작은 불변(계측만 비활성) — 안전 폴백.
+try:  # pragma: no cover - 폴백 분기
+    from common.runmetrics import note_http_request, note_http_retry
+except Exception:  # noqa: BLE001
+    def note_http_request() -> None:  # type: ignore[misc]
+        ...
+
+    def note_http_retry() -> None:  # type: ignore[misc]
+        ...
+
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
@@ -124,6 +135,7 @@ class HttpCore:
         last_error: BaseException | None = None
         for attempt in range(1, attempts + 1):
             self._respect_rate_limit()
+            note_http_request()                           # #188: 요청 1회(no-op if 비활성)
             try:
                 response = self._transport.send(
                     method, applied.url, params=applied.params,
@@ -134,6 +146,7 @@ class HttpCore:
                                self.source, method, redact(applied.url),
                                type(exc).__name__, attempt, attempts)
                 if attempt < attempts:
+                    note_http_retry()                     # #188: 재시도 1회
                     self._sleep(self._backoff_delay(attempt, None))
                 continue
 
@@ -145,6 +158,7 @@ class HttpCore:
                            response.status, attempt, attempts)
             if not _is_retryable_status(response.status) or attempt >= attempts:
                 break
+            note_http_retry()                             # #188: 재시도 1회
             self._sleep(self._backoff_delay(attempt, response))
 
         raise self._problem_error(method, applied.url, last_status, last_error, attempts)
