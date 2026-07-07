@@ -7,6 +7,21 @@
 
 ## 2026-07-07
 
+### 39. 버전 정렬 1순위에 LASTMODTS 폴백 — UPDATEDT 결측 시 최종수정시점으로 정렬
+
+request:
+- UPDATEDT 가 없으면 "MODDT"(최종수정시점)로도 정렬되게 할 것 + MODDT 전건 존재 여부 확인.
+
+response:
+- 컬럼 확인: 원천 날짜/수정 컬럼은 UPDATEDT·LASTMODTS·APVPERMYMD·DCBYMD·APVCANCELYMD·
+  CLGSTDT/CLGENDDT·ROPNYMD. "MODDT"에 해당하는 것은 **LASTMODTS**(별도 MODDT 컬럼 없음).
+- 커버리지 실측: history 1,344,765행 전부 updatedt_ts·lastmodts_ts **100% 존재**(결측 0) →
+  현재 UPDATEDT 결측 0건이라 폴백 필요 행 없음(순수 방어적 개선).
+- dbt silver(feat/45): `updatedt_sort` 를 `coalesce(updatedt_ts, lastmodts_ts, epoch)` 로 변경
+  (기존 `coalesce(updatedt_ts, epoch)`). UPDATEDT 없는 행이 epoch(최하위)로 밀리지 않고 LASTMODTS 로
+  정렬됨. lastmodts_sort(2순위)·grain·dedup 불변. 재빌드 행수·테스트 15/15 **동일**(무영향 확인).
+  schema.yml·timestamps-and-nulls.md 갱신.
+
 ### 38. silver gu/동 파싱 — 시도 접두 변형(서울시·무공백 결합형) 대응
 
 request:
