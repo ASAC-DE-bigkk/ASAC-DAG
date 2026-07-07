@@ -1,8 +1,11 @@
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from weather_ingest.common.runtime import (
     create_schema_if_needed,
+    r2_env,
+    r2_env_name,
     sql_int,
     sql_string,
     sql_timestamp,
@@ -14,6 +17,31 @@ from weather_ingest.kma import SOURCE_ID, request_params_json
 BRONZE_TABLE = "bronze_kma_vilage_fcst"
 KST = ZoneInfo("Asia/Seoul")
 MAX_KMA_INSERT_QUERY_CHARS = 900_000
+PYICEBERG_CHUNK_ROWS = 50_000
+KMA_BRONZE_COLUMNS = (
+    "request_id",
+    "source_id",
+    "request_params_json",
+    "place_id",
+    "base_date",
+    "base_time",
+    "nx",
+    "ny",
+    "category",
+    "fcst_date",
+    "fcst_time",
+    "fcst_value",
+    "raw_object_key",
+    "payload_hash",
+    "http_status",
+    "result_code",
+    "result_msg",
+    "total_count",
+    "item_count",
+    "collected_at",
+    "load_date",
+    "dag_run_id",
+)
 
 
 def ensure_kma_bronze_schema(cursor, qualified_table: str) -> None:
@@ -91,6 +119,150 @@ def validate_kma_row_count(
             "KMA bronze validation failed: "
             f"total_count={total_count}, parsed row_count={parsed_count}, nx={nx}, ny={ny}"
         )
+
+
+def validate_kma_bronze_row_batch(batch: dict) -> None:
+    validate_kma_row_count(
+        batch["rows"],
+        batch["metadata"],
+        int(batch["nx"]),
+        int(batch["ny"]),
+        allow_partial_page=True,
+    )
+
+
+def iter_kma_bronze_records(row_batches: list[dict], dag_run_id: str):
+    for batch in row_batches:
+        metadata = batch["metadata"]
+        rows = batch["rows"]
+        base_date = batch["base_date"]
+        base_time = batch["base_time"]
+        nx = int(batch["nx"])
+        ny = int(batch["ny"])
+        collected_at = batch["collected_at"]
+        validate_kma_bronze_row_batch(batch)
+        request_params = request_params_json(
+            base_date,
+            base_time,
+            nx,
+            ny,
+            page_no=batch.get("page_no"),
+            num_of_rows=batch.get("num_of_rows"),
+        )
+        load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
+        collected_at_utc = collected_at.astimezone(timezone.utc).replace(tzinfo=None)
+        for row in rows:
+            yield {
+                "request_id": batch["request_id"],
+                "source_id": SOURCE_ID,
+                "request_params_json": request_params,
+                "place_id": batch["place_id"],
+                "base_date": row.get("baseDate"),
+                "base_time": row.get("baseTime"),
+                "nx": int(row.get("nx")),
+                "ny": int(row.get("ny")),
+                "category": row.get("category"),
+                "fcst_date": row.get("fcstDate"),
+                "fcst_time": row.get("fcstTime"),
+                "fcst_value": row.get("fcstValue"),
+                "raw_object_key": batch["raw_object_key"],
+                "payload_hash": batch["raw_hash"],
+                "http_status": int(batch["http_status"]),
+                "result_code": metadata.get("result_code"),
+                "result_msg": metadata.get("result_msg"),
+                "total_count": metadata_int(metadata, "total_count"),
+                "item_count": metadata_int(metadata, "row_count"),
+                "collected_at": collected_at_utc,
+                "load_date": load_date,
+                "dag_run_id": dag_run_id,
+            }
+
+
+def _pyiceberg_catalog():
+    from pyiceberg.catalog.rest import RestCatalog
+
+    return RestCatalog(
+        "weather",
+        uri=r2_env("R2_DATA_CATALOG_URI"),
+        warehouse=r2_env("R2_DATA_CATALOG_WAREHOUSE"),
+        token=r2_env("R2_DATA_CATALOG_TOKEN"),
+        **{
+            "s3.endpoint": r2_env("R2_ENDPOINT"),
+            "s3.access-key-id": r2_env("R2_ACCESS_KEY_ID"),
+            "s3.secret-access-key": r2_env("R2_SECRET_ACCESS_KEY"),
+            "s3.region": os.environ.get(r2_env_name("R2_REGION"), "auto"),
+        },
+    )
+
+
+def _pyiceberg_table(schema: str):
+    return _pyiceberg_catalog().load_table(f"{schema}.{BRONZE_TABLE}")
+
+
+def _kma_pyiceberg_delete_filter(dag_run_id: str):
+    from pyiceberg.expressions import And, EqualTo
+
+    return And(EqualTo("source_id", SOURCE_ID), EqualTo("dag_run_id", dag_run_id))
+
+
+def _arrow_table(rows: list[dict]):
+    import pyarrow as pa
+
+    types = {
+        "nx": pa.int32(),
+        "ny": pa.int32(),
+        "http_status": pa.int32(),
+        "total_count": pa.int32(),
+        "item_count": pa.int32(),
+        "collected_at": pa.timestamp("us"),
+    }
+    fields = []
+    arrays = []
+    for column in KMA_BRONZE_COLUMNS:
+        arrow_type = types.get(column, pa.string())
+        fields.append(pa.field(column, arrow_type))
+        arrays.append(pa.array([row[column] for row in rows], type=arrow_type))
+    return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+
+def append_kma_bronze_row_batches_pyiceberg(
+    schema: str,
+    row_batches: list[dict],
+    dag_run_id: str,
+    *,
+    delete_existing: bool = True,
+    chunk_rows: int = PYICEBERG_CHUNK_ROWS,
+    table=None,
+) -> int:
+    if not row_batches:
+        return 0
+    if chunk_rows <= 0:
+        raise ValueError(f"chunk_rows must be positive: {chunk_rows}")
+    for batch in row_batches:
+        validate_kma_bronze_row_batch(batch)
+
+    iceberg_table = table or _pyiceberg_table(schema)
+    total = 0
+    chunk: list[dict] = []
+
+    with iceberg_table.transaction() as txn:
+        if delete_existing:
+            txn.delete(_kma_pyiceberg_delete_filter(dag_run_id))
+
+        def flush() -> None:
+            nonlocal total
+            if not chunk:
+                return
+            txn.append(_arrow_table(chunk))
+            total += len(chunk)
+            chunk.clear()
+
+        for record in iter_kma_bronze_records(row_batches, dag_run_id):
+            chunk.append(record)
+            if len(chunk) >= chunk_rows:
+                flush()
+        flush()
+    return total
 
 
 def insert_kma_bronze_rows(
