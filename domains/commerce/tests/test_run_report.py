@@ -51,17 +51,18 @@ def test_rollup_and_hierarchy():
     assert "합계(total)" in d
     # 중분류: 보건 하위는 category(식품), API 상세 존재
     assert "식품(food)" in d and "API별 신규" in d
-    # 단계 식별 이모지(색 구분): 🟣 대분류 · 🔵 중분류 · 🟠 소분류
-    assert "🟣" in d and "🔵" in d and "🟠" in d
+    # 단계 식별 마커(작은 텍스트 + 들여쓰기): 대분류=볼드 · 중분류=• · 소분류=◦
+    assert run_report.MARK_MID in d and run_report.MARK_API in d and run_report._INDENT in d
 
 
-def test_fail_names_task_and_error_before_success():
+def test_fail_names_task_and_error_before_success_with_gap():
     r = [_s(_shorts("food")[0], "failed", 0, 0, error="ERROR-500 서버 오류", task="ingest_one"),
          _s(_shorts("culture")[0], "ok", 100, 100)]
     d = _build(r)["description"]
     assert "❌ 실패" in d and "@ingest_one" in d and "서버 오류" in d   # 실패 task 명시
     assert "✅ API별" in d
     assert d.index("❌ 실패") < d.index("✅ API별")                    # 순서: 에러 → 성공
+    assert "\n\n" in d                                            # 그룹 간 빈 줄 간격
 
 
 def test_alignment_ascii_grid():

@@ -58,9 +58,9 @@ SUB_KO = {
 STAGE_KO = {"collect": "수집", "recollect": "재수집", "bronze_load": "bronze 적재", "silver": "silver 변환"}
 _LEVELS = ("ok", "warn", "fail", "miss")
 
-# 분류 단계 식별용 공용 이모지 — '단계'를 색으로 식별(내용별 아님). 상태색(❌빨강/⚠️노랑/✅초록)과
-# 겹치지 않게 보라/파랑/주황으로 선택 → 대분류/중분류/소분류.
-EMJ_MAJOR, EMJ_MID, EMJ_API = "🟣", "🔵", "🟠"
+# 분류 단계 표기 — 큰 이모지 대신 작은 텍스트 마커 + 들여쓰기로 뎁스를 식별.
+# 대분류 = **볼드**(마커 없음) · 중분류 = • · 소분류 = ◦
+MARK_MID, MARK_API = "•", "◦"
 _INDENT = "　"   # 전각 공백(들여쓰기, Discord 보존)
 
 
@@ -171,28 +171,34 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
     lines.append("**대분류별 통계** — OK성공·WN경고·FL실패·MS미수집·NEW신규\n```\n"
                  + "\n".join(tbl) + "\n```")
 
-    # ── 문제(실패/경고/미수집) 개별 목록: 한글(영문). 순서=에러 › 경고 › (성공은 아래) ──
+    # ── 섹션을 상태 그룹으로 모아 그룹 사이에 빈 줄 간격(순서: 에러 › 경고 › 성공) ──
+    overview = list(lines)  # head + 대분류 통계 표
+    err_sec, warn_sec, succ_sec = [], [], []
+
+    # (에러) 실패 — 어떤 DAG task 였는지 @task 로 명시
     if buckets["fail"]:
         det = []
         for s in buckets["fail"][:12]:
             e = redact(str(s.get("error") or "")).splitlines()[0][:80] if s.get("error") else "failed"
-            tk = f" `@{s.get('task')}`" if s.get("task") else ""   # 실패한 DAG task 명시
+            tk = f" `@{s.get('task')}`" if s.get("task") else ""
             det.append(f"- {api_lab(s)}{tk} — {e}")
         if n["fail"] > 12:
             det.append(f"- …외 {n['fail'] - 12}건")
-        lines.append("**❌ 실패(에러)**\n" + "\n".join(det))
+        err_sec.append("**❌ 실패(에러)**\n" + "\n".join(det))
+
+    # (경고) 부분 수집 + 미수집
     if buckets["warn"]:
         det = [f"- {api_lab(s)} — {_num(_new(s))}/{_num(_tot(s))}" for s in buckets["warn"][:12]]
         if n["warn"] > 12:
             det.append(f"- …외 {n['warn'] - 12}건")
-        lines.append("**⚠️ 경고(부분)**\n" + "\n".join(det))
+        warn_sec.append("**⚠️ 경고(부분)**\n" + "\n".join(det))
     if buckets["miss"]:
         ms = ", ".join(api_lab(s) for s in buckets["miss"][:20])
         if n["miss"] > 20:
             ms += f" …외 {n['miss'] - 20}"
-        lines.append(f"**⛔ 미수집(결과없음) {n['miss']}종**\n{ms}")
+        warn_sec.append(f"**⛔ 미수집(결과없음) {n['miss']}종**\n{ms}")
 
-    # ── 변경내역 없음(신규 0, 정상 수집) 요약 — 대분류별 (먼저 예산 확보) ──
+    # (성공) 변경내역 없음 요약 + API 신규 상세 — 대분류=볼드 · 중분류=• · 소분류=◦, 들여쓰기로 뎁스
     zero = defaultdict(int)
     for s in results:
         if _new(s) == 0 and _level(s.get("status")) == "ok":
@@ -202,11 +208,10 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
         parts = [f"{MAJOR_KO.get(m, m)} 하위 {c}개" for m, c in sorted(zero.items(), key=lambda x: -x[1])]
         zero_line = "**변경내역 없음(신규 0)**: " + " · ".join(parts)
 
-    # ── (성공) API 신규 상세: 대분류 › 중분류 › 소분류 아웃라인, 신규>0 만. ──
-    # 코드블록 대신 이모지 아웃라인(단계=색으로 식별) — 코드블록 안 이모지는 폭 불규칙 → 정렬 파손 회피.
     pos = [s for s in results if _new(s) > 0]
     if pos:
-        budget = _MAX_DESC - len("\n".join(lines)) - len(zero_line) - 80
+        fixed = len("\n".join(overview + err_sec + warn_sec)) + len(zero_line)
+        budget = _MAX_DESC - fixed - 120
         out, shown, used = [], 0, 0
         for mj in majors_by_new:
             mj_pos = [s for s in pos if major_of(s) == mj]
@@ -215,11 +220,11 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
             mids = defaultdict(list)
             for s in mj_pos:
                 mids[mid_key(s)].append(s)
-            seg = [f"{EMJ_MAJOR} {_major_lab(mj)} · {count_label} {_num(magg[mj]['new'])}"]
+            seg = [f"**{_major_lab(mj)}** · {count_label} {_num(magg[mj]['new'])}"]
             for mk in sorted(mids, key=lambda k: sum(_new(x) for x in mids[k]), reverse=True):
                 arr = sorted(mids[mk], key=_new, reverse=True)
-                seg.append(f"{_INDENT}{EMJ_MID} {mid_lab(arr[0])} · {count_label} {_num(sum(_new(x) for x in arr))}")
-                seg += [f"{_INDENT}{_INDENT}{EMJ_API} {api_lab(s)} · {_num(_new(s))}" for s in arr]
+                seg.append(f"{_INDENT}{MARK_MID} {mid_lab(arr[0])} · {count_label} {_num(sum(_new(x) for x in arr))}")
+                seg += [f"{_INDENT}{_INDENT}{MARK_API} {api_lab(s)} · {_num(_new(s))}" for s in arr]
             seg_text = "\n".join(seg)
             if used + len(seg_text) + 1 > budget:
                 break
@@ -227,16 +232,19 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
             used += len(seg_text) + 1
             shown += len(mj_pos)
         if out:
-            lines.append(f"**✅ API별 신규** ({EMJ_MAJOR}대분류 › {EMJ_MID}중분류 › {EMJ_API}소분류)")
-            lines += out
-            if len(pos) - shown > 0:
-                lines.append(f"…외 {len(pos) - shown}종 생략")
+            head_ln = f"**✅ API별 신규** (볼드=대분류 · {MARK_MID} 중분류 · {MARK_API} 소분류)"
+            tail = f"\n…외 {len(pos) - shown}종 생략" if len(pos) - shown > 0 else ""
+            succ_sec.append(head_ln + "\n" + "\n".join(out) + tail)
     if zero_line:
-        lines.append(zero_line)
+        succ_sec.append(zero_line)
+
+    # 그룹 조립: 비어있지 않은 그룹만, 그룹 사이 빈 줄(\n\n)로 간격 → 에러/경고/성공 시각 분리
+    groups = [g for g in (overview, err_sec, warn_sec, succ_sec) if g]
+    description = "\n\n".join("\n".join(g) for g in groups)
 
     occurred = datetime.now(_KST).strftime("%Y-%m-%d %H:%M:%S KST")
     footer = f"run_id={run_id} · observed_date={observed_date} · {occurred}"
-    return {"title": title, "description": "\n".join(lines), "footer": footer, "color": color,
+    return {"title": title, "description": description, "footer": footer, "color": color,
             "counts": {"total": total, "ok": n["ok"], "warning": n["warn"], "error": n["fail"],
                        "missing": n["miss"], "new": new_sum, "total_rows": tot_sum,
                        "majors": {m: magg[m]["new"] for m in majors_by_new}}}
