@@ -138,7 +138,7 @@ def iter_increment_rows(storage: Storage, increment_key: str,
     - **row-NDJSON**(feat/58 이후): 줄 = 레코드 1건 → 그대로 산출.
     - **page-NDJSON**(feat/58 이전): 줄 = API 페이지 응답 → `parse_page(...).rows` 로 레코드 산출.
       page 포맷은 `service_name`(LOCALDATA_*) 이 필요하다(응답 봉투 키).
-    포맷은 첫 줄로 판별(레코드=MGTNO 보유 / 페이지=봉투 구조).
+    포맷은 첫 줄로 판별(레코드=식별키 보유(MGTNO 구형/MNG_NO 신형) / 페이지=봉투 구조).
     """
     from bronze.clients import parse_page
 
@@ -150,7 +150,9 @@ def iter_increment_rows(storage: Storage, increment_key: str,
             continue
         obj = json.loads(line)
         if fmt is None:
-            fmt = "row" if (isinstance(obj, dict) and ("MGTNO" in obj or "mgtno" in obj)) else "page"
+            # 식별키 보유 = 레코드(row). v1=MGTNO/mgtno, v2(신형)=MNG_NO. 봉투(page)는 서비스명 1키.
+            fmt = "row" if (isinstance(obj, dict)
+                            and any(k in obj for k in ("MGTNO", "mgtno", "MNG_NO"))) else "page"
             if fmt == "page" and not service_name:
                 raise ValueError(f"page-NDJSON 파싱에 service_name 필요: {increment_key}")
         if fmt == "row":
