@@ -13,6 +13,7 @@ XCom 으로는 payload 없이 raw 키/메타만 오간다. 실패 격리·fail l
 
 from __future__ import annotations
 
+import concurrent.futures
 import gzip
 import hashlib
 import json
@@ -43,6 +44,9 @@ class CitydataIngestOptions:
 
     areas: tuple[str, ...] = AREAS
     max_areas: int | None = None
+    # 5분 주기 통합 수집을 위한 병렬도(I/O 바운드 — fetch+R2업로드). 121장소 실측:
+    # 순차 ~4분 → 12워커 ~5초(rate limit 무). Seoul API 보호 위해 상한은 둔다.
+    max_workers: int = 12
 
 
 def _build_sink(target: str, env_file: str | None, dry_run: bool, local_dir: str) -> Sink:
@@ -81,8 +85,8 @@ def fetch_and_land_citydata(
     if opts.max_areas is not None:
         areas = areas[: opts.max_areas]
 
-    results: list[dict] = []
-    for area_nm in areas:
+    def _fetch_one(area_nm: str) -> dict:
+        """장소 1곳 조회 + gzip + raw 적재. 장소별 격리(예외를 entry.error 로 흡수)."""
         request_id = str(uuid.uuid4())
         entry = {
             "area_nm": area_nm,
@@ -117,12 +121,17 @@ def fetch_and_land_citydata(
                     f"source not ok (code={fetched.parsed.result_code}, "
                     f"blocks={entry['block_count']})"
                 )
-                results.append(entry)
-                continue
+                return entry
             entry["ok"] = True
         except Exception as exc:  # noqa: BLE001 -- 장소별 격리, 배치는 계속
             entry["error"] = client.redact(f"{type(exc).__name__}: {exc}")
-        results.append(entry)
+        return entry
+
+    # I/O 바운드(fetch+R2업로드) 병렬 — 5분 주기 안에 121장소를 넣기 위함. 결과 순서 보존.
+    # client/sink 는 스레드 안전(요청별 urllib, boto3 put) — 실측 12워커 0에러.
+    workers = max(1, min(opts.max_workers, len(areas)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(_fetch_one, areas))
     return results
 
 
@@ -133,6 +142,7 @@ def load_citydata_bronze_from_raw(
     target: str = "dev",
     blocks: tuple[str, ...] | list[str] = DEFAULT_BRONZE_BLOCKS,
     env_file: str | None = None,
+    max_workers: int = 12,
 ) -> int:
     """raw(.json.gz)를 읽어 allowlist 블록만 bronze 에 멱등 적재. 반환: 행 수."""
     ok_results = [r for r in results if r.get("ok") and r.get("raw_object_key")]
@@ -146,33 +156,41 @@ def load_citydata_bronze_from_raw(
     sink = R2Sink(settings)
     allow = set(blocks)
 
-    rows: list[CitydataBronzeRow] = []
-    for r in ok_results:
+    def _rows_for(r: dict) -> list[CitydataBronzeRow]:
         body = gzip.decompress(sink.get(r["raw_object_key"]))
         parsed = parse_citydata_body(body)
         if not parsed.blocks:
             raise RuntimeError(f"raw blocks missing: {r['raw_object_key']}")
         body_hash = hashlib.sha256(body).hexdigest()
-        for block_name, block in parsed.blocks.items():
-            if block_name not in allow:
-                continue  # 겹침/저가치 블록은 raw 에만 보존
-            rows.append(
-                CitydataBronzeRow(
-                    request_id=r["request_id"],
-                    source_id=CITYDATA_SOURCE_ID,
-                    requested_area_nm=r["area_nm"],
-                    area_nm=parsed.area_nm,
-                    area_cd=parsed.area_cd,
-                    block_name=block_name,
-                    payload=json.dumps(block, ensure_ascii=False),
-                    payload_hash=body_hash,
-                    raw_object_key=r["raw_object_key"],
-                    http_status=r.get("http_status"),
-                )
+        return [
+            CitydataBronzeRow(
+                request_id=r["request_id"],
+                source_id=CITYDATA_SOURCE_ID,
+                requested_area_nm=r["area_nm"],
+                area_nm=parsed.area_nm,
+                area_cd=parsed.area_cd,
+                block_name=block_name,
+                payload=json.dumps(block, ensure_ascii=False),
+                payload_hash=body_hash,
+                raw_object_key=r["raw_object_key"],
+                http_status=r.get("http_status"),
             )
+            for block_name, block in parsed.blocks.items()
+            if block_name in allow  # 겹침/저가치 블록은 raw 에만 보존
+        ]
 
+    # raw 읽기(R2 get)도 I/O 바운드 — 병렬. 한 건이라도 blocks 누락이면 fail loud(기존 동일).
+    workers = max(1, min(max_workers, len(ok_results)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        row_lists = list(executor.map(_rows_for, ok_results))
+    rows: list[CitydataBronzeRow] = [row for rl in row_lists for row in rl]
+
+    # 6블록×121장소 ≈ 670행. Iceberg INSERT 는 커밋당 비용이 커서 배치를 크게 잡아
+    # 커밋 수를 줄인다(5분 주기 안에 들도록). payload 최대(따릉이)여도 쿼리 길이 여유.
     bronze = CitydataBronze(target=target)
-    return bronze.load(rows, load_date=ctx.load_date, ingest_ts=ctx.ingest_ts, dag_run_id=ctx.run_id)
+    return bronze.load(
+        rows, load_date=ctx.load_date, ingest_ts=ctx.ingest_ts,
+        dag_run_id=ctx.run_id, batch_size=100)
 
 
 def build_citydata_run_report(results: list[dict], ctx: RunContext, *, inserted: int,

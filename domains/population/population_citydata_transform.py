@@ -40,14 +40,6 @@ record_population_problem = problem_failure_callback(
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/population"
 
-# citydata 계열 모델만 선택 — 인구(silver_seoul_ppltn 계열)는 population_transform 소유.
-CITYDATA_MODELS = (
-    "dim_seoul_area "
-    "silver_citydata_cmrcl silver_citydata_cmrcl_rsb silver_citydata_transit_ppltn "
-    "silver_citydata_sbike silver_citydata_air "
-    "gold_citydata_place_latest gold_citydata_cmrcl_daily"
-)
-
 DEFAULT_PARAMS = {"target": "dev"}
 
 
@@ -64,9 +56,9 @@ def _dbt(args: str) -> str:
 
 with DAG(
     dag_id="population_citydata_transform",
-    description="Transform citydata bronze -> grain-split silvers + cross-signal golds via dbt (every 10 min).",
+    description="Transform citydata bronze -> **인구 + citydata** silver/gold via dbt (every 5 min). 단일 변환(population_transform 흡수).",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
-    schedule="5-59/10 * * * *",  # 수집(*/10) 5분 뒤 — 최신 bronze 반영
+    schedule="2-59/5 * * * *",  # 수집(*/5) 직후 — 최신 bronze 반영
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=2)},
@@ -80,18 +72,26 @@ with DAG(
         on_failure_callback=record_population_problem,
     )
 
-    # citydata silver/gold 빌드 — dbt 가 dim → silver → gold 의존성 순서를 보장.
+    # 참조 seed(area_geo + asac_axes crosswalk/boundary) 적재.
+    seed_refs = BashOperator(
+        task_id="dbt_seed",
+        bash_command=_dbt("seed"),
+        on_failure_callback=record_population_problem,
+    )
+
+    # **인구(seoul_ppltn) + citydata(seoul_citydata) 전 모델** 빌드 — 인구 silver 도 이제
+    # citydata bronze(LIVE_PPLTN_STTS)에서 나온다. asac_axes 패키지 내부 모델은 제외.
     run_models = BashOperator(
         task_id="dbt_run",
-        bash_command=_dbt(f"run --select {CITYDATA_MODELS}"),
+        bash_command=_dbt("run --exclude package:asac_axes"),
         on_failure_callback=record_population_problem,
     )
 
-    # citydata 모델 품질 테스트만 선택 실행.
+    # 품질 테스트 — population 모델만(패키지 자체 테스트는 패키지 CI 소관).
     test_models = BashOperator(
         task_id="dbt_test",
-        bash_command=_dbt(f"test --select {CITYDATA_MODELS}"),
+        bash_command=_dbt("test --exclude package:asac_axes"),
         on_failure_callback=record_population_problem,
     )
 
-    deps >> run_models >> test_models
+    deps >> seed_refs >> run_models >> test_models
