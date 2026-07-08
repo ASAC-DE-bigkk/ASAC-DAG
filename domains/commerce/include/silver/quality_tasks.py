@@ -99,3 +99,39 @@ def notify_masked_address_dong_skip_summary() -> dict:
         )
     log.info("masked address dong-skip summary: %s", metrics)
     return summary
+
+
+def report_silver_run() -> dict:
+    """silver current 를 데이터셋(API)별로 집계해 DAG 완료 리포트 전송(#218, stage=silver).
+
+    silver 는 dbt 로 전 데이터셋을 한 번에 변환하므로(태스크 단위 API 구분 없음) 변환 결과인
+    `silver_license_current` 를 **데이터셋(=short=API)별 현재 행수**로 집계해 리포트 내부를 API
+    단위로 채운다. dbt run/test 실패 등으로 조회가 불가하면 DAG 단위 실패로 리포트한다(best-effort).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from commerce_core import run_report
+
+    observed = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+    try:
+        catalog, schema, qschema = _qualified()
+        qcurrent = f"{qschema}.{CURRENT_TABLE}"
+        conn = _connect(catalog, schema)
+        try:
+            cur = conn.cursor()
+            cur.execute(  # security: allow-sql - qcurrent is built from _qualified() identifiers.
+                f"select cast(dataset as varchar) as dataset, count(*) as n "
+                f"from {qcurrent} group by 1")
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        results = [{"short": r[0], "status": "ok", "rows": _num(r[1])} for r in rows]
+    except Exception as exc:  # noqa: BLE001 — dbt 실패 등 조회 불가: DAG 단위 실패로 리포트
+        log.warning("silver 리포트 집계 실패(%s) — 실패 리포트로 대체", type(exc).__name__)
+        results = [{"short": "silver", "status": "failed",
+                    "error": "silver current 집계 실패(dbt run/test 결과 확인)"}]
+    counts = run_report.send_run_report(
+        dag_id="commerce_load_silver", run_id=observed, observed_date=observed,
+        stage="silver", results=results)
+    log.info("silver run report: %s", counts)
+    return counts
