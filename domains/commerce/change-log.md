@@ -7,6 +7,19 @@
 
 ## 2026-07-08
 
+### 47. 분류 2단계화 — 대분류(category) vs 명칭분류(sub_category) 분리
+
+request:
+- 명칭에 따른 분류와 대분류(industry)를 구분할 것.
+
+response:
+- `Dataset` 에 `sub_category` 필드 추가([schemas.py](include/commerce_core/schemas.py)) + [registry.py](include/commerce_core/registry.py)
+  로더 반영. `category`=대분류(유지), `sub_category`=명칭 기반 세분류(대분류 하위, 미지정 허용).
+- 산업 32종에 sub_category 부여: meter4·gas3·petroleum2·groundwater3·timber2·sales7·tobacco3·
+  job_agency2·education2·funeral1·emission1·animal2.
+- `test_registry.py::test_industry_has_sub_category` 추가(industry 는 sub_category 필수). 전체 pytest 296 통과.
+- (culture 56·기존 51 의 sub_category 는 후속 — 원하면 동일 방식 부여.)
+
 ### 46. 산업 상권 인허가 32종 추가 (107 → 139) + 라이브 검증
 
 request:

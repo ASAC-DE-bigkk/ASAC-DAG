@@ -48,6 +48,15 @@ def test_required_fields_and_service_name():
 
 
 def test_all_daily_collectible():
-    """현재 전 종 daily + service_name 존재 → 51종 전부 수집 대상."""
+    """현재 전 종 daily + service_name 존재 → 전 종 수집 대상."""
     assert len(registry.enabled_for_schedule("daily")) == EXPECTED_COUNT
     assert registry.pending_for_schedule("daily") == []      # 미해석(수집 제외) 없음
+
+
+def test_industry_has_sub_category():
+    """대분류(category)=industry 는 명칭분류(sub_category)를 반드시 가진다.
+    (sub_category 는 대분류 하위 세분류 — 다른 대분류는 아직 미지정 허용.)"""
+    ind = [d for d in registry.all_datasets() if d.category == "industry"]
+    assert ind, "industry 데이터셋 없음"
+    missing = [d.short for d in ind if not d.sub_category]
+    assert missing == [], f"sub_category 누락(industry): {missing}"

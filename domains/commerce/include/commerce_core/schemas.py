@@ -38,6 +38,7 @@ class Dataset:
     oa_id: str                 # 서울 열린데이터광장 데이터셋 ID (source-native)
     name_ko: str               # 원본 데이터셋명
     short: str                 # 안정적 영문 축약(저장 경로/파일명/마커 키)
-    category: str              # 분류(food/livestock/...)
+    category: str              # **대분류**(food/livestock/health_medical/.../culture/industry)
     schedule: str              # daily | monthly | irregular
     service_name: str | None   # 서울 OpenAPI 서비스명. None 이면 수집 제외
+    sub_category: str | None = None  # **명칭에 따른 분류**(대분류 하위 세분류). 미지정 가능
