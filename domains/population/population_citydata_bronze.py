@@ -131,9 +131,11 @@ def _report(**context) -> None:
 
 with DAG(
     dag_id="population_citydata_bronze",
-    description="Collect Seoul citydata (unified, 121 areas) gzip raw to R2 + block-split Iceberg bronze.",
+    description="Collect Seoul citydata (unified, 121 areas, 5min parallel) gzip raw to R2 + block-split Iceberg bronze. 인구 포함 단일 수집원.",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
-    schedule="*/10 * * * *",
+    # 5분 병렬 수집 — citydata 가 인구(LIVE_PPLTN_STTS)까지 담는 **단일 수집원**이 된다
+    # (citydata_ppltn 전용 population_bronze 은퇴). 121장소 병렬 실측 ~5초.
+    schedule="*/5 * * * *",
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 3, "retry_delay": timedelta(minutes=1)},
