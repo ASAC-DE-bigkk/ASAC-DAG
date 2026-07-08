@@ -12,7 +12,9 @@ raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 
 
 파라미터 (트리거 시 덮어쓰기 가능):
   target          "dev" | "prod"            (기본 dev -> 버킷 seoul-dev)
-  datasets        적재할 데이터셋 슬러그 일부; 빈 값 -> 활성 전체
+  datasets        적재할 데이터셋 슬러그; 빈 값 -> 활성 전체 중 daily 만
+                  (kopis_facility_detail 은 refresh="weekly" — culture_facility_refresh
+                  가 일요일 05:30 KST 에 전수 크롤, #206)
   date_from/to    YYYYMMDD; 비면 -> 롤링 [end-lookback_days, end]
   lookback_days   날짜창 크기 (boxoffice는 <=31)                       기본 31
   include_detail  KOPIS 상세 엔드포인트도 크롤(상한 있음)               기본 True

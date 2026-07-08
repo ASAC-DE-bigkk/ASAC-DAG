@@ -47,7 +47,8 @@ culture가 채택한 **12개 데이터셋**(KOPIS 6 + 서울 열린데이터 6).
 - **페이징 (`kopis_list`)** — `cpage`(1부터)·`rows`(기본 100)로 반복. 한 페이지가 `rows`보다 적게
   오면(마지막) 또는 `max_pages` 도달 시 정지.
 - **상세 (`kopis_detail`)** — 목록에서 id(`mt20id`/`mt10id`)를 `max_detail`개까지 모아, 건별로
-  `{endpoint}/{id}` 상세를 적재. `include_detail=False`면 skip.
+  `{endpoint}/{id}` 상세를 적재. `include_detail=False`면 skip. 시설 상세는 주간
+  크롤(#206) — 자정 일배치는 공연 상세만 200캡으로 돈다.
 - **예매상황판 (`kopis_boxoffice`)** — 페이징 없는 **단일 GET**(`cpage`/`rows` 무시). 기간 랭킹
   top50을 `<boxof>`로 한 번에. `stdate~eddate` **≤ 31일**(초과 시 `returncode 05`).
 - **날짜창**: `pblprfr`·`prffest`·`boxoffice`만 `stdate/eddate`를 받는다.

@@ -30,11 +30,11 @@ python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.en
 | 파라미터 | 뜻 | 기본 |
 |---|---|---|
 | `target` | `dev` / `prod` (그 외 값은 **즉시 실패**) | dev |
-| `datasets` | 적재할 슬러그 일부(빈 값 = 전체) | [] |
+| `datasets` | 적재할 슬러그(빈 값 = daily 전체 — weekly 인 시설 상세 제외, #206) | [] |
 | `date_from`/`date_to` | YYYYMMDD (비면 롤링창) | "" |
 | `lookback_days` | 날짜창 크기 (boxoffice ≤ 31) | 31 |
 | `include_detail` | KOPIS 상세 엔드포인트 크롤 | True |
-| `max_detail` | 상세 크롤당 id 상한 | 200 |
+| `max_detail` | 상세 크롤당 id 상한 (공연 상세용 — 시설 상세는 주간 DAG가 2000으로 오버라이드) | 200 |
 | `kopis_rows` | KOPIS 목록 페이지 크기 | 100 |
 | `fail_on_violation` | 계약 위반 시 run 실패 | False |
 
@@ -49,6 +49,10 @@ bronze Iceberg 적재는 파라미터가 아니라 **`load_bronze` 태스크가 
 - **특정 기간**: `date_from`/`date_to`(YYYYMMDD) 명시. 안 주면 `[end - lookback_days, end]` 롤링창.
 - **boxoffice 제약**: `stdate~eddate` **≤ 31일**(초과 시 `returncode 05`) → 긴 기간은 31일씩 나눠 재수집.
 - **상세(detail)**: `include_detail=True` + `max_detail`로 크롤 id 상한 조정.
+- **시설 상세 주간 분리(#206)**: `kopis_facility_detail`은 자정 일배치에서 제외
+  (`refresh="weekly"`). `culture_facility_refresh`(일 05:30 KST)가 목록+상세를
+  `max_detail=2000`으로 전수 크롤한다. 수동 전수 크롤:
+  `airflow dags trigger culture_bronze --conf '{"datasets": ["kopis_facility", "kopis_facility_detail"], "max_detail": 2000}'`
 
 ```bash
 # 예: boxoffice만 특정 주간 재수집 (dev, 로컬 CLI)
