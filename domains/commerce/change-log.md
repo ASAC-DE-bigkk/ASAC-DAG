@@ -7,6 +7,23 @@
 
 ## 2026-07-08
 
+### 45. raw 107종 실측 검증 + 응답 필드 커버리지 분석 + bronze 라인 검증
+
+request:
+- 현재 기준 모든 raw 호출로 수집 정상 여부 확인. 각 API 응답을 공통/비공통 필드로 분리.
+- 기존 bronze/silver 식별값이 107종에 그대로 유효한지 분석. raw·문서 정리 후 bronze/silver 라인 검증.
+
+response:
+- 107종 전량 라이브 샘플(1/5) → **수집 107/107 OK, 실패 0**. 응답 row 키 집계: 전 종 공통 14 +
+  준공통 5(`DCBYMD`/`TRDSTATENM`/`SITETEL`/`SITEWHLADDR`/`SITEPOSTNO`, 1~2종 결측) + API별 비공통(45 스키마 변형).
+- **식별값 `OPNSFTEAMCODE`·`MGTNO`·`UPDATEDT`·`LASTMODTS` = 107/107** → bronze 정렬/식별키·silver 그레인·
+  `content_hash`·`TRDSTATEGBN`(상태) 그대로 유효. silver 는 `record_json` schema-on-read(`nullif`)라 비공통/누락 무손실.
+- 문서: [docs/pipeline/bronze/api-field-coverage.md](docs/pipeline/bronze/api-field-coverage.md) 신설 + bronze README 인덱스 추가.
+- 검증: 전체 pytest 295 통과 + 신규 culture 1종(`traditional_temple`) bronze raw end-to-end 스모크
+  (격리 프리픽스 `_verify207` → status=ok, NDJSON+마커+diff-target 생성, 식별값 4개 보존, 검증 후 삭제).
+- 주의: bronze 정렬키의 `OPNSFTEAMCODE`/`LASTMODTS` 포함(#198/#193)은 별도 브랜치 → 107종 완전 적용은 #193·#198
+  머지 후. silver(dbt) 그레인은 이미 `(dataset, opnsfteamcode, mgtno)`.
+
 ### 44. 문화 상권 인허가 56종 추가 (51 → 107)
 
 request:
