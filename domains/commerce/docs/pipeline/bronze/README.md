@@ -12,6 +12,7 @@
 | [resolve-worklist.md](resolve-worklist.md) | **14종 해석 워크리스트(✅ 완료·이력 보관)** — 포털 정본 코드로 전부 해소(공중위생 비-LOCALDATA 가설은 오류로 정정) |
 | [../non-license-datasets.md](../non-license-datasets.md) | **인허가 외 격리 2종** — 위치정보·현황(비-LOCALDATA, 수집 대상 아님) |
 | [caveats.md](caveats.md) | **bronze 수집 주의사항(API별)** — 공통 특이사항 + API별 + `[bronze]`/`[silver]` 단계 태그 |
+| [api-field-coverage.md](api-field-coverage.md) | **응답 필드 커버리지(107종 실측)** — 공통 14 + 준공통 5 + API별 비공통(45 스키마), **식별값(OPNSFTEAMCODE·MGTNO·UPDATEDT·LASTMODTS)=107/107 → 기존 bronze/silver 라인 그대로 유효** |
 
 > 측정은 실키 부재로 `sample` 키(한 번에 5건) 기준. 전체 건수(`list_total_count`)·스키마·정렬
 > 안정성은 확인 가능하나, 실제 페이지 경계 동작은 실키로 재검증 권장(각 문서의 재검증 레시피).

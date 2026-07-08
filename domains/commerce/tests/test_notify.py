@@ -35,6 +35,33 @@ def test_notify_exception_routes_to_injected_notifier():
     assert context == {"short": "clinic"}
 
 
+def test_notify_schema_drift_warn_error_and_role():
+    sent = []
+
+    class Cap(notify.Notifier):
+        def send(self, *, subject, message, level="error", context=None):
+            sent.append((subject, level, message))
+
+    notify.set_notifier(Cap())
+    # coped=True(별칭 대응) → warning, subject 에 dataset·포맷전이, message 에 역할설명
+    notify.notify_schema_drift(task="bronze.collect.schema_drift", dataset="env_consulting",
+                               expected_fmt="v2", observed_fmt="v1", coped=True,
+                               sample_keys=["MGTNO", "OPNSFTEAMCODE"])
+    subject, level, message = sent[-1]
+    assert level == "warning" and "env_consulting" in subject and "v2→v1" in subject
+    assert "bronze 수집" in message                        # 역할 설명(NOTIFY_ROLES) 포함
+    # coped=False(식별키 미인식) → error
+    notify.notify_schema_drift(task="bronze.collect.schema_drift", dataset="d",
+                               expected_fmt="v1", observed_fmt="unknown", coped=False)
+    assert sent[-1][1] == "error"
+
+
+def test_role_of_lookup():
+    assert "silver" in notify.role_of("commerce_load_silver.enrich_fill_jibun")
+    assert notify.role_of("bronze.collect.schema_drift").startswith("bronze 수집")
+    assert notify.role_of("nope.task") == notify.NOTIFY_ROLES["_default"]
+
+
 def test_notify_exception_swallows_send_failure():
     class Bad(notify.Notifier):
         def send(self, **_kw):
