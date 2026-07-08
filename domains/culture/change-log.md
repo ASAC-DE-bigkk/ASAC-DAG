@@ -3,6 +3,22 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-08 — bronze pyiceberg 직접 적재 (엔진 스위치) (#203)
+
+- **26분 병목 근본 해법** — Trino `INSERT VALUES`의 커밋 고정비(1행도 4~7초)를 우회.
+  `PyicebergBronzeWarehouse`가 Arrow 로 데이터셋당 **append 1회**(커밋 1회) — 26분→2~3분
+  추정 + 스냅샷 216→12/일(옛 metadata.json 증식 동시 해소). 컬럼 계약(_COLUMNS)·멱등
+  (ingest_ts delete-then-append)은 Trino 경로와 동일 → silver/gold·조회 무영향.
+  → `common/warehouse.py`
+- **엔진 스위치(롤백 레버)** — `build_warehouse`가 env `CULTURE_BRONZE_ENGINE`로 분기,
+  **기본 trino**. pyiceberg 는 opt-in(이미지 준비+검증 후 전환). commerce 패턴 차용.
+  → `source/ingest.py`
+- **lazy import(파싱 안전)** — pyiceberg/pyarrow 를 함수 안에서만 import → 이미지에
+  pyiceberg 없어도 모듈 import·DAG 파싱 무손상(컨테이너 실측 import_errors 0). weather
+  `RestCatalog` 패턴 재사용, R2_DATA_CATALOG_* env 기존.
+- **인프라 의존성은 별도** — `Dockerfile.airflow`에 `pyiceberg[s3fs]` 추가(sample 인프라
+  레포, 멘토 승인)는 이미지 리빌드가 공유 액션이라 분리. 이미지 준비+행수 대조 후 엔진 전환.
+
 ## 2026-07-07 — HTTP 전송 계층 common.http 전환 (#152)
 
 - **culture 가 루트 `common/http`(#78) 소비자로** (#152) — 6/6 도메인 완성, 마지막 잔여 중복 해소.

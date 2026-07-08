@@ -223,3 +223,107 @@ class BronzeWarehouse:
             sql += f" WHERE ingest_ts = {_lit(ingest_ts)}"
         rows = self.client.execute(sql)
         return int(rows[0][0]) if rows else 0
+
+
+# --- pyiceberg 직접 적재 (#203) — Trino INSERT VALUES 의 커밋 고정비 우회 --------
+#
+# Trino 경로는 배치(=커밋)마다 파케이+메타데이터+카탈로그 왕복이 수 초라 대용량
+# 데이터셋에서 수십 분이 든다(세종 88MB≈13분). pyiceberg 는 Arrow 로 데이터셋당
+# append 1회 → 커밋 1회. 컬럼 계약(_COLUMNS)·멱등(ingest_ts delete-then-append)은
+# Trino 경로와 동일하게 유지해, silver/gold(dbt-trino)·조회가 같은 테이블을 그대로 읽는다.
+#
+# pyiceberg/pyarrow import 는 **함수 안 lazy** — 이미지에 pyiceberg 가 없어도 이 모듈
+# import·DAG 파싱이 안 깨진다(engine=trino 기본이면 이 경로 자체를 안 탐).
+
+# collected_at 은 bronze DDL 의 timestamp(6) = 마이크로초·타임존 없음 → Trino 경로의
+# 나이브 UTC 벽시계 문자열과 동일 의미. pyarrow 는 tz 없는 timestamp('us')로 맞춘다.
+_ARROW_INT_COLUMNS = ("record_seq",)
+_ARROW_TS_COLUMNS = ("collected_at",)
+
+
+def _bronze_columns(ds, ctx, records: list, collected_at) -> dict:
+    """records → bronze 컬럼별 값 리스트(column-oriented). pyarrow 없이 순수 변환(테스트 대상).
+
+    _COLUMNS 순서·의미를 Trino 경로(load)의 VALUES 튜플과 1:1로 맞춘다.
+    """
+    cols: dict[str, list] = {name: [] for name in _COLUMNS}
+    for seq, (raw_object_key, page_no, record) in enumerate(records):
+        cols["dataset"].append(ds.name)
+        cols["source"].append(ds.source)
+        cols["endpoint"].append(ds.endpoint)
+        cols["record_seq"].append(seq)
+        cols["record_json"].append(json.dumps(record, ensure_ascii=False))
+        cols["raw_object_key"].append(raw_object_key)
+        cols["page_no"].append(page_no)
+        cols["load_date"].append(ctx.load_date)
+        cols["ingest_ts"].append(ctx.ingest_ts)
+        cols["run_id"].append(ctx.run_id)
+        cols["collected_at"].append(collected_at)
+    return cols
+
+
+def _arrow_bronze_table(columns: dict):
+    """bronze 컬럼 dict → pyarrow.Table (Iceberg 테이블 스키마와 타입 일치). lazy import."""
+    import pyarrow as pa
+
+    fields, arrays = [], []
+    for name in _COLUMNS:
+        if name in _ARROW_INT_COLUMNS:
+            atype = pa.int32()          # Iceberg integer = 32bit
+        elif name in _ARROW_TS_COLUMNS:
+            atype = pa.timestamp("us")  # timestamp(6), tz 없음
+        else:
+            atype = pa.string()         # varchar
+        fields.append(pa.field(name, atype))
+        arrays.append(pa.array(columns[name], type=atype))
+    return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+
+class PyicebergBronzeWarehouse:
+    """culture bronze 적재 — pyiceberg 직접 write(#203). ``.load`` 인터페이스는 BronzeWarehouse 와 동일.
+
+    Trino 가 만든 기존 bronze_* 테이블을 그대로 append 한다(스키마 동일). 테이블 생성은
+    Trino 경로 소관 — 미존재 데이터셋은 명확한 에러로 안내(신규 데이터셋 첫 run 은 trino 엔진).
+    """
+
+    def __init__(self, settings: WarehouseSettings, *, catalog=None):
+        self.s = settings
+        self._cat = catalog  # 테스트 주입용; None 이면 lazy 생성
+
+    def _catalog(self):
+        if self._cat is not None:
+            return self._cat
+        from pyiceberg.catalog.rest import RestCatalog
+
+        prefix = "R2_DEV_" if self.s.catalog.endswith("_dev") else "R2_"
+        env = os.environ
+        self._cat = RestCatalog(
+            "culture",
+            uri=env[prefix + "DATA_CATALOG_URI"],
+            warehouse=env[prefix + "DATA_CATALOG_WAREHOUSE"],
+            token=env[prefix + "DATA_CATALOG_TOKEN"],
+            **{
+                "s3.endpoint": env[prefix + "ENDPOINT"],
+                "s3.access-key-id": env[prefix + "ACCESS_KEY_ID"],
+                "s3.secret-access-key": env[prefix + "SECRET_ACCESS_KEY"],
+                "s3.region": env.get(prefix + "REGION", "auto"),
+            },
+        )
+        return self._cat
+
+    def load(self, ds, ctx, records: list) -> int:
+        """레코드를 bronze 테이블에 pyiceberg 로 적재(멱등). 반환: 적재 행 수.
+
+        멱등: 이번 ``ingest_ts`` 를 지우고 append (Trino 경로의 delete-then-insert 와 동일).
+        """
+        if not records:
+            return 0
+        from pyiceberg.expressions import EqualTo
+
+        collected_at = datetime.now(timezone.utc).replace(tzinfo=None)  # tz 없는 벽시계(=Trino 경로)
+        table = self._catalog().load_table(f"{self.s.schema}.bronze_{ds.name}")
+        arrow = _arrow_bronze_table(_bronze_columns(ds, ctx, records, collected_at))
+        with table.transaction() as txn:
+            txn.delete(EqualTo("ingest_ts", ctx.ingest_ts))
+            txn.append(arrow)
+        return len(records)

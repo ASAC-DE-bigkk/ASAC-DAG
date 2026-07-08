@@ -13,6 +13,7 @@ fetch(원본 박제)와 load(bronze 적재)를 분리한 두 계열의 진입점
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -29,7 +30,11 @@ from culture_ingest.common.config import (
 from culture_ingest.common.landing import DatasetResult, Landing, LocalSink, R2Sink
 from culture_ingest.common.records import parse_records
 from culture_ingest.common.security import redact, refresh_env_secrets, register_secret
-from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_settings
+from culture_ingest.common.warehouse import (
+    BronzeWarehouse,
+    PyicebergBronzeWarehouse,
+    build_warehouse_settings,
+)
 
 from common.http.errors import HttpProblemError  # noqa: E402  (security 가 루트 보장 후)
 
@@ -434,9 +439,17 @@ def build_landing(
     return Landing(R2Sink(settings), root, ctx)
 
 
-def build_warehouse(target: str = "dev") -> BronzeWarehouse:
-    """bronze Iceberg 적재용 Trino 웨어하우스(환경변수 기반)."""
-    return BronzeWarehouse(build_warehouse_settings(target))
+def build_warehouse(target: str = "dev", *, engine: str | None = None):
+    """bronze Iceberg 적재 웨어하우스. 엔진 = env ``CULTURE_BRONZE_ENGINE`` (기본 trino, #203).
+
+    ``pyiceberg`` = 직접 write(빠름, 이미지에 pyiceberg 필요), ``trino`` = INSERT VALUES(롤백 레버).
+    둘 다 같은 bronze_* 테이블·컬럼 계약이라 하류(dbt-trino·조회)는 무관.
+    """
+    settings = build_warehouse_settings(target)
+    engine = (engine or os.environ.get("CULTURE_BRONZE_ENGINE", "trino")).strip().lower()
+    if engine == "pyiceberg":
+        return PyicebergBronzeWarehouse(settings)
+    return BronzeWarehouse(settings)
 
 
 def load_bronze_from_raw(
