@@ -1,64 +1,104 @@
-"""run_report — DAG 단위 완료 리포트(성공/경고/실패 · category 한글 · API단위) 단위테스트.
+"""run_report — 대분류(보건/문화/산업/환경)>중분류>소분류(API) 리포트 단위테스트.
 
     PYTHONPATH=dags/domains/commerce/include:dags pytest dags/domains/commerce/tests/test_run_report.py -q
 """
-from commerce_core import run_report
+import re
+
+from commerce_core import registry, run_report
+
+_DS = registry.all_datasets()
 
 
-def _s(short, status, rows=0, total=0, error=None):
-    d = {"short": short, "status": status, "rows_total": rows, "list_total_count": total}
+def _shorts(cat, k=1):
+    xs = [d.short for d in _DS if d.category == cat]
+    assert len(xs) >= k, f"{cat} 데이터셋 부족"
+    return xs[:k]
+
+
+def _s(short, status, new=0, total=0, error=None, task=None):
+    d = {"short": short, "status": status, "new": new, "total": total}
     if error:
         d["error"] = error
+    if task:
+        d["task"] = task
     return d
 
 
-def _build(results, stage="collect"):
+def _build(results, **kw):
+    kw.setdefault("stage", "collect")
     return run_report.build_run_report(dag_id="commerce_collect_raw", run_id="r1",
-                                       observed_date="2026-07-08", stage=stage, results=results)
+                                       observed_date="2026-07-08", results=results, **kw)
 
 
-def test_counts_levels_categories():
-    results = [
-        _s("general_restaurant", "ok", 100, 100),   # food 성공
-        _s("bakery", "ok", 0, 0),                    # food 0건 성공
-        _s("clinic", "partial", 50, 100),            # health_medical 경고
-        _s("hospital", "failed", 0, error="ERROR-500: 서버 오류입니다"),  # health_medical 에러
-    ]
-    rep = _build(results)
-    c = rep["counts"]
-    assert (c["total"], c["ok"], c["warning"], c["error"], c["rows"], c["empty"]) == (4, 2, 1, 1, 150, 1)
-    assert rep["color"] == run_report.COLOR_FAIL              # 실패 있으면 빨강
-    desc = rep["description"]
-    assert "❌ 실패" in desc and "hospital" in desc and "서버 오류" in desc
-    assert "⚠️ 경고" in desc and "clinic" in desc and "50/100" in desc.replace(",", "")
-    assert "0건" in desc and "bakery" in desc                 # 0건도 표기
-    assert "식품" in desc and "의료" in desc                 # category 한글
-    assert "식품: ✅2" in desc and "의료: ✅0 ⚠️1 ❌1" in desc
-    assert "(수집)" in rep["title"]                          # 스테이지 라벨
+def test_major_is_health_or_own():
+    # food/livestock/... → 보건, culture/industry/environment → 자기 자신
+    assert run_report._major("food") == "health" and run_report._major("lodging") == "health"
+    for m in ("culture", "industry", "environment"):
+        assert run_report._major(m) == m
 
 
-def test_all_ok_is_green_no_error_section():
-    rep = _build([_s("general_restaurant", "ok", 10, 10), _s("bakery", "ok", 5, 5)])
-    assert rep["color"] == run_report.COLOR_OK and rep["counts"]["error"] == 0
-    assert "❌ 실패" not in rep["description"]
+def test_rollup_and_hierarchy():
+    r = [_s(_shorts("food")[0], "ok", 100, 1000),          # 보건 > 식품
+         _s(_shorts("culture")[0], "ok", 50, 500),         # 문화 > sub_category
+         _s(_shorts("industry")[0], "ok", 30, 300),        # 산업
+         _s(_shorts("environment")[0], "ok", 10, 100)]     # 환경
+    rep = _build(r)
+    d = rep["description"]
+    assert rep["counts"]["new"] == 190
+    assert set(rep["counts"]["majors"]) <= {"health", "culture", "industry", "environment", "etc"}
+    # 대분류 통계 표: 4 대분류 + 합계
+    assert "보건(health)" in d and "문화(culture)" in d and "산업(industry)" in d and "환경(environment)" in d
+    assert "합계(total)" in d
+    # 중분류: 보건 하위는 category(식품), API 상세 존재
+    assert "식품(food)" in d and "API별 신규" in d
+    # 단계 식별 마커(작은 텍스트 + 들여쓰기): 대분류=볼드 · 중분류=• · 소분류=◦
+    assert run_report.MARK_MID in d and run_report.MARK_API in d and run_report._INDENT in d
 
 
-def test_warn_only_is_yellow():
-    assert _build([_s("clinic", "partial", 1, 2)])["color"] == run_report.COLOR_WARN
+def test_fail_names_task_and_error_before_success_with_gap():
+    r = [_s(_shorts("food")[0], "failed", 0, 0, error="ERROR-500 서버 오류", task="ingest_one"),
+         _s(_shorts("culture")[0], "ok", 100, 100)]
+    d = _build(r)["description"]
+    assert "❌ 실패" in d and "@ingest_one" in d and "서버 오류" in d   # 실패 task 명시
+    assert "✅ API별" in d
+    assert d.index("❌ 실패") < d.index("✅ API별")                    # 순서: 에러 → 성공
+    assert "\n\n" in d                                            # 그룹 간 빈 줄 간격
 
 
-def test_stage_and_alt_row_keys():
-    # bronze 적재 스테이지: rows_loaded / is_publishable → status 로 정규화해 넘긴 형태
-    results = [{"short": "bakery", "status": "ok", "rows_loaded": 16620},
-               {"short": "clinic", "status": "failed", "error": "commit 충돌"}]
-    rep = _build(results, stage="bronze_load")
-    assert "(bronze 적재)" in rep["title"] and rep["counts"]["rows"] == 16620
-    assert rep["color"] == run_report.COLOR_FAIL
+def test_alignment_ascii_grid():
+    d = _build([_s(_shorts("food")[0], "ok", 1500, 1), _s(_shorts("environment")[0], "ok", 12, 1)],
+               scope_shorts=_shorts("food") + _shorts("environment") + _shorts("culture"))["description"]
+    block = re.search(r"```\n(.*?)\n```", d, re.S).group(1)
+    rows = [x for x in block.splitlines() if x.strip()]
+    pl = {len(re.match(r"^[\x00-\x7f]*", x).group(0)) for x in rows}
+    assert len(pl) == 1, f"격자 정렬 깨짐: {pl}"
+    assert rows[0].lstrip().startswith("OK")
+
+
+def test_zero_no_change_summary():
+    two = _shorts("food", 2)
+    rep = _build([_s(two[0], "ok", 5, 100), _s(two[1], "ok", 0, 100)])   # 하나는 신규 0
+    assert "변경내역 없음" in rep["description"] and "보건 하위 1개" in rep["description"]
+
+
+def test_missing_and_color():
+    rep = _build([_s(_shorts("food")[0], "ok", 7, 100)],
+                 scope_shorts=_shorts("food", 1) + _shorts("culture", 2))
+    assert rep["counts"]["missing"] == 2 and rep["color"] == run_report.COLOR_WARN
+    assert "⛔ 미수집" in rep["description"]
+
+
+def test_stage_labels():
+    b = _build([_s(_shorts("food")[0], "ok", 16620, 16620)], stage="bronze_load")
+    assert "(bronze 적재)" in b["title"] and "신규 16,620건" in b["description"]
+    s = _build([_s(_shorts("food")[0], "ok", 999, 999)], stage="silver",
+               count_label="현재", show_total=False)
+    assert "(silver 변환)" in s["title"] and "현재 999건" in s["description"] and "전체수집" not in s["description"]
 
 
 def test_send_no_webhook_is_safe(monkeypatch):
     monkeypatch.delenv("COMMERCE_DISCORD_WEBHOOK_URL", raising=False)
     monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
     counts = run_report.send_run_report(dag_id="d", run_id="r", observed_date="d",
-                                        stage="collect", results=[_s("bakery", "ok", 1, 1)])
-    assert counts["total"] == 1 and counts["ok"] == 1        # webhook 없어도 예외 없이 counts 반환
+                                        stage="collect", results=[_s(_shorts("food")[0], "ok", 1, 1)])
+    assert counts["total"] == 1 and counts["new"] == 1

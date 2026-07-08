@@ -125,13 +125,14 @@ def report_silver_run() -> dict:
             rows = cur.fetchall()
         finally:
             conn.close()
-        results = [{"short": r[0], "status": "ok", "rows": _num(r[1])} for r in rows]
+        # silver 는 SCD 누적 → API별 '현재' 행수(신규가 아니라 현재 상태 지표).
+        results = [{"short": r[0], "status": "ok", "new": _num(r[1])} for r in rows]
     except Exception as exc:  # noqa: BLE001 — dbt 실패 등 조회 불가: DAG 단위 실패로 리포트
         log.warning("silver 리포트 집계 실패(%s) — 실패 리포트로 대체", type(exc).__name__)
-        results = [{"short": "silver", "status": "failed",
+        results = [{"short": "silver", "status": "failed", "task": "dbt_run_silver·dbt_test_silver",
                     "error": "silver current 집계 실패(dbt run/test 결과 확인)"}]
     counts = run_report.send_run_report(
         dag_id="commerce_load_silver", run_id=observed, observed_date=observed,
-        stage="silver", results=results)
+        stage="silver", results=results, count_label="현재", show_total=False)
     log.info("silver run report: %s", counts)
     return counts

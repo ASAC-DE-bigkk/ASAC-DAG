@@ -217,9 +217,15 @@ def finalize_run(bronze_run_id: str, observed_date: str, summaries: list[dict]) 
 
         dag_id = getattr(get_current_context().get("dag_run"), "dag_id", None) or "commerce_collect_raw"
         stage = "recollect" if "recollect" in dag_id else "collect"
+        # 신규 건수 = increment_count(정렬 파일 diff), 전체 = rows_total(API 호출 전량).
+        rr = [{"short": s.get("short"), "status": s.get("status"),
+               "new": s.get("increment_count", 0), "total": s.get("rows_total", 0),
+               "error": s.get("error"), "task": "ingest_one"} for s in summaries]
+        # collect(daily): 전 수집대상(152종) 기준 미수집(결과없음)까지 집계. recollect: 대상분만.
+        scope = list(COLLECTIBLE_SHORTS) if stage == "collect" else None
         metrics["report"] = run_report.send_run_report(
             dag_id=dag_id, run_id=bronze_run_id, observed_date=observed_date,
-            stage=stage, results=summaries)
+            stage=stage, results=rr, scope_shorts=scope)
     except Exception as exc:  # noqa: BLE001
         log.warning("run report 스킵(무시): %s", type(exc).__name__)
     return metrics
