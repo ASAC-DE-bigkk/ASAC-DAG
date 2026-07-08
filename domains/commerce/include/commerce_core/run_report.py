@@ -4,11 +4,14 @@
 결과를 모아 한 임베드로 보낸다. 핵심 지표는 **신규 건수(정렬 파일 diff = increment_count / bronze
 rows_loaded)** — 전체 API 호출량이 아니라 실제 신규·변경분 위주. 전체 수집량은 병기한다.
 
-구성(§ 요구 반영):
-- 대분류(category, 한글) 롤업 표 — **scope 전 API 를 빠짐없이 집계**(합계 행으로 완전성 보증).
-- **API 단위 신규 건수** 표(신규순) — 실질 수집분 지표.
+구성:
+- **대분류(category)별 통계 표** — scope 전 API 를 빠짐없이 집계(합계 행으로 완전성 보증).
+- **API 단위 신규 건수** — 대분류로 묶고 `한글(영문)` 라벨, 신규순.
 - 실패(에러)/경고(부분)/미수집(결과없음) 개별 목록.
-- Discord 는 비례폰트라 이름 길이가 다르면 열이 밀린다 → **코드블록(monospace) + CJK 폭 패딩**으로 정렬.
+
+정렬: Discord monospace 코드블록의 CJK 글리프 폭이 ASCII 2배가 아니어서(폰트마다 상이) 한글을
+'열' 사이에 넣으면 반드시 밀린다. → **정렬 격자는 ASCII(숫자)만, 한글 이름은 항상 줄 끝(마지막
+열)**에 둬 폰트와 무관하게 정렬되게 한다.
 
 메시지 내용만 도메인 소유, 전송·webhook·redaction 은 common.discord. webhook 미설정=조용히 스킵.
 
@@ -18,7 +21,6 @@ new(신규건수), total(전체건수), error.
 from __future__ import annotations
 
 import logging
-import unicodedata
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -41,10 +43,6 @@ STAGE_KO: dict[str, str] = {"collect": "수집", "recollect": "재수집",
 _LEVELS = ("ok", "warn", "fail", "miss")
 
 
-def _cat_ko(category: str | None) -> str:
-    return CATEGORY_KO.get(category or "", category or "기타")
-
-
 def _level(status: str | None) -> str:
     if status == "ok":
         return "ok"
@@ -64,16 +62,6 @@ def _tot(s: dict) -> int:
                or s.get("list_total_count") or 0)
 
 
-# ── 표 정렬(monospace): CJK/이모지는 2칸 폭 ──────────────────────────────────────
-def _dw(s: str) -> int:
-    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in str(s))
-
-
-def _pad(s: str, width: int, right: bool = False) -> str:
-    gap = max(0, width - _dw(s))
-    return (" " * gap + str(s)) if right else (str(s) + " " * gap)
-
-
 def _num(n: int) -> str:
     return f"{int(n):,}"
 
@@ -85,18 +73,24 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
     by_short = {d.short: d for d in registry.all_datasets()}
     results = [dict(s) for s in (results or []) if s]
 
-    # scope 전체 대비 결과 없는 API = 미수집(missing) 로 채워 완전 집계(§ 누락 방지)
+    # scope 전체 대비 결과 없는 API = 미수집(missing) 으로 채워 완전 집계(누락 방지)
     if scope_shorts:
         seen = {s.get("short") for s in results}
         for sh in scope_shorts:
             if sh not in seen:
                 results.append({"short": sh, "status": "missing", "new": 0, "total": 0})
 
-    def cat_of(s: dict) -> str:
+    def cat_en(s: dict) -> str:
         d = by_short.get(s.get("short"))
-        return _cat_ko(d.category if d else None)
+        return d.category if d and d.category else "기타"
 
-    lv = {s["short"] if s.get("short") else id(s): _level(s.get("status")) for s in results}
+    def cat_lab(en: str) -> str:          # 한글(영문)
+        return f"{CATEGORY_KO.get(en, en)}({en})"
+
+    def label(s: dict) -> str:            # API 한글(영문)
+        d = by_short.get(s.get("short"))
+        return f"{d.name_ko}({s.get('short')})" if d and d.name_ko else str(s.get("short"))
+
     buckets = {L: [s for s in results if _level(s.get("status")) == L] for L in _LEVELS}
     n = {L: len(buckets[L]) for L in _LEVELS}
     total = len(results)
@@ -115,70 +109,73 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
     head += f" · 대상 {total}종"
     lines = [head]
 
-    # ── 대분류(category)별 롤업 표 — scope 전체 집계 + 합계 행 ──
+    # 대분류 집계
     agg: dict[str, dict] = defaultdict(lambda: {"ok": 0, "warn": 0, "fail": 0, "miss": 0, "new": 0})
     for s in results:
-        a = agg[cat_of(s)]
+        a = agg[cat_en(s)]
         a[_level(s.get("status"))] += 1
         a["new"] += _new(s)
-    cats = sorted(agg)
-    nw = max([_dw("대분류")] + [_dw(c) for c in cats])
-    vw = max(6, len(_num(new_sum)))
-    hdr = f"{_pad('대분류', nw)}  성공 경고 실패 미수집  {_pad(count_label, vw, right=True)}"
-    tbl = [hdr]
-    for c in cats:
-        a = agg[c]
-        tbl.append(f"{_pad(c, nw)}  {a['ok']:>4} {a['warn']:>4} {a['fail']:>4} {a['miss']:>6}  "
-                   f"{_pad(_num(a['new']), vw, right=True)}")
-    tbl.append(f"{_pad('합계', nw)}  {n['ok']:>4} {n['warn']:>4} {n['fail']:>4} {n['miss']:>6}  "
-               f"{_pad(_num(new_sum), vw, right=True)}")
-    lines.append("**대분류별**\n```\n" + "\n".join(tbl) + "\n```")
+    cats_by_new = sorted(agg, key=lambda e: agg[e]["new"], reverse=True)
 
-    # ── 실패/경고/미수집 개별 목록(문제 우선, 전량) ──
+    # ── 대분류별 통계 표: 격자는 ASCII 숫자만, 한글 이름은 줄 끝(마지막 열) ──
+    cw = max(2, len(str(max([1, n["ok"], n["warn"], n["fail"], n["miss"]]))))
+    vw = max(len("NEW"), len(_num(new_sum)))
+
+    def row(ok, wn, fl, ms, new, lab):
+        return f"{ok:>{cw}} {wn:>{cw}} {fl:>{cw}} {ms:>{cw}} {_num(new):>{vw}}  {lab}"
+
+    tbl = [f"{'OK':>{cw}} {'WN':>{cw}} {'FL':>{cw}} {'MS':>{cw}} {'NEW':>{vw}}  대분류(major)"]
+    for en in cats_by_new:
+        a = agg[en]
+        tbl.append(row(a["ok"], a["warn"], a["fail"], a["miss"], a["new"], cat_lab(en)))
+    tbl.append(row(n["ok"], n["warn"], n["fail"], n["miss"], new_sum, "합계(total)"))
+    lines.append("**대분류별 통계** — OK성공·WN경고·FL실패·MS미수집·NEW신규\n```\n"
+                 + "\n".join(tbl) + "\n```")
+
+    # ── 문제(에러/경고/미수집) 개별 목록: 한글(영문) 라벨 ──
     if buckets["fail"]:
         det = []
-        for s in buckets["fail"][:15]:
-            e = redact(str(s.get("error") or "")).splitlines()[0][:90] if s.get("error") else "failed"
-            det.append(f"- `{s.get('short')}` ({cat_of(s)}) — {e}")
-        if n["fail"] > 15:
-            det.append(f"- … 외 {n['fail'] - 15}건")
+        for s in buckets["fail"][:12]:
+            e = redact(str(s.get("error") or "")).splitlines()[0][:80] if s.get("error") else "failed"
+            det.append(f"- {label(s)} — {e}")
+        if n["fail"] > 12:
+            det.append(f"- …외 {n['fail'] - 12}건")
         lines.append("**❌ 실패(에러)**\n" + "\n".join(det))
     if buckets["warn"]:
-        det = [f"- `{s.get('short')}` ({cat_of(s)}) — {_num(_new(s))}/{_num(_tot(s))}"
-               for s in buckets["warn"][:15]]
-        if n["warn"] > 15:
-            det.append(f"- … 외 {n['warn'] - 15}건")
+        det = [f"- {label(s)} — {_num(_new(s))}/{_num(_tot(s))}" for s in buckets["warn"][:12]]
+        if n["warn"] > 12:
+            det.append(f"- …외 {n['warn'] - 12}건")
         lines.append("**⚠️ 경고(부분)**\n" + "\n".join(det))
     if buckets["miss"]:
-        ms = [f"`{s.get('short')}`" for s in buckets["miss"][:25]]
-        tail = f" … 외 {n['miss'] - 25}" if n["miss"] > 25 else ""
-        lines.append(f"**⛔ 미수집(결과없음) {n['miss']}종**\n" + " ".join(ms) + tail)
+        ms = ", ".join(label(s) for s in buckets["miss"][:20])
+        if n["miss"] > 20:
+            ms += f" …외 {n['miss'] - 20}"
+        lines.append(f"**⛔ 미수집(결과없음) {n['miss']}종**\n{ms}")
 
-    # ── API 단위 신규 건수 표(신규순) — 남는 예산만큼 채우고 나머지는 요약 ──
-    ranked = sorted(results, key=lambda s: _new(s), reverse=True)
-    aw = min(24, max([_dw("API")] + [_dw(str(s.get("short"))) for s in ranked[:60]] or [3]))
-    api_hdr = f"{_pad('API', aw)}  {_pad(count_label, vw, right=True)}" + ("      전체" if show_total else "")
-    fixed = "\n".join(lines)
-    rows_out, shown, shown_new = [], 0, 0
-    for s in ranked:
-        if _new(s) <= 0 and _level(s.get("status")) == "ok":
-            continue   # 신규 0(정상)은 개별 표기 생략 — 롤업/합계에는 이미 포함
-        line = f"{_pad(str(s.get('short'))[:aw], aw)}  {_pad(_num(_new(s)), vw, right=True)}"
-        if show_total:
-            line += f"  {_pad(_num(_tot(s)), 8, right=True)}"
-        # 예산 관리: 고정부 + API표가 한도 넘으면 중단
-        if _dw(fixed) + len("\n**API별 " + count_label + "**\n```\n" + api_hdr + "\n```")\
-           + sum(len(x) + 1 for x in rows_out) + len(line) > _MAX_DESC:
-            break
-        rows_out.append(line)
-        shown += 1
-        shown_new += _new(s)
-    if rows_out:
-        api_block = f"**API별 {count_label}(신규순)**\n```\n" + api_hdr + "\n" + "\n".join(rows_out) + "\n```"
-        remain = total - shown
-        if remain > 0:
-            api_block += f"\n…외 {remain}종(표시분 {count_label} {_num(shown_new)} / 전체 {_num(new_sum)})"
-        lines.append(api_block)
+    # ── API 단위 신규 건수: 대분류로 묶고 한글(영문), 신규순 (숫자 ASCII 정렬 + 이름 줄 끝) ──
+    pos = [s for s in results if _new(s) > 0]
+    if pos:
+        nw = max(len(_num(_new(s))) for s in pos)
+        budget = _MAX_DESC - len("\n".join(lines)) - 60
+        body, shown, used = [], 0, 0
+        for en in cats_by_new:
+            apis = sorted([s for s in pos if cat_en(s) == en], key=_new, reverse=True)
+            if not apis:
+                continue
+            seg = [f"[{cat_lab(en)}] {count_label} {_num(agg[en]['new'])}"]
+            seg += [f"{_num(_new(s)):>{nw}}  {label(s)}" for s in apis]
+            seg_text = "\n".join(seg)
+            if used + len(seg_text) + 1 > budget:
+                break
+            body.append(seg_text)
+            used += len(seg_text) + 1
+            shown += len(apis)
+        if body:
+            blk = f"**API별 · 대분류 묶음({count_label}순)**\n```\n" + "\n".join(body) + "\n```"
+            rem = len(pos) - shown
+            if rem > 0:
+                blk += f"\n…외 {rem}종 생략(전체 {count_label} {_num(new_sum)})"
+            lines.append(blk)
 
     occurred = datetime.now(_KST).strftime("%Y-%m-%d %H:%M:%S KST")
     footer = f"run_id={run_id} · observed_date={observed_date} · {occurred}"

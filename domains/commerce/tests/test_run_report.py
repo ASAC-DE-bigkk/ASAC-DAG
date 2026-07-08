@@ -47,10 +47,17 @@ def test_scope_reconcile_missing():
     assert "⛔ 미수집" in rep["description"] and "bakery" in rep["description"]
 
 
-def test_alignment_uses_display_width_padding():
-    # 이름 길이가 달라도 코드블록 안에서 열이 밀리지 않도록 폭 계산 패딩
-    assert run_report._dw("위생·미용") == run_report._dw("aaaaaaaaa")   # CJK 2폭 → 9
-    assert run_report._pad("식품", 8).startswith("식품") and run_report._dw(run_report._pad("식품", 8)) == 8
+def test_alignment_ascii_grid_korean_at_line_end():
+    # 정렬 격자는 ASCII(숫자)만, 한글 라벨은 줄 끝 → 각 행의 ASCII 접두부 폭이 동일해야 정렬됨
+    import re
+    d = _build([_s("general_restaurant", "ok", 1500, 9),   # 식품(짧은 대분류명)
+                _s("optician", "ok", 12, 9)],              # 안경·치과(긴 대분류명)
+               scope_shorts=["general_restaurant", "optician", "clinic"])["description"]
+    block = re.search(r"```\n(.*?)\n```", d, re.S).group(1)
+    rows = [r for r in block.splitlines() if r.strip()]
+    prefix_lens = {len(re.match(r"^[\x00-\x7f]*", r).group(0)) for r in rows}  # 선두 ASCII 폭
+    assert len(prefix_lens) == 1, f"격자 접두부 폭 불일치(정렬 깨짐): {prefix_lens}"
+    assert rows[0].lstrip().startswith("OK")               # ASCII 헤더
 
 
 def test_all_ok_green_and_zero_new_hidden_per_api():
