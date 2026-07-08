@@ -7,6 +7,27 @@
 
 ## 2026-07-08
 
+### 48. 응답 컬럼 표준 v1/v2 대응 — 환경 13종(신형) 편입 + 양식변경 알림
+
+request:
+- (환경) 상권 인허가 13종 수집. datasetView 형식과 대조·상태값 처리기준 확인. key 가 달라도(신형 컬럼)
+  기존값과 동일하게 맞추고 **silver 에서 처리**. key 틀어지면 양식변경+error 알림. 알림 호출부에 역할별 설명 추가.
+
+response:
+- 라이브 확인: 환경 13종은 **신형(v2) 컬럼 표준** — `MNG_NO`(=MGTNO)·`OGDP_INST_CD`(=OPNSFTEAMCODE)·
+  `SALS_STTS_CD/NM`(=TRDSTATE)·`DTL_SALS_STTS_CD/NM`(=DTLSTATE)·`DATA_UPDT_YMD/LAST_MDFCN_YMD`·
+  `ROAD_NM_ADDR`·`XCRD/YCRD`. 식별/상태/버전 값 **전부 존재(이름만 다름)**, 13종 전수 확인.
+- 별칭 계약: `schemas.COLUMN_ALIASES_V2` + `canonical_get()`/`detect_row_format()`. `Dataset.fmt`(v1|v2) +
+  registry `format` 필드. 환경 13종 `category=environment`·`format=v2` 등록(139→152).
+- 정규화 위치 = **silver**(grain `(dataset, opnsfteamcode, mgtno)` 붕괴 지점 = 데이터 손실처). bronze 는
+  raw 그대로 저장(손실 없음, 증분만 비효율). warehouse 는 `canonical_get` 으로 v2 mgtno/updatedt 채움.
+- 알림: `notify_schema_drift`(양식변경→coped=warning / 미인식=error, §19.1 `[commerce][task>level]` 형식) +
+  `NOTIFY_ROLES`(역할별 설명 양식) + `role_of()`. bronze 수집 루프에서 등록 fmt≠관측 fmt 시 1회 알림.
+- 상태값 처리: 영업상태 `01 영업/03 폐업/04 폐쇄/05 제외사항`(v1 TRDSTATEGBN = v2 SALS_STTS_CD). 상세영업상태
+  코드는 **API별 상이**(`11/2/4/BBBB/N…`, datasetView 정의 정본) — NM 동반이라 code→name empirical 확보 가능.
+- 테스트: canonical_get/detect_row_format·format·schema_drift·role_of. 전체 pytest 300 통과.
+- ⚠️ **silver dbt coalesce(v1↔v2)는 후속**(dbt submodule) — 이게 완료돼야 환경 13종이 silver 에서 정합.
+
 ### 47. 분류 2단계화 — 대분류(category) vs 명칭분류(sub_category) 분리
 
 request:

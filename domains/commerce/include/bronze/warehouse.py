@@ -27,6 +27,7 @@ from typing import Iterable, Iterator
 
 from bronze import load_state
 from commerce_core.hashing import sha256_hex
+from commerce_core.schemas import canonical_get   # v1/v2 컬럼 별칭 정규화(MGTNO=MNG_NO 등)
 from commerce_core.settings import get_settings
 from common.storage import Storage
 from security import assert_identifier
@@ -178,8 +179,8 @@ def project_records(records: Iterable[dict], *, dataset: str, observed_date: str
     for seq, rec in enumerate(records):
         yield {
             "dataset": dataset,
-            "mgtno": rec.get("MGTNO") or rec.get("mgtno"),
-            "updatedt": rec.get("UPDATEDT") or rec.get("updatedt"),
+            "mgtno": canonical_get(rec, "MGTNO") or rec.get("mgtno"),      # v2=MNG_NO 대응
+            "updatedt": canonical_get(rec, "UPDATEDT") or rec.get("updatedt"),  # v2=DATA_UPDT_YMD
             "record_json": json.dumps(rec, ensure_ascii=False),
             "content_hash": sha256_hex(_canonical_json(rec).encode("utf-8")),
             "observed_date": observed_date,

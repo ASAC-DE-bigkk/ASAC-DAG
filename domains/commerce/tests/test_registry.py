@@ -7,10 +7,10 @@
 """
 from commerce_core import registry
 
-EXPECTED_COUNT = 139       # 39 → 51(#207 12종) → 107(문화 56종) → 139(산업 32종)
+EXPECTED_COUNT = 152       # 39→51(#207)→107(문화)→139(산업)→152(환경 13종, format v2)
 
 # service_name 은 대부분 LOCALDATA_ 접두이나 포털이 비표준명을 준 예외가 있다(라이브 확인).
-_NON_LOCALDATA_OK = {"repair092801"}       # 계량기수리업(OA-21239)
+_NON_LOCALDATA_OK = {"repair092801", "waterSystem093012"}   # 계량기수리업·수질오염설치시설
 
 
 def _dups(values):
@@ -57,3 +57,26 @@ def test_all_have_sub_category():
     """모든 데이터셋이 명칭분류(sub_category)를 가진다(대분류 category 하위 세분류)."""
     missing = [d.short for d in registry.all_datasets() if not d.sub_category]
     assert missing == [], f"sub_category 누락: {missing}"
+
+
+def test_format_values():
+    """format(응답 컬럼 표준)은 v1|v2. environment 대분류는 v2(신형 컬럼)."""
+    bad = [(d.short, d.fmt) for d in registry.all_datasets() if d.fmt not in ("v1", "v2")]
+    assert bad == [], f"format 위반: {bad}"
+    envs = [d for d in registry.all_datasets() if d.category == "environment"]
+    assert envs and all(d.fmt == "v2" for d in envs), "environment 은 format v2 이어야"
+
+
+# ── v1/v2 컬럼 별칭 정규화(schemas) ──────────────────────────────────────────────
+def test_canonical_get_v1_v2():
+    from commerce_core import schemas
+    v1 = {"MGTNO": "A", "OPNSFTEAMCODE": "3010000", "TRDSTATEGBN": "01"}
+    v2 = {"MNG_NO": "B", "OGDP_INST_CD": "3150000", "SALS_STTS_CD": "03"}
+    assert schemas.canonical_get(v1, "MGTNO") == "A"
+    assert schemas.canonical_get(v2, "MGTNO") == "B"          # v2 별칭으로 조회
+    assert schemas.canonical_get(v2, "OPNSFTEAMCODE") == "3150000"
+    assert schemas.canonical_get(v2, "TRDSTATEGBN") == "03"
+    assert schemas.canonical_get({}, "MGTNO") is None
+    assert schemas.detect_row_format(v1) == "v1"
+    assert schemas.detect_row_format(v2) == "v2"
+    assert schemas.detect_row_format({"FOO": 1}) == "unknown"

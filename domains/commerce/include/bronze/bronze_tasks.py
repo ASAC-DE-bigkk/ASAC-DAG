@@ -26,7 +26,8 @@ from bronze import incremental
 from bronze.validators import assess_completeness
 from commerce_core import paths
 from commerce_core.hashing import sha256_hex
-from commerce_core.schemas import DOMAIN, SOURCE_SYSTEM, Dataset
+from commerce_core.notify import notify_schema_drift
+from commerce_core.schemas import DOMAIN, SOURCE_SYSTEM, Dataset, detect_row_format
 from commerce_core.settings import get_settings
 from commerce_core.storage import Storage, get_storage
 from security import redact   # 마커(error)·요약에 저장되는 메시지의 시크릿 마스킹(이중 방어)
@@ -146,6 +147,7 @@ def fetch_dataset_to_bronze(dataset: Dataset, observed_date: str, run_id: str,
     stopped_by_cap = False
     raw_pages: list[bytes] = []
     page_metas: list[dict] = []
+    fmt_checked = False
 
     try:
         while True:
@@ -166,6 +168,22 @@ def fetch_dataset_to_bronze(dataset: Dataset, observed_date: str, run_id: str,
 
             rows_total += len(page.rows)
             raw_pages.append(page.raw_bytes)        # 원본 그대로(가공 없음)
+            if not fmt_checked:                     # 응답 컬럼 표준(v1/v2) 1회 감시 → 등록값과 다르면 알림
+                fmt_checked = True
+                observed = detect_row_format(page.rows[0].keys())
+                if observed == "unknown":
+                    notify_schema_drift(task="bronze.collect.schema_drift", dataset=short,
+                                        expected_fmt=dataset.fmt, observed_fmt="unknown", coped=False,
+                                        sample_keys=list(page.rows[0].keys()),
+                                        context={"bronze_run_id": bronze_run_id})
+                    log.warning("%s: 응답 식별키 미인식(v1/v2 아님) — 스키마 확인 필요", short)
+                elif observed != dataset.fmt:
+                    notify_schema_drift(task="bronze.collect.schema_drift", dataset=short,
+                                        expected_fmt=dataset.fmt, observed_fmt=observed, coped=True,
+                                        sample_keys=list(page.rows[0].keys()),
+                                        context={"bronze_run_id": bronze_run_id})
+                    log.warning("%s: 응답 양식 변경 등록=%s 실제=%s (별칭 정규화 대응)",
+                                short, dataset.fmt, observed)
             page_metas.append({"page": page_no, "start": start, "end": end,
                                "rows": len(page.rows), "content_hash": sha256_hex(page.raw_bytes)})
             log.info("%s: page %d 수집(%d행, 누적 %d/%s)",

@@ -31,6 +31,7 @@ def all_datasets() -> tuple[Dataset, ...]:
             category=r["category"], schedule=r["schedule"],
             service_name=r.get("service_name") or None,
             sub_category=r.get("sub_category") or None,
+            fmt=(r.get("format") or "v1"),      # 응답 컬럼 표준(v1/v2) — 감시 기준
         ))
     return tuple(out)
 
