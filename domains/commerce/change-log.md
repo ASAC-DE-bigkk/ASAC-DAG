@@ -7,6 +7,22 @@
 
 ## 2026-07-08
 
+### 46. 산업 상권 인허가 32종 추가 (107 → 139) + 라이브 검증
+
+request:
+- 산업 분류 상권 인허가(계량기/가스·석유/지하수/목재/각종 판매업/담배/직업소개/장례·요양 교육 등)를
+  commerce 로 편입. raw~bronze~silver 이전과 같은 방향으로 적용.
+
+response:
+- 소스 34행 중 **중복 2쌍 제거** → 32종 등록(107 → 139), `category: industry`. 중복:
+  `LOCALDATA_092701`(목재수입유통업=제재업)·`LOCALDATA_092809`(용기냉동기특정설비=액화석유가스용품제조업체)
+  — 동일 코드+OA-id 라 각 1건만 등록(둘째 이름은 코드 재확인 필요, 플래그).
+- **라이브 32/32 OK**(fail=0), 식별값 `OPNSFTEAMCODE/MGTNO/UPDATEDT/LASTMODTS` 전 종 존재 →
+  bronze/silver 라인 그대로 유효(§45 분석 연장). 신규 최대 통신판매업 total≈932,949·담배소매 95,263.
+- 계량기수리업 service_name 은 **비-LOCALDATA `repair092801`**(라이브 total≈113) — 테스트 allowlist 등록.
+- `tests/test_registry.py` `EXPECTED_COUNT` 107 → 139 + 비-LOCALDATA allowlist. 전체 pytest 295 통과.
+- 레지스트리 헤더 107 → 139 + category 에 `industry` 추가. DAG 는 registry 기반 → 139 job 자동 반영.
+
 ### 45. raw 107종 실측 검증 + 응답 필드 커버리지 분석 + bronze 라인 검증
 
 request:

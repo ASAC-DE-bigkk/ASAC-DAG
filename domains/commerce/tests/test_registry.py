@@ -7,7 +7,10 @@
 """
 from commerce_core import registry
 
-EXPECTED_COUNT = 107       # 39(원본) → 51(#207 보건/식품 12종) → 107(문화 상권 56종)
+EXPECTED_COUNT = 139       # 39 → 51(#207 12종) → 107(문화 56종) → 139(산업 32종)
+
+# service_name 은 대부분 LOCALDATA_ 접두이나 포털이 비표준명을 준 예외가 있다(라이브 확인).
+_NON_LOCALDATA_OK = {"repair092801"}       # 계량기수리업(OA-21239)
 
 
 def _dups(values):
@@ -36,11 +39,12 @@ def test_oa_id_unique():
     assert _dups(ids) == [], f"중복 oa_id: {_dups(ids)}"
 
 
-def test_required_fields_and_code_prefix():
+def test_required_fields_and_service_name():
     for d in registry.all_datasets():
         assert d.oa_id and d.name_ko and d.short and d.category, f"필수필드 누락: {d}"
-        assert d.service_name and d.service_name.startswith("LOCALDATA_"), \
-            f"service_name 규약 위반: {d.short}={d.service_name!r}"
+        assert d.service_name, f"service_name 없음: {d.short}"
+        assert d.service_name.startswith("LOCALDATA_") or d.service_name in _NON_LOCALDATA_OK, \
+            f"service_name 규약 위반(신규 비-LOCALDATA 는 allowlist 등록): {d.short}={d.service_name!r}"
 
 
 def test_all_daily_collectible():
