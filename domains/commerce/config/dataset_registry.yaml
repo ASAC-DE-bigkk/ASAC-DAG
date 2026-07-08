@@ -1,7 +1,7 @@
-# 서울 인허가(LOCALDATA) → commerce 수집 대상 레지스트리 (단일 진실 공급원, 39종 전체 수집).
-# service_name(=LOCALDATA API 코드)이 채워진 것만 수집 — 현재 39종 전부 포털 정본 코드로 채움.
+# 서울 인허가(LOCALDATA) → commerce 수집 대상 레지스트리 (단일 진실 공급원, 51종 전체 수집).
+# service_name(=LOCALDATA API 코드)이 채워진 것만 수집 — 현재 51종 전부 포털 정본 코드로 채움.
 # **DAG 매핑 1건 = API(데이터셋) 1개 = job 1개**(Airflow 의 ingest_one[<short>] 1 인스턴스).
-#   → 즉 job 갯수는 API 단위로 나뉜다(category 는 그룹 라벨일 뿐 job 수와 무관). 39 API = 39 job.
+#   → 즉 job 갯수는 API 단위로 나뉜다(category 는 그룹 라벨일 뿐 job 수와 무관). 51 API = 51 job.
 # 검증: python -m bronze.resolve verify  (PYTHONPATH=dags/domains/commerce/include)
 # ※ 인허가 외(위치정보/현황 등)는 여기 두지 않는다 → config/non_license_datasets.yaml 로 격리.
 datasets:
@@ -239,3 +239,80 @@ datasets:
     category: "lodging"
     schedule: "daily"
     service_name: "LOCALDATA_031103"   # 숙박업(일반/생활) — 포털 정본 코드, sample 확인, total≈7,072
+
+  # ── #207 추가: 보건/식품/동물 인허가 12종 (기존 39 + 12 = 51). OA-ID·코드 포털 정본. ──
+  # short 는 기존 39종·비인허가 격리분과 미충돌 확인(예: group_meal_facility≠group_meal_food_sale,
+  # food_mfg≠instant_sale_mfg, entertainment_bar≠tour_entertainment_bar,
+  # medical_device_sale≠animal_medical_device_sale).
+  - oa_id: "OA-16066"
+    name_ko: "서울시 위탁급식영업 인허가 정보"
+    short: "contract_meal_service"
+    category: "food"
+    schedule: "daily"
+    service_name: "LOCALDATA_072101"
+  - oa_id: "OA-16067"
+    name_ko: "서울시 집단급식소 인허가 정보"
+    short: "group_meal_facility"
+    category: "food"
+    schedule: "daily"
+    service_name: "LOCALDATA_072102"   # 집단급식소(≠ 072201 집단급식소식품판매업=group_meal_food_sale)
+  - oa_id: "OA-16078"
+    name_ko: "서울시 식품제조가공업 인허가 정보"
+    short: "food_mfg"
+    category: "food"
+    schedule: "daily"
+    service_name: "LOCALDATA_072211"
+  - oa_id: "OA-16079"
+    name_ko: "서울시 식품첨가물제조업 인허가 정보"
+    short: "food_additive_mfg"
+    category: "food"
+    schedule: "daily"
+    service_name: "LOCALDATA_072212"
+  - oa_id: "OA-16086"
+    name_ko: "서울시 식용얼음판매업 인허가 정보"
+    short: "edible_ice_sale"
+    category: "food"
+    schedule: "daily"
+    service_name: "LOCALDATA_072221"
+  - oa_id: "OA-16089"
+    name_ko: "서울시 단란주점영업 인허가 정보"
+    short: "singing_bar"
+    category: "food"
+    schedule: "daily"
+    service_name: "LOCALDATA_072301"   # 단란주점영업
+  - oa_id: "OA-16090"
+    name_ko: "서울시 유흥주점영업 인허가 정보"
+    short: "entertainment_bar"
+    category: "food"
+    schedule: "daily"
+    service_name: "LOCALDATA_072302"   # 유흥주점영업(≠ 072402 관광유흥, ≠ 072403 외국인전용)
+  - oa_id: "OA-16093"
+    name_ko: "서울시 외국인전용유흥음식점업 인허가 정보"
+    short: "foreigner_entertainment_bar"
+    category: "food"
+    schedule: "daily"
+    service_name: "LOCALDATA_072403"
+  - oa_id: "OA-16485"
+    name_ko: "서울시 의료법인 인허가 정보"
+    short: "medical_corporation"
+    category: "health_medical"
+    schedule: "daily"
+    service_name: "LOCALDATA_010108"
+  - oa_id: "OA-16487"
+    name_ko: "서울시 의료기기수리업 인허가 정보"
+    short: "medical_device_repair"
+    category: "health_medical"
+    schedule: "daily"
+    service_name: "LOCALDATA_010202"   # 인체 의료기기(≠ 020303 동물용의료용구=animal_medical_device_sale)
+  - oa_id: "OA-16488"
+    name_ko: "서울시 의료기기판매(임대)업 인허가 정보"
+    short: "medical_device_sale"
+    category: "health_medical"
+    schedule: "daily"
+    service_name: "LOCALDATA_010203"
+  - oa_id: "OA-16010"
+    name_ko: "서울시 동물용의약품도매상 인허가 정보"
+    short: "animal_drug_wholesale"
+    category: "animal"
+    schedule: "daily"
+    service_name: "LOCALDATA_020304"

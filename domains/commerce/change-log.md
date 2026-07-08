@@ -5,6 +5,28 @@
 
 ---
 
+## 2026-07-08
+
+### 43. raw 수집 대상 12종 추가 (39 → 51) + 레지스트리 무결성 테스트
+
+request:
+- 위탁급식영업/집단급식소/식품제조가공업/식품첨가물제조업/식용얼음판매업/단란주점영업/유흥주점영업/
+  외국인전용유흥음식점업/의료법인/의료기기수리업/의료기기판매(임대)업/동물용의약품도매상 12종의
+  raw 수집 라인이 누락 → 추가.
+- 중복 없는지·총 51종 맞는지 확인. 기존 bronze 수집 결과와 명칭(short) 겹침 점검.
+- 개발 후 테스트 및 로컬 commit(push 없음). branch: `207-raw-collect-etc`.
+- (보건 외 문화 상권 50+종 추가 예정 — 후속 배치.)
+
+response:
+- `config/dataset_registry.yaml` 에 12종 추가(39 → 51). LOCALDATA 코드 12개 모두 기존 39종과 중복
+  없음, `short`·`oa_id`·`service_name` 전부 유니크. 신규 short 는 기존/격리분과 미충돌 확인
+  (group_meal_facility≠group_meal_food_sale, food_mfg≠instant_sale_mfg,
+  entertainment_bar≠tour_entertainment_bar, medical_device_sale≠animal_medical_device_sale).
+- `tests/test_registry.py` 신설 — 개수 51·short/service_name/oa_id 중복 없음·필수필드·`LOCALDATA_`
+  접두·daily 전량 수집대상. 전체 pytest 295 통과.
+- 레지스트리 헤더 주석 39 → 51 갱신. DAG 매핑은 registry 기반이라 51 job 으로 자동 반영.
+- docs 의 상세 호출량("39종" 산정 표: api-call-volume 등)은 문화 배치까지 합쳐 일괄 재산정 예정.
+
 ## 2026-07-07
 
 ### 42. silver 마스킹 주소 동단위 매핑 스킵 + 품질 warning 알림 규칙
