@@ -19,7 +19,6 @@ raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 
   max_detail      상세 크롤당 id 상한                                  기본 200
   kopis_rows      KOPIS 목록 페이지 크기                               기본 100
   fail_on_violation  계약 위반 시 run 실패                             기본 False
-  load_workers    load_bronze 데이터셋 병렬도 (1 = 순차 롤백)           기본 4
 """
 
 from __future__ import annotations
@@ -78,7 +77,6 @@ DEFAULT_PARAMS = {
     "max_detail": 200,
     "kopis_rows": 100,
     "fail_on_violation": False,  # True면 계약 위반(완전성·드리프트·freshness) 시 run 실패
-    "load_workers": 4,  # load_bronze 데이터셋 병렬도(#202) — 1이면 순차(롤백 레버)
 }
 
 
@@ -213,12 +211,7 @@ def _load_bronze(**context) -> dict:
             ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
             run_id=context["dag_run"].run_id,
         )
-    # 데이터셋 병렬 적재(#202) — 기본 4. 공유 Trino 배려로 낮게 유지하고,
-    # 문제 시 트리거 파라미터 load_workers=1 로 현행 순차 경로 즉시 복귀.
-    loaded = load_bronze(
-        ctx, loadable, target=normalize_target(params["target"]),
-        max_workers=max(1, int(params.get("load_workers", 1))),
-    )
+    loaded = load_bronze(ctx, loadable, target=normalize_target(params["target"]))
     total = sum(loaded.values())
     print(f"[culture bronze] iceberg loaded {total} rows / {len(loaded)} datasets")
     for name, rows in sorted(loaded.items()):
