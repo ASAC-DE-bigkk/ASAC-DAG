@@ -7,6 +7,29 @@
 
 ## 2026-07-08
 
+### 49. silver v1/v2 정규화 + record_json 보존(API별 비공통) + raw→bronze→silver 전구간 검증
+
+request:
+- v1/v2 는 backfill 로 해결(bronze 문제 아니면 silver 만 재작업). silver 식별키=(OPNSFTEAMCODE, MGTNO).
+- API별 비공통 필드도 key 로 매핑 보존 → gold 에서 API별 table화(무리한 병합/완전정규화 X). history 는
+  전 필드 변화 SCD 추적. raw~bronze~silver 전구간 정상동작 확인.
+
+response:
+- **silver(dbt)**: `lf(v1,v2)` 매크로로 record_json 에서 정본(v1) 우선 coalesce 정규화 —
+  mgtno/opnsfteamcode/status/date/address/coord 모두 v1(MGTNO…)·v2(MNG_NO…) 대응. **record_json 을
+  current/history 에 보존** → API별 비공통 필드를 (dataset,opnsfteamcode,mgtno)로 매핑, gold 가 table화.
+  history 는 content_hash(전 record) 기반이라 **전 필드 변화 SCD** 유지.
+  (ASAC-DBT `feat/silver-v1v2-per-api`: `fe4c7ea`, `7c5db67`.)
+- **bronze**: warehouse `iter_increment_rows` 가 v2(MNG_NO) row 를 page 봉투로 오인하던 버그 수정(`e7e1fcc`).
+  `project_records` 는 `canonical_get` 으로 v2 mgtno/updatedt 채움(`39b4442`).
+- **검증(실 dev Trino/Iceberg)**:
+  - silver --full-refresh: history **1,344,778** · current **1,342,691**(v1 무회귀), record_json 전행 채움,
+    dental_lab 등 비공통 필드 추출 확인, SCD(한 업소 3버전) 확인.
+  - **v2 end-to-end**: env_consulting(093018, v2) raw **208행** → bronze Iceberg **208행**(publishable) →
+    silver **208행·distinct 208(붕괴 없음)**, mgtno=MNG_NO·opnsfteamcode=OGDP_INST_CD·상태=SALS_STTS,
+    record_json 보존, 비공통 `BPLC_SE_NM`=환경컨설팅회사 추출 확인.
+- gold(API별 table화)는 record_json 기반 **후속 레이어**(염두).
+
 ### 48. 응답 컬럼 표준 v1/v2 대응 — 환경 13종(신형) 편입 + 양식변경 알림
 
 request:
