@@ -1,27 +1,12 @@
-"""소스 클라이언트가 공용으로 쓰는 HTTP 헬퍼."""
+"""소스 클라이언트가 공용으로 쓰는 HTTP 자료형.
+
+전송 계층(세션/재시도/rate limit)은 #152 부터 루트 `common.http`(#78) 소관 —
+여기엔 도메인 페이징 결과의 공통 형태(:class:`Page`)만 남는다.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-
-def build_session(total_retries: int = 3, backoff: float = 0.5) -> requests.Session:
-    """일시적 HTTP 오류에 재시도/백오프가 걸린 requests 세션을 만든다."""
-    session = requests.Session()
-    retry = Retry(
-        total=total_retries,
-        backoff_factor=backoff,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=("GET",),
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
 
 
 @dataclass

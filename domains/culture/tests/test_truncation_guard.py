@@ -25,37 +25,40 @@ _URL_RE = re.compile(r"/json/(?P<svc>[^/]+)/(?P<start>\d+)/(?P<end>\d+)/")
 
 
 # ── 가짜 서울 서버: 실제 real개 행을 갖고 있으면서 총량은 lie 라고 주장 ────────────
+# 스텁 경계는 Transport(#152) — 진짜 HttpCore·SeoulOpenApiClient(PathKey)를 통과한다.
 
-class _FakeResp:
-    status_code = 200
-
-    def __init__(self, payload: dict):
-        self.content = json.dumps(payload).encode()
-
-    def raise_for_status(self):
-        pass
+from common.http.contract import TransportResponse
+from common.http.core import HttpCore
 
 
-class _LyingSeoulSession:
+class _LyingSeoulTransport:
     def __init__(self, service: str, real: int, lie: int):
         self.service, self.real, self.lie = service, real, lie
         self.calls = 0
 
-    def get(self, url, timeout=None):
+    def send(self, method, url, *, params, headers, timeout):
         self.calls += 1
         m = _URL_RE.search(url)
         start, end = int(m.group("start")), int(m.group("end"))
         rows = [{"SEQ": i} for i in range(start, min(end, self.real) + 1)] if start <= self.real else []
         if not rows:
             # 범위 밖: 서울 API는 INFO-200(데이터 없음)을 top-level RESULT 로 준다.
-            return _FakeResp({"RESULT": {"CODE": "INFO-200", "MESSAGE": "해당하는 데이터가 없습니다."}})
-        return _FakeResp({
-            self.service: {
-                "list_total_count": self.lie,
-                "RESULT": {"CODE": "INFO-000", "MESSAGE": "정상 처리되었습니다"},
-                "row": rows,
+            payload = {"RESULT": {"CODE": "INFO-200", "MESSAGE": "해당하는 데이터가 없습니다."}}
+        else:
+            payload = {
+                self.service: {
+                    "list_total_count": self.lie,
+                    "RESULT": {"CODE": "INFO-000", "MESSAGE": "정상 처리되었습니다"},
+                    "row": rows,
+                }
             }
-        })
+        return TransportResponse(status=200, content=json.dumps(payload).encode())
+
+
+def _seoul_client(transport) -> SeoulClient:
+    core = HttpCore(source="seoul_openapi", transport=transport, rate_limit=None,
+                    sleep=lambda s: None)
+    return SeoulClient("FAKEKEY123456", core=core)
 
 
 def _collect(client: SeoulClient, service: str, max_rows=None) -> int:
@@ -66,28 +69,25 @@ def _collect(client: SeoulClient, service: str, max_rows=None) -> int:
 
 def test_probe_recovers_from_lying_total():
     """총량 거짓말(925)에도 실제 데이터(1900)를 끝까지 수집해야 한다 — 7/1 사고 재현."""
-    sess = _LyingSeoulSession("culturalEventInfo", real=1900, lie=925)
-    cli = SeoulClient("FAKEKEY123456")
-    cli.session = sess
+    transport = _LyingSeoulTransport("culturalEventInfo", real=1900, lie=925)
+    cli = _seoul_client(transport)
     assert _collect(cli, "culturalEventInfo") == 1900, "truncation 자가치유 실패"
 
 
 def test_probe_costs_one_request_when_total_honest():
     """정직한 총량(1500)이면 probe 1회(INFO-200)만 추가 — 창2 + probe1 = 3요청."""
-    sess = _LyingSeoulSession("culturalEventInfo", real=1500, lie=1500)
-    cli = SeoulClient("FAKEKEY123456")
-    cli.session = sess
+    transport = _LyingSeoulTransport("culturalEventInfo", real=1500, lie=1500)
+    cli = _seoul_client(transport)
     assert _collect(cli, "culturalEventInfo") == 1500
-    assert sess.calls == 3  # 1-1000, 1001-1500, probe(1501-)
+    assert transport.calls == 3  # 1-1000, 1001-1500, probe(1501-)
 
 
 def test_probe_disabled_under_max_rows_cap():
     """max_rows 캡(샘플/드라이런)은 의도된 절단 — probe 하지 않는다."""
-    sess = _LyingSeoulSession("culturalEventInfo", real=1900, lie=925)
-    cli = SeoulClient("FAKEKEY123456")
-    cli.session = sess
+    transport = _LyingSeoulTransport("culturalEventInfo", real=1900, lie=925)
+    cli = _seoul_client(transport)
     assert _collect(cli, "culturalEventInfo", max_rows=500) == 500
-    assert sess.calls == 1  # 첫 창(1-500)뿐
+    assert transport.calls == 1  # 첫 창(1-500)뿐
 
 
 # ── ② 볼륨 HWM 계약 ───────────────────────────────────────────────────────────
