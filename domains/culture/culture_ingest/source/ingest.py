@@ -439,12 +439,40 @@ def build_warehouse(target: str = "dev") -> BronzeWarehouse:
     return BronzeWarehouse(build_warehouse_settings(target))
 
 
+def _load_one_dataset(s: dict, ctx: RunContext, *, sink, warehouse) -> tuple[str, int | None, str | None]:
+    """데이터셋 1개를 raw→bronze 적재. 반환 = (name, 적재 행 수 | None, 실패 사유 | None).
+
+    예외를 여기서 소진해 튜플로 돌려준다 — 병렬 실행(#202)에서 스레드 간 공유
+    상태 없이 호출측이 결과만 모으면 되게.
+    """
+    name = s["name"]
+    try:
+        # 미등록 이름도 KeyError로 루프를 죽이지 않게 조회부터 try 안에서.
+        ds = BY_NAME[name]
+        records = []
+        for key in s.get("object_keys") or []:
+            filename = key.rsplit("/", 1)[-1]
+            for rec in parse_records(ds.source, sink.get(key), ds.row_tag, ds.endpoint):
+                records.append((key, filename, rec))
+        # fetch가 센 행수와 **적재 전** 대조 — 손상 raw를 parse_records가 빈 리스트로
+        # 삼켜 0행 침묵 성공하는 구멍을 막고, 의심 데이터는 테이블에 쓰지 않는다.
+        if len(records) != s.get("rows", len(records)):
+            return name, None, f"{ds.name}: 파싱 {len(records)}행 ≠ fetch {s['rows']}행 (raw 파싱 유실 의심)"
+        t0 = time.monotonic()
+        n = warehouse.load(ds, ctx, records)
+        print(f"[load] {name}: {n:,}행 · {time.monotonic() - t0:.1f}s")
+        return name, n, None
+    except Exception as exc:  # noqa: BLE001 -- 데이터셋별 격리, 호출측 말미 fail loud
+        return name, None, redact(f"{name}: {type(exc).__name__}: {exc}")
+
+
 def load_bronze_from_raw(
     ctx: RunContext,
     summaries: list[dict],
     *,
     sink,
     warehouse,
+    max_workers: int = 1,
 ) -> dict[str, int]:
     """fetch 단계가 raw에 박제한 객체를 다시 읽어 bronze Iceberg에 멱등 적재한다.
 
@@ -452,31 +480,27 @@ def load_bronze_from_raw(
     된다. 데이터셋 단위로 격리해 하나가 실패해도 나머지는 적재하고, 말미에 실패
     목록으로 예외를 던진다(fail loud). 적재 자체는 ``warehouse.load``의
     ingest_ts delete-then-insert 라 재실행이 중복을 만들지 않는다.
+
+    ``max_workers > 1`` 이면 데이터셋 단위로 병렬 적재(#202) — 26분 순차 병목의
+    1단계 완화. 서로 다른 bronze_* 테이블이라 Iceberg 커밋 충돌이 없고,
+    TrinoClient 는 무상태(요청마다 새 POST)라 스레드 공유가 안전하다.
+    기본 1(순차)이며, 상한은 공유 Trino 배려로 낮게 유지할 것(DAG 기본 4).
     반환: {dataset: 적재 행 수} (에러/skipped 데이터셋은 제외).
     """
-    loaded: dict[str, int] = {}
-    failures: list[str] = []
-    for s in summaries:
-        if not s or s.get("error"):
-            continue  # 실패/skipped 데이터셋은 적재 대상 아님(리포트가 이미 드러냄)
-        try:
-            # 미등록 이름도 KeyError로 루프를 죽이지 않게 조회부터 try 안에서.
-            ds = BY_NAME[s["name"]]
-            records = []
-            for key in s.get("object_keys") or []:
-                filename = key.rsplit("/", 1)[-1]
-                for rec in parse_records(ds.source, sink.get(key), ds.row_tag, ds.endpoint):
-                    records.append((key, filename, rec))
-            # fetch가 센 행수와 **적재 전** 대조 — 손상 raw를 parse_records가 빈 리스트로
-            # 삼켜 0행 침묵 성공하는 구멍을 막고, 의심 데이터는 테이블에 쓰지 않는다.
-            if len(records) != s.get("rows", len(records)):
-                failures.append(
-                    f"{ds.name}: 파싱 {len(records)}행 ≠ fetch {s['rows']}행 (raw 파싱 유실 의심)"
-                )
-                continue
-            loaded[ds.name] = warehouse.load(ds, ctx, records)
-        except Exception as exc:  # noqa: BLE001 -- 데이터셋별 격리, 말미 fail loud
-            failures.append(redact(f"{s['name']}: {type(exc).__name__}: {exc}"))
+    targets = [s for s in summaries if s and not s.get("error")]
+    # 실패/skipped 데이터셋은 적재 대상 아님(리포트가 이미 드러냄)
+    if max_workers > 1 and len(targets) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = list(pool.map(
+                lambda s: _load_one_dataset(s, ctx, sink=sink, warehouse=warehouse), targets
+            ))
+    else:
+        results = [_load_one_dataset(s, ctx, sink=sink, warehouse=warehouse) for s in targets]
+
+    loaded = {name: n for name, n, err in results if err is None}
+    failures = [err for _, _, err in results if err is not None]
     if failures:
         raise RuntimeError("bronze 적재 실패: " + " | ".join(failures))
     return loaded
@@ -488,6 +512,7 @@ def load_bronze(
     *,
     target: str = "dev",
     env_file: str | None = None,
+    max_workers: int = 1,
 ) -> dict[str, int]:
     """R2 싱크·Trino 웨어하우스를 만들어 ``load_bronze_from_raw``를 실행 (DAG/CLI 공용)."""
     settings = build_r2_settings(target, env_file)
@@ -495,7 +520,8 @@ def load_bronze(
     if missing:
         raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
     return load_bronze_from_raw(
-        ctx, summaries, sink=R2Sink(settings), warehouse=build_warehouse(target)
+        ctx, summaries, sink=R2Sink(settings), warehouse=build_warehouse(target),
+        max_workers=max_workers,
     )
 
 

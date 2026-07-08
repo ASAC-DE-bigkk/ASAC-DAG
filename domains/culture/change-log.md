@@ -3,6 +3,18 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-08 — load_bronze 데이터셋 병렬화 + 진행 로그 (#202)
+
+- **26분 병목 1단계** — 7/8 실측: load_bronze = run 30분의 87%, 원인은 커밋 고정비
+  (~216쿼리 × 평균 7.2초, 1행 INSERT도 4~7초). `load_bronze_from_raw`에 `max_workers`
+  (ThreadPool, 데이터셋 단위) — 서로 다른 bronze_* 테이블이라 커밋 충돌 없음,
+  TrinoClient 무상태라 스레드 공유 안전. DAG 기본 4(공유 Trino 배려 스로틀),
+  `load_workers=1` 트리거 파라미터가 순차 롤백 레버. 기대: 26분 → ~13분(세종 바운드).
+  → `source/ingest.py` · `culture_bronze.py`
+- **26분 블랙박스 해소** — 배치(=Iceberg 커밋)마다 진행 로그 + 데이터셋별 완료
+  로그(행수·소요). 근본 해법(pyiceberg 직접 write, 커밋 216→12/일)은 이미지
+  의존성이 멘토 게이트라 #203 으로 분리. → `common/warehouse.py`
+
 ## 2026-07-07 — HTTP 전송 계층 common.http 전환 (#152)
 
 - **culture 가 루트 `common/http`(#78) 소비자로** (#152) — 6/6 도메인 완성, 마지막 잔여 중복 해소.
