@@ -143,9 +143,10 @@ def finalize(plan: dict, load_results: list[dict]) -> dict:
 
         # 신규 = rows_loaded(증분 파일 실제 적재분), 전체 = rows_expected(=increment_count).
         rr = [{"short": r["short"], "status": "ok" if r.get("is_publishable") else "failed",
-               "new": r.get("rows_loaded", 0), "total": r.get("rows_expected", 0)} for r in results]
-        rr += [{"short": sh, "status": "failed", "error": "적재 실패(다음 실행 재시도)"}
-               for (sh, _run) in failed]
+               "new": r.get("rows_loaded", 0), "total": r.get("rows_expected", 0),
+               "task": "load_one"} for r in results]
+        rr += [{"short": sh, "status": "failed", "error": "적재 실패(다음 실행 재시도)",
+                "task": "load_one"} for (sh, _run) in failed]
         if rr:
             metrics["report"] = run_report.send_run_report(
                 dag_id="commerce_load_bronze", run_id=metrics["finalized_at"],

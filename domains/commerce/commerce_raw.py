@@ -220,7 +220,7 @@ def finalize_run(bronze_run_id: str, observed_date: str, summaries: list[dict]) 
         # 신규 건수 = increment_count(정렬 파일 diff), 전체 = rows_total(API 호출 전량).
         rr = [{"short": s.get("short"), "status": s.get("status"),
                "new": s.get("increment_count", 0), "total": s.get("rows_total", 0),
-               "error": s.get("error")} for s in summaries]
+               "error": s.get("error"), "task": "ingest_one"} for s in summaries]
         # collect(daily): 전 수집대상(152종) 기준 미수집(결과없음)까지 집계. recollect: 대상분만.
         scope = list(COLLECTIBLE_SHORTS) if stage == "collect" else None
         metrics["report"] = run_report.send_run_report(

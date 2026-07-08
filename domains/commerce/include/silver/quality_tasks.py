@@ -129,7 +129,7 @@ def report_silver_run() -> dict:
         results = [{"short": r[0], "status": "ok", "new": _num(r[1])} for r in rows]
     except Exception as exc:  # noqa: BLE001 — dbt 실패 등 조회 불가: DAG 단위 실패로 리포트
         log.warning("silver 리포트 집계 실패(%s) — 실패 리포트로 대체", type(exc).__name__)
-        results = [{"short": "silver", "status": "failed",
+        results = [{"short": "silver", "status": "failed", "task": "dbt_run_silver·dbt_test_silver",
                     "error": "silver current 집계 실패(dbt run/test 결과 확인)"}]
     counts = run_report.send_run_report(
         dag_id="commerce_load_silver", run_id=observed, observed_date=observed,
