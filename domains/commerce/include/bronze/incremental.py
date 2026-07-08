@@ -4,10 +4,13 @@
 전량 RAM 금지 → **외부 병합 정렬**(청크를 임시파일로 쓰고 heapq 병합, 스트리밍). 비교정렬 하한
 O(n log n).
 
-정렬키(#193 — UPDATEDT None 케이스 대응): **(UPDATEDT desc → LASTMODTS desc → MGTNO)**.
-UPDATEDT 가 없거나(None/빈값/비정형) 0 이면 **LASTMODTS 로 폴백**해 최신순 위치에 둔다
-(예전엔 UPDATEDT 없으면 0=최하단으로 가라앉았다). 2순위 LASTMODTS(desc)는 UPDATEDT 동률의
-결정적 tie-break, 3순위 MGTNO. → silver 버전 정렬 `coalesce(updatedt_ts, lastmodts_ts, epoch)
+정렬키: **(UPDATEDT desc → LASTMODTS desc → OPNSFTEAMCODE → MGTNO)**.
+UPDATEDT 가 없거나(None/빈값/비정형) 0 이면 **LASTMODTS 로 폴백**해 최신순 위치에 둔다(#193 —
+예전엔 UPDATEDT 없으면 0=최하단으로 가라앉았다). 2순위 LASTMODTS(desc)는 UPDATEDT 동률의
+tie-break. 3·4순위는 **업소 식별키 (OPNSFTEAMCODE, MGTNO)** — MGTNO 는 발급 자치단체
+(OPNSFTEAMCODE) 안에서만 유니크하므로 MGTNO 단독은 서로 다른 구청의 별개 업소를 같은 키로
+뭉갠다(중복/이력 매핑 오류). diff 정렬 정합·업소 식별을 위해 OPNSFTEAMCODE 를 반드시 포함 →
+silver 그레인 (dataset, opnsfteamcode, mgtno) · 정렬 `coalesce(updatedt_ts, lastmodts_ts, epoch)
 desc, lastmodts desc` 와 일치.
 
 계약:
@@ -49,16 +52,18 @@ def lastmodts_num(row: dict) -> int:
     return _ts_num(row, "LASTMODTS")
 
 
-def sort_key(row: dict) -> tuple[int, int, str]:
-    """내림차순 정렬키(#193): (UPDATEDT desc → LASTMODTS desc → MGTNO).
+def sort_key(row: dict) -> tuple[int, int, str, str]:
+    """내림차순 정렬키: (UPDATEDT desc → LASTMODTS desc → OPNSFTEAMCODE → MGTNO).
 
-    UPDATEDT 없으면 LASTMODTS 로 폴백(coalesce) → None UPDATEDT 가 최하단으로 밀리지 않는다.
-    2순위 LASTMODTS(desc)는 UPDATEDT 동률의 결정적 tie-break, 3순위 MGTNO.
+    UPDATEDT 없으면 LASTMODTS 로 폴백(coalesce) → None UPDATEDT 가 최하단으로 밀리지 않는다(#193).
+    2순위 LASTMODTS(desc)는 UPDATEDT 동률의 tie-break. 3·4순위 **업소 식별키 (OPNSFTEAMCODE, MGTNO)**
+    — MGTNO 는 발급 자치단체 안에서만 유니크라, MGTNO 단독은 서로 다른 구청의 별개 업소를 같은
+    키로 충돌시킨다(diff 오정렬·중복/이력 매핑 오류). OPNSFTEAMCODE 포함으로 업소를 고유 식별.
     """
     u = updatedt_num(row)
     l = lastmodts_num(row)
     primary = u or l                        # UPDATEDT; 없으면(0) LASTMODTS 폴백
-    return (-primary, -l, row.get("MGTNO") or "")
+    return (-primary, -l, row.get("OPNSFTEAMCODE") or "", row.get("MGTNO") or "")
 
 
 def normalize(row: dict) -> str:
@@ -156,7 +161,7 @@ def diff_new_rows(today_sorted: Iterable[dict], prev_sorted: Iterable[dict],
                   *, stop_on_aligned_match: bool = False) -> Iterator[dict]:
     """오늘 정렬본에서 **전날 정렬본에 없던 신규/변경 row만** 방출(정렬 병합, 스트리밍).
 
-    둘 다 (UPDATEDT→LASTMODTS desc, MGTNO) 정렬이라:
+    둘 다 (UPDATEDT→LASTMODTS desc, OPNSFTEAMCODE, MGTNO) 정렬이라:
       - today 키 < prev 키(더 최신) → 오늘에만 있는 신규 → 방출
       - 키 동일 → 정규화 문자열 직접 비교: 같으면 미변경(건너뜀), 다르면 변경분 → 방출
       - today 키 > prev 키 → 전날에만 있던 행(삭제/이동) → 건너뜀
