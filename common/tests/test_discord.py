@@ -21,7 +21,11 @@ from common.discord.notify import (  # noqa: E402
     send_embed,
     send_text,
 )
-from common.errors.airflow import OPTOUT_ENV, problem_failure_callback  # noqa: E402
+from common.errors.airflow import (  # noqa: E402
+    OPTOUT_ENV,
+    problem_failure_callback,
+    problem_from_airflow_context,
+)
 from common.security import PLACEHOLDER  # noqa: E402
 
 _WEBHOOK = "https://discord.example/api/webhooks/123/abc"
@@ -182,3 +186,42 @@ def test_callback_never_raises_even_if_discord_breaks(monkeypatch, guard_dir):
     stored: list[str] = []
     _callback(stored)(_airflow_context(run_id="manual__discord-down"))
     assert stored                  # R2 기록은 영향 없음, 예외도 안 튐
+
+
+# ── context 추출 견고성 회귀 (#194 masond 리뷰) ──────────────────────────────
+# ti/dag/dag_run 이 빠지고 `task` 만 있는 컨텍스트(수동 트리거·DAG-level 콜백 등)에서
+# dag_id/task_id 가 None → 카드 '?'·R2 키 dag_id=unknown/ 으로 degrade 되던 버그.
+
+def test_problem_context_falls_back_to_task():
+    context = {
+        "task": SimpleNamespace(dag_id="traffic_incident_bronze", task_id="fetch_raw"),
+        "run_id": "manual__2026-07-07T15:10:20",
+        "exception": RuntimeError("boom"),
+    }
+    problem = problem_from_airflow_context(context, domain="traffic")
+    assert problem.dag_id == "traffic_incident_bronze"
+    assert problem.task_id == "fetch_raw"
+    assert problem.run_id == "manual__2026-07-07T15:10:20"
+    assert "unknown" not in problem.instance   # instance URN 도 unknown 아님
+
+
+def test_callback_card_and_r2_key_not_degraded_with_task_only(monkeypatch, sent, guard_dir):
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", _WEBHOOK)
+    monkeypatch.delenv(OPTOUT_ENV, raising=False)
+    context = {
+        "task": SimpleNamespace(dag_id="traffic_incident_bronze", task_id="fetch_raw"),
+        "run_id": "manual__task-only",
+        "exception": RuntimeError("boom"),
+    }
+    stored: list[str] = []
+    _callback_traffic(stored)(context)
+    title = sent[0]["embeds"][0]["title"]
+    assert "?" not in title and "traffic_incident_bronze" in title   # 카드에 실제 dag
+    assert stored and "dag_id=unknown" not in stored[0]              # R2 키도 unknown 아님
+
+
+def _callback_traffic(stored):
+    from common.errors.sink import R2ErrorSink
+
+    sink = R2ErrorSink(put_object=lambda key, payload: stored.append(key))
+    return problem_failure_callback(domain="traffic", sink=sink)

@@ -56,18 +56,42 @@ def _problem_embed(problem: Problem) -> tuple[str, str, str]:
 
 def problem_from_airflow_context(context: dict[str, Any], *, domain: str,
                                  source_system: str | None = None) -> Problem:
+    # dag_id/task_id 를 여러 컨텍스트 객체에서 폴백 탐색한다. task-level 콜백 외에
+    # 수동 트리거·DAG-level 콜백 등 일부 객체(ti/dag/dag_run)가 빠지는 경로가 있어,
+    # 그중 하나만 없어도 dag_id/task_id 가 None 이 되면 알림 카드가 '?'·R2 키가
+    # dag_id=unknown/ 으로 degrade 된다(#194 리뷰). `task` 를 포함해 넓게 훑는다.
     ti = context.get("task_instance") or context.get("ti")
+    task = context.get("task")
     dag = context.get("dag")
     dag_run = context.get("dag_run")
-    dag_id = (getattr(dag, "dag_id", None) or getattr(ti, "dag_id", None)
-              or getattr(dag_run, "dag_id", None))
-    run_id = context.get("run_id") or getattr(dag_run, "run_id", None)
+
+    def _pick(*values: Any) -> Any:
+        for value in values:
+            if value:
+                return value
+        return None
+
+    dag_id = _pick(
+        getattr(ti, "dag_id", None),
+        getattr(task, "dag_id", None),
+        getattr(dag, "dag_id", None),
+        getattr(dag_run, "dag_id", None),
+    )
+    task_id = _pick(
+        getattr(ti, "task_id", None),
+        getattr(task, "task_id", None),
+    )
+    run_id = _pick(
+        context.get("run_id"),
+        getattr(dag_run, "run_id", None),
+        getattr(ti, "run_id", None),
+    )
     try_number = getattr(ti, "try_number", None)
     return Problem.from_exception(
         context.get("exception"),
         domain=domain,
         dag_id=dag_id,
-        task_id=getattr(ti, "task_id", None),
+        task_id=task_id,
         run_id=run_id,
         try_number=try_number if isinstance(try_number, int) else None,
         source_system=source_system,

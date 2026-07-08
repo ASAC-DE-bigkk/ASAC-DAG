@@ -9,6 +9,9 @@ culture 검토 의견의 v1 필수 요구: 동적 매핑 N태스크가 동시에
 `airflow_logs` 볼륨을 공유하는 현 LocalExecutor 단일 호스트 구성에서 프로세스 간
 안전하다. (멀티 호스트로 가면 DB/Variable 기반으로 교체 — 모듈 docstring 계약만
 유지하면 됨.) 가드 실패는 fail-open: 중복 전송이 침묵보다 낫다.
+
+마커는 빈 파일이고 자동 삭제하지 않는다 — run 종료 후엔 불필요하므로, `airflow_logs`
+볼륨(로그) 정리 시 `_discord_notify_guard/` 도 함께 비우면 된다(culture 리뷰 #194).
 """
 from __future__ import annotations
 
