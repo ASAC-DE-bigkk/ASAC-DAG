@@ -7,6 +7,20 @@
 
 ## 2026-07-08
 
+### 44. 문화 상권 인허가 56종 추가 (51 → 107)
+
+request:
+- 문화 상권 인허가 56종(골프장·체육시설/영화·비디오/게임/관광·여행/공연/음악·음반/출판·인쇄·광고 등)을
+  추가. "문화 카테고리지만 결국 상권"이라 commerce 로 편입. 기존과 같이 수집(중복·명칭 충돌 점검 포함).
+
+response:
+- `config/dataset_registry.yaml` 에 56종 추가(51 → 107), `category: culture`. LOCALDATA 코드·oa_id·short
+  56종 전부 기존 51종/격리분과 중복 없음(기존 `031103`=숙박업 ≠ 신규 `031105/031107`=야영장). 코드 오름차순 배치.
+- `tests/test_registry.py` `EXPECTED_COUNT` 51 → 107. 무결성 6종 통과(개수·short/service_name/oa_id 유니크·
+  필수필드·`LOCALDATA_` 접두·daily 전량). 전체 pytest 295 통과.
+- 레지스트리 헤더 51 → 107 + category 목록에 `culture` 추가. DAG 는 registry 기반이라 107 job 자동 반영.
+- docs 상세 호출량 표(api-call-volume 등)는 107종 실측 재산정 후속.
+
 ### 43. raw 수집 대상 12종 추가 (39 → 51) + 레지스트리 무결성 테스트
 
 request:

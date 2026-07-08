@@ -7,7 +7,7 @@
 """
 from commerce_core import registry
 
-EXPECTED_COUNT = 51        # #207 로 39 → 51 (문화 상권 배치 추가 시 함께 갱신)
+EXPECTED_COUNT = 107       # 39(원본) → 51(#207 보건/식품 12종) → 107(문화 상권 56종)
 
 
 def _dups(values):
