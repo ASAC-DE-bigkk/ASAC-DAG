@@ -43,37 +43,49 @@ def _fake_key_registered():
             red._literals.remove(k)
 
 
-# ── ① clients 예외 경계 ────────────────────────────────────────────────────────
+# ── ① clients 예외 경계 (#152: HttpProblemError — 생성 시 자체 redact) ─────────
 
-class _Resp400:
-    """service= 키가 박힌 URL 로 HTTPError 를 던지는 requests 응답 흉내."""
-
-    status_code = 400
-    content = b""
-
-    def __init__(self, url: str):
-        self.url = url
-
-    def raise_for_status(self):
-        raise requests.HTTPError(
-            f"400 Client Error: Bad Request for url: {self.url}", response=self
-        )
+from common.http.contract import TransportResponse
+from common.http.core import HttpCore
+from common.http.errors import HttpProblemError
 
 
-class _Session400:
-    def get(self, url, params=None, timeout=None):
-        qs = "&".join(f"{k}={v}" for k, v in (params or {}).items())
-        return _Resp400(f"{url}?{qs}")
+class _LeakyConnectTransport:
+    """전송 계층 예외 메시지에 키 박힌 URL 이 포함되는 최악 경로 흉내 —
+    core 가 detail 로 감싸며 redact(literal)로 가리는지 검증."""
+
+    def send(self, method, url, *, params, headers, timeout):
+        raise ConnectionError(f"Max retries exceeded with url: {LEAKY_URL}")
 
 
-def test_kopis_client_httperror_masks_key():
-    cli = KopisClient(FAKE_KOPIS)
-    cli.session = _Session400()
-    with pytest.raises(requests.HTTPError) as ei:
+class _Status400Transport:
+    def send(self, method, url, *, params, headers, timeout):
+        return TransportResponse(status=400)
+
+
+def _kopis(transport) -> KopisClient:
+    core = HttpCore(source="kopis", transport=transport, rate_limit=None,
+                    sleep=lambda s: None)
+    return KopisClient(FAKE_KOPIS, retry_delay_sec=0, core=core)
+
+
+def test_kopis_transport_error_detail_masks_key():
+    cli = _kopis(_LeakyConnectTransport())
+    with pytest.raises(HttpProblemError) as ei:
         cli._get("pblprfr", {"cpage": 1})
-    msg = str(ei.value)
-    assert FAKE_KOPIS not in msg, "예외 메시지에 KOPIS 키 평문"
-    assert PLACEHOLDER in msg
+    surface = str(ei.value) + json.dumps(ei.value.problem.to_dict())
+    assert FAKE_KOPIS not in surface, "HttpProblemError 표면에 KOPIS 키 평문"
+    assert PLACEHOLDER in surface
+
+
+def test_kopis_400_problem_url_carries_no_key():
+    """QueryKey(#152)는 키를 params 로 분리 — 에러의 request.url 에 키가 아예 없다."""
+    cli = _kopis(_Status400Transport())
+    with pytest.raises(HttpProblemError) as ei:
+        cli._get("pblprfr", {"cpage": 1})
+    surface = str(ei.value) + json.dumps(ei.value.problem.to_dict())
+    assert FAKE_KOPIS not in surface
+    assert ei.value.status == 400
 
 
 # ── ② ingest result.error ─────────────────────────────────────────────────────

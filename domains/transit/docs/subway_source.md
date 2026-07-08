@@ -44,7 +44,8 @@ silver/gold 설계·도메인 통합 시 레퍼런스. 필드는 **실제 적재
 ```
 
 - **시각 2개**가 핵심: `ts_collected`(폴링) vs `ts_source`(=`recptnDt`) → **신선도(staleness)** 계산 = 두 시각 차.
-- **좌표 없음**: 지하철 도착/위치 응답엔 위경도가 없다 → 공간연계는 `statnId`/역명 ↔ 별도 역좌표 매핑 필요(후속).
+- **좌표 없음**: 지하철 도착/위치 응답엔 위경도가 없다 → 공간연계는 역 마스터([master_source.md](master_source.md), #162)와
+  **역명+노선 조인**으로 해결(ID 조인 불가 — `statnId`≠`BLDN_ID` 체계 불일치 실증). silver 구현: ASAC-DBT #51 `slv_transit_subway_arrival`.
 - **페이징 메타**(`beginRow/endRow/curPage/pageRow/totalCount/rowNum/selectedCount`)는 두 API 공통 OpenAPI 래퍼 필드 → silver 에서 버림.
 
 ---
@@ -136,6 +137,27 @@ silver/gold 설계·도메인 통합 시 레퍼런스. 필드는 **실제 적재
 - ⚠️ **`updnLine` 으로 join 하지 말 것**: 도착=텍스트("내선"/"외선"), 위치=숫자(0/1) — 표현 체계가 다름.
 - 역 식별은 양쪽 `statnId` 로 가능하나, **현재역 의미가 다름**(도착=도착예정역 맥락 / 위치=열차 현위치) → 의미 구분해 silver 모델링.
 
+### 3.1 silver 활용 현황 — arrival 만 승격, position 은 보류 (설계 v2 결정)
+
+**현재 silver 는 `subway_arrival` 단독**이다. `slv_transit_subway_arrival` = 도착 이벤트 + 역 마스터
+dim(역명+노선 조인)이며, position 은 어디에도 조인되지 않는다(수집=bronze 만 유지).
+
+**position 을 보류한 이유:**
+1. **공간 정합이 애매** — position 의 가치는 "열차가 지금 어디 있나"인데 열차는 대부분 역 **사이**에 있다.
+   응답에 좌표 없이 `statnId`(현재/최근접 역)만 있어, 역 좌표를 붙여도 "그 역 근처"라는 근사일 뿐
+   행정동 할당(공통축)의 의미가 흐림. 버스(`gpsX/gpsY` 실좌표)와 결정적으로 다른 점.
+2. **arrival 과 정보 중복** — `arvlCd`(진입/도착/출발)·`arvlMsg2` 가 이미 열차 움직임을 역 기준으로
+   제공해, 동별 교통 상태 분석에는 arrival 만으로 충분.
+
+**승격 시 가능해지는 분석** (arrival ↔ position 을 열차번호로 조인):
+- 특정 열차의 **궤적 추적** — 구간 실주행 시간·지연 전파 분석
+- arrival 의 예측(`barvlDt`) vs position 의 실위치 대조 → **도착 예측 정확도 평가**
+
+**승격 전 확인 조건:**
+- ⚠️ `btrainNo` 는 **신분당선에서 비정상이 실증**돼 arrival grain 에서도 기각됨(`ordkey` 채택) —
+  열차번호 조인은 1~9호선 한정 신뢰 가능성이 크므로, 승격 시 노선 범위 한정 또는 재검증 필수.
+- 역간 위치의 공간 표현 방식 결정 필요(예: 최근접 역으로 스냅 + "역간" 플래그, 또는 구간 단위 축).
+
 ---
 
 ## 4. `subwayId` ↔ 노선 매핑
@@ -173,10 +195,13 @@ raw/transit/seoul_subway/<dataset>/load_date=YYYY-MM-DD/ingest_ts=…/page-NNNN.
 
 ---
 
-## 6. silver / gold 로의 함의 (메모)
+## 6. silver 반영 상태 (ASAC-DBT #51 구현 기준)
 
-- **파싱**: `raw`(JSON varchar) → 위 필드로 전개. 페이징 메타 7필드는 제외.
-- **dedup 키 후보**: 도착 = (`statnId`, `btrainNo`, `recptnDt`) · 위치 = (`trainNo`, `recptnDt`).
-- **staleness**: `ts_collected - ts_source` 파생 컬럼.
-- **location_key 부재**: 좌표가 없어 `statnId`/역명 기준. 도메인 통합 시 역좌표 마스터와 매핑 필요.
-- **타입 정규화**: `barvlDt`/코드값은 문자열로 옴 → silver 에서 int/enum 캐스팅.
+- **도착 → `slv_transit_subway_arrival` 구현 완료**: grain = (`statnId`, **`ordkey`**, `recptnDt`).
+  ⚠️ 애초 후보였던 `btrainNo` 는 **신분당선에서 비정상(중복/불안정)이 실증돼 기각** — `ordkey` 채택.
+- **공간축**: 역명+노선 조인(`dim_transit_station`, `subwayId`→노선 라벨은 `seoul_subway_line_code` seed 다대일 변환).
+  역명은 괄호 부기 제거 후 매칭("잠실(송파구청)"→"잠실"), 노선 라벨 괄호는 유지.
+- **위치(`subway_position`)는 silver 2차 보류**: 열차가 역 사이 이동 중이라 공간 정합이 애매(설계 v2).
+  dedup 키 후보 = (`trainNo`, `recptnDt`) 는 유효.
+- **staleness**: `ts_collected - ts_source` 파생 (미구현 — 후속. event_at 미래값 이상치 실측됨, freshness 게이트 후보).
+- **타입 정규화**: silver 에서 int/enum 캐스팅 (`barvl_dt_sec` 등 구현됨).

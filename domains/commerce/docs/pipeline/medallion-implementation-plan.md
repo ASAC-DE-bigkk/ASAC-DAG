@@ -115,10 +115,11 @@ Iceberg 테이블 + 이 상태파일을 삭제해도 raw 는 불변이라 **전�
 - `gold_commerce_license_status_current` — **current 기준 스냅샷 집계**(grain
   `(district, dataset, trdstategbn)`). silver `ref()` 만, 신규 파싱·중복제거 금지.
   일별 추이/상태 전이 gold 는 date-spine 설계가 필요해 phase-2 로 이연.
-- materialization 은 전부 `table` 전량 재빌드 — **silver 는 bronze 의 순수 함수**(멱등·재처리
-  자동). incremental 은 R2 Data Catalog 이슈로 당분간 보류(후속 이슈). **단위 재적재/삭제**는
-  bronze 워터마크 파일(§2.1.1)과 dbt vars(`exclude_datasets`/`exclude_observed_dates`/
-  `exclude_load_dates`/`exclude_bronze_run_ids`)로 제어 — 운영 가이드:
+- materialization 은 history=`incremental`(append), current=`table`. 첫 실행/`--full-refresh` 는
+  publishable bronze 전체를 백필하고, 이후에는 `silver_license_history.bronze_run_id` 를 marker 로
+  아직 반영되지 않은 run 만 처리한다. **단위 재적재/삭제**는 bronze 워터마크 파일(§2.1.1)과
+  dbt vars(`exclude_datasets`/`exclude_observed_dates`/`exclude_load_dates`/
+  `exclude_bronze_run_ids`) + full-refresh 백필로 제어 — 운영 가이드:
   `dbt/domains/commerce/docs/rebuild-and-ops.md`.
 - **타임존 정책(2026-07-06 재확정 — KST 일원화, 직전 #34 UTC 정책을 뒤집음)**: silver 의 timestamp
   컬럼은 **전부 KST(naive)**. `updatedt_ts`/`lastmodts_ts` 는 KST 원문 파싱 후 **무변환**(원문 문자열도
@@ -229,13 +230,17 @@ Iceberg 테이블 + 이 상태파일을 삭제해도 raw 는 불변이라 **전�
   (일별 추이·상태 전이 gold 는 date-spine 설계와 함께 phase-2.)
 - **완료 기준**: `dbt run+test` PASS, gold 는 `ref(silver)` 만 참조.
 
-### Step 10. transform DAG + 마무리 *(DAG 구현 완료 2026-07-05 — 잔여 문서 정리 후속)*
+### Step 10. silver load DAG + 마무리 *(DAG 구현 완료 2026-07-05, 2026-07-07 증분 전환)*
 
-- **구현됨**: `commerce_localdata_transform` DAG — schedule 05:00 KST(적재 04:00 이후),
+- **구현됨**: `commerce_load_silver` DAG — schedule 05:00 KST(적재 04:00 이후),
   BashOperator 2단: dbt run silver → test silver (gold 단계는 Step 9 구현 시 2단 추가).
   `common_dbt_smoke.py` 와 동일한 dbt venv/env 계약(`DBT_BIN`=이미지 dbt venv,
   target 기본 dev — `.env.commerce` 의 `COMMERCE_DBT_TARGET`/`COMMERCE_DBT_PROJECT_DIR`).
-  DAG 는 무상태(전량 재빌드 오케스트레이션만) — 재실행 항상 안전.
+  DAG 는 `silver_license_history` 의 `bronze_run_id` marker 를 기준으로 신규 run 만 반영한다.
+  marker/table 이 없거나 `--full-refresh` 를 주면 전체 백필한다.
+- **공용 마스터 DAG 판단**: `common_admin_dong_bronze` 는 commerce 소유가 아닌 공용 행정동/법정동
+  마스터 수집 DAG 이므로 `commerce_load_silver` 로 병합하지 않는다. commerce silver 는 공용 raw
+  `raw/common/admin_dong` 최신본을 읽어 commerce 스키마의 `bronze_ref_admin_dong` 만 갱신한다.
 - **잔여(후속)**: 기존 pandas silver([silver_tasks.py](../../include/silver/silver_tasks.py))
   deprecated 표기, [storage.md](../architecture/storage.md) 의 구식 기술("전체 페이지 NDJSON")
   갱신, [incremental-sort-diff.md](bronze/incremental-sort-diff.md) §6 오픈 이슈 종결,
@@ -375,8 +380,8 @@ CREATE TABLE IF NOT EXISTS <catalog>.commerce.bronze_geocode_address (
 - **recollect 와 bronze**: 같은 KST 날짜에 recollect 성공으로 bronze_run_id 가 복수 생기는 것은
   정상(양쪽 DAG 모두 적재 — Step 3). `cleanup_incomplete` 가 raw 실패 파편을 지워도 incomplete
   run 엔 증분 파일이 없어 bronze 적재와 무관.
-- **dbt 전량 재빌드의 장기 성장**: 수년 뒤 재빌드 시간 증가 시 incremental 전환 검토(현재는
-  R2 Data Catalog 이슈로 보류).
+- **silver 증분 한계**: 신규 bronze_run_id 는 증분 처리한다. 과거 run 을 강제로 교체하거나 제외 vars 를
+  바꾸는 경우에는 `dbt run --full-refresh --select silver_license_history+` 로 marker 를 재생성한다.
 - **초기 백필 처리량(해결)**: Trino INSERT VALUES 로 대용량을 넣으면 Iceberg 커밋 폭증 + 코디네이터
   OOM(실측 확인). → 전체 스냅샷(mode=first)은 **PyIceberg**(커밋 1회, 메모리 바운드)로 적재하고
   일일 소량 변경분만 Trino. 실행당 날짜 수 바운드로 catch-up.
@@ -386,7 +391,7 @@ CREATE TABLE IF NOT EXISTS <catalog>.commerce.bronze_geocode_address (
 
 ```text
 [Step 1 문서] → [2 적재 엔진·상태 ✓] → [3 적재 DAG ✓] → [4 소형 백필(이미지 통합)] → [5 dbt 골격 ✓]
-→ [6 silver+테스트 ✓(07-05 암묵 버저닝 개정)] → [7 전체 백필] → [8a API·EPSG 확정 → 8b geocode 수집
+→ [6 silver+테스트 ✓(07-07 marker 증분)] → [7 전체 백필] → [8a API·EPSG 확정 → 8b geocode 수집
 → 8c 조인 → 8d 주소 백필] → [9 gold] → [10 transform DAG ✓ + 잔여 문서 정리]
 ```
 (✓ = 코드 구현 완료. 4·7 백필과 dbt run/test 는 Trino·PyIceberg·dbt-trino 설치된 이미지에서 검증.)

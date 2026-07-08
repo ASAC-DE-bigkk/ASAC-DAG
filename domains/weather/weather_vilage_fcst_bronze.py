@@ -34,9 +34,8 @@ from _shared.bronze_run_manifest import (  # noqa: E402
     record_bronze_run_event,
 )
 from weather_ingest.bronze import (  # noqa: E402
+    append_kma_bronze_row_batches_pyiceberg,
     create_kma_bronze_table,
-    insert_kma_bronze_row_batches,
-    insert_kma_bronze_rows,
     verify_kma_bronze_runtime as verify_kma_bronze_rows,
 )
 from weather_ingest.common.runtime import (  # noqa: E402
@@ -569,9 +568,8 @@ def load_kma_bronze(**context) -> dict:
             }
         )
 
-    inserted = insert_kma_bronze_row_batches(
-        cursor=cursor,
-        qualified_table=qualified_table,
+    inserted = append_kma_bronze_row_batches_pyiceberg(
+        schema=schema,
         row_batches=batch_inputs,
         dag_run_id=context["run_id"],
         delete_existing=True,

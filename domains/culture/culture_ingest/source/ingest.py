@@ -31,6 +31,8 @@ from culture_ingest.common.records import parse_records
 from culture_ingest.common.security import redact, refresh_env_secrets, register_secret
 from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_settings
 
+from common.http.errors import HttpProblemError  # noqa: E402  (security 가 루트 보장 후)
+
 from . import config as culture_config
 from .clients import KopisClient, KopisError, SeoulClient
 from .datasets import ALL_DATASETS, BY_NAME, Dataset, select
@@ -196,7 +198,7 @@ def ingest_dataset(
             for identifier in ids:
                 try:
                     page = clients.kopis.detail(ds.endpoint, identifier)
-                except (requests.RequestException, KopisError) as exc:
+                except (HttpProblemError, requests.RequestException, KopisError) as exc:
                     # 개별 상세 실패(예: KOPIS 간헐적 400)는 그 id만 건너뛰고 계속 진행 —
                     # 한 건이 크롤 전체를 죽이지 않게. 과다 실패는 아래에서 태스크 실패로.
                     detail_errors.append(f"{identifier}: {type(exc).__name__}")

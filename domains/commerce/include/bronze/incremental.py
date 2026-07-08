@@ -1,12 +1,23 @@
-"""bronze 증분 — UPDATEDT desc 외부 병합 정렬 · 정규화 해시 검증키 · 스트리밍 diff.
+"""bronze 증분 — UPDATEDT→LASTMODTS desc 외부 병합 정렬 · 정규화 해시 검증키 · 스트리밍 diff.
 
 목적: 매 수집이 전체를 다시 저장하지 않도록, **정렬본 기준으로 전날과 다른 신규 row만** 저장.
 전량 RAM 금지 → **외부 병합 정렬**(청크를 임시파일로 쓰고 heapq 병합, 스트리밍). 비교정렬 하한
-O(n log n). (UPDATEDT는 -1단계 확인상 39종 100% datetime → 14자리 정수키로 치환.)
+O(n log n).
+
+정렬키: **(UPDATEDT desc → LASTMODTS desc → OPNSFTEAMCODE → MGTNO)**.
+UPDATEDT 가 없거나(None/빈값/비정형) 0 이면 **LASTMODTS 로 폴백**해 최신순 위치에 둔다(#193 —
+예전엔 UPDATEDT 없으면 0=최하단으로 가라앉았다). 2순위 LASTMODTS(desc)는 UPDATEDT 동률의
+tie-break. 3·4순위는 **업소 식별키 (OPNSFTEAMCODE, MGTNO)** — MGTNO 는 발급 자치단체
+(OPNSFTEAMCODE) 안에서만 유니크하므로 MGTNO 단독은 서로 다른 구청의 별개 업소를 같은 키로
+뭉갠다(중복/이력 매핑 오류). diff 정렬 정합·업소 식별을 위해 OPNSFTEAMCODE 를 반드시 포함 →
+silver 그레인 (dataset, opnsfteamcode, mgtno) · 정렬 `coalesce(updatedt_ts, lastmodts_ts, epoch)
+desc, lastmodts desc` 와 일치.
 
 계약:
-- row = dict(파싱된 인허가 레코드). 정렬키 = (UPDATEDT 정수 내림차순, MGTNO) — 결정적 전순서.
+- row = dict(파싱된 인허가 레코드). 정렬키 = 위 3키 — 결정적 전순서.
 - 검증키(verification key) = 정렬본 row 정규화(JSON, key정렬) 문자열을 순서대로 이어 sha256(순서 민감).
+  **정렬키가 바뀌면 검증키도 바뀐다** → 기존 diff-target 은 `resort_diff_target`(→ `bronze.resort`)
+  으로 1회 재정렬해야 다음 수집의 diff 정렬이 정합한다.
 - diff = 오늘 정렬본 − 전날 정렬본. 둘 다 같은 키로 정렬 → **스트리밍 병합**으로 신규/변경 row만 방출.
   같은 정렬키 위치에서는 정규화 문자열 **직접 비교**(해시 불필요 — hot loop 경량).
 
@@ -25,15 +36,34 @@ from typing import Iterable, Iterator
 _NON_DIGIT = re.compile(r"\D")
 
 
-def updatedt_num(row: dict) -> int:
-    """UPDATEDT(datetime 문자열) → YYYYMMDDHHMMSS 정수. 없으면 0(가장 오래된 것으로 취급)."""
-    digits = _NON_DIGIT.sub("", (row.get("UPDATEDT") or "").strip())[:14]
+def _ts_num(row: dict, field: str) -> int:
+    """타임스탬프 필드(datetime 문자열) → YYYYMMDDHHMMSS 정수. 없거나 비정형이면 0."""
+    digits = _NON_DIGIT.sub("", (row.get(field) or "").strip())[:14]
     return int(digits) if digits else 0
 
 
-def sort_key(row: dict) -> tuple[int, str]:
-    """내림차순 정렬키: UPDATEDT 정수를 음수화(desc) + MGTNO(동률 tie-break, 결정적)."""
-    return (-updatedt_num(row), row.get("MGTNO") or "")
+def updatedt_num(row: dict) -> int:
+    """UPDATEDT → 정수(YYYYMMDDHHMMSS). 없으면 0."""
+    return _ts_num(row, "UPDATEDT")
+
+
+def lastmodts_num(row: dict) -> int:
+    """LASTMODTS(최종수정시점) → 정수. UPDATEDT None 케이스의 폴백 + 2순위 정렬키."""
+    return _ts_num(row, "LASTMODTS")
+
+
+def sort_key(row: dict) -> tuple[int, int, str, str]:
+    """내림차순 정렬키: (UPDATEDT desc → LASTMODTS desc → OPNSFTEAMCODE → MGTNO).
+
+    UPDATEDT 없으면 LASTMODTS 로 폴백(coalesce) → None UPDATEDT 가 최하단으로 밀리지 않는다(#193).
+    2순위 LASTMODTS(desc)는 UPDATEDT 동률의 tie-break. 3·4순위 **업소 식별키 (OPNSFTEAMCODE, MGTNO)**
+    — MGTNO 는 발급 자치단체 안에서만 유니크라, MGTNO 단독은 서로 다른 구청의 별개 업소를 같은
+    키로 충돌시킨다(diff 오정렬·중복/이력 매핑 오류). OPNSFTEAMCODE 포함으로 업소를 고유 식별.
+    """
+    u = updatedt_num(row)
+    l = lastmodts_num(row)
+    primary = u or l                        # UPDATEDT; 없으면(0) LASTMODTS 폴백
+    return (-primary, -l, row.get("OPNSFTEAMCODE") or "", row.get("MGTNO") or "")
 
 
 def normalize(row: dict) -> str:
@@ -131,17 +161,17 @@ def diff_new_rows(today_sorted: Iterable[dict], prev_sorted: Iterable[dict],
                   *, stop_on_aligned_match: bool = False) -> Iterator[dict]:
     """오늘 정렬본에서 **전날 정렬본에 없던 신규/변경 row만** 방출(정렬 병합, 스트리밍).
 
-    둘 다 (UPDATEDT desc, MGTNO) 정렬이라:
+    둘 다 (UPDATEDT→LASTMODTS desc, OPNSFTEAMCODE, MGTNO) 정렬이라:
       - today 키 < prev 키(더 최신) → 오늘에만 있는 신규 → 방출
       - 키 동일 → 정규화 문자열 직접 비교: 같으면 미변경(건너뜀), 다르면 변경분 → 방출
       - today 키 > prev 키 → 전날에만 있던 행(삭제/이동) → 건너뜀
     전날본이 소진되면 남은 오늘 행은 모두 신규.
 
     stop_on_aligned_match=True 면, 정렬 프런티어에서 **같은 정보(키+내용 동일)가 처음
-    위치하는 순간 비교를 중단**한다 — UPDATEDT desc 정렬이라 신규/변경 row 는 항상 그보다
-    위(더 최신 키)에 오기 때문. (전제: 내용이 바뀌면 UPDATEDT 가 갱신된다. UPDATEDT 갱신
-    없이 내용만 바뀌는 소스 이상치는 이 모드에서 감지되지 않는다 — 검증키가 파일 단위
-    동일/상이만 판정.)
+    위치하는 순간 비교를 중단**한다 — UPDATEDT/LASTMODTS desc 정렬이라 신규/변경 row 는 항상
+    그보다 위(더 최신 키)에 오기 때문. (전제: 내용이 바뀌면 UPDATEDT 또는 LASTMODTS 가 갱신된다.
+    둘 다 그대로면서 내용만 바뀌는 소스 이상치는 이 모드에서 감지되지 않는다 — 검증키가 파일
+    단위 동일/상이만 판정.)
     """
     t = _Peek(iter(today_sorted))
     p = _Peek(iter(prev_sorted))
@@ -326,3 +356,30 @@ def seed_diff_target(storage, *, target_key: str, target_key_file: str,
         storage.write_bytes(target_key, f.read())
     storage.write_bytes(target_key_file, key.encode("utf-8"))
     return {"key": key, "count": count}
+
+
+# ── diff-target 재정렬 마이그레이션(#193 — 정렬키 변경 후 1회성) ──────────────────
+def resort_diff_target(storage, *, target_key: str, target_keyfile: str, tmp_dir: str,
+                       dry_run: bool = False) -> dict:
+    """기존 diff-target(정렬 전체본)을 **현재 sort_key 로 재정렬** + 검증키 갱신(멱등).
+
+    정렬키 규칙이 바뀐 뒤(#193) 1회 실행해 기존 정렬본을 새 순서로 맞춘다. **내용(row 집합)은
+    보존**하고 순서/검증키만 갱신 → 다음 수집의 diff 정렬이 정합. 이미 새 규칙으로 정렬돼 있으면
+    검증키가 같아 no-op(changed=False). 대용량도 외부 병합 정렬로 스트리밍 처리(전량 RAM 금지).
+    반환: {target_key, rows, old_key, new_key, changed}.
+    """
+    in_path = os.path.join(tmp_dir, "resort_in.jsonl")
+    with open(in_path, "wb") as f:
+        f.write(storage.read_bytes(target_key))
+    out_path = os.path.join(tmp_dir, "resort_out.jsonl")
+    new_key, n = sort_rows_to_file(read_rows(in_path), dest_path=out_path, tmp_dir=tmp_dir)
+    old_key = None
+    if storage.exists(target_keyfile):
+        old_key = storage.read_bytes(target_keyfile).decode("utf-8").strip()
+    changed = new_key != old_key
+    if changed and not dry_run:
+        with open(out_path, "rb") as f:
+            storage.write_bytes(target_key, f.read())      # 재정렬본으로 교체(내용 동일, 순서만)
+        storage.write_bytes(target_keyfile, new_key.encode("utf-8"))
+    return {"target_key": target_key, "rows": n, "old_key": old_key,
+            "new_key": new_key, "changed": changed}

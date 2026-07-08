@@ -902,6 +902,48 @@ pipeline contract ([docs/common_info.md](docs/pipeline/common_info.md)), operati
 **security gate** ([docs/security/security.md](docs/security/security.md), §20 below).
 
 
+## 19.1 Known Data-Quality Alert Rule
+
+Known source/data-quality issues are not pipeline exceptions. When the issue is already understood
+and the pipeline can continue, log and notify it as a grouped quality event instead of raising a raw
+failure.
+
+Use this grouping key:
+
+```text
+[작업>에러레벨]
+```
+
+For commerce notifications, the subject should use:
+
+```text
+[commerce][<task>><level>] <short title>
+```
+
+Each grouped quality alert must include:
+
+- `task`: concrete DAG/task or logical job name.
+- `level`: `warning` for known source-quality degradation, `error` for contract violations that
+  still allow observation, `critical` only for data loss/security/stop-the-line conditions.
+- a plain-language description of what the task does and why this condition is being reported.
+- `affected_rows`: rows affected by the condition.
+- `settled_rows`: total rows checked/settled by the task.
+- `affected_ratio_pct`: affected rows as a percentage of settled rows.
+- any diagnostic counts needed to verify the intended behavior, such as skipped rows, mapped rows,
+  unresolved rows, or sample counts.
+
+Use `security.log_event(level=...)` for the machine-parseable log receipt and
+`commerce_core.notify.notify_quality_event(...)` for the external alert interface. Redaction still
+applies before sending to external channels.
+
+Current known rule:
+
+- `commerce_load_silver.masked_address_dong_mapping_skip > warning`: if `road_address` or
+  `jibun_address` contains `*`, silver must skip dong-level legal/admin mapping and report the total
+  count, settled count, and ratio. Gu/sgg parsing may remain populated because it does not depend on
+  the masked dong token.
+
+
 ## 20. Security Gate (recall · apply · check, ongoing)
 
 

@@ -96,6 +96,32 @@ def test_notify_completion_warns_with_unresolved_samples():
     assert message.count("[not_found]") == 10     # 샘플은 상위 10건만
 
 
+def test_notify_quality_event_groups_by_task_and_level():
+    sent = []
+
+    class Cap(notify.Notifier):
+        def send(self, *, subject, message, level="error", context=None):
+            sent.append((subject, level, message, context))
+
+    notify.set_notifier(Cap())
+    notify.notify_quality_event(
+        task="commerce_load_silver.masked_address_dong_mapping_skip",
+        level="warning",
+        title="마스킹 주소 동단위 매핑 스킵",
+        description="주소에 '*'가 포함된 행은 동단위 매핑을 수행하지 않습니다.",
+        metrics={"affected_rows": 124602, "settled_rows": 1342678, "affected_ratio_pct": 9.2801},
+        context={"table": "iceberg_dev.commerce.silver_license_current"},
+    )
+
+    subject, level, message, context = sent[0]
+    assert "[commerce][commerce_load_silver.masked_address_dong_mapping_skip>warning]" in subject
+    assert level == "warning"
+    assert "affected_rows=124602" in message
+    assert "settled_rows=1342678" in message
+    assert "affected_ratio_pct=9.2801" in message
+    assert context["task"] == "commerce_load_silver.masked_address_dong_mapping_skip"
+
+
 def test_webhook_discord_payload_and_redact(monkeypatch):
     captured = {}
 

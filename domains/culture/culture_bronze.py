@@ -53,7 +53,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     build_run_report,
     ingest_one,
-    load_baselines,
+    load_baselines_for_target,
     load_bronze,
     normalize_mapped_results,
     write_run_report,

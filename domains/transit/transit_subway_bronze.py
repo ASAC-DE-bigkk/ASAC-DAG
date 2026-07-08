@@ -29,6 +29,7 @@ if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
 from common.errors.airflow import problem_failure_callback
+from common.runmetrics import track
 
 from seoul_transit import config
 from seoul_transit.r2_landing import land
@@ -172,6 +173,7 @@ with DAG(
 ) as dag:
     ingest = PythonOperator(
         task_id="ingest_subway",
-        python_callable=ingest_subway,
+        # 실행 메트릭(#188) — 최소 침습 콜러블 래핑.
+        python_callable=track(layer="bronze", domain="transit")(ingest_subway),
         on_failure_callback=record_transit_problem,
     )

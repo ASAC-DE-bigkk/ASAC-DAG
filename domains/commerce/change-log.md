@@ -7,6 +7,83 @@
 
 ## 2026-07-07
 
+### 42. silver 마스킹 주소 동단위 매핑 스킵 + 품질 warning 알림 규칙
+
+request:
+- 주소 값이 `*` 로 마스킹된 행은 silver 단계에서 동단위 법정동/행정동 매핑을 스킵할 것.
+- 해당 데이터가 발생하면 warning 레벨로 로그를 남기고, 전체 카운트와 정산건수, 전체 대비 비율을
+  알림 인터페이스로 전달할 것.
+- 사전에 인지한 품질 이슈 알림은 `[작업>에러레벨]` 단위로 묶고, 작업이 무엇을 하는지 쉽게
+  설명하는 규칙을 `CLAUDE.md` 에 남길 것.
+
+response:
+- `silver_license_history` 의 `dong_token` 산출에서 `road_address` 또는 `jibun_address` 에 `*` 가 있으면
+  `dong_raw` 를 null 로 만들어 신규/재처리 행의 `legal_dong/legal_code/admin_dong/admin_dong_code`
+  매핑을 수행하지 않게 했다.
+- `silver_license_current` 에서는 기존 history 행이라도 마스킹 주소이면 법정동/행정동 산출 컬럼을 null 로
+  내보내도록 막았다. 기존 history 자체를 소급 정리하려면 `dbt run --full-refresh --select silver_license_history+`
+  로 전체 재해석해야 한다.
+- `silver.quality_tasks.notify_masked_address_dong_skip_summary()` 를 추가하고 `commerce_load_silver` DAG 에
+  `notify_masked_address_summary` 태스크를 `dbt_run_silver -> dbt_test_silver` 사이에 연결했다. 집계는 Trino
+  단일 aggregate 쿼리로 수행해 Airflow 메모리에 행 데이터를 싣지 않는다.
+- `commerce_core.notify.notify_quality_event()` 를 추가해 `[commerce][<task>><level>]` 제목과
+  `affected_rows/settled_rows/affected_ratio_pct` 중심의 품질 알림을 보낼 수 있게 했다.
+- `CLAUDE.md` 에 사전 인지 품질 이슈 알림 규칙을 추가하고, 주소/행정구역 문서에 마스킹 주소 예외를
+  반영했다.
+
+### 41. silver 행정동 코드 컬럼명 확정 + 행정/법정 코드 시군구 prefix 불일치 error 알림
+
+request:
+- silver 산출 컬럼의 행정동 코드는 `admin_dong_code` 로 사용할 것.
+- 시군구 코드가 행정동/법정동 코드 앞 5자리를 공유하는 것으로 보이므로, 연산 과정에서
+  다른 값이 보이면 error 로그로 남기고 알림 인터페이스로 연결할 것.
+
+response:
+- dbt silver history/current 산출 컬럼을 `admin_dong_code` 로 정리했다. 기존 오타성
+  `admin_dong_cod` 변경은 즉시 되돌렸고, `admin_code` 산출 참조도 `admin_dong_code` 로 맞췄다.
+- `enrich_admin_dong_ref` 단계에 `_sgg_prefix_mismatches()` 검증을 추가했다. `legal_dong_code[:5]`,
+  `admin_dong_code[:5]`, 산출 `sgg_code` 가 불일치하면 `admin_dong_sgg_prefix_mismatch` 이벤트를
+  **error** 레벨로 기록하고, `notify_completion(..., level="error")` 로 알림 인터페이스에 연결한다.
+  불일치가 있어도 적재는 계속 진행해 원천 이상을 관측 가능하게 남긴다.
+- 문서(`dbt/docs/address-and-geo.md`)에 `admin_dong_code` 컬럼명과 시군구 prefix 불일치 error/알림
+  정책을 반영했다. 회귀 테스트 1개를 추가했다.
+- 검증: `compileall` 통과, `pytest test_silver_tasks.py` 5개 통과, `python -m security` 차단 이슈 0.
+
+### 40. silver marker 증분 전환 + DAG 명칭 `commerce_load_silver` 정리 + gold 포장 계획
+
+request:
+- `dbt/domains/commerce` 와 commerce docs/changelog 맥락을 확인해 silver 레이어가 매번 전체 데이터를
+  재적재하는 문제를 marker 기반 증분으로 바꿀 것. marker 가 없으면 해당 경로 전체 백필을 수행하되,
+  대용량 백필에서 RAM/CPU 문제가 없도록 stream I/O 와 최소 병렬 처리를 적용할 것.
+- Airflow UI 에 보이는 `commerce_localdata_transform`/`common_admin_dong_bronze` 를
+  `commerce_load_silver` 단위로 취합해야 하는지 검토하고, bronze 유지가 맞으면 silver/gold 도달 계획을
+  문서로 남길 것.
+
+response:
+- dbt silver history 를 `incremental` + `append` 로 전환하고 `silver_load_run_marker` 의
+  `(dataset, bronze_run_id, status='DONE')` 를 silver 완료 marker 로 사용. 첫 실행/`--full-refresh`/
+  target table 부재 시 `is_incremental()` 이 false 라 publishable bronze 전체를 백필하고, 이후에는
+  DONE marker 가 없는 `bronze_run_id` 만 읽는다. dbt test 통과 후 Airflow `mark_silver_done` 태스크가
+  DONE 을 기록한다. 증분 첫 행의 인접 중복 방지를 위해
+  영향 key `(dataset, opnsfteamcode, mgtno)` 의 기존 최신 1행만 조인해 `content_hash` 를 비교한다.
+- DONE marker 가 없는 후보 run 은 dbt pre-hook 으로 history 에서 선삭제 후 재삽입되도록 해
+  dbt run/test 실패 후 재시도 중복 위험을 줄였다. 기존 history 가 있는 배포 환경은
+  `ensure_silver_marker` 태스크가 marker 를 부트스트랩한다.
+- dbt profile `threads: 1` 로 낮춰 동시 warehouse 쿼리를 제한했다. full backfill 도 Trino/Iceberg 쿼리
+  안에서 수행하고 Airflow/Python 메모리에 전체 데이터를 올리지 않는 구조로 유지했다.
+- DAG 파일/ID 를 `commerce_load_silver.py` / `commerce_load_silver` 로 정리했다. 내부 흐름은
+  `[enrich_admin_dong_ref, enrich_fill_jibun] -> dbt_run_silver -> dbt_test_silver`.
+- `common_admin_dong_bronze` 는 루트 `dags/` 의 공용 마스터 수집 DAG 이므로 commerce DAG 로 병합하지 않는
+  것으로 결정했다. commerce 는 공용 raw `raw/common/admin_dong` 최신본을 읽어 자기 스키마의
+  `bronze_ref_admin_dong` 만 갱신한다.
+- 운영 문서(`dbt/docs/rebuild-and-ops.md`)와 초보자/주소/README 문서를 marker 증분·full-refresh 백필
+  계약으로 갱신하고, [docs/pipeline/silver-gold-load-plan.md](docs/pipeline/silver-gold-load-plan.md) 를
+  추가해 silver DAG 경계와 gold current 집계 포장 계획을 남겼다. 공식 근거는 dbt incremental,
+  dbt-trino incremental strategy, dbt threads 공식 문서 링크로 표기했다.
+- 검증: `compileall` 통과, `pytest test_silver_tasks.py test_load_plan.py` 12개 통과(승인 실행),
+  `python -m security` 차단 이슈 0, `pytest test_security.py` 162개 통과. 로컬 `dbt parse` 는
+  설치된 dbt 환경에 `dbt-trino` 어댑터가 없어 실행 불가(Airflow dbt venv 계약상 배포 환경에서 확인 필요).
+
 ### 39. 버전 정렬 1순위에 LASTMODTS 폴백 — UPDATEDT 결측 시 최종수정시점으로 정렬
 
 request:

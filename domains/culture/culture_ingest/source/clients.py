@@ -3,6 +3,14 @@
 두 클라이언트 모두 원본 bytes를 *받아오기만* 한다 -- 업무 필드는 파싱하지 않는다.
 파싱은 후속 bronze->silver dbt 레이어의 몫이다. 여기서 하는 응답 들여다보기는
 페이징을 돌리고 매니페스트에 행 수를 기록하는 데 필요한 최소한이 전부다.
+
+전송 계층은 공용 `common.http`(#78)를 합성으로 소비한다(#152):
+- KOPIS  : HttpCore + QueryKey("service", key) — 키가 URL 문자열에 아예 안 들어가
+  로그/HttpProblemError 표면에 키 노출 표면 자체가 없다(#144 강화).
+- 서울   : SeoulOpenApiClient(PathKey) — URL 규약·키 치환은 공용 소관.
+재시도 분담: 429/5xx = core(backoff+jitter+Retry-After) / **400 1회 재시도만 도메인**
+(자정 rate-limit 400 은 KOPIS 도메인 지식(#146) — core 는 400 을 정당하게 비재시도).
+페이징·probe-beyond-end(#147)·오버슛=목록 끝(#84)·행 카운트는 도메인 소관 유지.
 """
 
 from __future__ import annotations
@@ -13,15 +21,19 @@ import random
 import re
 import time
 
-import requests
+# security 가 dags 루트를 sys.path 에 보장하는 진입점(#144) — 루트 기준 패키지인
+# common.* 보다 반드시 먼저 import 해야 단독 스크립트/host pytest 문맥이 안 깨진다.
+from culture_ingest.common.security import redact
 
-from culture_ingest.common.http import Page, build_session
-from culture_ingest.common.security import redact, scrub_exception
+from common.http.auth import QueryKey  # noqa: E402
+from common.http.core import HttpCore  # noqa: E402
+from common.http.errors import HttpProblemError  # noqa: E402
+from common.http.seoul import SOURCE as SEOUL_SOURCE, SeoulOpenApiClient  # noqa: E402
+from culture_ingest.common.http import Page  # noqa: E402
 
 log = logging.getLogger(__name__)
 
 KOPIS_BASE = "http://www.kopis.or.kr/openApi/restful"
-SEOUL_BASE = "http://openapi.seoul.go.kr:8088"
 
 # KOPIS 목록 페이지는 XML <dbs><db>...</db></dbs> 형태 -- 페이지당 <db> 개수를 센다.
 _KOPIS_DB_RE = re.compile(r"<db>")
@@ -40,32 +52,29 @@ class SeoulError(RuntimeError):
 class KopisClient:
     """KOPIS 공연예술통합전산망 open API (XML)."""
 
-    def __init__(self, service_key: str, timeout: int = 30, retry_delay_sec: float = 2.0):
+    def __init__(self, service_key: str, timeout: int = 30, retry_delay_sec: float = 2.0,
+                 core: HttpCore | None = None):
         self.service_key = service_key
-        self.timeout = timeout
-        self.retry_delay_sec = retry_delay_sec  # 400/429 1회 재시도 전 대기(+jitter)
-        self.session = build_session()
+        self.retry_delay_sec = retry_delay_sec  # 400 1회 재시도 전 대기(+jitter)
+        self.core = core or HttpCore(source="kopis", timeout=timeout)
 
     def _get(self, path: str, params: dict) -> bytes:
-        """단일 GET. 400/429 는 **1회 백오프 재시도**로 '일시(자정 rate-limit)'와
+        """단일 GET. 400 은 **1회 백오프 재시도**로 '일시(자정 rate-limit)'와
         '지속(진짜 범위 밖/오류)'을 구분한다(#146) — 자정 rate-limit 400 이 #84 오버슛
         처리에 '목록 끝'으로 오인돼 목록이 1페이지에서 절단된 실증(7/4·7/5) 대응.
         지속 400 은 그대로 전파되어 기존 의미(오버슛=끝, 1페이지=오류)를 유지한다.
+        429/5xx·연결 오류는 core 가 backoff 재시도 후 HttpProblemError 로 던진다(#152).
         """
-        params = {"service": self.service_key, **params}
+        auth = QueryKey("service", self.service_key)
         for attempt in (1, 2):
-            resp = self.session.get(f"{KOPIS_BASE}/{path}", params=params, timeout=self.timeout)
             try:
-                resp.raise_for_status()
-            except requests.HTTPError as exc:
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                if attempt == 1 and status in (400, 429):
+                resp = self.core.get(f"{KOPIS_BASE}/{path}", params=params, auth=auth)
+            except HttpProblemError as exc:
+                if attempt == 1 and exc.status == 400:
                     if self.retry_delay_sec:
                         time.sleep(self.retry_delay_sec + random.uniform(0, 0.5))
                     continue
-                # HTTPError 메시지엔 `service=<키>` 가 박힌 URL 이 들어간다(#144) —
-                # 예외가 어디로 전파되든 키가 남지 않게 args 를 여기서 마스킹.
-                raise scrub_exception(exc)
+                raise
             body = resp.content
             text = body[:600].decode("utf-8", "ignore")
             if "<errmsg>" in text or "<returncode>" in text:
@@ -93,9 +102,8 @@ class KopisClient:
             params = {**base_params, "cpage": page, "rows": rows}
             try:
                 body = self._get(path, params)
-            except requests.HTTPError as exc:
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                if page > 1 and status == 400:
+            except HttpProblemError as exc:
+                if page > 1 and exc.status == 400:
                     log.info("[kopis] %s cpage=%d 오버슛 400 — 목록 끝으로 종료", path, page)
                     return
                 raise
@@ -133,20 +141,14 @@ class KopisClient:
 class SeoulClient:
     """서울 열린데이터광장 open API (JSON)."""
 
-    def __init__(self, api_key: str, timeout: int = 30):
+    def __init__(self, api_key: str, timeout: int = 30, core: HttpCore | None = None):
         self.api_key = api_key
-        self.timeout = timeout
-        self.session = build_session()
+        self._api = SeoulOpenApiClient(
+            core or HttpCore(source=SEOUL_SOURCE, timeout=timeout), api_key)
 
     def _get_window(self, service: str, start: int, end: int) -> tuple[bytes, dict]:
-        url = f"{SEOUL_BASE}/{self.api_key}/json/{service}/{start}/{end}/"
-        resp = self.session.get(url, timeout=self.timeout)
-        try:
-            resp.raise_for_status()
-        except requests.HTTPError as exc:
-            # 서울 키는 URL 경로에 박힌다 — HTTPError 메시지 전파 전 마스킹(#144).
-            raise scrub_exception(exc)
-        body = resp.content
+        # 서울 키는 URL 경로에 박히지만(#144) HttpProblemError 는 생성 시 자체 redact.
+        body = self._api.fetch_bytes(service, start, end).content
         payload = json.loads(body.decode("utf-8", "ignore"))
         if service in payload:
             result = payload[service].get("RESULT", {})

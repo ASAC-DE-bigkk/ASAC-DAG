@@ -20,6 +20,7 @@ commerce 카테고리 문서 모음. 코드·설정·테스트·문서·규약(C
 - **작업 경계 + 규약**: [../CLAUDE.md](../CLAUDE.md) (Working Scope·§19)
 - **정상 동작 조건(환경변수)**: [configuration/configuration.md](configuration/configuration.md)
 - **파이프라인 계약(컬럼·마커·카탈로그)**: [pipeline/common_info.md](pipeline/common_info.md)
+- **silver/gold 적재 계획**: [pipeline/silver-gold-load-plan.md](pipeline/silver-gold-load-plan.md)
 - **폴더 구성 규약(heritage)**: [architecture/project_setting.md](architecture/project_setting.md)
 - **보안 종합검증(단일 포인트)**: [security/security.md](security/security.md) · `python -m security`
 - **변경 이력(대단위 변경 기록)**: [../change-log.md](../change-log.md)
@@ -31,7 +32,7 @@ docs/
 ├─ architecture/   project_setting.md · architecture.md · storage.md
 ├─ configuration/  configuration.md · environments.md
 ├─ operations/     operations.md · deploy-local.md · deploy-dev.md · deploy-prod.md
-├─ pipeline/       common_info.md · medallion-implementation-plan.md
+├─ pipeline/       common_info.md · medallion-implementation-plan.md · silver-gold-load-plan.md
 │  └─ bronze/      pagination-ordering.md · api-call-volume.md · status-tracking-model.md · uncollectable-datasets.md
 └─ security/       security.md · adoption.md
 ```

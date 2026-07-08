@@ -47,6 +47,72 @@ def test_sort_key_desc_by_updatedt():
     assert inc.sort_key(b) < inc.sort_key(a)   # b 가 더 최신 → desc 에서 앞
 
 
+def test_lastmodts_num():
+    assert inc.lastmodts_num({"LASTMODTS": "2024-04-15 11:28:43"}) == 20240415112843
+    assert inc.lastmodts_num({"LASTMODTS": ""}) == 0
+    assert inc.lastmodts_num({}) == 0
+
+
+def test_sort_key_updatedt_none_falls_back_to_lastmodts(tmp_path):
+    """#193: UPDATEDT 없으면 LASTMODTS 로 폴백 → 최하단으로 가라앉지 않고 최신순 위치."""
+    old = {"MGTNO": "1", "UPDATEDT": "2026-01-01 00:00:00", "LASTMODTS": ""}
+    none_recent = {"MGTNO": "2", "UPDATEDT": "", "LASTMODTS": "2026-06-01 00:00:00"}
+    mid = {"MGTNO": "3", "UPDATEDT": "2026-03-01 00:00:00", "LASTMODTS": ""}
+    out = list(inc.external_merge_sort(iter([old, none_recent, mid]),
+                                       tmp_dir=str(tmp_path), chunk_rows=2))
+    # 내림차순(최신 먼저): LASTMODTS 2026-06(none_recent) > UPDATEDT 2026-03(mid) > 2026-01(old)
+    assert [r["MGTNO"] for r in out] == ["2", "3", "1"]
+
+
+def test_sort_key_lastmodts_is_secondary_desc():
+    """UPDATEDT 동률이면 LASTMODTS 내림차순으로 tie-break."""
+    a = {"MGTNO": "1", "UPDATEDT": "2026-05-01 00:00:00", "LASTMODTS": "2026-05-01 09:00:00"}
+    b = {"MGTNO": "2", "UPDATEDT": "2026-05-01 00:00:00", "LASTMODTS": "2026-05-02 09:00:00"}
+    assert inc.sort_key(b) < inc.sort_key(a)   # b 의 LASTMODTS 가 더 최신 → 앞
+
+
+def test_sort_key_opnsfteamcode_distinguishes_same_mgtno():
+    """MGTNO 는 발급 자치단체 안에서만 유니크 → 같은 MGTNO·다른 OPNSFTEAMCODE 는 별개 키(충돌 X)."""
+    a = {"MGTNO": "1", "OPNSFTEAMCODE": "3210000", "UPDATEDT": "2026-05-01 00:00:00"}
+    b = {"MGTNO": "1", "OPNSFTEAMCODE": "3220000", "UPDATEDT": "2026-05-01 00:00:00"}
+    assert inc.sort_key(a) != inc.sort_key(b)   # 같은 MGTNO 라도 키 충돌 안 함
+    assert inc.sort_key(a) < inc.sort_key(b)    # OPNSFTEAMCODE 오름차순 결정적
+
+
+def test_diff_same_mgtno_different_opnsfteamcode_not_collapsed():
+    """중복/이력 매핑에서 같은 MGTNO·다른 OPNSFTEAMCODE(별개 업소)를 뭉개지 않는다."""
+    keep = {"MGTNO": "1", "OPNSFTEAMCODE": "A", "UPDATEDT": "2026-05-01 00:00:00", "BPLCNM": "x"}
+    other = {"MGTNO": "1", "OPNSFTEAMCODE": "B", "UPDATEDT": "2026-05-01 00:00:00", "BPLCNM": "y"}
+    prev = sorted([dict(keep)], key=inc.sort_key)
+    today = sorted([dict(keep), dict(other)], key=inc.sort_key)   # keep=미변경, other=다른 업소(신규)
+    out = list(inc.diff_new_rows(today, prev))
+    assert out == [other]                        # 다른 구청 업소만 신규로 방출(keep 은 정합·스킵)
+
+
+def test_resort_diff_target_reorders_and_idempotent(tmp_path):
+    """#193 마이그레이션: 기존 정렬본을 새 규칙으로 재정렬 + 검증키 갱신, 재실행은 no-op."""
+    import json
+    st = _FakeStorage()
+    rows = [
+        {"MGTNO": "1", "UPDATEDT": "2026-01-01 00:00:00", "LASTMODTS": ""},
+        {"MGTNO": "2", "UPDATEDT": "", "LASTMODTS": "2026-06-01 00:00:00"},   # None UPDATEDT·최신 LASTMODTS
+        {"MGTNO": "3", "UPDATEDT": "2026-03-01 00:00:00", "LASTMODTS": ""},
+    ]
+    tk, tkf = "_diff_target/x.2026-07-01.jsonl", "_diff_target/x.2026-07-01.key"
+    st.data[tk] = ("\n".join(json.dumps(r) for r in rows) + "\n").encode("utf-8")
+
+    d1 = tmp_path / "r1"; d1.mkdir()
+    res = inc.resort_diff_target(st, target_key=tk, target_keyfile=tkf, tmp_dir=str(d1))
+    assert res["changed"] is True and res["rows"] == 3
+    out = [json.loads(l) for l in st.data[tk].decode().splitlines() if l.strip()]
+    assert [r["MGTNO"] for r in out] == ["2", "3", "1"]     # 내림차순(None→LASTMODTS 폴백)
+    assert st.exists(tkf) and st.data[tkf].decode() == res["new_key"]
+
+    d2 = tmp_path / "r2"; d2.mkdir()
+    res2 = inc.resort_diff_target(st, target_key=tk, target_keyfile=tkf, tmp_dir=str(d2))
+    assert res2["changed"] is False                         # 멱등 — 이미 정렬됨
+
+
 def test_external_merge_sort_multichunk(tmp_path):
     rows = [_row(str(i), f"2026-01-{(i % 28) + 1:02d} 00:00:00") for i in range(10)]
     # chunk_rows=2 로 여러 청크 강제 → 병합 정확성 검증

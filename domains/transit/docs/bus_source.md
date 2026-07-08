@@ -92,8 +92,9 @@ raw/transit/seoul_bus/<dataset>/load_date=…/ingest_ts=…/page-NNNN.xml   # �
 
 > XML 1노선 ≈ 수백 KB → **노선당 1 INSERT 로 분할**(Trino `QUERY_TEXT_TOO_LARGE` 100만자 한도 회피).
 
-## 5. silver 로의 함의 (메모)
+## 5. silver 반영 상태 (ASAC-DBT #51 구현 기준)
 
-- `raw`(XML) → `itemList` 단위로 explode(노선당 정류장/차량 N행). dbt 에서 XML 파싱.
-- staleness: 위치 `dataTm` 기준. 도착은 `traTime*`(예정초).
-- dedup: 위치 = (`vehId`, `dataTm`) · 도착 = (`busRouteId`, `arsId`, `vehId1`).
+- **위치 → `slv_transit_bus_position` 구현 완료**: Trino `(?s)` regexp + `unnest` 로 `itemList` explode(xpath 부재),
+  grain = (`vehId`, `dataTm`), `gpsX/gpsY` 직접 + 경계 조인(ST_Contains)으로 `admin_dong_code` 런타임 할당(커버리지 1.00).
+- **도착(`bus_arrival`)은 silver 제외**(설계 v2): 응답에 좌표가 없고 정류소 마스터(`stationinfo`)가 미등록(headerCd=7)이라
+  공간 재료 부재. 수집(bronze)은 유지 — 정류소 마스터 확보 시 (`busRouteId`, `arsId`, `vehId1`) grain 으로 승격 후보.
