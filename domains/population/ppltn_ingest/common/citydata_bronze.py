@@ -10,12 +10,19 @@
 
 from __future__ import annotations
 
+import dataclasses
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .trino import build_trino_settings, connect, ensure_schema, sql_identifier, sql_int, sql_string
 
 CITYDATA_BRONZE_TABLE = "bronze_seoul_citydata"
+
+# citydata 는 **seoul_citydata 스키마로 분리**(#69) — population(seoul_ppltn)과 격리한다.
+# (상권·따릉이·대기질 등은 인구와 별개 신호라 스키마도 분리한다.)
+CITYDATA_SCHEMA_ENV = "SEOUL_CITYDATA_SCHEMA"
+DEFAULT_CITYDATA_SCHEMA = "seoul_citydata"
 
 _COLUMNS = (
     "request_id",
@@ -54,8 +61,12 @@ class CitydataBronzeRow:
 class CitydataBronze:
     """citydata bronze Iceberg 테이블 생성/적재 (Trino DBAPI 경유)."""
 
-    def __init__(self, settings=None, *, target: str = "dev"):
-        self.s = settings or build_trino_settings(target)
+    def __init__(self, settings=None, *, target: str = "dev", schema: str | None = None):
+        # citydata bronze 는 seoul_citydata 스키마에 적재(population 격리).
+        # 명시 schema > SEOUL_CITYDATA_SCHEMA env > 기본 seoul_citydata.
+        base = settings or build_trino_settings(target)
+        citydata_schema = schema or os.environ.get(CITYDATA_SCHEMA_ENV, DEFAULT_CITYDATA_SCHEMA)
+        self.s = dataclasses.replace(base, schema=sql_identifier(citydata_schema))
         self.conn = connect(self.s)
         self.cur = self.conn.cursor()
 
