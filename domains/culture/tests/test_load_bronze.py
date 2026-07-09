@@ -75,6 +75,16 @@ def _seoul_body(ds, titles):
     return json.dumps({ds.endpoint: {"row": [{"TITLE": t} for t in titles]}}).encode()
 
 
+def test_load_bronze_logs_per_dataset_timing(capsys):
+    # load_bronze 는 26분 블랙박스라(#202), 데이터셋별 소요 로그로 병목을 눈에 보이게 한다.
+    se = BY_NAME["seoul_cultural_event"]
+    sink = FakeSink({"raw/culture/seoul/seoul_cultural_event/x/page-000001.json": _seoul_body(se, ["t1", "t2"])})
+    summaries = [_summary(name="seoul_cultural_event",
+                          keys=("raw/culture/seoul/seoul_cultural_event/x/page-000001.json",), rows=2)]
+    load_bronze_from_raw(CTX, summaries, sink=sink, warehouse=FakeWarehouse())
+    assert "[load] seoul_cultural_event" in capsys.readouterr().out
+
+
 def test_load_bronze_parses_raw_and_loads_per_dataset():
     kp = BY_NAME["kopis_performance"]
     se = BY_NAME["seoul_cultural_event"]

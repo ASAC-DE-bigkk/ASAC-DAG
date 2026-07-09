@@ -500,7 +500,11 @@ def load_bronze_from_raw(
                     f"{ds.name}: 파싱 {len(records)}행 ≠ fetch {s['rows']}행 (raw 파싱 유실 의심)"
                 )
                 continue
+            # 데이터셋별 소요 로그 — load_bronze 는 26분 블랙박스라(#202), 어느 데이터셋이
+            # 몇 초 걸렸는지 남겨 병목(세종 88MB≈13분)을 눈으로 확인 가능하게 한다.
+            t0 = time.monotonic()
             loaded[ds.name] = warehouse.load(ds, ctx, records)
+            print(f"[load] {ds.name}: {loaded[ds.name]:,}행 · {time.monotonic() - t0:.1f}s")
         except Exception as exc:  # noqa: BLE001 -- 데이터셋별 격리, 말미 fail loud
             failures.append(redact(f"{s['name']}: {type(exc).__name__}: {exc}"))
     if failures:
