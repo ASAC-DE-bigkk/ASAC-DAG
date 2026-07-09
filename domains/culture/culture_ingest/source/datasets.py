@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class Dataset:
     name: str  # 안정적인 슬러그 = 파티션 폴더명
-    source: str  # "kopis" | "seoul"
-    kind: str  # "kopis_list" | "kopis_detail" | "kopis_boxoffice" | "seoul_list"
-    # endpoint: KOPIS 경로(예: "pblprfr") 또는 서울 서비스명(예: "culturalEventInfo")
+    source: str  # "kopis" | "seoul" | "kcisa" | "kobis"
+    kind: str  # kopis_list|kopis_detail|kopis_boxoffice|seoul_list|kcisa_list|kobis_boxoffice
+    # endpoint: KOPIS 경로(예: "pblprfr") / 서울 서비스명(culturalEventInfo) / KCISA(area2) / KOBIS(searchDailyBoxOfficeList)
     endpoint: str
     load_pattern: str  # "interval_append"(구간) | "snapshot_append"(스냅샷) | "scd2_dim"(차원)
     # ※ scd2_dim 은 설계 의도 — silver v1(ASAC-DBT#50)은 최신본 dim 으로 보류(bronze 가
@@ -41,6 +41,9 @@ class Dataset:
     # 값은 6/29~7/6 실측 일간 변동 기반: 안정 카탈로그 0.8 / 목록 0.7 / 예약류(자연
     # churn -23% 실측)·boxoffice(고정 50) 0.5.
     volume_drop_threshold: float | None = None
+    # 크롤 주기(#206): "daily"=자정 일배치, "weekly"=주간 refresh 전용(자정런 제외).
+    # 정적 dim(시설 상세)은 매일 재크롤이 낭비 + 자정 KOPIS 400(#201) 압력이라 분리.
+    refresh: str = "daily"
 
 
 # --- KOPIS (XML) -- 공연예술통합전산망 --------------------------------------------
@@ -95,6 +98,7 @@ KOPIS_DATASETS = [
         base_params={"signgucode": "11"},  # 11 = 서울
         freshness_sla_hours=24 * 8,  # 좌표 차원(느린 변화)
         key_fields=("mt10id", "fcltynm"),
+        refresh="weekly",  # 정적 dim — culture_facility_refresh 가 주 1회 전수 크롤(#206)
     ),
     Dataset(
         name="kopis_festival",
@@ -192,7 +196,60 @@ SEOUL_DATASETS = [
     ),
 ]
 
-ALL_DATASETS = KOPIS_DATASETS + SEOUL_DATASETS
+# --- KCISA (XML) -- 한눈에보는문화정보(data.go.kr B553457)(#196) ------------------
+KCISA_DATASETS = [
+    Dataset(
+        name="kcisa_seoul_event",
+        source="kcisa",
+        kind="kcisa_list",
+        endpoint="area2",
+        load_pattern="snapshot_append",
+        title="KCISA 한눈에보는문화정보 — 서울 공연·전시(area2, sido=서울)",
+        base_params={"sido": "서울"},
+        row_tag="item",
+        min_rows=300,          # 실측 498 의 보수적 하한(#150 그물)
+        volume_drop_threshold=0.7,
+        key_fields=("seq", "title"),
+        note="현재 활성 스냅샷. 국립기관 최신 전시 구멍 보강(#196). 좌표 gpsX/gpsY 내장.",
+    ),
+]
+
+# --- KOBIS (JSON) -- 영화진흥위원회 일별 박스오피스(#197) ------------------------
+# 단일 GET 스냅샷(페이징 없음). 전국 + 서울 한정(wideAreaCd) 2벌 = 일 2요청.
+# "전국을 서울 소비 온도로" 프록시 오류를 상영지역 필터로 보정 — 진짜 서울 영화소비
+# 시계열 축. targetDt=load_date-1(전일 확정 박스오피스)은 ingest 의 kobis_boxoffice
+# 분기가 실행일에서 계산한다. top10 고정이라 min_rows=5(0건·절단 그물), volume 0.5.
+KOBIS_DATASETS = [
+    Dataset(
+        name="kobis_boxoffice_nation",
+        source="kobis",
+        kind="kobis_boxoffice",
+        endpoint="searchDailyBoxOfficeList",
+        load_pattern="snapshot_append",
+        title="KOBIS 일별 박스오피스 — 전국",
+        row_tag="item",  # JSON 이라 파싱엔 미사용, 관례상 명시
+        key_fields=("movieCd", "movieNm"),
+        min_rows=5,
+        volume_drop_threshold=0.5,
+        note="영화진흥위원회 오픈API searchDailyBoxOfficeList. targetDt=전일. 페이징 없음.",
+    ),
+    Dataset(
+        name="kobis_boxoffice_seoul",
+        source="kobis",
+        kind="kobis_boxoffice",
+        endpoint="searchDailyBoxOfficeList",
+        load_pattern="snapshot_append",
+        title="KOBIS 일별 박스오피스 — 서울(wideAreaCd)",
+        base_params={"wideAreaCd": "0105001"},  # 0105001 = 서울(상영지역 코드)
+        row_tag="item",
+        key_fields=("movieCd", "movieNm"),
+        min_rows=5,
+        volume_drop_threshold=0.5,
+        note="상영지역=서울 한정 랭킹. 전국과 다른 시계열(실측: 같은 날 1위 영화 상이).",
+    ),
+]
+
+ALL_DATASETS = KOPIS_DATASETS + SEOUL_DATASETS + KCISA_DATASETS + KOBIS_DATASETS
 BY_NAME = {ds.name: ds for ds in ALL_DATASETS}
 
 
@@ -211,3 +268,30 @@ def select(names: list[str] | None) -> list[Dataset]:
             raise KeyError(f"Unknown dataset: {name}. Known: {sorted(BY_NAME)}")
         chosen.append(BY_NAME[name])
     return chosen
+
+
+def plan_dataset_names(wanted: list[str] | None, *, include_detail: bool) -> list[str]:
+    """DAG plan 용 적재 대상 이름 선택.
+
+    상세(kopis_detail)는 마지막으로 정렬(#146) — 목록이 먼저 랜딩될 확률을 높여
+    detail 의 "랜딩된 raw 에서 id 재사용" 경로를 살린다. ``wanted`` 가 비면 스케줄
+    run — refresh="weekly" 데이터셋(#206 시설 상세)은 제외한다. 주간 트리거·수동
+    run 은 이름을 명시하므로 그대로 포함된다.
+    """
+    chosen = set(wanted or [])
+    return [
+        ds.name
+        for ds in sorted(enabled_datasets(), key=lambda d: d.kind == "kopis_detail")
+        if (include_detail or ds.kind != "kopis_detail")
+        and (ds.name in chosen if chosen else ds.refresh == "daily")
+    ]
+
+
+# 주간 facility refresh(#206) 트리거 conf — culture_facility_refresh DAG 가 사용.
+# 목록을 같이 태우는 이유: detail 이 같은 run 에 랜딩된 목록에서 id 재사용(#146)
+# + 신규 시설이 목록→상세 같은 주기에 편입. max_detail 은 시설 1,686 + 여유.
+WEEKLY_FACILITY_REFRESH_CONF = {
+    "datasets": ["kopis_facility", "kopis_facility_detail"],
+    "max_detail": 2000,
+    "include_detail": True,
+}

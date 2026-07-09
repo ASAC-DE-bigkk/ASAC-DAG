@@ -52,10 +52,10 @@ def _seed_run(st, run_id, entries):
             st.write_bytes(paths.bronze_object_key(run_id=run_id, short=short), b'{"MGTNO":"1"}\n')
 
 
-def _plan(st, datasets, watermark=None, pending=None, today="2026-07-05", max_dates=None):
+def _plan(st, datasets, watermark=None, pending=None, today="2026-07-05", lookback_days=None):
     return load_plan.resolve_load_plan(
         st, prefix="", datasets=datasets, watermark=watermark or {},
-        pending=pending or [], today=today, max_dates=max_dates)
+        pending=pending or [], today=today, lookback_days=lookback_days)
 
 
 def test_first_file_pyiceberg_rest_trino():
@@ -116,12 +116,26 @@ def test_incomplete_becomes_pending():
     assert {(p["date"], p["short"]) for p in plan["pending_keep"]} == {("2026-07-05", "gr")}
 
 
-def test_max_dates_bounds_backfill():
+def test_lookback_window_keeps_recent_days_only():
+    # #223: 최근 lookback_days 창(today-N ~ today)만 적재 — 오래된 날짜 제외(이른-N-날짜였던 구버전과 반대).
     st = _FakeStorage()
-    for d in ("2026-07-01", "2026-07-02", "2026-07-03"):
+    for d in ("2026-07-01", "2026-07-02", "2026-07-05"):
         _seed_run(st, f"{d}_010000_001", {"gr": {"status": "completed", "file": True, "count": 1}})
-    plan = _plan(st, ["gr"], max_dates=2)
-    assert sorted({u["run_id"][:10] for u in plan["units"]}) == ["2026-07-01", "2026-07-02"]
+    # today=07-05, lookback=2 → cutoff=07-03 → 07-05 만 포함(07-01/02 제외)
+    plan = _plan(st, ["gr"], today="2026-07-05", lookback_days=2)
+    assert sorted({u["run_id"][:10] for u in plan["units"]}) == ["2026-07-05"]
+
+
+def test_new_dataset_latest_run_loads_within_window():
+    # #223 회귀: 신규 데이터셋(wm 없음)의 데이터가 최신 run 에만 있어도 최근 창에 들어 base 적재된다.
+    # (구버전 이른-N-날짜였다면 07-05 가 창 밖으로 밀려 영구 배제됐을 케이스.)
+    st = _FakeStorage()
+    for d in ("2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04"):
+        _seed_run(st, f"{d}_010000_001", {"old": {"status": "completed", "file": True, "count": 1}})
+    _seed_run(st, "2026-07-05_010000_001", {"new": {"status": "completed", "file": True, "legacy": True}})
+    plan = _plan(st, ["new"], today="2026-07-05", lookback_days=3)
+    assert [u["run_id"][:10] for u in plan["units"]] == ["2026-07-05"]
+    assert plan["units"][0]["is_base"] is True
 
 
 def test_commit_watermark_stops_before_failure():

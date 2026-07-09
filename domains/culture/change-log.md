@@ -3,6 +3,80 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-09 — KOBIS 일별 박스오피스 bronze 편입 (#197)
+
+- **신규 소스 `kobis`** — 영화진흥위원회 오픈API `searchDailyBoxOfficeList`(JSON,
+  단일 GET 스냅샷). `KobisClient`(HttpCore + `QueryKey("key")` — 키 URL 미노출 #144),
+  faultInfo→`KobisError`(redact). → `source/clients.py`
+- **데이터셋 2벌** — `kobis_boxoffice_nation`(전국) + `kobis_boxoffice_seoul`
+  (`wideAreaCd=0105001`). "전국 집계를 서울 소비 온도로" 프록시 오류를 상영지역
+  필터로 보정 — 진짜 서울 영화소비 시계열 축. 실측: 같은 날 전국 1위≠서울 1위.
+  snapshot_append · min_rows=5(top10 고정) · volume 0.5. → `source/datasets.py`
+- **targetDt=load_date−1**(전일 확정분) — ingest `kobis_boxoffice` 분기가 실행일에서
+  계산. `parse_records` kobis 분기(`boxOfficeResult.dailyBoxOfficeList`) 신규.
+  `SourceKeys.kobis`(`KOBIS_SERVICE_KEY`) 필수화 · `Clients.kobis` 배선. →
+  `source/config.py` · `common/records.py` · `source/ingest.py`
+- 테스트 신규 4파일(client·records·dataset·redaction surface) — 디스패치 그물에
+  `res.error==""` 단언(#196 params 실버그 재발 방지). SLO expected 13→15 자동 반영.
+  → 설계 `docs/design/2026-07-09-culture-kobis-boxoffice-bronze{,-plan}.md`
+
+## 2026-07-09 — KCISA 한눈에보는문화정보 서울 행사 bronze 수집 (#196)
+
+- **신규 소스 `kcisa`** — 국립기관 최신 전시 구멍(서울 API 자발등록 사각) 보강. `KcisaClient`
+  (HttpCore+QueryKey("serviceKey"), 키 URL 미노출) + `kcisa_seoul_event`(area2, sido=서울,
+  현재 활성 스냅샷 ~498). 빈 페이지=끝(KOPIS 400 오버슛과 대조). `parse_records` XML 분기 공용화.
+  → `source/clients.py` · `source/datasets.py` · `source/ingest.py` · `common/records.py` · `source/config.py`
+- **계약**: min_rows 300 실측 하한, volume_drop 0.7. 좌표 gpsX/gpsY·sigungu 내장(silver 지오코딩 불요).
+- silver 편입(seq dedup·seoul_cultural_event 중복·gold)은 후속 PR. 설계:
+  [docs/design/2026-07-09-culture-kcisa-event-bronze.md](docs/design/2026-07-09-culture-kcisa-event-bronze.md)
+
+## 2026-07-09 — culture_bronze 스케줄 자정→03:00 KST 이동 (#201)
+
+- **자정 400 창 이탈** — KOPIS 가 자정 직후 00:00~00:02 창에서 간헐 400 을 뱉는다
+  (cause B, 시간의존·낮/새벽엔 정상, 4차 재발까지 관찰). 방어 3겹(#146 재시도·#147 HWM·
+  retries=2)이 흡수 중이지만 매 자정런이 헛재시도를 한 번씩 사고, 400 창이 retries 총
+  ~4분보다 길어지는 날은 전멸 위험. `@daily`(자정) → `0 3 * * *`(03:00 KST)로 옮겨
+  노출 자체를 제거 — 가장 값싼 완화(#201 후보 ③). → `culture_bronze.py`
+- **무영향 근거** — freshness SLA 30h 라 시각 여유 충분, 하류 `culture_transform` 은
+  asset 트리거(고정 시각 의존 없음). cron 은 DAG 타임존(KST) 해석. 회귀 그물
+  `test_bronze_schedule.py`(자정 스케줄 재도입 차단, airflow 없이 소스 검증).
+
+## 2026-07-08 — #206 facility 상세 주간 크롤 분리
+
+- `Dataset.refresh`("daily"/"weekly") 추가, `kopis_facility_detail`을 weekly로 —
+  자정런 제외(KOPIS -200콜/일, #201 압력↓). 선택 로직은 `plan_dataset_names`로
+  추출(airflow 없이 테스트 가능). → `source/datasets.py` · `culture_bronze.py`
+- `culture_facility_refresh` DAG 신규(일 05:30 KST) — culture_bronze를 목록+상세
+  전수(`max_detail=2000`)로 트리거. 커버리지 200/1,686(11.9%)→전량.
+- `load_baselines` 다중 리포트 병합(최신 5건) — 부분 run(주간·백필) 리포트가
+  다음 자정런 볼륨 HWM을 가리던 결함 수정. → `source/ingest.py`
+- 설계: [docs/design/2026-07-08-culture-facility-weekly-refresh.md](docs/design/2026-07-08-culture-facility-weekly-refresh.md)
+
+## 2026-07-08 — load_bronze 진행 로그 (26분 블랙박스 해소) (#202)
+
+- **26분 블랙박스 해소** — 7/8 실측: load_bronze = run 30분의 87%, 원인은 Trino INSERT
+  커밋 고정비(~216쿼리 × 평균 7.2초, 1행 INSERT도 4~7초). 그런데 시작~끝 사이 진행
+  로그가 0줄이라 어느 데이터셋이 병목인지 안 보였다. 배치(=Iceberg 커밋)마다 진행
+  로그 + 데이터셋별 완료 로그(행수·소요) 추가 — 세종 88MB≈13분 병목이 눈에 보인다.
+  → `common/warehouse.py` · `source/ingest.py`
+- **속도 개선은 #203(pyiceberg)에 위임** — 병렬화(ThreadPool, 26분→~13분)를 초안에
+  넣었다가 뺐다: pyiceberg 직접 write(#203)가 26분→2~3분으로 병렬화를 무의미하게
+  만든다(엔진당 데이터셋 적재가 이미 수 초). 버릴 코드를 안 만들고, 이 PR 은 어느
+  엔진에서도 살아남는 **관측(로그)** 만 남긴다. #203 은 이미지 의존성이 멘토 게이트.
+
+## 2026-07-08 — 전멸 run 정직성: report 가 상류 전멸 시 스스로 실패 (#185)
+
+- **slo_passed 공허 참 교정** — plan 전멸이면 expected=0 이라 "실패 0"이 공허하게
+  참이 되어 7/7 사고 리포트가 `slo_passed=true` 로 나왔다. 기대가 없으면 통과도
+  없다(`expected_total > 0` 조건 추가). Discord embed 색도 이 판정을 따라 빨강으로.
+  → `source/ingest.py`
+- **report 리프의 success 위장 차단** — report(all_done)가 리포트 저장·알림 발송을
+  마친 **뒤**, 전멸(`expected==0` 또는 `landed==0 and failed>0`)이면
+  `AirflowFailException` 으로 스스로 실패해 run 을 UI 에서 빨갛게 만든다(재시도 없음
+  — 재시도해도 결과 동일 + 알림 중복 방지). 부분 실패·전부 의도적 skip 은 기존 동작
+  유지. 판정은 순수 함수 `annihilation_reason(coverage)` 로 분리해 단위 테스트.
+  → `culture_bronze.py` · `source/ingest.py` · `tests/test_report_annihilation.py`
+
 ## 2026-07-07 — HTTP 전송 계층 common.http 전환 (#152)
 
 - **culture 가 루트 `common/http`(#78) 소비자로** (#152) — 6/6 도메인 완성, 마지막 잔여 중복 해소.

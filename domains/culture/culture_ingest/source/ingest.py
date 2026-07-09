@@ -16,7 +16,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
@@ -34,7 +34,14 @@ from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_set
 from common.http.errors import HttpProblemError  # noqa: E402  (security 가 루트 보장 후)
 
 from . import config as culture_config
-from .clients import KopisClient, KopisError, SeoulClient
+from .clients import (
+    KCISA_ROWS,
+    KcisaClient,
+    KobisClient,
+    KopisClient,
+    KopisError,
+    SeoulClient,
+)
 from .datasets import ALL_DATASETS, BY_NAME, Dataset, select
 
 
@@ -45,7 +52,7 @@ class IngestOptions:
     date_from: str = ""  # 날짜창 엔드포인트용 시작일 YYYYMMDD
     date_to: str = ""  # 종료일 YYYYMMDD
     kopis_rows: int = 100  # KOPIS 목록 엔드포인트 페이지 크기
-    max_pages: int | None = None  # KOPIS 목록 페이지 상한 (None = 전체)
+    max_pages: int | None = None  # KOPIS·KCISA 목록 페이지 상한 (None = 전체)
     max_rows: int | None = None  # 서울 행 수 상한 (None = 전체)
     max_detail: int = 200  # KOPIS 상세 엔드포인트에서 크롤할 id 상한
     include_detail: bool = False  # kopis_detail 데이터셋 실행 여부
@@ -56,10 +63,12 @@ class IngestOptions:
 
 @dataclass
 class Clients:
-    """두 소스 클라이언트 묶음."""
+    """세 소스 클라이언트 묶음."""
 
     kopis: KopisClient
     seoul: SeoulClient
+    kcisa: KcisaClient
+    kobis: KobisClient
 
 
 # stdate/eddate 날짜창이 필요한 KOPIS 엔드포인트.
@@ -169,12 +178,45 @@ def ingest_dataset(
             result.object_keys.append(key)
             _record_page(page.body)
 
+        elif ds.kind == "kobis_boxoffice":
+            # KOBIS 일별 박스오피스: 단일 GET 1건(page-0001.json). targetDt=전일 확정분
+            # (DAG 03:00 KST 실행, load_date=당일 → 전일). date_from/date_to 창은 쓰지
+            # 않는다 — 일배치가 창을 항상 당일로 채워, 존중하면 아직 확정 안 된 당일을
+            # 조회하게 되기 때문. 과거 재수집은 logical date 재실행(operations.md). 서울은
+            # base_params 에 wideAreaCd=0105001, 전국은 없음.
+            target_dt = (
+                date.fromisoformat(landing.ctx.load_date) - timedelta(days=1)
+            ).strftime("%Y%m%d")
+            wide = ds.base_params.get("wideAreaCd")
+            page = clients.kobis.daily_boxoffice(target_dt, wide)
+            key = landing.write_page(prefix, "page-0001.json", page.body, "json")
+            result.pages += 1
+            result.rows += page.row_count
+            result.bytes_written += len(page.body)
+            result.object_keys.append(key)
+            _record_page(page.body)
+            # write_manifest 용 params (설정 누락 시 UnboundLocalError → #196 실버그 교훈).
+            params = {**ds.base_params, "targetDt": target_dt}
+
         elif ds.kind == "seoul_list":
             # 서울 목록: 1000행 윈도우를 page-NNNNNN.json으로 적재.
             params = {"service": ds.endpoint}
             for page in clients.seoul.list_pages(ds.endpoint, opts.max_rows):
                 filename = f"page-{page.index:06d}.json"
                 key = landing.write_page(prefix, filename, page.body, "json")
+                result.pages += 1
+                result.rows += page.row_count
+                result.bytes_written += len(page.body)
+                result.object_keys.append(key)
+                _record_page(page.body)
+
+        elif ds.kind == "kcisa_list":
+            # KCISA area2: PageNo 페이징(numOfrows=KCISA_ROWS)을 page-NNNN.xml 로 적재.
+            params = {**ds.base_params, "numOfrows": KCISA_ROWS}  # 매니페스트 기록용 요청 파라미터
+            for page in clients.kcisa.list_pages(ds.endpoint, ds.base_params, rows=KCISA_ROWS,
+                                                 max_pages=opts.max_pages):
+                filename = f"page-{page.index:04d}.xml"
+                key = landing.write_page(prefix, filename, page.body, "xml")
                 result.pages += 1
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
@@ -300,8 +342,10 @@ def build_run_report(
         if ch.get("freshness_age_hours") is not None:
             ages.append(ch["freshness_age_hours"])
 
-    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 + bronze 적재 성공이면 통과
-    slo_passed = not failed and not violations and not load_failed
+    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 + bronze 적재 성공이면 통과.
+    # expected=0(plan 전멸)은 분모가 없어 "실패 0"이 공허하게 참이 된다 — 7/7 사고(#182)
+    # 리포트가 slo_passed=true 로 나온 구멍. 기대가 없으면 통과도 없다(#185).
+    slo_passed = expected_total > 0 and not failed and not violations and not load_failed
     # 리포트는 R2·XCom·알림으로 퍼진다 — error 문자열 등에 시크릿이 남지 않게 통째 마스킹(#144).
     return redact({
         "domain": "culture",
@@ -326,6 +370,30 @@ def build_run_report(
         "slo_passed": slo_passed,
         "datasets": rows,
     })
+
+
+def annihilation_reason(coverage: dict) -> str | None:
+    """상류 전멸이면 report 태스크가 run 을 실패시켜야 하는 사유, 아니면 None (#185).
+
+    report 는 all_done 리프라 상류가 전멸해도 성공하고, Airflow run 최종 상태는
+    리프 기준이라 run 전체가 초록으로 위장된다(7/7 사고가 아침까지 미검출된 원인).
+    리포트·알림을 다 보낸 **뒤** 이 판정으로 raise 해 관측 기능은 유지하고 run
+    상태만 정직하게 만든다. 전멸만 잡는다:
+
+    - ``expected == 0`` — plan 자체가 죽어 분모가 없음
+    - ``landed == 0 and failed > 0`` — 계획은 됐지만 수집이 하나도 착지 못 함
+
+    부분 실패는 기존대로 SLO surface 에 맡기고, 전부 의도적 skip(landed=0,
+    failed=0)은 수집할 게 없던 run 이므로 전멸이 아니다.
+    """
+    expected = coverage.get("expected", 0)
+    landed = coverage.get("landed", 0)
+    failed = coverage.get("failed", 0)
+    if expected == 0:
+        return "plan 전멸 — 기대 데이터셋 0 (expected=0)"
+    if landed == 0 and failed > 0:
+        return f"수집 전멸 — {expected}개 계획, 0개 착지 (failed={failed})"
+    return None
 
 
 def write_run_report(
@@ -355,14 +423,19 @@ def write_run_report(
 
 # --- 런타임 빌더 ---------------------------------------------------------------
 
-def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
-    """직전 run_report 에서 {dataset: rows} 볼륨 HWM 을 읽는다(#147).
+_BASELINE_SCAN_REPORTS = 5  # 부분 run(주간 refresh·백필)이 껴도 이 안에 전체 run 이 있도록
 
-    ``before_ingest_ts`` 이전(=이번 실행보다 과거)의 리포트 중 최신 1건을 쓴다 —
-    리포트 경로의 ingest_ts 는 UTC 문자열이라 사전순 = 시간순. error 가 있던
-    데이터셋은 제외(실패 런의 부분 rows 로 기준선을 끌어내리지 않기 위해).
-    리포트가 없거나 읽기 실패 시 {} — 첫 런/사고 시 볼륨 검사가 조용히 생략될 뿐
-    수집 자체는 막지 않는다(fail-open).
+
+def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
+    """직전 run_report 들에서 {dataset: rows} 볼륨 HWM 을 읽는다(#147, 병합 #206).
+
+    ``before_ingest_ts`` 이전(=이번 실행보다 과거) 리포트를 최신순으로 최대
+    ``_BASELINE_SCAN_REPORTS`` 건 훑어 데이터셋별 가장 최근 rows 를 채운다 —
+    부분 run(주간 facility refresh 등) 리포트가 최신이어도 나머지 데이터셋
+    기준선이 과거 전체 run 에서 보충된다. 리포트 경로의 ingest_ts 는 UTC
+    문자열이라 사전순 = 시간순. error 가 있던 데이터셋은 제외(실패 런의 부분
+    rows 로 기준선을 끌어내리지 않기 위해). 리포트가 없거나 읽기 실패 시 {} —
+    볼륨 검사가 조용히 생략될 뿐 수집 자체는 막지 않는다(fail-open).
     """
     try:
         keys = sink.list(f"{root}/_reports/")
@@ -372,15 +445,13 @@ def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
             m = re.search(r"ingest_ts=([0-9TZ]+)", k)
             if m and m.group(1) < before_ingest_ts:
                 candidates.append((m.group(1), k))
-        if not candidates:
-            return {}
-        _, latest_key = max(candidates)
-        report = json.loads(sink.get(latest_key))
-        return {
-            s["name"]: int(s["rows"])
-            for s in report.get("datasets", [])
-            if s.get("rows") and not s.get("error")
-        }
+        merged: dict[str, int] = {}
+        for _, key in sorted(candidates, reverse=True)[:_BASELINE_SCAN_REPORTS]:
+            report = json.loads(sink.get(key))
+            for s in report.get("datasets", []):
+                if s.get("rows") and not s.get("error") and s["name"] not in merged:
+                    merged[s["name"]] = int(s["rows"])
+        return merged
     except Exception as exc:  # noqa: BLE001 -- baseline 은 보조 신호, 수집을 막지 않는다
         print(f"[baselines] 직전 리포트 조회 실패(볼륨 검사 생략): {type(exc).__name__}")
         return {}
@@ -411,8 +482,15 @@ def build_clients(env_file: str | None = None) -> Clients:
         raise RuntimeError(f"Missing culture source keys: {', '.join(missing)}")
     register_secret(keys.kopis)
     register_secret(keys.seoul)
+    register_secret(keys.cult)
+    register_secret(keys.kobis)
     refresh_env_secrets()  # R2 자격증명 등 이름 기반 env 시크릿도 함께 등록
-    return Clients(kopis=KopisClient(keys.kopis), seoul=SeoulClient(keys.seoul))
+    return Clients(
+        kopis=KopisClient(keys.kopis),
+        seoul=SeoulClient(keys.seoul),
+        kcisa=KcisaClient(keys.cult),
+        kobis=KobisClient(keys.kobis),
+    )
 
 
 def build_landing(
@@ -474,7 +552,11 @@ def load_bronze_from_raw(
                     f"{ds.name}: 파싱 {len(records)}행 ≠ fetch {s['rows']}행 (raw 파싱 유실 의심)"
                 )
                 continue
+            # 데이터셋별 소요 로그 — load_bronze 는 26분 블랙박스라(#202), 어느 데이터셋이
+            # 몇 초 걸렸는지 남겨 병목(세종 88MB≈13분)을 눈으로 확인 가능하게 한다.
+            t0 = time.monotonic()
             loaded[ds.name] = warehouse.load(ds, ctx, records)
+            print(f"[load] {ds.name}: {loaded[ds.name]:,}행 · {time.monotonic() - t0:.1f}s")
         except Exception as exc:  # noqa: BLE001 -- 데이터셋별 격리, 말미 fail loud
             failures.append(redact(f"{s['name']}: {type(exc).__name__}: {exc}"))
     if failures:

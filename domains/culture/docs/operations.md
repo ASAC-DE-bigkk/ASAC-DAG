@@ -3,7 +3,8 @@
 ## 시크릿 (env)
 
 DAG는 키를 **환경변수에서만** 읽는다. `docker-compose`가 `sample/.env`를 (`env_file:`로) 모든
-Airflow 컨테이너에 주입: `KOPIS_SERVICE_KEY`, `SEOUL_API_KEY_CULT`, `R2_DEV_*`.
+Airflow 컨테이너에 주입: `KOPIS_SERVICE_KEY`, `SEOUL_API_KEY_CULT`, `PUBLIC_DATA_API_KEY_CULT`(KCISA #196), `KOBIS_SERVICE_KEY`(#197), `R2_DEV_*`.
+네 소스 키는 **모두 필수** — `build_clients`가 하나라도 없으면 `RuntimeError`(전 fetch_raw 실패).
 **키는 절대 커밋하지 않는다** — `.env`는 상위 레포에서 gitignore.
 
 ## 로컬 실행 (CLI · Airflow 없이)
@@ -30,11 +31,11 @@ python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.en
 | 파라미터 | 뜻 | 기본 |
 |---|---|---|
 | `target` | `dev` / `prod` (그 외 값은 **즉시 실패**) | dev |
-| `datasets` | 적재할 슬러그 일부(빈 값 = 전체) | [] |
+| `datasets` | 적재할 슬러그(빈 값 = daily 전체 — weekly 인 시설 상세 제외, #206) | [] |
 | `date_from`/`date_to` | YYYYMMDD (비면 롤링창) | "" |
 | `lookback_days` | 날짜창 크기 (boxoffice ≤ 31) | 31 |
 | `include_detail` | KOPIS 상세 엔드포인트 크롤 | True |
-| `max_detail` | 상세 크롤당 id 상한 | 200 |
+| `max_detail` | 상세 크롤당 id 상한 (공연 상세용 — 시설 상세는 주간 DAG가 2000으로 오버라이드) | 200 |
 | `kopis_rows` | KOPIS 목록 페이지 크기 | 100 |
 | `fail_on_violation` | 계약 위반 시 run 실패 | False |
 
@@ -49,6 +50,16 @@ bronze Iceberg 적재는 파라미터가 아니라 **`load_bronze` 태스크가 
 - **특정 기간**: `date_from`/`date_to`(YYYYMMDD) 명시. 안 주면 `[end - lookback_days, end]` 롤링창.
 - **boxoffice 제약**: `stdate~eddate` **≤ 31일**(초과 시 `returncode 05`) → 긴 기간은 31일씩 나눠 재수집.
 - **상세(detail)**: `include_detail=True` + `max_detail`로 크롤 id 상한 조정.
+- **KOBIS 박스오피스(#197)**: `kobis_boxoffice_*`의 `targetDt`는 **실행 logical date − 1일**로
+  고정 계산되며 `date_from`/`date_to` 창을 **쓰지 않는다**(일배치가 창을 항상 당일로
+  채우기 때문 — 창을 존중하면 아직 확정 안 된 당일을 조회하게 됨). 과거 특정일 재수집은
+  **Airflow 로 그 날짜+1일을 logical date 로 재실행**한다(예: 6/1 박스오피스 = logical
+  date 6/2 → load_date 2026-06-02 → targetDt 20260601). CLI `--date-from/--date-to`는
+  KOBIS 에 무효(전국/서울 모두 항상 전일분).
+- **시설 상세 주간 분리(#206)**: `kopis_facility_detail`은 자정 일배치에서 제외
+  (`refresh="weekly"`). `culture_facility_refresh`(일 05:30 KST)가 목록+상세를
+  `max_detail=2000`으로 전수 크롤한다. 수동 전수 크롤:
+  `airflow dags trigger culture_bronze --conf '{"datasets": ["kopis_facility", "kopis_facility_detail"], "max_detail": 2000}'`
 
 ```bash
 # 예: boxoffice만 특정 주간 재수집 (dev, 로컬 CLI)

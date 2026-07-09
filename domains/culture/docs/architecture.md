@@ -4,7 +4,8 @@ culture bronze 수집이 **어떻게(오케스트레이션)** 돌고 **어디에
 
 ## 1. 오케스트레이션 전략 (Airflow 레벨)
 
-DAG [`culture_bronze`](../culture_bronze.py) (스케줄 `@daily`). 태스크 흐름:
+DAG [`culture_bronze`](../culture_bronze.py) (스케줄 `0 3 * * *` = 03:00 KST — 자정
+KOPIS 간헐 400 창(#201)을 피해 새벽으로 이동, freshness 무영향). 태스크 흐름:
 
 ```text
 plan ──▶ fetch_raw (12개 동적 매핑 · 병렬) ──▶ load_bronze ──▶ report (all_done)

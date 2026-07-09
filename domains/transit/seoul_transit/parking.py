@@ -6,7 +6,7 @@ raw = 주차장 행 그대로. ts_source = NOW_PRK_VHCL_UPDT_TM(갱신시각).
 """
 
 from . import config
-from .api import get, openapi_url
+from .api import get, openapi_url, raise_for_result
 from .records import envelope, now_kst
 
 
@@ -17,6 +17,8 @@ def collect_parking(key: str) -> dict:
     """
     tc = now_kst()
     d = get(openapi_url(key, "GetParkingInfo", 1, config.PARKING_ROWS))
+    # 200 + 에러/최상위 RESULT(키 만료·쿼터 등)를 실패로 올린다(#229) — 아니면 0행 마스킹.
+    raise_for_result(d, "GetParkingInfo")
     rows = d.get("GetParkingInfo", {}).get("row", [])
     records = [
         envelope(

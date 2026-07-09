@@ -1,7 +1,7 @@
-"""population 도메인 설정: bronze 적재 루트 + 소스 식별자 + 인증키.
+"""citydata 도메인 설정: raw 적재 루트 + 소스 식별자 + 인증키.
 
-공용 R2/Trino 대상은 ``ppltn_ingest.common``에서 온다. 여기에는 population 소스
-(서울 citydata_ppltn) 전용 값만 둔다.
+공용 R2/Trino 대상은 ``citydata_ingest.common``에서 온다. 여기에는 서울 citydata
+통합 API 소스 전용 값만 둔다.
 """
 
 from __future__ import annotations
@@ -10,14 +10,15 @@ import os
 
 from ..common.config import load_env_file, pick
 
-# raw 원본 객체가 적재되는 raw prefix (이슈 #16 → #75: raw/<domain>).
-# 개인 샌드박스 테스트 시 env로 덮어쓴다 (예: dev/<github_id>/raw/population) --
-# 공유 dev 경로(raw/population)와 격리해 팀원 실행과 겹치지 않게.
+# raw 원본 객체가 적재되는 raw prefix. env(SEOUL_PPLTN_LANDING_ROOT)로 덮어쓴다.
+# ⚠ 기본값은 raw/population 유지 — 기존 raw 아카이브 연속성(경로 이전 시 과거분과 분리)을
+# 위해 도메인 개명(population→citydata) 후에도 데이터 경로는 그대로 둔다.
 LANDING_ROOT = os.environ.get("SEOUL_PPLTN_LANDING_ROOT", "raw/population")
 
 # 추적 메타데이터 source_id -- raw path와 bronze row 양쪽에 쓰인다.
+# (블록 bronze 의 source_id 는 citydata.CITYDATA_SOURCE_ID='seoul_citydata' 를 쓴다.)
 SOURCE_ID = "seoul_ppltn"
-SOURCE_DOMAIN = "population"
+SOURCE_DOMAIN = "citydata"
 
 # 서울 열린데이터광장 실시간 도시데이터 API.
 SEOUL_API_KEY_ENV = "SEOUL_API_KEY_PPLT"

@@ -1,18 +1,22 @@
 """Airflow DAG: culture 도메인 bronze 적재 -> R2 raw + bronze Iceberg.
 
 일배치. ``plan -> fetch_raw(동적 매핑) -> load_bronze -> report`` 네 태스크 구조.
-fetch_raw는 채택한 culture 데이터셋을 KOPIS / 서울 열린데이터에서 받아 원본 API
-응답을 R2 ``raw/culture/`` 아래에 박제만 한다(재현 불가 경계). load_bronze가 그
+fetch_raw는 채택한 culture 데이터셋을 KOPIS / 서울 열린데이터 / KCISA / KOBIS에서 받아
+원본 API 응답을 R2 ``raw/culture/`` 아래에 박제만 한다(재현 불가 경계). load_bronze가 그
 raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 run은 API 재호출
 없이 load_bronze만 재시도하면 된다(``culture_ingest`` 참고). 데이터셋마다 매핑
 태스크 1개라서, 한 데이터셋 실패가 격리되고 재시도 가능하며 그리드에서 바로 보인다.
 
 시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가
-``KOPIS_SERVICE_KEY``, ``SEOUL_API_KEY_CULT``, ``R2_DEV_*``를 주입) -- 값은 여기 없다.
+``KOPIS_SERVICE_KEY``, ``SEOUL_API_KEY_CULT``, ``PUBLIC_DATA_API_KEY_CULT``(KCISA),
+``KOBIS_SERVICE_KEY``, ``R2_DEV_*``를 주입) -- 값은 여기 없다. 네 소스 키는 모두 필수
+(하나라도 없으면 전 적재 실패).
 
 파라미터 (트리거 시 덮어쓰기 가능):
   target          "dev" | "prod"            (기본 dev -> 버킷 seoul-dev)
-  datasets        적재할 데이터셋 슬러그 일부; 빈 값 -> 활성 전체
+  datasets        적재할 데이터셋 슬러그; 빈 값 -> 활성 전체 중 daily 만
+                  (kopis_facility_detail 은 refresh="weekly" — culture_facility_refresh
+                  가 일요일 05:30 KST 에 전수 크롤, #206)
   date_from/to    YYYYMMDD; 비면 -> 롤링 [end-lookback_days, end]
   lookback_days   날짜창 크기 (boxoffice는 <=31)                       기본 31
   include_detail  KOPIS 상세 엔드포인트도 크롤(상한 있음)               기본 True
@@ -31,6 +35,7 @@ import pendulum
 
 from airflow import DAG
 from airflow.exceptions import AirflowException
+from airflow.sdk.exceptions import AirflowFailException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
 
@@ -48,9 +53,10 @@ from culture_ingest.common.config import (  # noqa: E402
     RunContext,
     normalize_target,
 )
-from culture_ingest.source.datasets import enabled_datasets  # noqa: E402
+from culture_ingest.source.datasets import plan_dataset_names  # noqa: E402
 from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
+    annihilation_reason,
     build_run_report,
     ingest_one,
     load_baselines_for_target,
@@ -116,17 +122,11 @@ def _plan(**context) -> list[dict]:
         date_to = end.in_timezone(KST).strftime("%Y%m%d")
         date_from = end.in_timezone(KST).subtract(days=int(params["lookback_days"])).strftime("%Y%m%d")
 
-    # 데이터셋 필터: include_detail 꺼지면 상세 제외, datasets 지정 시 그 부분집합만.
-    # 상세(kopis_detail)는 마지막으로 정렬(#146) — 목록이 먼저 랜딩될 확률을 높여
-    # detail 의 "랜딩된 raw 에서 id 재사용" 경로(목록 API 재조회 생략)를 살린다.
+    # 데이터셋 선택은 datasets.plan_dataset_names 로 위임(#206) — include_detail,
+    # datasets 파라미터, weekly 제외(시설 상세는 주간 DAG 소관), detail 후순위
+    # 정렬(#146)을 한 곳에서 결정.
     include_detail = bool(params["include_detail"])
-    wanted = set(params.get("datasets") or [])
-    names = [
-        ds.name
-        for ds in sorted(enabled_datasets(), key=lambda d: d.kind == "kopis_detail")
-        if (include_detail or ds.kind != "kopis_detail")
-        and (not wanted or ds.name in wanted)
-    ]
+    names = plan_dataset_names(params.get("datasets") or [], include_detail=include_detail)
     # 볼륨 HWM(#147): 직전 run_report 의 데이터셋별 rows 를 기준선으로 로드(fail-open).
     baselines = load_baselines_for_target(target, before_ingest_ts=ingest_ts)
     print(
@@ -284,6 +284,13 @@ def _report(**context) -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"[culture bronze] discord 알림 실패(무시): {type(exc).__name__}")
 
+    # 상류 전멸이면 run 을 정직하게 실패로(#185) — report 가 all_done 리프라 전멸
+    # run 도 초록으로 위장되던 구멍(7/7 사고 미검출 원인). 리포트 저장·알림 발송을
+    # 마친 뒤라 관측 기능은 그대로다. 재시도해도 결과가 같으니 즉시 실패(no retry).
+    reason = annihilation_reason(cov)
+    if reason:
+        raise AirflowFailException(f"culture bronze {reason} — 리포트/알림은 발송 완료")
+
     # 런타임 신뢰성 게이트(opt-in): fail_on_violation=True일 때만 위반 시 run 실패.
     # 기본은 surface 전용 — 계약 v0가 안정화되기 전 거짓 경보를 피한다.
     # (수집 자체 실패는 fetch_raw 매핑 태스크가 이미 빨갛게 실패시킨다.)
@@ -297,7 +304,11 @@ with DAG(
     dag_id="culture_bronze",
     description="Land culture raw source data (KOPIS + Seoul OA) to R2 raw/culture, then load bronze Iceberg.",
     start_date=pendulum.datetime(2026, 6, 1, tz=KST),
-    schedule="@daily",
+    # 03:00 KST — 자정 정각을 피한다(#201). KOPIS 가 자정 직후 짧은 창(00:00~00:02)에서
+    # 간헐 400 을 뱉어(cause B, 시간의존·낮엔 정상) 매 자정런이 헛재시도를 한 번씩 사는데,
+    # 새벽 한산창으로 옮기면 노출 자체가 사라진다. freshness SLA 30h 라 시각 무영향,
+    # 하류 culture_transform 은 asset 트리거라 고정 시각 의존 없음. cron 은 DAG 타임존(KST) 해석.
+    schedule="0 3 * * *",
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},

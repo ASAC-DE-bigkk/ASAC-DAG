@@ -46,6 +46,33 @@ def test_fetch_url_retries_configured_429(monkeypatch):
     assert sleeps == [0.0]
 
 
+def test_fetch_url_uses_429_backoff_schedule(monkeypatch):
+    transport = FakeTransport(
+        [
+            TransportResponse(status=429),
+            TransportResponse(status=429),
+            TransportResponse(status=200, content=b"ok"),
+        ]
+    )
+    monkeypatch.setenv("KMA_SERVICE_KEY", "kma-service-key")
+    monkeypatch.setattr(runtime._HTTP, "_transport", transport)
+
+    sleeps = []
+    monkeypatch.setattr(runtime.time, "sleep", sleeps.append)
+
+    assert runtime.fetch_url(
+        "https://example.test/data",
+        "ask-seoul-test/1.0",
+        max_attempts=3,
+        retry_statuses=(429,),
+        retry_base_delay_seconds=30,
+        retry_429_backoff_seconds=(3600, 5400, 7200),
+    ) == (200, b"ok")
+
+    assert len(transport.calls) == 3
+    assert sleeps == [3600.0, 5400.0]
+
+
 def test_fetch_url_raises_redacted_metadata_on_retriable_exhaustion(monkeypatch):
     transport = FakeTransport(
         [TransportResponse(status=500), TransportResponse(status=500)]
