@@ -1,6 +1,6 @@
 # 소스 & 데이터셋
 
-culture가 채택한 **13개 데이터셋**(KOPIS 6 + 서울 열린데이터 6 + KCISA 1). 레지스트리 원본:
+culture가 채택한 **15개 데이터셋**(KOPIS 6 + 서울 열린데이터 6 + KCISA 1 + KOBIS 2). 레지스트리 원본:
 [`source/datasets.py`](../culture_ingest/source/datasets.py) — 데이터셋 추가 = 여기 한 줄.
 
 ## 데이터셋 카탈로그
@@ -19,9 +19,12 @@ culture가 채택한 **13개 데이터셋**(KOPIS 6 + 서울 열린데이터 6 +
 | 10 | `seoul_sports_reservation` | seoul | list | `ListPublicReservationSport` | snapshot_append | 공공체육시설 예약 | — |
 | 11 | `seoul_sema_exhibition` | seoul | list | `ListExhibitionOfSeoulMOAInfo` | interval_append | 시립미술관 전시(OA-15323) | — |
 | 12 | `seoul_sejong` | seoul | list | `SJWPerform` | interval_append | 세종문화회관(OA-2708) | — |
-| 13 | `kcisa_seoul_event` | kcisa | list | `area2` (sido=서울) | snapshot_append | KCISA 한눈에보는문화정보 공연·전시(#196) | seq, title |
+| 13 | `kcisa_seoul_event` | kcisa | kcisa_list | `area2` (sido=서울) | snapshot_append | KCISA 한눈에보는문화정보 공연·전시(#196) | seq, title |
+| 14 | `kobis_boxoffice_nation` | kobis | kobis_boxoffice | `searchDailyBoxOfficeList` | snapshot_append | KOBIS 일별 박스오피스 — 전국(#197) | movieCd, movieNm |
+| 15 | `kobis_boxoffice_seoul` | kobis | kobis_boxoffice | `searchDailyBoxOfficeList` | snapshot_append | KOBIS 일별 박스오피스 — 서울(wideAreaCd) | movieCd, movieNm |
 
 - KOPIS는 `signgucode=11`(서울)로 범위 한정 · boxoffice는 `area=11`. KCISA는 `sido=서울` 필터.
+- KOBIS는 `wideAreaCd=0105001`(서울 상영지역)로 서울 한정 · 전국은 필터 없음.
 - `kcisa_seoul_event`는 현재 활성 스냅샷(날짜 필터 없이 전량). 키 env `PUBLIC_DATA_API_KEY_CULT`(data.go.kr B553457). 좌표 gpsX/gpsY·구(sigungu) 내장.
 - `load_pattern`은 메달리온 설계 의도 메모(silver/gold 생성 일관성용) — 원본 적재 동작엔 영향 없음.
 
@@ -68,3 +71,19 @@ culture가 채택한 **13개 데이터셋**(KOPIS 6 + 서울 열린데이터 6 +
   요청해 샘플/드라이런 행수 제어가 첫 페이지부터 먹는다. → [change-log #44](../change-log.md)
 
 코드: [`source/clients.py`](../culture_ingest/source/clients.py) (`SeoulClient`)
+
+### KOBIS (JSON · 영화진흥위원회 일별 박스오피스, #197)
+
+- **Base**: `http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice` ·
+  엔드포인트 `searchDailyBoxOfficeList.json`. 인증키 `key=<KOBIS_SERVICE_KEY>`는
+  `QueryKey("key")`로 params 병합 → URL 문자열에 키 미노출(#144).
+- **파라미터**: `targetDt`(YYYYMMDD, 필수 — **전일 확정분**, ingest 가 `load_date-1`로 계산) ·
+  `wideAreaCd`(선택, 상영지역 코드. **서울 = `0105001`**, 없으면 전국).
+- **응답**: UTF-8 JSON `boxOfficeResult.dailyBoxOfficeList[]` = **일별 top10 고정**(정확히 10건).
+  18필드(rank·movieCd·movieNm·audiCnt·salesAmt·scrnCnt·showCnt…). 페이징 없음(단일 GET).
+- **에러**: 잘못된 요청은 `{"faultInfo": {...}}` → `KobisError`(redact). 정상은 `boxOfficeResult`만.
+- **지역 필터 실효**(실측 2026-07-09): 같은 targetDt에서 전국 1위와 서울 1위가 다른 영화
+  (전국 audiCnt 44,464 vs 서울 10,930) — "전국을 서울 온도로" 프록시가 아닌 진짜 서울 랭킹.
+- **백필**: `targetDt`로 과거 임의 일자 조회 = 완전 백필 가능(비소멸).
+
+코드: [`source/clients.py`](../culture_ingest/source/clients.py) (`KobisClient`)

@@ -3,6 +3,23 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-09 — KOBIS 일별 박스오피스 bronze 편입 (#197)
+
+- **신규 소스 `kobis`** — 영화진흥위원회 오픈API `searchDailyBoxOfficeList`(JSON,
+  단일 GET 스냅샷). `KobisClient`(HttpCore + `QueryKey("key")` — 키 URL 미노출 #144),
+  faultInfo→`KobisError`(redact). → `source/clients.py`
+- **데이터셋 2벌** — `kobis_boxoffice_nation`(전국) + `kobis_boxoffice_seoul`
+  (`wideAreaCd=0105001`). "전국 집계를 서울 소비 온도로" 프록시 오류를 상영지역
+  필터로 보정 — 진짜 서울 영화소비 시계열 축. 실측: 같은 날 전국 1위≠서울 1위.
+  snapshot_append · min_rows=5(top10 고정) · volume 0.5. → `source/datasets.py`
+- **targetDt=load_date−1**(전일 확정분) — ingest `kobis_boxoffice` 분기가 실행일에서
+  계산. `parse_records` kobis 분기(`boxOfficeResult.dailyBoxOfficeList`) 신규.
+  `SourceKeys.kobis`(`KOBIS_SERVICE_KEY`) 필수화 · `Clients.kobis` 배선. →
+  `source/config.py` · `common/records.py` · `source/ingest.py`
+- 테스트 신규 4파일(client·records·dataset·redaction surface) — 디스패치 그물에
+  `res.error==""` 단언(#196 params 실버그 재발 방지). SLO expected 13→15 자동 반영.
+  → 설계 `docs/design/2026-07-09-culture-kobis-boxoffice-bronze{,-plan}.md`
+
 ## 2026-07-09 — KCISA 한눈에보는문화정보 서울 행사 bronze 수집 (#196)
 
 - **신규 소스 `kcisa`** — 국립기관 최신 전시 구멍(서울 API 자발등록 사각) 보강. `KcisaClient`
