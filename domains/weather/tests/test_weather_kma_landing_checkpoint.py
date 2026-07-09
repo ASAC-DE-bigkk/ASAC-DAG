@@ -255,6 +255,58 @@ def test_load_kma_bronze_fails_before_insert_when_expected_page_is_missing(monke
     assert insert_calls == []
 
 
+def test_load_kma_bronze_allows_partial_pages_when_conf_flag_set(monkeypatch):
+    raw_object = {
+        "request_id": "request-page-1",
+        "raw_object_key": "raw/weather/kma/page-1.json",
+        "raw_hash": "abc",
+        "http_status": 200,
+        "collected_at": "2026-07-05T08:20:00+00:00",
+        "place_id": "first",
+        "base_date": "20260705",
+        "base_time": "1700",
+        "nx": 56,
+        "ny": 130,
+        "page_no": 1,
+        "num_of_rows": 1000,
+    }
+    raw_result = {
+        "raw_objects": [raw_object],
+        "grid_count": 1,
+        "api_call_count": 1,
+        "base_date": "20260705",
+        "base_time": "1700",
+    }
+    insert_calls = []
+
+    class PartialDagRun:
+        conf = {"allow_partial_pages": True}
+
+    def fake_insert_kma_bronze_row_batches(**kwargs):
+        insert_calls.append(kwargs)
+        return sum(len(batch["rows"]) for batch in kwargs["row_batches"])
+
+    monkeypatch.setattr(dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev"))
+    monkeypatch.setattr(dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze")
+    monkeypatch.setattr(
+        dag_module,
+        "download_raw_object",
+        lambda _object_key, _log_label: kma_payload(total_count=1001, item_count=1000),
+    )
+    monkeypatch.setattr(dag_module, "append_kma_bronze_row_batches_pyiceberg", fake_insert_kma_bronze_row_batches)
+
+    result = dag_module.load_kma_bronze(
+        ti=TaskInstance(raw_result),
+        run_id="manual__load:partial-page",
+        dag_run=PartialDagRun(),
+    )
+
+    assert len(insert_calls) == 1
+    assert result["inserted"] == 1000
+    assert result["expected_rows"] == 1001
+    assert result["expected_raw_object_count"] == 1
+
+
 def test_load_kma_bronze_inserts_pages_after_aggregate_count_matches(monkeypatch):
     raw_objects = [
         {
