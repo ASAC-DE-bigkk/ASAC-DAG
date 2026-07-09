@@ -3,6 +3,17 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-09 — culture_bronze 스케줄 자정→03:00 KST 이동 (#201)
+
+- **자정 400 창 이탈** — KOPIS 가 자정 직후 00:00~00:02 창에서 간헐 400 을 뱉는다
+  (cause B, 시간의존·낮/새벽엔 정상, 4차 재발까지 관찰). 방어 3겹(#146 재시도·#147 HWM·
+  retries=2)이 흡수 중이지만 매 자정런이 헛재시도를 한 번씩 사고, 400 창이 retries 총
+  ~4분보다 길어지는 날은 전멸 위험. `@daily`(자정) → `0 3 * * *`(03:00 KST)로 옮겨
+  노출 자체를 제거 — 가장 값싼 완화(#201 후보 ③). → `culture_bronze.py`
+- **무영향 근거** — freshness SLA 30h 라 시각 여유 충분, 하류 `culture_transform` 은
+  asset 트리거(고정 시각 의존 없음). cron 은 DAG 타임존(KST) 해석. 회귀 그물
+  `test_bronze_schedule.py`(자정 스케줄 재도입 차단, airflow 없이 소스 검증).
+
 ## 2026-07-08 — #206 facility 상세 주간 크롤 분리
 
 - `Dataset.refresh`("daily"/"weekly") 추가, `kopis_facility_detail`을 weekly로 —

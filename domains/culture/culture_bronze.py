@@ -302,7 +302,11 @@ with DAG(
     dag_id="culture_bronze",
     description="Land culture raw source data (KOPIS + Seoul OA) to R2 raw/culture, then load bronze Iceberg.",
     start_date=pendulum.datetime(2026, 6, 1, tz=KST),
-    schedule="@daily",
+    # 03:00 KST — 자정 정각을 피한다(#201). KOPIS 가 자정 직후 짧은 창(00:00~00:02)에서
+    # 간헐 400 을 뱉어(cause B, 시간의존·낮엔 정상) 매 자정런이 헛재시도를 한 번씩 사는데,
+    # 새벽 한산창으로 옮기면 노출 자체가 사라진다. freshness SLA 30h 라 시각 무영향,
+    # 하류 culture_transform 은 asset 트리거라 고정 시각 의존 없음. cron 은 DAG 타임존(KST) 해석.
+    schedule="0 3 * * *",
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},
