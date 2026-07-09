@@ -38,6 +38,7 @@ from common.errors.airflow import problem_failure_callback
 from common.runmetrics import track
 
 from seoul_transit import config
+from seoul_transit.alerts import warn_if_empty
 from seoul_transit.r2_landing import land
 from seoul_transit.subway import collect_subway
 
@@ -163,6 +164,8 @@ def ingest_subway() -> dict:
         _land_objects(dataset, raws, dag_run_id)
         # 2) Iceberg bronze 적재
         counts[dataset] = _load_bronze(table, records, dag_run_id)
+        # 0행 이상 경보(#229) — 에러코드 없는 빈응답을 Discord WARN 으로 가시화.
+        warn_if_empty(dataset, counts[dataset], dag_run_id)
     print(f"ingest counts: {counts}")
     return counts
 

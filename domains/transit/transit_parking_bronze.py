@@ -25,6 +25,7 @@ from common.errors.airflow import problem_failure_callback
 from common.runmetrics import track
 
 from seoul_transit import config
+from seoul_transit.alerts import warn_if_empty
 from seoul_transit.parking import collect_parking
 from seoul_transit.r2_landing import land
 
@@ -131,6 +132,8 @@ def ingest_parking() -> dict:
     res = collect_parking(key)
     _land_objects(res, dag_run_id)
     n = _load_bronze(res["records"], dag_run_id)
+    # 0행 이상 경보(#229) — 에러코드 없는 빈응답을 Discord WARN 으로 가시화.
+    warn_if_empty(DATASET, n, dag_run_id)
     print(f"ingest counts: {{'parking': {n}}}")
     return {"parking": n}
 
