@@ -184,6 +184,7 @@ def ingest_dataset(
 
         elif ds.kind == "kcisa_list":
             # KCISA area2: PageNo 페이징(numOfrows=200)을 page-NNNN.xml 로 적재.
+            params = {**ds.base_params, "numOfrows": 200}  # 매니페스트 기록용 요청 파라미터
             for page in clients.kcisa.list_pages(ds.endpoint, ds.base_params, rows=200,
                                                  max_pages=opts.max_pages):
                 filename = f"page-{page.index:04d}.xml"

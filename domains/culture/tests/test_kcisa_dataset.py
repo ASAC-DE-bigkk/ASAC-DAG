@@ -66,5 +66,6 @@ def test_ingest_dispatches_kcisa_list(tmp_path):
     ctx = RunContext(load_date="2026-07-09", ingest_ts="20260709T000000Z", run_id="t")
     landing = Landing(LocalSink(str(tmp_path)), "raw/culture", ctx)
     res = ingest_dataset(ds, _Clients(), landing, IngestOptions())
+    assert res.error == "", f"적재 후 에러 없어야 함: {res.error!r}"  # write_manifest 의 params 배선 포함
     assert res.rows == 1 and res.pages == 1
     assert res.object_keys and res.object_keys[0].endswith("page-0001.xml")
