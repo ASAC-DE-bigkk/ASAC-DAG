@@ -38,6 +38,7 @@ python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.en
 | `max_detail` | 상세 크롤당 id 상한 (공연 상세용 — 시설 상세는 주간 DAG가 2000으로 오버라이드) | 200 |
 | `kopis_rows` | KOPIS 목록 페이지 크기 | 100 |
 | `fail_on_violation` | 계약 위반 시 run 실패 | False |
+| `engine` | bronze 적재 엔진 `pyiceberg`(기본) / `trino`(롤백 레버) — 그 외 값은 즉시 실패 | pyiceberg |
 
 bronze Iceberg 적재는 파라미터가 아니라 **`load_bronze` 태스크가 매 run 수행**한다
 (옵션으로 켜던 구 파라미터는 #102에서 삭제 → [change-log](../change-log.md)).
@@ -79,6 +80,18 @@ airflow tasks clear culture_bronze -t load_bronze -d -s <ts> -e <ts> --yes
 ```
 
 `run_report.json`의 `load_failed: true`(리포트/Discord 알림)가 이 케이스의 신호다.
+
+## bronze 적재 엔진 (#203)
+
+bronze 쓰기는 기본 **pyiceberg**(R2 Data Catalog REST 직접 커밋 — 데이터셋당 1회,
+자정런 load_bronze 26분→2~3분)다. Trino 는 조회·DDL·silver/gold(dbt)에서 그대로 쓴다.
+
+- **롤백**: pyiceberg 경로 장애 시 `{"engine": "trino"}` 로 재트리거(코드 변경 불필요).
+  CLI 는 `--engine trino`.
+- **추가 env**: `R2_DEV_DATA_CATALOG_URI/WAREHOUSE/TOKEN`(dev), `R2_DATA_CATALOG_*`(prod)
+  — 없으면 load_bronze 가 이름을 적어 즉시 실패.
+- **일몰**: 자정런 7회 연속 성공 후 trino 쓰기 경로(`BronzeWarehouse.load`)와
+  `engine` 파라미터를 제거하는 후속 이슈를 등록한다.
 
 ## 디버깅
 

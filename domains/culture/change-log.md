@@ -3,6 +3,15 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-09 — bronze pyiceberg 직접 write 전환 (#203)
+
+- **#203 bronze pyiceberg 직접 write 전환** (2026-07-09): Trino `INSERT VALUES`
+  (SQL 텍스트 운반·800KB 배치 상한 → 216커밋/일·load_bronze 26분)를 pyiceberg
+  `delete+append` 트랜잭션(데이터셋당 커밋 1회)으로 교체. `engine` 파라미터
+  (기본 pyiceberg, trino=롤백 레버 — 자정런 7회 연속 성공 후 일몰), R2 Data
+  Catalog REST 설정 `build_catalog_settings`(+토큰 redaction #144). 스냅샷
+  216→12/일 — culture_maintenance 가 지우던 옛 metadata.json 의 생산자 제거.
+
 ## 2026-07-09 — KOBIS 일별 박스오피스 bronze 편입 (#197)
 
 - **신규 소스 `kobis`** — 영화진흥위원회 오픈API `searchDailyBoxOfficeList`(JSON,
