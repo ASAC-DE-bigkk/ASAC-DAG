@@ -71,6 +71,15 @@ def test_kcisa_stops_on_short_page():
     assert len(pages) == 1 and pages[0].row_count == 150
 
 
+def test_kcisa_ends_on_empty_page_when_exact_multiple():
+    """total 이 rows 의 정확한 배수면 마지막 꽉 찬 페이지 다음의 빈 페이지에서 끝난다 —
+    KOPIS(오버슛 400)와 달리 KCISA 는 status 200·빈 item 을 주므로 이 경로가 종료 계약."""
+    t = _FakeKcisaTransport(total=400)  # 200+200 후 3페이지는 빈 페이지(0건)
+    pages = list(_client(t).list_pages("area2", {"sido": "서울"}, rows=200, max_pages=None))
+    assert [p.index for p in pages] == [1, 2] and sum(p.row_count for p in pages) == 400
+    assert len(t.seen_keys) == 3  # 빈 3페이지까지 실제로 요청해 종료를 확인
+
+
 def test_kcisa_error_masks_key():
     class _AuthErr:
         def send(self, method, url, *, params, headers, timeout):

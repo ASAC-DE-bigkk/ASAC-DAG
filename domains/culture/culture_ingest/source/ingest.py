@@ -34,7 +34,7 @@ from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_set
 from common.http.errors import HttpProblemError  # noqa: E402  (security 가 루트 보장 후)
 
 from . import config as culture_config
-from .clients import KcisaClient, KopisClient, KopisError, SeoulClient
+from .clients import KCISA_ROWS, KcisaClient, KopisClient, KopisError, SeoulClient
 from .datasets import ALL_DATASETS, BY_NAME, Dataset, select
 
 
@@ -45,7 +45,7 @@ class IngestOptions:
     date_from: str = ""  # 날짜창 엔드포인트용 시작일 YYYYMMDD
     date_to: str = ""  # 종료일 YYYYMMDD
     kopis_rows: int = 100  # KOPIS 목록 엔드포인트 페이지 크기
-    max_pages: int | None = None  # KOPIS 목록 페이지 상한 (None = 전체)
+    max_pages: int | None = None  # KOPIS·KCISA 목록 페이지 상한 (None = 전체)
     max_rows: int | None = None  # 서울 행 수 상한 (None = 전체)
     max_detail: int = 200  # KOPIS 상세 엔드포인트에서 크롤할 id 상한
     include_detail: bool = False  # kopis_detail 데이터셋 실행 여부
@@ -183,9 +183,9 @@ def ingest_dataset(
                 _record_page(page.body)
 
         elif ds.kind == "kcisa_list":
-            # KCISA area2: PageNo 페이징(numOfrows=200)을 page-NNNN.xml 로 적재.
-            params = {**ds.base_params, "numOfrows": 200}  # 매니페스트 기록용 요청 파라미터
-            for page in clients.kcisa.list_pages(ds.endpoint, ds.base_params, rows=200,
+            # KCISA area2: PageNo 페이징(numOfrows=KCISA_ROWS)을 page-NNNN.xml 로 적재.
+            params = {**ds.base_params, "numOfrows": KCISA_ROWS}  # 매니페스트 기록용 요청 파라미터
+            for page in clients.kcisa.list_pages(ds.endpoint, ds.base_params, rows=KCISA_ROWS,
                                                  max_pages=opts.max_pages):
                 filename = f"page-{page.index:04d}.xml"
                 key = landing.write_page(prefix, filename, page.body, "xml")

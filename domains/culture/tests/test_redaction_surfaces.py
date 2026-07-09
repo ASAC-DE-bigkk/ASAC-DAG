@@ -39,7 +39,7 @@ def _fake_key_registered():
     register_secret(FAKE_SEOUL)
     yield
     red = get_default_redactor()
-    for k in (FAKE_KOPIS, FAKE_SEOUL):
+    for k in (FAKE_KOPIS, FAKE_SEOUL, FAKE_CULT):  # build_clients 가 등록한 cult 도 정리
         if k in red._literals:  # noqa: SLF001 -- 테스트 정리 용도
             red._literals.remove(k)
 
@@ -180,3 +180,4 @@ def test_build_clients_registers_source_keys(monkeypatch):
 
     assert FAKE_KOPIS not in redact(f"url?service={FAKE_KOPIS}&cpage=1")
     assert FAKE_SEOUL not in redact(f"GET /{FAKE_SEOUL}/json/culturalEventInfo/1/1000/")
+    assert FAKE_CULT not in redact(f"url?serviceKey={FAKE_CULT}&PageNo=1")  # #196 KCISA 키도 등록

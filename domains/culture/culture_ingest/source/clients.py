@@ -216,6 +216,7 @@ class SeoulClient:
 
 
 KCISA_BASE = "https://apis.data.go.kr/B553457/cultureinfo"
+KCISA_ROWS = 200  # area2 페이지 크기(단일 진실원 — ingest 디스패치·매니페스트 공유)
 _KCISA_ITEM_RE = re.compile(r"<item>")
 
 
