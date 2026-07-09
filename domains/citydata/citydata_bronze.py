@@ -1,7 +1,8 @@
 """Airflow DAG: citydata(통합 도시데이터) bronze 적재 (#192).
 
-서울시 실시간 도시데이터 **통합 API(citydata)** 121개 장소를 10분마다 수집한다.
-``population_bronze``(인구 전용)와 같은 태스크 경계:
+서울시 실시간 도시데이터 **통합 API(citydata)** 121개 장소를 **5분마다 병렬로**
+수집하는 단일 수집원이다. 인구(LIVE_PPLTN_STTS)·상권·승하차·따릉이·대기질을 한 번에
+담아 silver 에서 도메인별 마트로 파생한다(인구 silver 포함). 태스크 경계:
 
     fetch_raw    API 호출 + **수집 즉시 gzip** 해 R2 raw 아카이브 (~177KB→~25KB,
                  전 블록 원본 보존 — 어떤 블록이든 사후 재처리 가능)
@@ -31,7 +32,7 @@ from airflow import DAG
 from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.python import PythonOperator
 
-# 이 파일의 디렉토리(domains/population)를 sys.path에 넣어 `ppltn_ingest.*`를 import.
+# 이 파일의 디렉토리(domains/citydata)를 sys.path에 넣어 `citydata_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
 _DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,9 +41,9 @@ if _DAGS_ROOT not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 
-from ppltn_ingest.common.config import RunContext  # noqa: E402
-from ppltn_ingest.source.citydata import DEFAULT_BRONZE_BLOCKS  # noqa: E402
-from ppltn_ingest.source.citydata_ingest import (  # noqa: E402
+from citydata_ingest.common.config import RunContext  # noqa: E402
+from citydata_ingest.source.citydata import DEFAULT_BRONZE_BLOCKS  # noqa: E402
+from citydata_ingest.source.citydata_ingest import (  # noqa: E402
     CitydataIngestOptions,
     build_citydata_run_report,
     fetch_and_land_citydata,
@@ -52,8 +53,8 @@ from ppltn_ingest.source.citydata_ingest import (  # noqa: E402
 
 KST = "Asia/Seoul"
 
-record_population_problem = problem_failure_callback(
-    domain="population", source_system="seoul_citydata")
+record_citydata_problem = problem_failure_callback(
+    domain="citydata", source_system="seoul_citydata")
 
 DEFAULT_PARAMS = {
     "target": "dev",
@@ -130,26 +131,26 @@ def _report(**context) -> None:
 
 
 with DAG(
-    dag_id="population_citydata_bronze",
+    dag_id="citydata_bronze",
     description="Collect Seoul citydata (unified, 121 areas, 5min parallel) gzip raw to R2 + block-split Iceberg bronze. 인구 포함 단일 수집원.",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
-    # 5분 병렬 수집 — citydata 가 인구(LIVE_PPLTN_STTS)까지 담는 **단일 수집원**이 된다
-    # (citydata_ppltn 전용 population_bronze 은퇴). 121장소 병렬 실측 ~5초.
+    # 5분 병렬 수집 — citydata 가 인구(LIVE_PPLTN_STTS)까지 담는 **단일 수집원**이 된다.
+    # 121장소 병렬 실측 ~5초. 인구 등 도메인 마트는 silver 에서 파생.
     schedule="*/5 * * * *",
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 3, "retry_delay": timedelta(minutes=1)},
     params=DEFAULT_PARAMS,
-    tags=["ingest", "population", "citydata", "bronze", "r2", "iceberg"],
+    tags=["ingest", "citydata", "population", "bronze", "r2", "iceberg"],
 ) as dag:
     fetch_raw = PythonOperator(
         task_id="fetch_raw", python_callable=_fetch_raw,
-        on_failure_callback=record_population_problem)
+        on_failure_callback=record_citydata_problem)
     load_bronze = PythonOperator(
         task_id="load_bronze", python_callable=_load_bronze,
-        on_failure_callback=record_population_problem)
+        on_failure_callback=record_citydata_problem)
     report = PythonOperator(
         task_id="report", python_callable=_report, trigger_rule="all_done",
-        on_failure_callback=record_population_problem)
+        on_failure_callback=record_citydata_problem)
 
     fetch_raw >> load_bronze >> report
