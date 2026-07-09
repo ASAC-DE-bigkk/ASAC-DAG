@@ -83,6 +83,7 @@ DEFAULT_PARAMS = {
     "max_detail": 200,
     "kopis_rows": 100,
     "fail_on_violation": False,  # True면 계약 위반(완전성·드리프트·freshness) 시 run 실패
+    "engine": "pyiceberg",  # bronze 적재 엔진 — trino 는 전환기 롤백 레버(#203)
 }
 
 
@@ -211,7 +212,11 @@ def _load_bronze(**context) -> dict:
             ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
             run_id=context["dag_run"].run_id,
         )
-    loaded = load_bronze(ctx, loadable, target=normalize_target(params["target"]))
+    loaded = load_bronze(
+        ctx, loadable,
+        target=normalize_target(params["target"]),
+        engine=params.get("engine", "pyiceberg"),  # 불량값은 build_warehouse 가 즉시 실패
+    )
     total = sum(loaded.values())
     print(f"[culture bronze] iceberg loaded {total} rows / {len(loaded)} datasets")
     for name, rows in sorted(loaded.items()):
