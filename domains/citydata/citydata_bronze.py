@@ -61,7 +61,43 @@ DEFAULT_PARAMS = {
     "max_areas": None,
     "blocks": list(DEFAULT_BRONZE_BLOCKS),
     "write_report": True,
+    # 부분 실패 알림 임계 — 실패 영역이 이 수 이상이면 run당 1건 Discord.
+    # 기본 1(한 곳이라도 실패하면 알림). 시끄러우면 상향(예: 3).
+    "alert_min_failures": 1,
 }
+
+
+def _maybe_alert_partial(report: dict, params: dict) -> None:
+    """부분 실패(성공은 있으나 일부 영역 실패) 시 **run당 1건** Discord 알림.
+
+    전멸(성공 0)은 fetch_raw 가 이미 실패 콜백으로 알리고, 이때 report 는 XCom None
+    으로 스킵되므로 여기선 partial 만 잡힌다(중복 없음). 전송 실패는 삼킨다(best-effort).
+    """
+    failed = report.get("failures", [])
+    threshold = int(params.get("alert_min_failures", 1) or 1)
+    if len(failed) < threshold:
+        return
+    cov = report.get("coverage", {})
+    lines = [
+        f"⚠️ citydata 수집 부분 실패 — {report.get('ingest_ts')}",
+        f"성공 {cov.get('landed')}/{cov.get('expected')} ({cov.get('coverage_pct')}%), 실패 {len(failed)}곳",
+    ]
+    for f in failed[:15]:
+        reason = f.get("error") or f.get("result_code") or "실패"
+        lines.append(f" • {f.get('area_nm')} — {reason}")
+    if len(failed) > 15:
+        lines.append(f" … 외 {len(failed) - 15}곳")
+    msg = "\n".join(lines)
+    try:
+        from common.discord import resolve_webhook, send_text
+        if not resolve_webhook("citydata"):
+            print("[citydata bronze] 부분실패 알림 webhook 미설정 — 스킵(로그만)")
+            print(msg)
+            return
+        if send_text(msg, domain="citydata"):
+            print(f"[citydata bronze] 부분실패 알림 전송 ({len(failed)}곳)")
+    except Exception as exc:  # noqa: BLE001 -- 알림 실패가 run 판정을 가리지 않게
+        print(f"[citydata bronze] 부분실패 알림 전송 실패(무시): {exc}")
 
 
 def _run_context(context) -> RunContext:
@@ -118,11 +154,15 @@ def _report(**context) -> None:
     if not fetched:
         print("[citydata bronze] 리포트 없음(fetch_raw 미완료) — 스킵")
         return
-    if not params.get("write_report"):
-        return
     inserted = context["ti"].xcom_pull(task_ids="load_bronze") or 0
     ctx = RunContext(**fetched["ctx"])
     report = build_citydata_run_report(fetched["results"], ctx, inserted=inserted)
+
+    # 부분 실패 알림(run당 1건) — R2 리포트 기록 여부와 독립.
+    _maybe_alert_partial(report, params)
+
+    if not params.get("write_report"):
+        return
     try:
         key = write_citydata_run_report(report, target=params["target"])
         print(f"[citydata bronze] run report -> {key}")
