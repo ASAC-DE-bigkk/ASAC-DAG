@@ -34,27 +34,23 @@ from datetime import datetime, timedelta, timezone
 from ..common.config import build_r2_settings
 from ..common.trino import build_trino_settings, connect, sql_identifier
 
-# 유지보수 대상 테이블 — **스키마별로 분리**. 참조 seed·dim(정적)은 제외.
-# population 계열은 seoul_ppltn 스키마.
-POPULATION_TABLES: tuple[str, ...] = (
-    "bronze_seoul_ppltn",
-    "silver_seoul_ppltn",
-    "gold_seoul_ppltn_by_time",
-    "gold_seoul_ppltn_daily",
-)
-# citydata 계열은 **seoul_citydata 스키마**(#69 분리) — 10분 증분 merge 가 스냅샷을 쌓음.
+# 유지보수 대상 테이블 — **전부 seoul_citydata 스키마**(#87/#233: 인구 마트도 통합).
+# 5분 증분 merge 가 스냅샷을 쌓는 bronze/silver/gold. 정적 seed·dim(dim_seoul_area)은
+# 제외 — dim 의 drop 잔재는 storage_cleanup 이 스키마 스캔으로 정리한다.
 CITYDATA_TABLES: tuple[str, ...] = (
     "bronze_seoul_citydata",
+    "silver_seoul_ppltn",
     "silver_citydata_cmrcl",
     "silver_citydata_cmrcl_rsb",
     "silver_citydata_transit_ppltn",
     "silver_citydata_sbike",
     "silver_citydata_air",
+    "gold_seoul_ppltn_by_time",
+    "gold_seoul_ppltn_daily",
     "gold_citydata_place_latest",
     "gold_citydata_cmrcl_daily",
 )
-# 하위호환 별칭(기존 호출부는 population 기본).
-MAINTAINED_TABLES: tuple[str, ...] = POPULATION_TABLES
+MAINTAINED_TABLES: tuple[str, ...] = CITYDATA_TABLES
 
 CITYDATA_SCHEMA_ENV = "SEOUL_CITYDATA_SCHEMA"
 DEFAULT_CITYDATA_SCHEMA = "seoul_citydata"

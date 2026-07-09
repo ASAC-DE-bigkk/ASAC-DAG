@@ -137,14 +137,10 @@ def iter_snapshot(
 
 # ── R2 랜딩 (common.storage #109) ────────────────────────────────────────────────
 def _r2_env(name: str) -> str:
-    """R2 자격증명 — R2_DEV_<name> 우선(멘티 dev 게이트), 없으면 R2_<name> 폴백."""
-    dev = os.environ.get("R2_DEV_" + name)
-    if dev:
-        return dev
-    value = os.environ.get("R2_" + name)
-    if not value:
-        raise RuntimeError(f"R2 자격증명 누락 — R2_DEV_{name} 또는 R2_{name}")
-    return value
+    """R2 자격증명 — common.storage.r2_env 단일 규약(#230). 동작 동일(존재 우선)."""
+    from common.storage import r2_env
+
+    return r2_env(name)
 
 
 def build_r2_storage():
