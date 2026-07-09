@@ -38,3 +38,33 @@ def test_kcisa_dataset_registered():
 def test_kcisa_in_daily_plan():
     names = plan_dataset_names([], include_detail=True)
     assert "kcisa_seoul_event" in names   # 자정 일배치에 포함
+
+
+# ── ingest 디스패치 (kcisa_list → clients.kcisa) ──────────────────────────────
+from culture_ingest.common.config import RunContext
+from culture_ingest.common.http import Page
+from culture_ingest.common.landing import Landing, LocalSink
+from culture_ingest.source.ingest import IngestOptions, ingest_dataset
+
+
+class _FakeKcisa:
+    def list_pages(self, path, base_params, rows, max_pages):
+        assert path == "area2" and base_params == {"sido": "서울"}
+        body = (b"<response><body><items>"
+                b"<item><seq>1</seq><title>A</title></item></items></body></response>")
+        yield Page(index=1, body=body, row_count=1, ext="xml")
+
+
+class _Clients:
+    kopis = None
+    seoul = None
+    kcisa = _FakeKcisa()
+
+
+def test_ingest_dispatches_kcisa_list(tmp_path):
+    ds = BY_NAME["kcisa_seoul_event"]
+    ctx = RunContext(load_date="2026-07-09", ingest_ts="20260709T000000Z", run_id="t")
+    landing = Landing(LocalSink(str(tmp_path)), "raw/culture", ctx)
+    res = ingest_dataset(ds, _Clients(), landing, IngestOptions())
+    assert res.rows == 1 and res.pages == 1
+    assert res.object_keys and res.object_keys[0].endswith("page-0001.xml")

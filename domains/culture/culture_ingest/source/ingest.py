@@ -34,7 +34,7 @@ from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_set
 from common.http.errors import HttpProblemError  # noqa: E402  (security 가 루트 보장 후)
 
 from . import config as culture_config
-from .clients import KopisClient, KopisError, SeoulClient
+from .clients import KcisaClient, KopisClient, KopisError, SeoulClient
 from .datasets import ALL_DATASETS, BY_NAME, Dataset, select
 
 
@@ -56,10 +56,11 @@ class IngestOptions:
 
 @dataclass
 class Clients:
-    """두 소스 클라이언트 묶음."""
+    """세 소스 클라이언트 묶음."""
 
     kopis: KopisClient
     seoul: SeoulClient
+    kcisa: KcisaClient
 
 
 # stdate/eddate 날짜창이 필요한 KOPIS 엔드포인트.
@@ -175,6 +176,18 @@ def ingest_dataset(
             for page in clients.seoul.list_pages(ds.endpoint, opts.max_rows):
                 filename = f"page-{page.index:06d}.json"
                 key = landing.write_page(prefix, filename, page.body, "json")
+                result.pages += 1
+                result.rows += page.row_count
+                result.bytes_written += len(page.body)
+                result.object_keys.append(key)
+                _record_page(page.body)
+
+        elif ds.kind == "kcisa_list":
+            # KCISA area2: PageNo 페이징(numOfrows=200)을 page-NNNN.xml 로 적재.
+            for page in clients.kcisa.list_pages(ds.endpoint, ds.base_params, rows=200,
+                                                 max_pages=opts.max_pages):
+                filename = f"page-{page.index:04d}.xml"
+                key = landing.write_page(prefix, filename, page.body, "xml")
                 result.pages += 1
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
@@ -440,8 +453,13 @@ def build_clients(env_file: str | None = None) -> Clients:
         raise RuntimeError(f"Missing culture source keys: {', '.join(missing)}")
     register_secret(keys.kopis)
     register_secret(keys.seoul)
+    register_secret(keys.cult)
     refresh_env_secrets()  # R2 자격증명 등 이름 기반 env 시크릿도 함께 등록
-    return Clients(kopis=KopisClient(keys.kopis), seoul=SeoulClient(keys.seoul))
+    return Clients(
+        kopis=KopisClient(keys.kopis),
+        seoul=SeoulClient(keys.seoul),
+        kcisa=KcisaClient(keys.cult),
+    )
 
 
 def build_landing(
