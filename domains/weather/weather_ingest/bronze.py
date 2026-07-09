@@ -198,12 +198,76 @@ def _pyiceberg_catalog():
             "s3.access-key-id": r2_env("R2_ACCESS_KEY_ID"),
             "s3.secret-access-key": r2_env("R2_SECRET_ACCESS_KEY"),
             "s3.region": os.environ.get(r2_env_name("R2_REGION"), "auto"),
+            # AWS SDK 기본 요청 타임아웃(3초)은 저속 컷(3초간 1B/s 미만)으로 작동해
+            # 순간 네트워크 정체에도 커밋이 죽는다(2026-07-09 새벽 try 1~3 연속 실패).
+            # 재시도 1회 비용(raw 재다운로드 + 파일 재작성)이 대기 몇 초보다 훨씬 크다.
+            "s3.request-timeout": os.environ.get(
+                r2_env_name("R2_S3_REQUEST_TIMEOUT"), "10"
+            ),
         },
     )
 
 
+# 이보다 어린 미완료 업로드는 동시 실행 중인 정기/백필 런의 살아있는 쓰기일 수 있어 남겨둔다.
+STALE_UPLOAD_SECONDS = 3600.0
+
+
+def _abort_stale_multipart_uploads(
+    client,
+    bucket: str,
+    prefix: str,
+    *,
+    older_than_seconds: float = STALE_UPLOAD_SECONDS,
+    now=None,
+) -> int:
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc)
+    aborted = 0
+    kwargs = {"Bucket": bucket, "Prefix": prefix}
+    while True:
+        response = client.list_multipart_uploads(**kwargs)
+        for upload in response.get("Uploads") or []:
+            age_seconds = (now - upload["Initiated"]).total_seconds()
+            if age_seconds < older_than_seconds:
+                continue
+            client.abort_multipart_upload(
+                Bucket=bucket, Key=upload["Key"], UploadId=upload["UploadId"]
+            )
+            aborted += 1
+            print(
+                f"Aborted stale multipart upload (age={age_seconds:.0f}s): {upload['Key']}"
+            )
+        if not response.get("IsTruncated"):
+            break
+        kwargs["KeyMarker"] = response.get("NextKeyMarker")
+        kwargs["UploadIdMarker"] = response.get("NextUploadIdMarker")
+    return aborted
+
+
+def _cleanup_stale_uploads(table) -> None:
+    # 쓰기 도중 죽은 시도(네트워크 컷 등)가 남긴 미완료 멀티파트 업로드는 아무도
+    # 참조하지 않지만 abort 전까지 버킷에 잔류한다 — 다음 적재가 청소한다(best-effort).
+    try:
+        import boto3
+
+        location = table.location()
+        bucket, _, prefix = location.removeprefix("s3://").partition("/")
+        client = boto3.client(
+            "s3",
+            endpoint_url=r2_env("R2_ENDPOINT"),
+            aws_access_key_id=r2_env("R2_ACCESS_KEY_ID"),
+            aws_secret_access_key=r2_env("R2_SECRET_ACCESS_KEY"),
+        )
+        _abort_stale_multipart_uploads(client, bucket, prefix)
+    except Exception as exc:  # noqa: BLE001 — 청소 실패가 적재를 막으면 안 된다
+        print(f"Skipping stale multipart upload cleanup: {type(exc).__name__}: {exc}")
+
+
 def _pyiceberg_table(schema: str):
-    return _pyiceberg_catalog().load_table(f"{schema}.{BRONZE_TABLE}")
+    table = _pyiceberg_catalog().load_table(f"{schema}.{BRONZE_TABLE}")
+    _cleanup_stale_uploads(table)
+    return table
 
 
 def _kma_pyiceberg_delete_filter(dag_run_id: str):
