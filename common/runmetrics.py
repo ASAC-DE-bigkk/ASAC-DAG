@@ -303,17 +303,17 @@ class MetricsR2Sink:
     def _put_r2_object(object_key: str, payload: bytes) -> None:
         import boto3
 
-        # env 규약(R2_DEV_* dev 우선)은 errors sink 와 단일 출처로 공유(#77 정합).
-        from common.errors.sink import _r2_env
+        # R2 자격 env 규약은 common.storage.r2_env 단일 출처(#230) — errors/admin_dong 과 공유.
+        from common.storage import r2_env
 
         boto3.client(
             "s3",
-            endpoint_url=_r2_env("R2_ENDPOINT"),
-            aws_access_key_id=_r2_env("R2_ACCESS_KEY_ID"),
-            aws_secret_access_key=_r2_env("R2_SECRET_ACCESS_KEY"),
+            endpoint_url=r2_env("R2_ENDPOINT"),
+            aws_access_key_id=r2_env("R2_ACCESS_KEY_ID"),
+            aws_secret_access_key=r2_env("R2_SECRET_ACCESS_KEY"),
             region_name="auto",
         ).put_object(
-            Bucket=_r2_env("R2_BUCKET_NAME"),
+            Bucket=r2_env("R2_BUCKET_NAME"),
             Key=object_key,
             Body=payload,
             ContentType="application/json; charset=utf-8",
@@ -400,12 +400,16 @@ def _run_tracked(fn: Callable, layer: str, domain: str, args: tuple,
     record["schedule_delay_s"] = _schedule_delay_s(started_at, ctx["data_interval_end"])
     rusage_start = _read_rusage()
     wall_start = time.monotonic()
+    http_counter = None  # with __enter__ 전 예외 대비(그 땐 None 으로 남음)
 
     try:
         with collect_http_metrics() as http_counter:
             result = _call_original(fn, args, context)
     except BaseException as exc:  # noqa: BLE001 - 실패도 기록 후 재던짐
-        _finalize(record, wall_start, rusage_start, http_counter=None,
+        # 실패 런도 재시도를 소진했으면 그 호출/재시도 카운트가 의미 있다 —
+        # http_counter 를 전달한다(#230 A4). 과거엔 None 이라 api_calls/retries 가
+        # 정작 중요한 실패 행에서 0 으로 공백이었다.
+        _finalize(record, wall_start, rusage_start, http_counter=http_counter,
                   status="failed", skipped=False, result=None)
         write_record(record, sink=sink)
         raise exc
