@@ -16,7 +16,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
@@ -34,7 +34,7 @@ from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_set
 from common.http.errors import HttpProblemError  # noqa: E402  (security 가 루트 보장 후)
 
 from . import config as culture_config
-from .clients import KopisClient, KopisError, SeoulClient
+from .clients import KobisClient, KopisClient, KopisError, SeoulClient
 from .datasets import ALL_DATASETS, BY_NAME, Dataset, select
 
 
@@ -56,10 +56,11 @@ class IngestOptions:
 
 @dataclass
 class Clients:
-    """두 소스 클라이언트 묶음."""
+    """세 소스 클라이언트 묶음."""
 
     kopis: KopisClient
     seoul: SeoulClient
+    kobis: KobisClient
 
 
 # stdate/eddate 날짜창이 필요한 KOPIS 엔드포인트.
@@ -168,6 +169,24 @@ def ingest_dataset(
             result.bytes_written += len(page.body)
             result.object_keys.append(key)
             _record_page(page.body)
+
+        elif ds.kind == "kobis_boxoffice":
+            # KOBIS 일별 박스오피스: 단일 GET 1건(page-0001.json). targetDt=전일 확정분
+            # (DAG 03:00 KST 실행, load_date=당일 → 전일). 서울은 base_params 에
+            # wideAreaCd=0105001, 전국은 없음.
+            target_dt = (
+                date.fromisoformat(landing.ctx.load_date) - timedelta(days=1)
+            ).strftime("%Y%m%d")
+            wide = ds.base_params.get("wideAreaCd")
+            page = clients.kobis.daily_boxoffice(target_dt, wide)
+            key = landing.write_page(prefix, "page-0001.json", page.body, "json")
+            result.pages += 1
+            result.rows += page.row_count
+            result.bytes_written += len(page.body)
+            result.object_keys.append(key)
+            _record_page(page.body)
+            # write_manifest 용 params (설정 누락 시 UnboundLocalError → #196 실버그 교훈).
+            params = {**ds.base_params, "targetDt": target_dt}
 
         elif ds.kind == "seoul_list":
             # 서울 목록: 1000행 윈도우를 page-NNNNNN.json으로 적재.
@@ -440,8 +459,13 @@ def build_clients(env_file: str | None = None) -> Clients:
         raise RuntimeError(f"Missing culture source keys: {', '.join(missing)}")
     register_secret(keys.kopis)
     register_secret(keys.seoul)
+    register_secret(keys.kobis)
     refresh_env_secrets()  # R2 자격증명 등 이름 기반 env 시크릿도 함께 등록
-    return Clients(kopis=KopisClient(keys.kopis), seoul=SeoulClient(keys.seoul))
+    return Clients(
+        kopis=KopisClient(keys.kopis),
+        seoul=SeoulClient(keys.seoul),
+        kobis=KobisClient(keys.kobis),
+    )
 
 
 def build_landing(

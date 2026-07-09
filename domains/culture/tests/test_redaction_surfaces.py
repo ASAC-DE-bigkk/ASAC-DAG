@@ -27,6 +27,7 @@ from culture_ingest.source.ingest import IngestOptions, build_run_report, ingest
 # 실키 금지 — 길이만 literal 등록 조건(≥6)을 충족하는 가짜 값.
 FAKE_KOPIS = "FAKEKOPISKEY1234567890"
 FAKE_SEOUL = "FAKESEOULKEY0987654321"
+FAKE_KOBIS = "FAKEKOBISKEY0123456789ABCDEF0123"
 
 LEAKY_URL = f"http://www.kopis.or.kr/openApi/restful/prfplc?service={FAKE_KOPIS}&cpage=1"
 
@@ -36,9 +37,10 @@ def _fake_key_registered():
     """가짜 키를 기본 redactor 에 등록하고 테스트 후 제거(전역 오염 방지)."""
     register_secret(FAKE_KOPIS)
     register_secret(FAKE_SEOUL)
+    register_secret(FAKE_KOBIS)
     yield
     red = get_default_redactor()
-    for k in (FAKE_KOPIS, FAKE_SEOUL):
+    for k in (FAKE_KOPIS, FAKE_SEOUL, FAKE_KOBIS):
         if k in red._literals:  # noqa: SLF001 -- 테스트 정리 용도
             red._literals.remove(k)
 
@@ -167,14 +169,17 @@ def test_build_clients_registers_source_keys(monkeypatch):
     """build_clients 가 읽은 키를 redactor literal 로 등록해야
     bare `service=` (structural 미매치) 도 가려진다."""
     red = get_default_redactor()
-    for k in (FAKE_KOPIS, FAKE_SEOUL):  # fixture 등록분 제거 후 배선 자체를 검증
+    for k in (FAKE_KOPIS, FAKE_SEOUL, FAKE_KOBIS):  # fixture 등록분 제거 후 배선 자체를 검증
         if k in red._literals:  # noqa: SLF001
             red._literals.remove(k)
     monkeypatch.setenv("KOPIS_SERVICE_KEY", FAKE_KOPIS)
     monkeypatch.setenv("SEOUL_API_KEY_CULT", FAKE_SEOUL)
+    monkeypatch.setenv("KOBIS_SERVICE_KEY", FAKE_KOBIS)
 
     from culture_ingest.source.ingest import build_clients
     build_clients()
 
     assert FAKE_KOPIS not in redact(f"url?service={FAKE_KOPIS}&cpage=1")
     assert FAKE_SEOUL not in redact(f"GET /{FAKE_SEOUL}/json/culturalEventInfo/1/1000/")
+    # KOBIS 도 bare `key=` (structural 미매치) — literal 등록만이 방어(#144).
+    assert FAKE_KOBIS not in redact(f"searchDailyBoxOfficeList.json?key={FAKE_KOBIS}&targetDt=20260708")
