@@ -3,6 +3,19 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-08 — 전멸 run 정직성: report 가 상류 전멸 시 스스로 실패 (#185)
+
+- **slo_passed 공허 참 교정** — plan 전멸이면 expected=0 이라 "실패 0"이 공허하게
+  참이 되어 7/7 사고 리포트가 `slo_passed=true` 로 나왔다. 기대가 없으면 통과도
+  없다(`expected_total > 0` 조건 추가). Discord embed 색도 이 판정을 따라 빨강으로.
+  → `source/ingest.py`
+- **report 리프의 success 위장 차단** — report(all_done)가 리포트 저장·알림 발송을
+  마친 **뒤**, 전멸(`expected==0` 또는 `landed==0 and failed>0`)이면
+  `AirflowFailException` 으로 스스로 실패해 run 을 UI 에서 빨갛게 만든다(재시도 없음
+  — 재시도해도 결과 동일 + 알림 중복 방지). 부분 실패·전부 의도적 skip 은 기존 동작
+  유지. 판정은 순수 함수 `annihilation_reason(coverage)` 로 분리해 단위 테스트.
+  → `culture_bronze.py` · `source/ingest.py` · `tests/test_report_annihilation.py`
+
 ## 2026-07-07 — HTTP 전송 계층 common.http 전환 (#152)
 
 - **culture 가 루트 `common/http`(#78) 소비자로** (#152) — 6/6 도메인 완성, 마지막 잔여 중복 해소.

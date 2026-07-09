@@ -300,8 +300,10 @@ def build_run_report(
         if ch.get("freshness_age_hours") is not None:
             ages.append(ch["freshness_age_hours"])
 
-    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 + bronze 적재 성공이면 통과
-    slo_passed = not failed and not violations and not load_failed
+    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 + bronze 적재 성공이면 통과.
+    # expected=0(plan 전멸)은 분모가 없어 "실패 0"이 공허하게 참이 된다 — 7/7 사고(#182)
+    # 리포트가 slo_passed=true 로 나온 구멍. 기대가 없으면 통과도 없다(#185).
+    slo_passed = expected_total > 0 and not failed and not violations and not load_failed
     # 리포트는 R2·XCom·알림으로 퍼진다 — error 문자열 등에 시크릿이 남지 않게 통째 마스킹(#144).
     return redact({
         "domain": "culture",
@@ -326,6 +328,30 @@ def build_run_report(
         "slo_passed": slo_passed,
         "datasets": rows,
     })
+
+
+def annihilation_reason(coverage: dict) -> str | None:
+    """상류 전멸이면 report 태스크가 run 을 실패시켜야 하는 사유, 아니면 None (#185).
+
+    report 는 all_done 리프라 상류가 전멸해도 성공하고, Airflow run 최종 상태는
+    리프 기준이라 run 전체가 초록으로 위장된다(7/7 사고가 아침까지 미검출된 원인).
+    리포트·알림을 다 보낸 **뒤** 이 판정으로 raise 해 관측 기능은 유지하고 run
+    상태만 정직하게 만든다. 전멸만 잡는다:
+
+    - ``expected == 0`` — plan 자체가 죽어 분모가 없음
+    - ``landed == 0 and failed > 0`` — 계획은 됐지만 수집이 하나도 착지 못 함
+
+    부분 실패는 기존대로 SLO surface 에 맡기고, 전부 의도적 skip(landed=0,
+    failed=0)은 수집할 게 없던 run 이므로 전멸이 아니다.
+    """
+    expected = coverage.get("expected", 0)
+    landed = coverage.get("landed", 0)
+    failed = coverage.get("failed", 0)
+    if expected == 0:
+        return "plan 전멸 — 기대 데이터셋 0 (expected=0)"
+    if landed == 0 and failed > 0:
+        return f"수집 전멸 — {expected}개 계획, 0개 착지 (failed={failed})"
+    return None
 
 
 def write_run_report(
