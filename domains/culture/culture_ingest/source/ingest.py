@@ -172,8 +172,10 @@ def ingest_dataset(
 
         elif ds.kind == "kobis_boxoffice":
             # KOBIS 일별 박스오피스: 단일 GET 1건(page-0001.json). targetDt=전일 확정분
-            # (DAG 03:00 KST 실행, load_date=당일 → 전일). 서울은 base_params 에
-            # wideAreaCd=0105001, 전국은 없음.
+            # (DAG 03:00 KST 실행, load_date=당일 → 전일). date_from/date_to 창은 쓰지
+            # 않는다 — 일배치가 창을 항상 당일로 채워, 존중하면 아직 확정 안 된 당일을
+            # 조회하게 되기 때문. 과거 재수집은 logical date 재실행(operations.md). 서울은
+            # base_params 에 wideAreaCd=0105001, 전국은 없음.
             target_dt = (
                 date.fromisoformat(landing.ctx.load_date) - timedelta(days=1)
             ).strftime("%Y%m%d")

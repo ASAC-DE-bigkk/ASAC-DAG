@@ -49,6 +49,12 @@ bronze Iceberg 적재는 파라미터가 아니라 **`load_bronze` 태스크가 
 - **특정 기간**: `date_from`/`date_to`(YYYYMMDD) 명시. 안 주면 `[end - lookback_days, end]` 롤링창.
 - **boxoffice 제약**: `stdate~eddate` **≤ 31일**(초과 시 `returncode 05`) → 긴 기간은 31일씩 나눠 재수집.
 - **상세(detail)**: `include_detail=True` + `max_detail`로 크롤 id 상한 조정.
+- **KOBIS 박스오피스(#197)**: `kobis_boxoffice_*`의 `targetDt`는 **실행 logical date − 1일**로
+  고정 계산되며 `date_from`/`date_to` 창을 **쓰지 않는다**(일배치가 창을 항상 당일로
+  채우기 때문 — 창을 존중하면 아직 확정 안 된 당일을 조회하게 됨). 과거 특정일 재수집은
+  **Airflow 로 그 날짜+1일을 logical date 로 재실행**한다(예: 6/1 박스오피스 = logical
+  date 6/2 → load_date 2026-06-02 → targetDt 20260601). CLI `--date-from/--date-to`는
+  KOBIS 에 무효(전국/서울 모두 항상 전일분).
 - **시설 상세 주간 분리(#206)**: `kopis_facility_detail`은 자정 일배치에서 제외
   (`refresh="weekly"`). `culture_facility_refresh`(일 05:30 KST)가 목록+상세를
   `max_detail=2000`으로 전수 크롤한다. 수동 전수 크롤:
