@@ -20,6 +20,23 @@ This file governs the **commerce** category bundle at `dags/domains/commerce/`.
   implemented with boto3, not s3fs.)
 
 
+### Project policy — single source: [docs/PROJECT.md](docs/PROJECT.md)
+
+
+- 이 프로젝트의 **고유 정책**(특히 **데이터 분류 체계 = 대분류 › 중분류 › 소분류**)은
+  **[docs/PROJECT.md](docs/PROJECT.md) 를 단일 소스로 따른다.** 작업 시작 전 이 문서를 확인하고,
+  분류·집계·리포트 표기 관련 결정은 임의로 만들지 말고 이 문서에 근거한다.
+- 정책이 바뀌면 **PROJECT.md 를 먼저 갱신**하고, 코드·리포트가 그 문서를 따르게 한다.
+
+
+### Commit & PR policy
+
+
+- **PR 은 사용자 승인 전까지 만들거나 push 하지 않는다.** 승인 전에는 작업을 **로컬 커밋 단위로만**
+  관리하고, 사용자가 명시적으로 승인하면 그때 push / PR 한다(푸시 대상 브랜치·시점도 승인에 따른다).
+- 커밋 자체는 승인 없이 논리 단위로 진행한다(한국어 conventional 메시지). 즉 **커밋 = 상시, push/PR = 승인 후.**
+
+
 ## 0. Primary Operating Rule
 
 

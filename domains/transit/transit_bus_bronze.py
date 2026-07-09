@@ -4,6 +4,12 @@
   - 소스 = 서울 TOPIS 버스(ws.bus.go.kr), 키 = PUBLIC_DATA_API_KEY(URL 인코딩 필요)
   - 응답이 XML → 원본 그대로 보존(R2 ext=xml, Iceberg raw=XML varchar). 파싱은 silver(dbt).
   - 단위 = 노선(busRouteId). 이 DAG = Bronze 한정.
+
+수집 스코프(#212): `bus_arrival` 은 **수집하지 않는다** — silver 가 소비하지 않아
+(설계 v2, bus_source.md §5) 호출 예산을 위치로 재배분(720→360콜/일).
+코드·테이블·파서는 그대로 유지 — SOURCES 에서 해당 항목만 주석 처리했다.
+재개: 아래 SOURCES 의 주석을 해제하면 즉시 복귀.
+⚠️ 실시간 데이터는 소급 수집 불가 — 중단 구간은 영구 이력 공백으로 남는다.
 """
 
 import os
@@ -37,7 +43,7 @@ SOURCE = os.environ.get("BUS_SOURCE", "seoul_bus")
 
 # bronze 테이블 -> dataset
 SOURCES = {
-    "bronze_bus_arrival": "bus_arrival",
+    # "bronze_bus_arrival": "bus_arrival",  # 수집 제외(#212) — silver 미소비, 재개 시 주석 해제
     "bronze_bus_position": "bus_position",
 }
 

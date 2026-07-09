@@ -177,11 +177,17 @@ class BronzeWarehouse:
         buffer: list[str] = []
         buffer_len = len(prefix.encode("utf-8"))
 
+        batch_no = 0
+
         def _flush() -> None:
-            nonlocal inserted, buffer, buffer_len
+            nonlocal inserted, buffer, buffer_len, batch_no
             if buffer:
                 self.client.execute(prefix + ", ".join(buffer))
                 inserted += len(buffer)
+                batch_no += 1
+                # 배치 1개 = Iceberg 커밋 1회 = 수 초 — 진행 로그가 없으면 대용량
+                # 데이터셋(세종 88MB=110배치)이 수십 분 블랙박스가 된다(#202).
+                print(f"[load] {ds.name} 배치 {batch_no}: 누적 {inserted:,}/{len(records):,}행")
                 buffer = []
                 buffer_len = len(prefix.encode("utf-8"))
 

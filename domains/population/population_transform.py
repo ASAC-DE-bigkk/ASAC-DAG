@@ -69,6 +69,14 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["transform", "population", "silver", "gold", "dbt"],
 ) as dag:
+    # 공용 패키지(asac_axes, #48/#49) 설치 -- silver 가 asac_axes 매크로/seed 를 참조하므로
+    # dbt_packages/ 가 없으면 run 이 깨진다(gitignore 라 실행 환경마다 설치 필요). 멱등.
+    deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=_dbt("deps"),
+        on_failure_callback=record_population_problem,
+    )
+
     # 참조 데이터(121장소 좌표/영역 seed) 적재 -- 121행이라 매 run 갱신해도 싸고 멱등.
     seed_refs = BashOperator(
         task_id="dbt_seed",
@@ -83,11 +91,13 @@ with DAG(
         on_failure_callback=record_population_problem,
     )
 
-    # 데이터 품질 테스트 (assert_silver_not_empty 등).
+    # 데이터 품질 테스트 -- **population 모델만**. asac_axes 패키지의 내부 모델
+    # (dim_beop_admin_link 등)은 여기서 빌드하지 않으므로 그 테스트는 제외한다
+    # (소비자는 자기 모델만 검증; 패키지 자체 테스트는 패키지 CI 소관).
     test_models = BashOperator(
         task_id="dbt_test",
-        bash_command=_dbt("test"),
+        bash_command=_dbt("test --exclude package:asac_axes"),
         on_failure_callback=record_population_problem,
     )
 
-    seed_refs >> run_models >> test_models
+    deps >> seed_refs >> run_models >> test_models

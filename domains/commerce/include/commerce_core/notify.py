@@ -151,6 +151,60 @@ def notify_completion(*, where: str, summary: dict, unresolved: list[dict] | Non
         log.exception("notify_completion 전송 실패(무시): where=%s", where)
 
 
+# ── 역할별 설명 양식 ────────────────────────────────────────────────────────────
+# 알림 인터페이스를 호출하는 각 지점의 **역할 설명**(양식). 알림 메시지 description 앞에 붙여
+# "이 알림이 무슨 작업에서 왜 났는지"를 사람이 바로 알게 한다. 새 호출부는 여기에 역할을 등록.
+NOTIFY_ROLES: dict[str, str] = {
+    "bronze.collect.schema_drift":
+        "bronze 수집이 데이터셋의 응답 컬럼 표준(v1 구형/v2 신형)을 감시한다. 등록 포맷과 다른 키로 "
+        "응답이 오면(양식 변경) 별칭으로 정규화 대응하되 이 알림을 낸다.",
+    "commerce_load_silver.schema_drift":
+        "silver 가 v1/v2 별칭으로도 식별키(MGTNO/OPNSFTEAMCODE 등)를 찾지 못하면(정규화 실패) "
+        "grain 붕괴 위험이라 에러로 보고한다.",
+    "ingest_one":
+        "데이터셋 1종의 원본 수집(페이지 순회 → bronze 적재). 실패 시 예외 알림.",
+    "commerce_load_silver.enrich_admin_dong_ref":
+        "silver 사전보강 — 행안부 행정동↔법정동 참조 스냅샷 전량 교체 적재 결과 보고.",
+    "commerce_load_silver.enrich_fill_jibun":
+        "silver 사전보강 — 지번 결측 도로명에 Juso 보강 결과·미해결 보고.",
+    "commerce_load_silver.masked_address_dong_mapping_skip":
+        "silver 가 마스킹(*) 주소의 동단위 법정/행정동 매핑을 스킵한 규모를 warning 으로 보고.",
+    "_default": "commerce 파이프라인 알림.",
+}
+
+
+def role_of(task: str) -> str:
+    """task(호출부 라벨)의 역할 설명. 미등록이면 접두 매칭 후 기본값."""
+    if task in NOTIFY_ROLES:
+        return NOTIFY_ROLES[task]
+    for key, desc in NOTIFY_ROLES.items():
+        if key != "_default" and task.startswith(key):
+            return desc
+    return NOTIFY_ROLES["_default"]
+
+
+def notify_schema_drift(*, task: str, dataset: str, expected_fmt: str, observed_fmt: str,
+                        sample_keys: list[str] | None = None, coped: bool = True,
+                        context: dict | None = None) -> None:
+    """응답 컬럼 표준(v1/v2)이 등록값과 달라졌을 때 = **양식 변경** 알림.
+
+    coped=True: 별칭 정규화로 대응됨 → warning(수집/silver 정합 유지).
+    coped=False: v1/v2 어느 이름으로도 식별키 미발견 → error(정규화 실패, 수동 확인).
+    §19.1 형식([commerce][<task>><level>])으로 notify_quality_event 를 통해 나간다.
+    """
+    level = "warning" if coped else "error"
+    tail = ("별칭 정규화로 대응(silver 정합 유지)." if coped
+            else "식별키 미인식 — 정규화 실패, 스키마 수동 확인 필요.")
+    notify_quality_event(
+        task=task, level=level,
+        title=f"응답 양식 변경 감지: {dataset} ({expected_fmt}→{observed_fmt})",
+        description=f"{role_of(task)} 등록 포맷={expected_fmt}, 실제 응답={observed_fmt}. {tail}",
+        metrics={"dataset": dataset, "expected_fmt": expected_fmt, "observed_fmt": observed_fmt,
+                 "coped": coped, "sample_keys": ", ".join(sorted(sample_keys or [])[:12])},
+        context=context,
+    )
+
+
 def notify_quality_event(*, task: str, level: str, title: str, description: str,
                          metrics: dict, context: dict | None = None) -> None:
     """사전 인지 품질 이슈를 [작업>레벨] 단위로 묶어 알림 채널로 전송한다."""

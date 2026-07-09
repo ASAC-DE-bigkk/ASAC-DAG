@@ -107,7 +107,11 @@ with DAG(
             "assert_silver_traffic_wgs84_required_when_source_coordinate_available "
             "assert_silver_traffic_admin_axis_consistent "
             "assert_silver_traffic_admin_axis_coverage "
-            "assert_silver_traffic_latest_publishable_record"
+            "assert_silver_traffic_latest_publishable_record "
+            # gold-silver 교차 카운트 테스트는 silver 모델명 셀렉터가 참조 테스트로
+            # 끌어오지만, 이 단계에서는 gold가 직전 사이클 상태라 silver 가 갱신된
+            # 사이클마다 구조적으로 FAIL 한다. gold 재빌드 후 dbt_test_gold 에서만 돌린다.
+            "--exclude assert_gold_traffic_counts_match_silver"
         ),
         on_failure_callback=record_traffic_problem,
     )

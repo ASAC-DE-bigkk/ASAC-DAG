@@ -41,6 +41,9 @@ class Dataset:
     # 값은 6/29~7/6 실측 일간 변동 기반: 안정 카탈로그 0.8 / 목록 0.7 / 예약류(자연
     # churn -23% 실측)·boxoffice(고정 50) 0.5.
     volume_drop_threshold: float | None = None
+    # 크롤 주기(#206): "daily"=자정 일배치, "weekly"=주간 refresh 전용(자정런 제외).
+    # 정적 dim(시설 상세)은 매일 재크롤이 낭비 + 자정 KOPIS 400(#201) 압력이라 분리.
+    refresh: str = "daily"
 
 
 # --- KOPIS (XML) -- 공연예술통합전산망 --------------------------------------------
@@ -95,6 +98,7 @@ KOPIS_DATASETS = [
         base_params={"signgucode": "11"},  # 11 = 서울
         freshness_sla_hours=24 * 8,  # 좌표 차원(느린 변화)
         key_fields=("mt10id", "fcltynm"),
+        refresh="weekly",  # 정적 dim — culture_facility_refresh 가 주 1회 전수 크롤(#206)
     ),
     Dataset(
         name="kopis_festival",
@@ -211,3 +215,30 @@ def select(names: list[str] | None) -> list[Dataset]:
             raise KeyError(f"Unknown dataset: {name}. Known: {sorted(BY_NAME)}")
         chosen.append(BY_NAME[name])
     return chosen
+
+
+def plan_dataset_names(wanted: list[str] | None, *, include_detail: bool) -> list[str]:
+    """DAG plan 용 적재 대상 이름 선택.
+
+    상세(kopis_detail)는 마지막으로 정렬(#146) — 목록이 먼저 랜딩될 확률을 높여
+    detail 의 "랜딩된 raw 에서 id 재사용" 경로를 살린다. ``wanted`` 가 비면 스케줄
+    run — refresh="weekly" 데이터셋(#206 시설 상세)은 제외한다. 주간 트리거·수동
+    run 은 이름을 명시하므로 그대로 포함된다.
+    """
+    chosen = set(wanted or [])
+    return [
+        ds.name
+        for ds in sorted(enabled_datasets(), key=lambda d: d.kind == "kopis_detail")
+        if (include_detail or ds.kind != "kopis_detail")
+        and (ds.name in chosen if chosen else ds.refresh == "daily")
+    ]
+
+
+# 주간 facility refresh(#206) 트리거 conf — culture_facility_refresh DAG 가 사용.
+# 목록을 같이 태우는 이유: detail 이 같은 run 에 랜딩된 목록에서 id 재사용(#146)
+# + 신규 시설이 목록→상세 같은 주기에 편입. max_detail 은 시설 1,686 + 여유.
+WEEKLY_FACILITY_REFRESH_CONF = {
+    "datasets": ["kopis_facility", "kopis_facility_detail"],
+    "max_detail": 2000,
+    "include_detail": True,
+}

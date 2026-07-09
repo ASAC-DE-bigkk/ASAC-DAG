@@ -5,6 +5,134 @@
 
 ---
 
+## 2026-07-08
+
+### 49. silver v1/v2 정규화 + record_json 보존(API별 비공통) + raw→bronze→silver 전구간 검증
+
+request:
+- v1/v2 는 backfill 로 해결(bronze 문제 아니면 silver 만 재작업). silver 식별키=(OPNSFTEAMCODE, MGTNO).
+- API별 비공통 필드도 key 로 매핑 보존 → gold 에서 API별 table화(무리한 병합/완전정규화 X). history 는
+  전 필드 변화 SCD 추적. raw~bronze~silver 전구간 정상동작 확인.
+
+response:
+- **silver(dbt)**: `lf(v1,v2)` 매크로로 record_json 에서 정본(v1) 우선 coalesce 정규화 —
+  mgtno/opnsfteamcode/status/date/address/coord 모두 v1(MGTNO…)·v2(MNG_NO…) 대응. **record_json 을
+  current/history 에 보존** → API별 비공통 필드를 (dataset,opnsfteamcode,mgtno)로 매핑, gold 가 table화.
+  history 는 content_hash(전 record) 기반이라 **전 필드 변화 SCD** 유지.
+  (ASAC-DBT `feat/silver-v1v2-per-api`: `fe4c7ea`, `7c5db67`.)
+- **bronze**: warehouse `iter_increment_rows` 가 v2(MNG_NO) row 를 page 봉투로 오인하던 버그 수정(`e7e1fcc`).
+  `project_records` 는 `canonical_get` 으로 v2 mgtno/updatedt 채움(`39b4442`).
+- **검증(실 dev Trino/Iceberg)**:
+  - silver --full-refresh: history **1,344,778** · current **1,342,691**(v1 무회귀), record_json 전행 채움,
+    dental_lab 등 비공통 필드 추출 확인, SCD(한 업소 3버전) 확인.
+  - **v2 end-to-end**: env_consulting(093018, v2) raw **208행** → bronze Iceberg **208행**(publishable) →
+    silver **208행·distinct 208(붕괴 없음)**, mgtno=MNG_NO·opnsfteamcode=OGDP_INST_CD·상태=SALS_STTS,
+    record_json 보존, 비공통 `BPLC_SE_NM`=환경컨설팅회사 추출 확인.
+- gold(API별 table화)는 record_json 기반 **후속 레이어**(염두).
+
+### 48. 응답 컬럼 표준 v1/v2 대응 — 환경 13종(신형) 편입 + 양식변경 알림
+
+request:
+- (환경) 상권 인허가 13종 수집. datasetView 형식과 대조·상태값 처리기준 확인. key 가 달라도(신형 컬럼)
+  기존값과 동일하게 맞추고 **silver 에서 처리**. key 틀어지면 양식변경+error 알림. 알림 호출부에 역할별 설명 추가.
+
+response:
+- 라이브 확인: 환경 13종은 **신형(v2) 컬럼 표준** — `MNG_NO`(=MGTNO)·`OGDP_INST_CD`(=OPNSFTEAMCODE)·
+  `SALS_STTS_CD/NM`(=TRDSTATE)·`DTL_SALS_STTS_CD/NM`(=DTLSTATE)·`DATA_UPDT_YMD/LAST_MDFCN_YMD`·
+  `ROAD_NM_ADDR`·`XCRD/YCRD`. 식별/상태/버전 값 **전부 존재(이름만 다름)**, 13종 전수 확인.
+- 별칭 계약: `schemas.COLUMN_ALIASES_V2` + `canonical_get()`/`detect_row_format()`. `Dataset.fmt`(v1|v2) +
+  registry `format` 필드. 환경 13종 `category=environment`·`format=v2` 등록(139→152).
+- 정규화 위치 = **silver**(grain `(dataset, opnsfteamcode, mgtno)` 붕괴 지점 = 데이터 손실처). bronze 는
+  raw 그대로 저장(손실 없음, 증분만 비효율). warehouse 는 `canonical_get` 으로 v2 mgtno/updatedt 채움.
+- 알림: `notify_schema_drift`(양식변경→coped=warning / 미인식=error, §19.1 `[commerce][task>level]` 형식) +
+  `NOTIFY_ROLES`(역할별 설명 양식) + `role_of()`. bronze 수집 루프에서 등록 fmt≠관측 fmt 시 1회 알림.
+- 상태값 처리: 영업상태 `01 영업/03 폐업/04 폐쇄/05 제외사항`(v1 TRDSTATEGBN = v2 SALS_STTS_CD). 상세영업상태
+  코드는 **API별 상이**(`11/2/4/BBBB/N…`, datasetView 정의 정본) — NM 동반이라 code→name empirical 확보 가능.
+- 테스트: canonical_get/detect_row_format·format·schema_drift·role_of. 전체 pytest 300 통과.
+- ⚠️ **silver dbt coalesce(v1↔v2)는 후속**(dbt submodule) — 이게 완료돼야 환경 13종이 silver 에서 정합.
+
+### 47. 분류 2단계화 — 대분류(category) vs 명칭분류(sub_category) 분리
+
+request:
+- 명칭에 따른 분류와 대분류(industry)를 구분할 것.
+
+response:
+- `Dataset` 에 `sub_category` 필드 추가([schemas.py](include/commerce_core/schemas.py)) + [registry.py](include/commerce_core/registry.py)
+  로더 반영. `category`=대분류(유지), `sub_category`=명칭 기반 세분류(대분류 하위, 미지정 허용).
+- 산업 32종에 sub_category 부여: meter4·gas3·petroleum2·groundwater3·timber2·sales7·tobacco3·
+  job_agency2·education2·funeral1·emission1·animal2.
+- **전 139종 sub_category 부여 완료**(산업 32 + culture 56 + 기존 51). food(restaurant/bar/manufacturing/
+  sale/meal_service/logistics/vending/bakery)·culture(sports/film_video/game/tourism/amusement/travel/music/
+  publishing/performance/culture_arts/camping)·health_medical(institution/care/drug_sale/medical_device) 등.
+- `test_registry.py::test_all_have_sub_category`(전 종 sub_category 필수)로 가드. 전체 pytest 296 통과.
+
+### 46. 산업 상권 인허가 32종 추가 (107 → 139) + 라이브 검증
+
+request:
+- 산업 분류 상권 인허가(계량기/가스·석유/지하수/목재/각종 판매업/담배/직업소개/장례·요양 교육 등)를
+  commerce 로 편입. raw~bronze~silver 이전과 같은 방향으로 적용.
+
+response:
+- 소스 34행 중 **중복 2쌍 제거** → 32종 등록(107 → 139), `category: industry`. 중복:
+  `LOCALDATA_092701`(목재수입유통업=제재업)·`LOCALDATA_092809`(용기냉동기특정설비=액화석유가스용품제조업체)
+  — 동일 코드+OA-id 라 각 1건만 등록(둘째 이름은 코드 재확인 필요, 플래그).
+- **라이브 32/32 OK**(fail=0), 식별값 `OPNSFTEAMCODE/MGTNO/UPDATEDT/LASTMODTS` 전 종 존재 →
+  bronze/silver 라인 그대로 유효(§45 분석 연장). 신규 최대 통신판매업 total≈932,949·담배소매 95,263.
+- 계량기수리업 service_name 은 **비-LOCALDATA `repair092801`**(라이브 total≈113) — 테스트 allowlist 등록.
+- `tests/test_registry.py` `EXPECTED_COUNT` 107 → 139 + 비-LOCALDATA allowlist. 전체 pytest 295 통과.
+- 레지스트리 헤더 107 → 139 + category 에 `industry` 추가. DAG 는 registry 기반 → 139 job 자동 반영.
+
+### 45. raw 107종 실측 검증 + 응답 필드 커버리지 분석 + bronze 라인 검증
+
+request:
+- 현재 기준 모든 raw 호출로 수집 정상 여부 확인. 각 API 응답을 공통/비공통 필드로 분리.
+- 기존 bronze/silver 식별값이 107종에 그대로 유효한지 분석. raw·문서 정리 후 bronze/silver 라인 검증.
+
+response:
+- 107종 전량 라이브 샘플(1/5) → **수집 107/107 OK, 실패 0**. 응답 row 키 집계: 전 종 공통 14 +
+  준공통 5(`DCBYMD`/`TRDSTATENM`/`SITETEL`/`SITEWHLADDR`/`SITEPOSTNO`, 1~2종 결측) + API별 비공통(45 스키마 변형).
+- **식별값 `OPNSFTEAMCODE`·`MGTNO`·`UPDATEDT`·`LASTMODTS` = 107/107** → bronze 정렬/식별키·silver 그레인·
+  `content_hash`·`TRDSTATEGBN`(상태) 그대로 유효. silver 는 `record_json` schema-on-read(`nullif`)라 비공통/누락 무손실.
+- 문서: [docs/pipeline/bronze/api-field-coverage.md](docs/pipeline/bronze/api-field-coverage.md) 신설 + bronze README 인덱스 추가.
+- 검증: 전체 pytest 295 통과 + 신규 culture 1종(`traditional_temple`) bronze raw end-to-end 스모크
+  (격리 프리픽스 `_verify207` → status=ok, NDJSON+마커+diff-target 생성, 식별값 4개 보존, 검증 후 삭제).
+- 주의: bronze 정렬키의 `OPNSFTEAMCODE`/`LASTMODTS` 포함(#198/#193)은 별도 브랜치 → 107종 완전 적용은 #193·#198
+  머지 후. silver(dbt) 그레인은 이미 `(dataset, opnsfteamcode, mgtno)`.
+
+### 44. 문화 상권 인허가 56종 추가 (51 → 107)
+
+request:
+- 문화 상권 인허가 56종(골프장·체육시설/영화·비디오/게임/관광·여행/공연/음악·음반/출판·인쇄·광고 등)을
+  추가. "문화 카테고리지만 결국 상권"이라 commerce 로 편입. 기존과 같이 수집(중복·명칭 충돌 점검 포함).
+
+response:
+- `config/dataset_registry.yaml` 에 56종 추가(51 → 107), `category: culture`. LOCALDATA 코드·oa_id·short
+  56종 전부 기존 51종/격리분과 중복 없음(기존 `031103`=숙박업 ≠ 신규 `031105/031107`=야영장). 코드 오름차순 배치.
+- `tests/test_registry.py` `EXPECTED_COUNT` 51 → 107. 무결성 6종 통과(개수·short/service_name/oa_id 유니크·
+  필수필드·`LOCALDATA_` 접두·daily 전량). 전체 pytest 295 통과.
+- 레지스트리 헤더 51 → 107 + category 목록에 `culture` 추가. DAG 는 registry 기반이라 107 job 자동 반영.
+- docs 상세 호출량 표(api-call-volume 등)는 107종 실측 재산정 후속.
+
+### 43. raw 수집 대상 12종 추가 (39 → 51) + 레지스트리 무결성 테스트
+
+request:
+- 위탁급식영업/집단급식소/식품제조가공업/식품첨가물제조업/식용얼음판매업/단란주점영업/유흥주점영업/
+  외국인전용유흥음식점업/의료법인/의료기기수리업/의료기기판매(임대)업/동물용의약품도매상 12종의
+  raw 수집 라인이 누락 → 추가.
+- 중복 없는지·총 51종 맞는지 확인. 기존 bronze 수집 결과와 명칭(short) 겹침 점검.
+- 개발 후 테스트 및 로컬 commit(push 없음). branch: `207-raw-collect-etc`.
+- (보건 외 문화 상권 50+종 추가 예정 — 후속 배치.)
+
+response:
+- `config/dataset_registry.yaml` 에 12종 추가(39 → 51). LOCALDATA 코드 12개 모두 기존 39종과 중복
+  없음, `short`·`oa_id`·`service_name` 전부 유니크. 신규 short 는 기존/격리분과 미충돌 확인
+  (group_meal_facility≠group_meal_food_sale, food_mfg≠instant_sale_mfg,
+  entertainment_bar≠tour_entertainment_bar, medical_device_sale≠animal_medical_device_sale).
+- `tests/test_registry.py` 신설 — 개수 51·short/service_name/oa_id 중복 없음·필수필드·`LOCALDATA_`
+  접두·daily 전량 수집대상. 전체 pytest 295 통과.
+- 레지스트리 헤더 주석 39 → 51 갱신. DAG 매핑은 registry 기반이라 51 job 으로 자동 반영.
+- docs 의 상세 호출량("39종" 산정 표: api-call-volume 등)은 문화 배치까지 합쳐 일괄 재산정 예정.
+
 ## 2026-07-07
 
 ### 42. silver 마스킹 주소 동단위 매핑 스킵 + 품질 warning 알림 규칙

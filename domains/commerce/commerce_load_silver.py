@@ -109,6 +109,13 @@ def commerce_load_silver():
 
         return quality_tasks.notify_masked_address_dong_skip_summary()
 
+    @task(trigger_rule="all_done")
+    def report_silver() -> dict:
+        """DAG 완료 리포트(#218) — silver current 데이터셋(API)별 현재 행수. 실패해도 반드시 보고."""
+        from silver import quality_tasks
+
+        return quality_tasks.report_silver_run()
+
     run_silver = BashOperator(
         task_id="dbt_run_silver",
         bash_command=_dbt_command(f"run --select {SILVER_SELECT}"),
@@ -118,7 +125,7 @@ def commerce_load_silver():
         bash_command=_dbt_command(f"test --select {SILVER_SELECT}"),
     )
     [enrich_admin_dong_ref(), enrich_fill_jibun(), ensure_silver_marker()] >> run_silver
-    run_silver >> notify_masked_address_summary() >> test_silver >> mark_silver_done()
+    run_silver >> notify_masked_address_summary() >> test_silver >> mark_silver_done() >> report_silver()
 
 
 commerce_load_silver()

@@ -154,3 +154,34 @@ def test_load_baselines_picks_latest_before_current(tmp_path):
     # 현재 런 이전 것만: before 가 더 이르면 직전 리포트로
     earlier = load_baselines(sink, root, before_ingest_ts="20260705T000000Z")
     assert earlier.get("seoul_cultural_event") == 11111
+
+
+def test_load_baselines_merges_partial_reports(tmp_path):
+    """주간 facility run(부분 리포트)이 최신이어도 자정런 HWM 이 전 데이터셋 유지(#206)."""
+    sink = LocalSink(str(tmp_path))
+    root = "raw/culture"
+    _write_report(sink, root, "2026-07-05", "20260704T150000Z",
+                  [{"name": "seoul_cultural_event", "rows": 19371, "error": ""},
+                   {"name": "kopis_facility_detail", "rows": 200, "error": ""}])
+    _write_report(sink, root, "2026-07-05", "20260705T083000Z",  # 주간 부분 run
+                  [{"name": "kopis_facility", "rows": 1686, "error": ""},
+                   {"name": "kopis_facility_detail", "rows": 1686, "error": ""}])
+    baselines = load_baselines(sink, root, before_ingest_ts="20260705T150000Z")
+    assert baselines.get("kopis_facility_detail") == 1686  # 최신 리포트 우선
+    assert baselines.get("seoul_cultural_event") == 19371  # 과거 리포트에서 보충
+
+
+def test_load_baselines_merge_skips_error_and_caps_scan(tmp_path):
+    sink = LocalSink(str(tmp_path))
+    root = "raw/culture"
+    # 스캔 상한(5건) 밖의 옛 리포트에만 있는 데이터셋은 병합되지 않는다
+    _write_report(sink, root, "2026-06-30", "20260629T150000Z",
+                  [{"name": "kopis_boxoffice", "rows": 50, "error": ""}])
+    for i in range(1, 6):  # 최신 5건에는 boxoffice 없음
+        _write_report(sink, root, f"2026-07-0{i}", f"2026070{i}T150000Z",
+                      [{"name": "seoul_cultural_event", "rows": 19000 + i, "error": ""},
+                       {"name": "kopis_festival", "rows": 0, "error": "HTTPError: ..."}])
+    baselines = load_baselines(sink, root, before_ingest_ts="20260706T000000Z")
+    assert baselines.get("seoul_cultural_event") == 19005  # 데이터셋별 최신값
+    assert "kopis_festival" not in baselines               # error 제외 유지
+    assert "kopis_boxoffice" not in baselines              # 상한 밖은 안 읽음

@@ -305,8 +305,10 @@ def build_run_report(
         if ch.get("freshness_age_hours") is not None:
             ages.append(ch["freshness_age_hours"])
 
-    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 + bronze 적재 성공이면 통과
-    slo_passed = not failed and not violations and not load_failed
+    # run 단위 SLO: 수집 실패 0 + 계약 위반 0 + bronze 적재 성공이면 통과.
+    # expected=0(plan 전멸)은 분모가 없어 "실패 0"이 공허하게 참이 된다 — 7/7 사고(#182)
+    # 리포트가 slo_passed=true 로 나온 구멍. 기대가 없으면 통과도 없다(#185).
+    slo_passed = expected_total > 0 and not failed and not violations and not load_failed
     # 리포트는 R2·XCom·알림으로 퍼진다 — error 문자열 등에 시크릿이 남지 않게 통째 마스킹(#144).
     return redact({
         "domain": "culture",
@@ -331,6 +333,30 @@ def build_run_report(
         "slo_passed": slo_passed,
         "datasets": rows,
     })
+
+
+def annihilation_reason(coverage: dict) -> str | None:
+    """상류 전멸이면 report 태스크가 run 을 실패시켜야 하는 사유, 아니면 None (#185).
+
+    report 는 all_done 리프라 상류가 전멸해도 성공하고, Airflow run 최종 상태는
+    리프 기준이라 run 전체가 초록으로 위장된다(7/7 사고가 아침까지 미검출된 원인).
+    리포트·알림을 다 보낸 **뒤** 이 판정으로 raise 해 관측 기능은 유지하고 run
+    상태만 정직하게 만든다. 전멸만 잡는다:
+
+    - ``expected == 0`` — plan 자체가 죽어 분모가 없음
+    - ``landed == 0 and failed > 0`` — 계획은 됐지만 수집이 하나도 착지 못 함
+
+    부분 실패는 기존대로 SLO surface 에 맡기고, 전부 의도적 skip(landed=0,
+    failed=0)은 수집할 게 없던 run 이므로 전멸이 아니다.
+    """
+    expected = coverage.get("expected", 0)
+    landed = coverage.get("landed", 0)
+    failed = coverage.get("failed", 0)
+    if expected == 0:
+        return "plan 전멸 — 기대 데이터셋 0 (expected=0)"
+    if landed == 0 and failed > 0:
+        return f"수집 전멸 — {expected}개 계획, 0개 착지 (failed={failed})"
+    return None
 
 
 def write_run_report(
@@ -360,14 +386,19 @@ def write_run_report(
 
 # --- 런타임 빌더 ---------------------------------------------------------------
 
-def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
-    """직전 run_report 에서 {dataset: rows} 볼륨 HWM 을 읽는다(#147).
+_BASELINE_SCAN_REPORTS = 5  # 부분 run(주간 refresh·백필)이 껴도 이 안에 전체 run 이 있도록
 
-    ``before_ingest_ts`` 이전(=이번 실행보다 과거)의 리포트 중 최신 1건을 쓴다 —
-    리포트 경로의 ingest_ts 는 UTC 문자열이라 사전순 = 시간순. error 가 있던
-    데이터셋은 제외(실패 런의 부분 rows 로 기준선을 끌어내리지 않기 위해).
-    리포트가 없거나 읽기 실패 시 {} — 첫 런/사고 시 볼륨 검사가 조용히 생략될 뿐
-    수집 자체는 막지 않는다(fail-open).
+
+def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
+    """직전 run_report 들에서 {dataset: rows} 볼륨 HWM 을 읽는다(#147, 병합 #206).
+
+    ``before_ingest_ts`` 이전(=이번 실행보다 과거) 리포트를 최신순으로 최대
+    ``_BASELINE_SCAN_REPORTS`` 건 훑어 데이터셋별 가장 최근 rows 를 채운다 —
+    부분 run(주간 facility refresh 등) 리포트가 최신이어도 나머지 데이터셋
+    기준선이 과거 전체 run 에서 보충된다. 리포트 경로의 ingest_ts 는 UTC
+    문자열이라 사전순 = 시간순. error 가 있던 데이터셋은 제외(실패 런의 부분
+    rows 로 기준선을 끌어내리지 않기 위해). 리포트가 없거나 읽기 실패 시 {} —
+    볼륨 검사가 조용히 생략될 뿐 수집 자체는 막지 않는다(fail-open).
     """
     try:
         keys = sink.list(f"{root}/_reports/")
@@ -377,15 +408,13 @@ def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
             m = re.search(r"ingest_ts=([0-9TZ]+)", k)
             if m and m.group(1) < before_ingest_ts:
                 candidates.append((m.group(1), k))
-        if not candidates:
-            return {}
-        _, latest_key = max(candidates)
-        report = json.loads(sink.get(latest_key))
-        return {
-            s["name"]: int(s["rows"])
-            for s in report.get("datasets", [])
-            if s.get("rows") and not s.get("error")
-        }
+        merged: dict[str, int] = {}
+        for _, key in sorted(candidates, reverse=True)[:_BASELINE_SCAN_REPORTS]:
+            report = json.loads(sink.get(key))
+            for s in report.get("datasets", []):
+                if s.get("rows") and not s.get("error") and s["name"] not in merged:
+                    merged[s["name"]] = int(s["rows"])
+        return merged
     except Exception as exc:  # noqa: BLE001 -- baseline 은 보조 신호, 수집을 막지 않는다
         print(f"[baselines] 직전 리포트 조회 실패(볼륨 검사 생략): {type(exc).__name__}")
         return {}
@@ -487,7 +516,11 @@ def load_bronze_from_raw(
                     f"{ds.name}: 파싱 {len(records)}행 ≠ fetch {s['rows']}행 (raw 파싱 유실 의심)"
                 )
                 continue
+            # 데이터셋별 소요 로그 — load_bronze 는 26분 블랙박스라(#202), 어느 데이터셋이
+            # 몇 초 걸렸는지 남겨 병목(세종 88MB≈13분)을 눈으로 확인 가능하게 한다.
+            t0 = time.monotonic()
             loaded[ds.name] = warehouse.load(ds, ctx, records)
+            print(f"[load] {ds.name}: {loaded[ds.name]:,}행 · {time.monotonic() - t0:.1f}s")
         except Exception as exc:  # noqa: BLE001 -- 데이터셋별 격리, 말미 fail loud
             failures.append(redact(f"{s['name']}: {type(exc).__name__}: {exc}"))
     if failures:

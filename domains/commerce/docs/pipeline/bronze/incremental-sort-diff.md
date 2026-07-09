@@ -25,11 +25,13 @@
 
 ## 2. 정렬 (외부 병합 정렬, 스트리밍)
 
-- 정렬키(#193) = **(UPDATEDT desc → LASTMODTS desc → MGTNO)**. 각 타임스탬프를 14자리 정수
-  (YYYYMMDDHHMMSS)로 치환해 **내림차순**(최신 먼저). **UPDATEDT 가 없거나 비정형이면(None 케이스)
-  LASTMODTS 로 폴백**해 최신순 위치에 둔다(예전엔 UPDATEDT 없으면 0=최하단으로 가라앉았다).
-  2순위 LASTMODTS(desc)는 UPDATEDT 동률의 tie-break, 3순위 MGTNO(결정적 전순서).
-  → silver 버전 정렬 `coalesce(updatedt_ts, lastmodts_ts, epoch) desc, lastmodts desc` 와 일치.
+- 정렬키 = **(UPDATEDT desc → LASTMODTS desc → OPNSFTEAMCODE → MGTNO)**. 각 타임스탬프를 14자리
+  정수(YYYYMMDDHHMMSS)로 치환해 **내림차순**(최신 먼저). **UPDATEDT 가 없거나 비정형이면(None 케이스,
+  #193) LASTMODTS 로 폴백**해 최신순 위치에 둔다(예전엔 UPDATEDT 없으면 0=최하단). 2순위
+  LASTMODTS(desc)는 UPDATEDT 동률의 tie-break. 3·4순위는 **업소 식별키 (OPNSFTEAMCODE, MGTNO)**
+  — MGTNO 는 발급 자치단체 안에서만 유니크라 **단독 사용 시 다른 구청의 별개 업소가 같은 키로
+  충돌**(중복/이력 매핑 오류)하므로 OPNSFTEAMCODE 를 포함한다. → silver 그레인 (dataset,
+  opnsfteamcode, mgtno)·정렬 `coalesce(updatedt_ts, lastmodts_ts, epoch) desc, lastmodts desc` 와 일치.
 - **전량 RAM 금지** → `external_merge_sort`: 청크를 임시파일로 쓰고 `heapq.merge` 로 병합(스트리밍·바운디드 RAM).
   비교정렬 하한 O(n log n). (정수키라 이론상 radix O(n) 가능하나, 외부 정렬 견고성/단순성으로 병합 채택.)
 

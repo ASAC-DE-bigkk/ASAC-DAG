@@ -12,7 +12,9 @@ raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 
 
 파라미터 (트리거 시 덮어쓰기 가능):
   target          "dev" | "prod"            (기본 dev -> 버킷 seoul-dev)
-  datasets        적재할 데이터셋 슬러그 일부; 빈 값 -> 활성 전체
+  datasets        적재할 데이터셋 슬러그; 빈 값 -> 활성 전체 중 daily 만
+                  (kopis_facility_detail 은 refresh="weekly" — culture_facility_refresh
+                  가 일요일 05:30 KST 에 전수 크롤, #206)
   date_from/to    YYYYMMDD; 비면 -> 롤링 [end-lookback_days, end]
   lookback_days   날짜창 크기 (boxoffice는 <=31)                       기본 31
   include_detail  KOPIS 상세 엔드포인트도 크롤(상한 있음)               기본 True
@@ -31,6 +33,7 @@ import pendulum
 
 from airflow import DAG
 from airflow.exceptions import AirflowException
+from airflow.sdk.exceptions import AirflowFailException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
 
@@ -48,9 +51,10 @@ from culture_ingest.common.config import (  # noqa: E402
     RunContext,
     normalize_target,
 )
-from culture_ingest.source.datasets import enabled_datasets  # noqa: E402
+from culture_ingest.source.datasets import plan_dataset_names  # noqa: E402
 from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
+    annihilation_reason,
     build_run_report,
     ingest_one,
     load_baselines_for_target,
@@ -116,17 +120,11 @@ def _plan(**context) -> list[dict]:
         date_to = end.in_timezone(KST).strftime("%Y%m%d")
         date_from = end.in_timezone(KST).subtract(days=int(params["lookback_days"])).strftime("%Y%m%d")
 
-    # 데이터셋 필터: include_detail 꺼지면 상세 제외, datasets 지정 시 그 부분집합만.
-    # 상세(kopis_detail)는 마지막으로 정렬(#146) — 목록이 먼저 랜딩될 확률을 높여
-    # detail 의 "랜딩된 raw 에서 id 재사용" 경로(목록 API 재조회 생략)를 살린다.
+    # 데이터셋 선택은 datasets.plan_dataset_names 로 위임(#206) — include_detail,
+    # datasets 파라미터, weekly 제외(시설 상세는 주간 DAG 소관), detail 후순위
+    # 정렬(#146)을 한 곳에서 결정.
     include_detail = bool(params["include_detail"])
-    wanted = set(params.get("datasets") or [])
-    names = [
-        ds.name
-        for ds in sorted(enabled_datasets(), key=lambda d: d.kind == "kopis_detail")
-        if (include_detail or ds.kind != "kopis_detail")
-        and (not wanted or ds.name in wanted)
-    ]
+    names = plan_dataset_names(params.get("datasets") or [], include_detail=include_detail)
     # 볼륨 HWM(#147): 직전 run_report 의 데이터셋별 rows 를 기준선으로 로드(fail-open).
     baselines = load_baselines_for_target(target, before_ingest_ts=ingest_ts)
     print(
@@ -283,6 +281,13 @@ def _report(**context) -> None:
         notifier_from_env().send(build_report_payload(report))
     except Exception as exc:  # noqa: BLE001
         print(f"[culture bronze] discord 알림 실패(무시): {type(exc).__name__}")
+
+    # 상류 전멸이면 run 을 정직하게 실패로(#185) — report 가 all_done 리프라 전멸
+    # run 도 초록으로 위장되던 구멍(7/7 사고 미검출 원인). 리포트 저장·알림 발송을
+    # 마친 뒤라 관측 기능은 그대로다. 재시도해도 결과가 같으니 즉시 실패(no retry).
+    reason = annihilation_reason(cov)
+    if reason:
+        raise AirflowFailException(f"culture bronze {reason} — 리포트/알림은 발송 완료")
 
     # 런타임 신뢰성 게이트(opt-in): fail_on_violation=True일 때만 위반 시 run 실패.
     # 기본은 surface 전용 — 계약 v0가 안정화되기 전 거짓 경보를 피한다.

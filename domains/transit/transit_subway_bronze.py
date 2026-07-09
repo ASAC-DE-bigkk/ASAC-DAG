@@ -8,6 +8,12 @@ sample(common_dbt_smoke) 패턴을 따른다:
 이 DAG = Bronze 한정(도메인 부트스트랩 + 지하철 적재). silver/gold/dbt 는 ASAC-DBT 별도 이슈.
 동봉 패키지 seoul_transit 는 같은 폴더에 있고, Airflow 3.x 는 dags 하위 디렉터리를
 sys.path 에 자동 추가하지 않으므로(plugins 마운트도 없음) 아래에서 직접 path 에 올려 import 한다.
+
+수집 스코프(#212): `subway_position` 은 **수집하지 않는다** — silver 가 소비하지 않아
+(설계 v2, subway_source.md §3.1) 호출 예산을 도착으로 재배분(864→216콜/일).
+코드·테이블·파서는 그대로 유지 — SOURCES 에서 해당 항목만 주석 처리했다.
+재개: 아래 SOURCES 의 주석을 해제하면 즉시 복귀.
+⚠️ 실시간 데이터는 소급 수집 불가 — 중단 구간은 영구 이력 공백으로 남는다.
 """
 
 import json
@@ -46,7 +52,7 @@ SOURCE = os.environ.get("TRANSIT_SOURCE", "seoul_subway")
 # bronze 테이블 -> dataset 매핑
 SOURCES = {
     "bronze_subway_arrival": "subway_arrival",
-    "bronze_subway_position": "subway_position",
+    # "bronze_subway_position": "subway_position",  # 수집 제외(#212) — silver 미소비, 재개 시 주석 해제
 }
 
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
