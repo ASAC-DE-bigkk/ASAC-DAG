@@ -508,7 +508,6 @@ def build_traffic_bronze_dag(dag_id: str, schedule: str | None, description: str
         verify_bronze = PythonOperator(
             task_id="verify_seoul_traffic_bronze_runtime",
             python_callable=verify_seoul_traffic_bronze_runtime,
-            on_success_callback=notify_traffic_bronze_success,
             on_failure_callback=[record_and_notify_seoul_traffic_run_failed, record_traffic_problem],
             outlets=[Asset(TRAFFIC_BRONZE_ASSET)],
         )

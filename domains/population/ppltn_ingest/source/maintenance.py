@@ -27,18 +27,42 @@ R2 Data Catalog가 **못 잡는 2가지**는 ``run_storage_cleanup``이 boto3로
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
 from ..common.config import build_r2_settings
 from ..common.trino import build_trino_settings, connect, sql_identifier
 
-# 유지보수 대상 테이블(도메인 스키마 내). 참조 seed는 정적이라 제외.
-MAINTAINED_TABLES: tuple[str, ...] = (
+# 유지보수 대상 테이블 — **스키마별로 분리**. 참조 seed·dim(정적)은 제외.
+# population 계열은 seoul_ppltn 스키마.
+POPULATION_TABLES: tuple[str, ...] = (
     "bronze_seoul_ppltn",
     "silver_seoul_ppltn",
     "gold_seoul_ppltn_by_time",
+    "gold_seoul_ppltn_daily",
 )
+# citydata 계열은 **seoul_citydata 스키마**(#69 분리) — 10분 증분 merge 가 스냅샷을 쌓음.
+CITYDATA_TABLES: tuple[str, ...] = (
+    "bronze_seoul_citydata",
+    "silver_citydata_cmrcl",
+    "silver_citydata_cmrcl_rsb",
+    "silver_citydata_transit_ppltn",
+    "silver_citydata_sbike",
+    "silver_citydata_air",
+    "gold_citydata_place_latest",
+    "gold_citydata_cmrcl_daily",
+)
+# 하위호환 별칭(기존 호출부는 population 기본).
+MAINTAINED_TABLES: tuple[str, ...] = POPULATION_TABLES
+
+CITYDATA_SCHEMA_ENV = "SEOUL_CITYDATA_SCHEMA"
+DEFAULT_CITYDATA_SCHEMA = "seoul_citydata"
+
+
+def citydata_schema() -> str:
+    """citydata 스키마명(seoul_citydata) — env override 가능."""
+    return os.environ.get(CITYDATA_SCHEMA_ENV, DEFAULT_CITYDATA_SCHEMA)
 
 # metadata 파일 경로: s3://<bucket>/__r2_data_catalog/<schema-uuid>/<table-dir>/metadata/<name>
 _META_PATH_RE = re.compile(
@@ -51,16 +75,19 @@ def run_maintenance(
     *,
     tables: tuple[str, ...] = MAINTAINED_TABLES,
     retention: str = "3d",
+    schema: str | None = None,
 ) -> dict[str, str]:
     """대상 테이블에 optimize + expire_snapshots + remove_orphan_files 실행.
 
+    schema 미지정 시 도메인 기본(seoul_ppltn). citydata 는 schema=citydata_schema().
     반환: {테이블명: 'ok' | 'error: ...'} — 한 테이블 실패해도 나머지는 계속.
     """
     s = build_trino_settings(target)
+    schema_name = sql_identifier(schema or s.schema)
     cur = connect(s).cursor()
     results: dict[str, str] = {}
     for tbl in tables:
-        t = f"{sql_identifier(s.catalog)}.{sql_identifier(s.schema)}.{sql_identifier(tbl)}"
+        t = f"{sql_identifier(s.catalog)}.{schema_name}.{sql_identifier(tbl)}"
         try:
             for op in (
                 "optimize",
@@ -110,6 +137,7 @@ def run_storage_cleanup(
     target: str = "dev",
     *,
     retention_hours: int = 6,
+    schema: str | None = None,
 ) -> dict[str, int]:
     """R2 Data Catalog가 못 잡는 두 종류의 잔재를 boto3로 직접 정리한다.
 
@@ -128,7 +156,7 @@ def run_storage_cleanup(
 
     ts = build_trino_settings(target)
     cur = connect(ts).cursor()
-    keep_meta, live_dirs, prefixes = _collect_live_state(cur, ts.catalog, ts.schema)
+    keep_meta, live_dirs, prefixes = _collect_live_state(cur, ts.catalog, schema or ts.schema)
     if not prefixes:
         # 살아있는 테이블을 못 찾으면(예: 스키마 비어있음) 아무것도 지우지 않는다.
         return {"orphan_dir_objects": 0, "orphan_dir_bytes": 0, "old_metadata_objects": 0, "old_metadata_bytes": 0}

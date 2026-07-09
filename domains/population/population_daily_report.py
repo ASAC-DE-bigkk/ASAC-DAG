@@ -4,8 +4,11 @@
 성공/실패·커버리지·자주 실패한 장소를 요약해 Discord webhook으로 보낸다.
 
 수집 DAG(``population_bronze``, 5분)와 완전히 분리돼 있어 수집 성능에 영향 없다.
-webhook URL은 환경변수 ``DISCORD_WEBHOOK_URL``에서 온다(.env, 시크릿). 값이 없으면
-메시지를 로그로만 남기고 경고한다(리포트 DAG는 실패시키지 않음).
+전송은 공통 모듈(``common.discord``, #161)을 쓴다 — webhook 은
+``POPULATION_DISCORD_WEBHOOK_URL``(도메인 채널) 우선, 없으면 ``DISCORD_WEBHOOK_URL``
+폴백(.env, 시크릿). 둘 다 없으면 메시지를 로그로만 남기고 경고한다(실패 아님).
+전송 자체가 실패하면 태스크를 실패시켜 재시도한다 — 이 DAG 의 존재 이유가
+리포트 전송이라 best-effort 로 삼키지 않는다.
 
 파라미터 (트리거 시 덮어쓰기 가능):
   target       "dev" | "prod"   (기본 dev)
@@ -29,9 +32,9 @@ _DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
+from common.discord import resolve_webhook, send_text  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 
-from ppltn_ingest.common.discord import post_message, webhook_url  # noqa: E402
 from ppltn_ingest.source.daily_report import aggregate_day, format_message  # noqa: E402
 
 KST = "Asia/Seoul"
@@ -57,12 +60,13 @@ def _send_report(**context) -> None:
     message = format_message(summary)
     print(message)
 
-    url = webhook_url()
-    if not url:
-        print("[daily_report] DISCORD_WEBHOOK_URL 미설정 — Discord 전송 생략(메시지는 위 로그 참고)")
+    if not resolve_webhook("population"):
+        print("[daily_report] webhook 미설정(POPULATION_/공통 모두 없음) — 전송 생략(메시지는 위 로그 참고)")
         return
-    status = post_message(url, message)
-    print(f"[daily_report] Discord 전송 완료 (HTTP {status})")
+    if not send_text(message, domain="population"):
+        # 전송이 이 DAG 의 목적이므로 실패를 삼키지 않는다 — 태스크 실패로 재시도 유도.
+        raise RuntimeError("daily report Discord 전송 실패")
+    print("[daily_report] Discord 전송 완료")
 
 
 with DAG(

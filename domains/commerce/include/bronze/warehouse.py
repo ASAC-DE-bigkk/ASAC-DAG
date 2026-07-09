@@ -27,6 +27,7 @@ from typing import Iterable, Iterator
 
 from bronze import load_state
 from commerce_core.hashing import sha256_hex
+from commerce_core.schemas import canonical_get   # v1/v2 컬럼 별칭 정규화(MGTNO=MNG_NO 등)
 from commerce_core.settings import get_settings
 from common.storage import Storage
 from security import assert_identifier
@@ -137,7 +138,7 @@ def iter_increment_rows(storage: Storage, increment_key: str,
     - **row-NDJSON**(feat/58 이후): 줄 = 레코드 1건 → 그대로 산출.
     - **page-NDJSON**(feat/58 이전): 줄 = API 페이지 응답 → `parse_page(...).rows` 로 레코드 산출.
       page 포맷은 `service_name`(LOCALDATA_*) 이 필요하다(응답 봉투 키).
-    포맷은 첫 줄로 판별(레코드=MGTNO 보유 / 페이지=봉투 구조).
+    포맷은 첫 줄로 판별(레코드=식별키 보유(MGTNO 구형/MNG_NO 신형) / 페이지=봉투 구조).
     """
     from bronze.clients import parse_page
 
@@ -149,7 +150,9 @@ def iter_increment_rows(storage: Storage, increment_key: str,
             continue
         obj = json.loads(line)
         if fmt is None:
-            fmt = "row" if (isinstance(obj, dict) and ("MGTNO" in obj or "mgtno" in obj)) else "page"
+            # 식별키 보유 = 레코드(row). v1=MGTNO/mgtno, v2(신형)=MNG_NO. 봉투(page)는 서비스명 1키.
+            fmt = "row" if (isinstance(obj, dict)
+                            and any(k in obj for k in ("MGTNO", "mgtno", "MNG_NO"))) else "page"
             if fmt == "page" and not service_name:
                 raise ValueError(f"page-NDJSON 파싱에 service_name 필요: {increment_key}")
         if fmt == "row":
@@ -178,8 +181,8 @@ def project_records(records: Iterable[dict], *, dataset: str, observed_date: str
     for seq, rec in enumerate(records):
         yield {
             "dataset": dataset,
-            "mgtno": rec.get("MGTNO") or rec.get("mgtno"),
-            "updatedt": rec.get("UPDATEDT") or rec.get("updatedt"),
+            "mgtno": canonical_get(rec, "MGTNO") or rec.get("mgtno"),      # v2=MNG_NO 대응
+            "updatedt": canonical_get(rec, "UPDATEDT") or rec.get("updatedt"),  # v2=DATA_UPDT_YMD
             "record_json": json.dumps(rec, ensure_ascii=False),
             "content_hash": sha256_hex(_canonical_json(rec).encode("utf-8")),
             "observed_date": observed_date,

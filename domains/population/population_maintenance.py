@@ -33,7 +33,13 @@ from airflow.providers.standard.operators.python import PythonOperator
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ppltn_ingest.source.maintenance import run_maintenance, run_storage_cleanup  # noqa: E402
+from ppltn_ingest.source.maintenance import (  # noqa: E402
+    CITYDATA_TABLES,
+    POPULATION_TABLES,
+    citydata_schema,
+    run_maintenance,
+    run_storage_cleanup,
+)
 
 KST = "Asia/Seoul"
 
@@ -42,7 +48,13 @@ DEFAULT_PARAMS = {"target": "dev", "retention": "3d", "cleanup_hours": 6}
 
 def _maintain(**context) -> None:
     params = context["params"]
-    results = run_maintenance(params["target"], retention=params.get("retention", "3d"))
+    target = params["target"]
+    retention = params.get("retention", "3d")
+    # 두 스키마 유지보수: population(seoul_ppltn) + citydata(seoul_citydata, #69 분리).
+    results: dict[str, str] = {}
+    results.update(run_maintenance(target, tables=POPULATION_TABLES, retention=retention))
+    results.update(run_maintenance(
+        target, tables=CITYDATA_TABLES, retention=retention, schema=citydata_schema()))
     for tbl, status in results.items():
         print(f"[population maintenance] {tbl}: {status}")
     failed = [t for t, s in results.items() if not s == "ok"]
@@ -53,12 +65,16 @@ def _maintain(**context) -> None:
 
 def _storage_cleanup(**context) -> None:
     params = context["params"]
-    tally = run_storage_cleanup(params["target"], retention_hours=int(params.get("cleanup_hours", 6)))
-    print(
-        "[population storage_cleanup] "
-        f"버려진 디렉터리 {tally['orphan_dir_objects']}개/{tally['orphan_dir_bytes'] / 1024 / 1024:.0f}MB, "
-        f"옛 metadata {tally['old_metadata_objects']}개/{tally['old_metadata_bytes'] / 1024 / 1024:.0f}MB 정리"
-    )
+    target = params["target"]
+    hours = int(params.get("cleanup_hours", 6))
+    # 두 스키마 각각 정리 (스키마별 UUID 프리픽스로 스코프됨 — 타 도메인 불가침).
+    for label, schema in (("seoul_ppltn", None), ("seoul_citydata", citydata_schema())):
+        tally = run_storage_cleanup(target, retention_hours=hours, schema=schema)
+        print(
+            f"[population storage_cleanup:{label}] "
+            f"버려진 디렉터리 {tally['orphan_dir_objects']}개/{tally['orphan_dir_bytes'] / 1024 / 1024:.0f}MB, "
+            f"옛 metadata {tally['old_metadata_objects']}개/{tally['old_metadata_bytes'] / 1024 / 1024:.0f}MB 정리"
+        )
 
 
 with DAG(

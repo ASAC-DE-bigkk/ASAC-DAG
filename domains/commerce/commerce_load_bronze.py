@@ -136,6 +136,24 @@ def finalize(plan: dict, load_results: list[dict]) -> dict:
         log.warning("적재 실패 run(다음 실행 재시도): %s", sorted(failed))
     if plan.get("pending_expired"):
         log.warning("pending 폐기(3일 경과, complete 없음): %s", plan["pending_expired"])
+
+    # DAG 단위 완료 리포트 → Discord(common.discord, #218). API(short)·category(한글) 단위.
+    try:
+        from commerce_core import run_report   # 지연 임포트
+
+        # 신규 = rows_loaded(증분 파일 실제 적재분), 전체 = rows_expected(=increment_count).
+        rr = [{"short": r["short"], "status": "ok" if r.get("is_publishable") else "failed",
+               "new": r.get("rows_loaded", 0), "total": r.get("rows_expected", 0),
+               "task": "load_one"} for r in results]
+        rr += [{"short": sh, "status": "failed", "error": "적재 실패(다음 실행 재시도)",
+                "task": "load_one"} for (sh, _run) in failed]
+        if rr:
+            metrics["report"] = run_report.send_run_report(
+                dag_id="commerce_load_bronze", run_id=metrics["finalized_at"],
+                observed_date=datetime.now(KST).strftime("%Y-%m-%d"),
+                stage="bronze_load", results=rr)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("run report 스킵(무시): %s", type(exc).__name__)
     return metrics
 
 

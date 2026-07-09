@@ -71,6 +71,24 @@ def test_sort_key_lastmodts_is_secondary_desc():
     assert inc.sort_key(b) < inc.sort_key(a)   # b 의 LASTMODTS 가 더 최신 → 앞
 
 
+def test_sort_key_opnsfteamcode_distinguishes_same_mgtno():
+    """MGTNO 는 발급 자치단체 안에서만 유니크 → 같은 MGTNO·다른 OPNSFTEAMCODE 는 별개 키(충돌 X)."""
+    a = {"MGTNO": "1", "OPNSFTEAMCODE": "3210000", "UPDATEDT": "2026-05-01 00:00:00"}
+    b = {"MGTNO": "1", "OPNSFTEAMCODE": "3220000", "UPDATEDT": "2026-05-01 00:00:00"}
+    assert inc.sort_key(a) != inc.sort_key(b)   # 같은 MGTNO 라도 키 충돌 안 함
+    assert inc.sort_key(a) < inc.sort_key(b)    # OPNSFTEAMCODE 오름차순 결정적
+
+
+def test_diff_same_mgtno_different_opnsfteamcode_not_collapsed():
+    """중복/이력 매핑에서 같은 MGTNO·다른 OPNSFTEAMCODE(별개 업소)를 뭉개지 않는다."""
+    keep = {"MGTNO": "1", "OPNSFTEAMCODE": "A", "UPDATEDT": "2026-05-01 00:00:00", "BPLCNM": "x"}
+    other = {"MGTNO": "1", "OPNSFTEAMCODE": "B", "UPDATEDT": "2026-05-01 00:00:00", "BPLCNM": "y"}
+    prev = sorted([dict(keep)], key=inc.sort_key)
+    today = sorted([dict(keep), dict(other)], key=inc.sort_key)   # keep=미변경, other=다른 업소(신규)
+    out = list(inc.diff_new_rows(today, prev))
+    assert out == [other]                        # 다른 구청 업소만 신규로 방출(keep 은 정합·스킵)
+
+
 def test_resort_diff_target_reorders_and_idempotent(tmp_path):
     """#193 마이그레이션: 기존 정렬본을 새 규칙으로 재정렬 + 검증키 갱신, 재실행은 no-op."""
     import json

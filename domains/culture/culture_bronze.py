@@ -31,6 +31,7 @@ import pendulum
 
 from airflow import DAG
 from airflow.exceptions import AirflowException
+from airflow.sdk.exceptions import AirflowFailException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
 
@@ -51,6 +52,7 @@ from culture_ingest.common.config import (  # noqa: E402
 from culture_ingest.source.datasets import enabled_datasets  # noqa: E402
 from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
+    annihilation_reason,
     build_run_report,
     ingest_one,
     load_baselines_for_target,
@@ -283,6 +285,13 @@ def _report(**context) -> None:
         notifier_from_env().send(build_report_payload(report))
     except Exception as exc:  # noqa: BLE001
         print(f"[culture bronze] discord 알림 실패(무시): {type(exc).__name__}")
+
+    # 상류 전멸이면 run 을 정직하게 실패로(#185) — report 가 all_done 리프라 전멸
+    # run 도 초록으로 위장되던 구멍(7/7 사고 미검출 원인). 리포트 저장·알림 발송을
+    # 마친 뒤라 관측 기능은 그대로다. 재시도해도 결과가 같으니 즉시 실패(no retry).
+    reason = annihilation_reason(cov)
+    if reason:
+        raise AirflowFailException(f"culture bronze {reason} — 리포트/알림은 발송 완료")
 
     # 런타임 신뢰성 게이트(opt-in): fail_on_violation=True일 때만 위반 시 run 실패.
     # 기본은 surface 전용 — 계약 v0가 안정화되기 전 거짓 경보를 피한다.
