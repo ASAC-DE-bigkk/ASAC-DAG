@@ -27,6 +27,11 @@ This file governs the **commerce** category bundle at `dags/domains/commerce/`.
   **[docs/PROJECT.md](docs/PROJECT.md) 를 단일 소스로 따른다.** 작업 시작 전 이 문서를 확인하고,
   분류·집계·리포트 표기 관련 결정은 임의로 만들지 말고 이 문서에 근거한다.
 - 정책이 바뀌면 **PROJECT.md 를 먼저 갱신**하고, 코드·리포트가 그 문서를 따르게 한다.
+- **정책 변경은 §변경 이력에 요약 항목을 남긴다**: PROJECT.md 본문을 고칠 때 같은 커밋에서
+  **`§변경 이력`(change-log) 에 한 줄 요약**을 반드시 추가한다 — 형식 `YYYY-MM-DD: 무엇을·왜 (#이슈)`,
+  최신이 위. 즉 **정책 결정의 요약 이력**은 PROJECT.md §변경 이력에 모은다. (저장 레이아웃/스키마/마커
+  계약/DAG 등 **큰 구조 변경의 운영 이력**은 별도 `change-log.md` — 아래 **Change Log Rule** — 에 남긴다.
+  두 로그는 목적이 달라 각각 갱신한다: PROJECT.md §변경 이력=정책 요약, change-log.md=구조 변경 상세.)
 
 
 ### Commit & PR policy
