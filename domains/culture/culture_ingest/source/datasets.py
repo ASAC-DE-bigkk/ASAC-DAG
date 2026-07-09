@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class Dataset:
     name: str  # 안정적인 슬러그 = 파티션 폴더명
-    source: str  # "kopis" | "seoul"
-    kind: str  # "kopis_list" | "kopis_detail" | "kopis_boxoffice" | "seoul_list"
+    source: str  # "kopis" | "seoul" | "kobis"
+    kind: str  # "kopis_list" | "kopis_detail" | "kopis_boxoffice" | "seoul_list" | "kobis_boxoffice"
     # endpoint: KOPIS 경로(예: "pblprfr") 또는 서울 서비스명(예: "culturalEventInfo")
     endpoint: str
     load_pattern: str  # "interval_append"(구간) | "snapshot_append"(스냅샷) | "scd2_dim"(차원)
@@ -196,7 +196,42 @@ SEOUL_DATASETS = [
     ),
 ]
 
-ALL_DATASETS = KOPIS_DATASETS + SEOUL_DATASETS
+# --- KOBIS (JSON) -- 영화진흥위원회 일별 박스오피스(#197) ------------------------
+# 단일 GET 스냅샷(페이징 없음). 전국 + 서울 한정(wideAreaCd) 2벌 = 일 2요청.
+# "전국을 서울 소비 온도로" 프록시 오류를 상영지역 필터로 보정 — 진짜 서울 영화소비
+# 시계열 축. targetDt=load_date-1(전일 확정 박스오피스)은 ingest 의 kobis_boxoffice
+# 분기가 실행일에서 계산한다. top10 고정이라 min_rows=5(0건·절단 그물), volume 0.5.
+KOBIS_DATASETS = [
+    Dataset(
+        name="kobis_boxoffice_nation",
+        source="kobis",
+        kind="kobis_boxoffice",
+        endpoint="searchDailyBoxOfficeList",
+        load_pattern="snapshot_append",
+        title="KOBIS 일별 박스오피스 — 전국",
+        row_tag="item",  # JSON 이라 파싱엔 미사용, 관례상 명시
+        key_fields=("movieCd", "movieNm"),
+        min_rows=5,
+        volume_drop_threshold=0.5,
+        note="영화진흥위원회 오픈API searchDailyBoxOfficeList. targetDt=전일. 페이징 없음.",
+    ),
+    Dataset(
+        name="kobis_boxoffice_seoul",
+        source="kobis",
+        kind="kobis_boxoffice",
+        endpoint="searchDailyBoxOfficeList",
+        load_pattern="snapshot_append",
+        title="KOBIS 일별 박스오피스 — 서울(wideAreaCd)",
+        base_params={"wideAreaCd": "0105001"},  # 0105001 = 서울(상영지역 코드)
+        row_tag="item",
+        key_fields=("movieCd", "movieNm"),
+        min_rows=5,
+        volume_drop_threshold=0.5,
+        note="상영지역=서울 한정 랭킹. 전국과 다른 시계열(실측: 같은 날 1위 영화 상이).",
+    ),
+]
+
+ALL_DATASETS = KOPIS_DATASETS + SEOUL_DATASETS + KOBIS_DATASETS
 BY_NAME = {ds.name: ds for ds in ALL_DATASETS}
 
 
