@@ -252,15 +252,73 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
 
 def send_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str,
                     results: list[dict], scope_shorts: list[str] | None = None,
-                    count_label: str = "신규", show_total: bool = True) -> dict:
-    """리포트 빌드 + common.discord 전송(best-effort). 반환: counts(로그/테스트용)."""
+                    count_label: str = "신규", show_total: bool = True,
+                    extra_sections: list[str] | None = None) -> dict:
+    """리포트 빌드 + common.discord 전송(best-effort). 반환: counts(로그/테스트용).
+
+    extra_sections: DAG 리포트에 흡수할 task 단위 섹션(예: 유지보수). '메시지 1건 = DAG 1회, task
+    산출물은 섹션'(리포트 묶기 원칙). 섹션이 있으면 본문 tail 을 줄여 섹션이 항상 보이게 한다.
+    """
     rep = build_run_report(dag_id=dag_id, run_id=run_id, observed_date=observed_date, stage=stage,
                            results=results, scope_shorts=scope_shorts,
                            count_label=count_label, show_total=show_total)
+    desc = rep["description"]
+    extra = [s for s in (extra_sections or []) if s]
+    if extra:
+        tail = "\n\n" + "\n\n".join(extra)
+        room = 4000 - len(tail)
+        if len(desc) > room:
+            desc = desc[:room].rstrip() + " …"
+        desc += tail
     try:
-        send_embed(rep["title"], rep["description"], color=rep["color"],
-                   footer=rep["footer"], domain=_DOMAIN)
+        send_embed(rep["title"], desc, color=rep["color"], footer=rep["footer"], domain=_DOMAIN)
     except Exception as exc:  # noqa: BLE001 — 알림 실패가 DAG 상태를 오염시키지 않게
         log.warning("[commerce] run report 전송 실패(무시): %s", type(exc).__name__)
     log.info("[commerce] run report(%s): %s", stage, rep["counts"])
     return rep["counts"]
+
+
+# ── 유지보수(#226) 섹션 렌더 — (테이블,op) 단위 성공/실패 + 자원(elapsed/cpu/peak RAM). GPU=Trino 미사용 N/A ──
+def _fmt_ms(ms) -> str:
+    return f"{ms / 1000:.1f}s" if ms else "-"
+
+
+def _fmt_bytes(b) -> str:
+    b = float(b or 0)
+    for u in ("B", "KB", "MB", "GB"):
+        if b < 1024:
+            return f"{b:.0f}{u}"
+        b /= 1024
+    return f"{b:.0f}TB"
+
+
+def maintenance_section(results: list[dict]) -> str:
+    """maintenance.run_table_maintenance 결과 → DAG 리포트용 '🧹 유지보수' 섹션 문자열."""
+    if not results:
+        return ""
+    by_table: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        by_table[r.get("table", "?")].append(r)
+    n_ok = sum(1 for r in results if r.get("status") == "ok")
+    n_fail = sum(1 for r in results if r.get("status") == "failed")
+    icon = "❌" if n_fail else "✅"
+    lines = [f"**🧹 유지보수 (Iceberg optimize/expire/orphan)** {icon} op 성공 {n_ok}·실패 {n_fail} "
+             "(자원=Trino 쿼리 stats · GPU N/A)"]
+    for t, rs in by_table.items():
+        skip = next((r for r in rs if r.get("status") == "skipped"), None)
+        if skip:
+            lines.append(f"- `{t}` — skip({skip.get('reason', '')})")
+            continue
+        snap = next((r for r in rs if r.get("op") == "snapshots"), None)
+        snaptxt = f" 스냅샷 {snap.get('before')}→{snap.get('after')}" if snap else ""
+        parts = []
+        for r in rs:
+            if r.get("op") in ("snapshots", "-"):
+                continue
+            if r.get("status") == "ok":
+                parts.append(f"{r['op']} ✅{_fmt_ms(r.get('elapsed_ms'))}/cpu{_fmt_ms(r.get('cpu_ms'))}"
+                             f"/{_fmt_bytes(r.get('peak_mem_bytes'))}")
+            else:
+                parts.append(f"{r.get('op')} ❌")
+        lines.append(f"- `{t}`{snaptxt} — " + " · ".join(parts))
+    return "\n".join(lines)

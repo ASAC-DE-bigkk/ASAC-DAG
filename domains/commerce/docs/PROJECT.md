@@ -80,10 +80,33 @@ minor = short               (API)
 
 ---
 
-## 3. 변경 이력
+## 3. 재개(resumability) 표준 — 부분 성공/실패/중단 처리
+
+파이프라인 전 단계는 **명확한 단위**로 재개 가능해야 한다: **완료=제외 · 실패=이어받기 · 진행중 중단=
+미완성분 drop 후 재실행.** 단위는 적당한 수준(per-dataset / per-run)이며 행 단위처럼 과하게 세분하지 않는다.
+
+| 단계 | 단위 | 완료 제외 | 실패 이어받기 | 중단 → 미완성 drop |
+|---|---|---|---|---|
+| **raw** | (dataset, run) | 당일 `completed` 마커 제외 | `recollect`(incomplete 재수집) | 재수집이 파일 덮어씀 + `cleanup_incomplete` |
+| **bronze** | (dataset, run) | 워터마크 이후만 | `commit_watermark`(실패 run 직전까지만 전진) | PyIceberg **delete+append 원자 트랜잭션**(재적재 시 delete 선행) |
+| **silver** | (dataset, bronze_run_id) | **DONE 마커**(dbt test 통과분) | 미마커 run 재처리 | `delete_unmarked_silver_history_runs`(미완성 이력 삭제 후 재append). current/detail 은 grain 단위 incremental(원자) |
+| **gold** | (미구현) | — | — | 구현 시 **동일 패턴**: DONE 마커 + 미마커 drop, 단위=(집계키, 입력 run) |
+| **유지보수(#226)** | (테이블, op) | 멱등 → 성공 재실행 무해 | 실패 op 만 재실행 | 각 op 원자·멱등 |
+
+- **불변식**: `silver_license_history` 는 **append-only(전 버전 보존)** — 값이 바뀌어도 이전 값은 삭제되지
+  않는다. current/detail 은 '최신 포인터'만 grain 단위로 교체(#81).
+- **신규 개발 규약**(gold 포함): (1) 처리 단위를 명확히 정하고, (2) 완료 마커/워터마크로 완료분 skip,
+  (3) 중단 시 미완성분을 식별해 **drop 후 재실행**(원자 트랜잭션 또는 delete-then-write). 단위는 적당히 큼.
+
+---
+
+## 4. 변경 이력
 
 - 2026-07-09: **3단 분류(대분류 4 / 중분류 / 소분류)** 도입, DAG 완료 리포트에 반영(#218 후속).
   이전에는 registry `category`(11종)를 단일 대분류로 사용했음 → 이제 그 11종은 **중분류**로 내려가고,
   대분류는 보건/문화/산업/환경 4종으로 재정의.
 - 2026-07-09: 리포트 표기 보강 — 섹션 순서 **에러›경고›성공**(그룹 간 빈 줄 간격), 실패에 **`@task`
   명시**, 분류 단계는 **작은 텍스트 마커(볼드/•/◦)+들여쓰기** 아웃라인(초기 색 이모지 🟣🔵🟠는 크기 과해 교체).
+- 2026-07-09: **재개(resumability) 표준**(§3) 명문화 — 단위별 완료제외·실패이어받기·중단 시 미완성 drop.
+  **Iceberg 유지보수 일일 task(#226)**((테이블,op) 멱등 + 자원 리포트), bronze 적재 **최근 N일 창**(#223),
+  silver current/detail **증분화**(#81), silver **분야별 detail**(#80) 병행.
