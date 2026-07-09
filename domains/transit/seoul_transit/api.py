@@ -42,6 +42,54 @@ def get(url: str, timeout: int = 20) -> dict:
     return json.loads(_read(url, timeout))
 
 
+class SeoulApiError(RuntimeError):
+    """서울 OpenAPI 가 비정상 결과 코드를 반환(HTTP 200 + 에러 엔벨로프) — #229.
+
+    HttpCore 는 HTTP 4xx/5xx 만 실패로 본다. 서울 API 는 인증오류·쿼터초과를
+    **200 본문의 결과 코드**로 알리므로, 코드를 검사해 이 예외로 올려 태스크를
+    실패시킨다(→ #77 콜백·재시도·#161 Discord). 그러지 않으면 0행 success 로 마스킹돼
+    실시간 이력에 영구 공백이 남는다.
+    """
+
+
+# INFO-000 = 정상, INFO-200 = 데이터 없음(정상 종료로 간주). culture 선례와 동일.
+_OK_RESULT_CODES = frozenset({"INFO-000", "INFO-200"})
+
+
+def result_code(payload: dict, service: str) -> str | None:
+    """응답에서 결과 코드를 뽑는다 — 서울의 두 엔벨로프 형태를 모두 지원.
+
+    - swopenapi(지하철): 정상은 ``errorMessage.code``(예 INFO-000), 인증오류 시엔
+      errorMessage 필드가 **top-level 로 flatten**되어 ``code``/``message`` 로 온다.
+    - openapi.seoul(주차): 정상은 ``payload[service].RESULT.CODE``, 인증/요청 오류 시엔
+      **top-level ``RESULT``** 만 오기도 한다(culture clients 선례).
+
+    코드가 어디에도 없으면 None(구형/예외 응답 — 여기서 raise 하지 않고 0행 경보에 맡긴다).
+    """
+    if not isinstance(payload, dict):
+        return None
+    em = payload.get("errorMessage")
+    if isinstance(em, dict) and em.get("code"):
+        return em.get("code")
+    # 지하철 인증오류: errorMessage 가 top-level 로 flatten (service 키·리스트 없음).
+    if payload.get("code") and payload.get("message") is not None and service not in payload:
+        return payload.get("code")
+    svc = payload.get(service)
+    if isinstance(svc, dict) and isinstance(svc.get("RESULT"), dict):
+        return svc["RESULT"].get("CODE")
+    if isinstance(payload.get("RESULT"), dict):
+        return payload["RESULT"].get("CODE")
+    return None
+
+
+def raise_for_result(payload: dict, service: str, target: str = "") -> None:
+    """비정상 결과 코드면 SeoulApiError. 정상(INFO-000/200)·코드없음이면 통과."""
+    code = result_code(payload, service)
+    if code and code not in _OK_RESULT_CODES:
+        where = f" target={target}" if target else ""
+        raise SeoulApiError(f"{service} 응답 오류 code={code}{where}")
+
+
 def get_text(url: str, timeout: int = 20) -> str:
     """원본 텍스트 응답 (버스 XML — 파싱 없이 원본 보존). 일시 오류 재시도 포함."""
     return _read(url, timeout)

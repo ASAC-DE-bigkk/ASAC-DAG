@@ -8,7 +8,7 @@ raw = 원본 행 그대로. ts_source = recptnDt. 좌표는 응답에 없어 Non
 """
 
 from . import config
-from .api import get, subway_url
+from .api import get, raise_for_result, subway_url
 from .records import envelope, now_kst
 
 # dataset -> (service, list_key, targets_attr, rows_attr, source)
@@ -31,6 +31,8 @@ def collect_subway(key: str, dataset: str) -> dict:
     records, raws = [], []
     for target in getattr(config, targets_attr):
         d = get(subway_url(key, service, rows_cap, target))
+        # 200 + 에러 엔벨로프(키 만료·쿼터 등)를 실패로 올린다(#229) — 아니면 0행 마스킹.
+        raise_for_result(d, service, target)
         rows = d.get(list_key, [])
         records.extend(
             envelope(source, r, ts_source=r.get("recptnDt"), ts_collected=tc) for r in rows
