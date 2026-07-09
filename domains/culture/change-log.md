@@ -3,6 +3,16 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-09 — KCISA 한눈에보는문화정보 서울 행사 bronze 수집 (#196)
+
+- **신규 소스 `kcisa`** — 국립기관 최신 전시 구멍(서울 API 자발등록 사각) 보강. `KcisaClient`
+  (HttpCore+QueryKey("serviceKey"), 키 URL 미노출) + `kcisa_seoul_event`(area2, sido=서울,
+  현재 활성 스냅샷 ~498). 빈 페이지=끝(KOPIS 400 오버슛과 대조). `parse_records` XML 분기 공용화.
+  → `source/clients.py` · `source/datasets.py` · `source/ingest.py` · `common/records.py` · `source/config.py`
+- **계약**: min_rows 300 실측 하한, volume_drop 0.7. 좌표 gpsX/gpsY·sigungu 내장(silver 지오코딩 불요).
+- silver 편입(seq dedup·seoul_cultural_event 중복·gold)은 후속 PR. 설계:
+  [docs/design/2026-07-09-culture-kcisa-event-bronze.md](docs/design/2026-07-09-culture-kcisa-event-bronze.md)
+
 ## 2026-07-09 — culture_bronze 스케줄 자정→03:00 KST 이동 (#201)
 
 - **자정 400 창 이탈** — KOPIS 가 자정 직후 00:00~00:02 창에서 간헐 400 을 뱉는다

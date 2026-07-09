@@ -1,6 +1,6 @@
 # 소스 & 데이터셋
 
-culture가 채택한 **12개 데이터셋**(KOPIS 6 + 서울 열린데이터 6). 레지스트리 원본:
+culture가 채택한 **13개 데이터셋**(KOPIS 6 + 서울 열린데이터 6 + KCISA 1). 레지스트리 원본:
 [`source/datasets.py`](../culture_ingest/source/datasets.py) — 데이터셋 추가 = 여기 한 줄.
 
 ## 데이터셋 카탈로그
@@ -19,13 +19,15 @@ culture가 채택한 **12개 데이터셋**(KOPIS 6 + 서울 열린데이터 6).
 | 10 | `seoul_sports_reservation` | seoul | list | `ListPublicReservationSport` | snapshot_append | 공공체육시설 예약 | — |
 | 11 | `seoul_sema_exhibition` | seoul | list | `ListExhibitionOfSeoulMOAInfo` | interval_append | 시립미술관 전시(OA-15323) | — |
 | 12 | `seoul_sejong` | seoul | list | `SJWPerform` | interval_append | 세종문화회관(OA-2708) | — |
+| 13 | `kcisa_seoul_event` | kcisa | list | `area2` (sido=서울) | snapshot_append | KCISA 한눈에보는문화정보 공연·전시(#196) | seq, title |
 
-- KOPIS는 `signgucode=11`(서울)로 범위 한정 · boxoffice는 `area=11`.
+- KOPIS는 `signgucode=11`(서울)로 범위 한정 · boxoffice는 `area=11`. KCISA는 `sido=서울` 필터.
+- `kcisa_seoul_event`는 현재 활성 스냅샷(날짜 필터 없이 전량). 키 env `PUBLIC_DATA_API_KEY_CULT`(data.go.kr B553457). 좌표 gpsX/gpsY·구(sigungu) 내장.
 - `load_pattern`은 메달리온 설계 의도 메모(silver/gold 생성 일관성용) — 원본 적재 동작엔 영향 없음.
 
 ## 좌표 & CRS
 
-**5개 데이터셋**이 좌표를 제공하며 **전부 WGS84(EPSG:4326)** — 중부원점(EPSG:2097) 아님(실측 검증).
+**6개 데이터셋**이 좌표를 제공하며 **전부 WGS84(EPSG:4326)** — 중부원점(EPSG:2097) 아님(실측 검증). (kcisa_seoul_event 는 gpsX=경도/gpsY=위도 내장, #196.)
 
 | dataset | 경도(lon) 필드 | 위도(lat) 필드 | 비고 |
 |---------|---------------|---------------|------|

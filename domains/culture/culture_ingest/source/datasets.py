@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class Dataset:
     name: str  # 안정적인 슬러그 = 파티션 폴더명
-    source: str  # "kopis" | "seoul"
-    kind: str  # "kopis_list" | "kopis_detail" | "kopis_boxoffice" | "seoul_list"
-    # endpoint: KOPIS 경로(예: "pblprfr") 또는 서울 서비스명(예: "culturalEventInfo")
+    source: str  # "kopis" | "seoul" | "kcisa"
+    kind: str  # "kopis_list" | "kopis_detail" | "kopis_boxoffice" | "seoul_list" | "kcisa_list"
+    # endpoint: KOPIS 경로(예: "pblprfr") / 서울 서비스명(예: "culturalEventInfo") / KCISA 경로(area2)
     endpoint: str
     load_pattern: str  # "interval_append"(구간) | "snapshot_append"(스냅샷) | "scd2_dim"(차원)
     # ※ scd2_dim 은 설계 의도 — silver v1(ASAC-DBT#50)은 최신본 dim 으로 보류(bronze 가
@@ -196,7 +196,24 @@ SEOUL_DATASETS = [
     ),
 ]
 
-ALL_DATASETS = KOPIS_DATASETS + SEOUL_DATASETS
+KCISA_DATASETS = [
+    Dataset(
+        name="kcisa_seoul_event",
+        source="kcisa",
+        kind="kcisa_list",
+        endpoint="area2",
+        load_pattern="snapshot_append",
+        title="KCISA 한눈에보는문화정보 — 서울 공연·전시(area2, sido=서울)",
+        base_params={"sido": "서울"},
+        row_tag="item",
+        min_rows=300,          # 실측 498 의 보수적 하한(#150 그물)
+        volume_drop_threshold=0.7,
+        key_fields=("seq", "title"),
+        note="현재 활성 스냅샷. 국립기관 최신 전시 구멍 보강(#196). 좌표 gpsX/gpsY 내장.",
+    ),
+]
+
+ALL_DATASETS = KOPIS_DATASETS + SEOUL_DATASETS + KCISA_DATASETS
 BY_NAME = {ds.name: ds for ds in ALL_DATASETS}
 
 

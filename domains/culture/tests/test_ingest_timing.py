@@ -29,7 +29,7 @@ def _run(tmp_path, name, include_detail=False):
         def fetch_once(self, *a, **k): raise RuntimeError("no net")
         def detail(self, *a, **k): raise RuntimeError("no net")
 
-    clients = Clients(kopis=DeadKopis(), seoul=None)
+    clients = Clients(kopis=DeadKopis(), seoul=None, kcisa=None)
     return ingest_dataset(ds, clients, landing, opts)
 
 
