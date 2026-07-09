@@ -1,13 +1,15 @@
-"""bronze Iceberg 적재 — Trino HTTP API 경유.
+"""bronze Iceberg 적재 — 두 엔진: 기본 pyiceberg, Trino HTTP API는 DDL·롤백 레버.
 
 R2의 culture raw 객체를 파싱한 레코드를 ``<catalog>.<schema>.bronze_<dataset>``
-Iceberg 테이블로 ``INSERT`` 한다. 메인 Airflow 파이썬에 ``trino`` 클라이언트가
-없으므로(이미지가 dbt-trino를 별도 venv에 둠) 표준 Trino **HTTP API**(`requests`)를
-직접 쓴다 — 형제 도메인의 ``trino.dbapi`` 사용과 기능적으로 동일하다.
+Iceberg 테이블에 적재한다. 기본 엔진은 ``PyicebergBronzeWarehouse`` — R2 Data
+Catalog(Iceberg REST)에 delete+append 트랜잭션으로 **커밋 1회** 직접 write한다(#203).
+``BronzeWarehouse``는 표준 Trino **HTTP API**(`requests`, 메인 Airflow 파이썬에
+``trino`` 클라이언트가 없어 직접 호출)로 DDL·count를 맡고, pyiceberg 경로 장애 시
+``engine=trino`` 롤백 레버(INSERT 기반, 느림)로 쓰인다.
 
 경계: 멘티는 자기 도메인 스키마에만 쓴다 → 기본 스키마 ``culture``
 (`iceberg.culture.bronze_*`). dev/prod는 카탈로그로 가른다(계획안 Slide 10).
-적재는 ``ingest_ts`` 파티션 기준 delete-then-insert로 **멱등**하게 만든다.
+적재는 ``ingest_ts`` 파티션 기준 delete-then-insert(또는 delete+append)로 **멱등**하게 만든다.
 """
 
 from __future__ import annotations
@@ -285,7 +287,7 @@ class PyicebergBronzeWarehouse:
     없어도 DAG 파싱은 살아야 한다.
     """
 
-    MAX_COMMIT_ATTEMPTS = 3  # culture_maintenance 스냅샷 정리와의 낙관적 잠금 경합 대비
+    MAX_COMMIT_ATTEMPTS = 4  # culture_maintenance 스냅샷 정리와의 낙관적 잠금 경합 대비
 
     def __init__(self, settings: WarehouseSettings, catalog, *, table_loader=None, sleep=time.sleep):
         self._trino = BronzeWarehouse(settings)

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))  # 한국 표준시 (UTC+9)
@@ -134,10 +134,11 @@ class CatalogSettings:
     target: str  # "dev" | "prod"
     uri: str
     warehouse: str
-    token: str
+    # repr/print 표면에서 시크릿 제외 — redact() 미경유 출력(로그·디버거 등) 방어.
+    token: str = field(repr=False)
     s3_endpoint: str
     s3_access_key_id: str
-    s3_secret_access_key: str
+    s3_secret_access_key: str = field(repr=False)
     s3_region: str
 
 

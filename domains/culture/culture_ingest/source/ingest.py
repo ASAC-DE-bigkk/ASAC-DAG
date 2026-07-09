@@ -520,7 +520,7 @@ def build_landing(
 ENGINES = ("pyiceberg", "trino")  # trino = 전환기 롤백 레버(#203) — 일몰 계획은 operations.md
 
 
-def build_warehouse(target: str = "dev", engine: str = "pyiceberg"):
+def build_warehouse(target: str = "dev", engine: str = "pyiceberg") -> BronzeWarehouse | PyicebergBronzeWarehouse:
     """bronze Iceberg 적재 웨어하우스. 기본 pyiceberg(커밋 1회), trino 는 롤백 레버."""
     if engine not in ENGINES:
         raise ValueError(f"engine must be one of {ENGINES}, got {engine!r}")

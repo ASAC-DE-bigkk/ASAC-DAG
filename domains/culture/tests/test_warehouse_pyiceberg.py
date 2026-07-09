@@ -155,6 +155,6 @@ def test_load_retries_commit_conflict_then_succeeds():
 
 
 def test_load_raises_after_max_attempts():
-    table = FakeTable(fail_commits=3)  # MAX_COMMIT_ATTEMPTS=3 전부 소진
+    table = FakeTable(fail_commits=4)  # MAX_COMMIT_ATTEMPTS=4 전부 소진
     with pytest.raises(CommitFailedException):
         _warehouse(table).load(DS, CTX, _records(3))
