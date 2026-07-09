@@ -229,3 +229,46 @@ class BronzeWarehouse:
             sql += f" WHERE ingest_ts = {_lit(ingest_ts)}"
         rows = self.client.execute(sql)
         return int(rows[0][0]) if rows else 0
+
+
+def _bronze_rows(ds, ctx, records: list) -> list[dict]:
+    """(raw_object_key, page_no, record) 목록 -> bronze 11컬럼 dict 행 목록.
+
+    값 구성은 Trino 경로(load)와 동일: record_json 은 ensure_ascii=False,
+    collected_at 은 tz 없는 UTC(테이블 timestamp(6) 과 일치).
+    """
+    collected_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    return [
+        {
+            "dataset": ds.name,
+            "source": ds.source,
+            "endpoint": ds.endpoint,
+            "record_seq": seq,
+            "record_json": json.dumps(record, ensure_ascii=False),
+            "raw_object_key": raw_object_key,
+            "page_no": page_no,
+            "load_date": ctx.load_date,
+            "ingest_ts": ctx.ingest_ts,
+            "run_id": ctx.run_id,
+            "collected_at": collected_at,
+        }
+        for seq, (raw_object_key, page_no, record) in enumerate(records)
+    ]
+
+
+def _arrow_table(rows: list[dict]):
+    """행 dict 목록 -> 기존 bronze 테이블 스키마와 정확히 일치하는 Arrow 테이블.
+
+    record_seq=int32(Trino integer), collected_at=timestamp(us), 나머지 string.
+    pyarrow 는 이미지 전용 — lazy import 로 파싱 경로를 보호한다.
+    """
+    import pyarrow as pa
+
+    types = {"record_seq": pa.int32(), "collected_at": pa.timestamp("us")}
+    fields = []
+    arrays = []
+    for column in _COLUMNS:
+        arrow_type = types.get(column, pa.string())
+        fields.append(pa.field(column, arrow_type))
+        arrays.append(pa.array([row[column] for row in rows], type=arrow_type))
+    return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
