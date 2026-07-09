@@ -10,11 +10,13 @@
 그 외(=소량 변경분) → **Trino** 증분. '워터마크 없음(처음부터)' 이면 각 데이터셋 첫 run 이 mode=first →
 자연히 PyIceberg 로 적재된다.
 
-한 번에 모든 날짜를 적재하지 않도록 실행당 **최대 날짜 수**로 바운드(catch-up 은 다음 실행이 이어감).
+적재 범위: 워터마크 이후(=미적재)이면서 **최근 `lookback_days` 일 창**(today-N ~ today)에 든 완료 run.
+`COMMERCE_LOAD_LOOKBACK_DAYS`(기본 3, 0=무제한)로 조절. 신규 데이터셋도 최신 run 이 창에 들어 정상 적재된다.
 """
 from __future__ import annotations
 
 import logging
+from datetime import date, timedelta
 
 from bronze import load_state, markers
 from commerce_core import paths
@@ -23,20 +25,17 @@ from common.storage import Storage
 log = logging.getLogger(__name__)
 
 
-def _bound_by_dates(run_ids: list[str], max_dates: int | None) -> list[str]:
-    """run_ids(시간순)를 **가장 이른 max_dates 개 날짜**까지만. None/<=0 이면 무제한."""
-    if not max_dates or max_dates <= 0:
+def _within_lookback(run_ids: list[str], today: str, lookback_days: int | None) -> list[str]:
+    """run_ids 중 **최근 lookback_days 일 창**(run 날짜 >= today - lookback_days)만. 0/None=무제한.
+
+    이미 적재분(워터마크 이후) 후보에서 '최근 N일'만 남긴다 → 신규 데이터셋의 최신 run 도 포함된다.
+    (구버전 `_bound_by_dates` 는 '가장 이른 N날짜'만 남겨, 데이터가 최신 run 에만 있는 신규 데이터셋을
+    영구 배제하는 버그가 있었다 — #223. 사용자 의도 = "이미 적재분 제외 + 최근 N일 미적재분 적재".)
+    """
+    if not lookback_days or lookback_days <= 0:
         return run_ids
-    seen: list[str] = []
-    out: list[str] = []
-    for r in run_ids:
-        d = r[:10]
-        if d not in seen:
-            if len(seen) >= max_dates:
-                break
-            seen.append(d)
-        out.append(r)
-    return out
+    cutoff = (date.fromisoformat(today) - timedelta(days=lookback_days)).isoformat()
+    return [r for r in run_ids if r[:10] >= cutoff]
 
 
 def _read_marker(storage: Storage, prefix: str, run_id: str, short: str) -> dict:
@@ -50,7 +49,7 @@ def _read_marker(storage: Storage, prefix: str, run_id: str, short: str) -> dict
 
 def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
                       watermark: dict[str, str], pending: list[dict], today: str,
-                      max_dates: int | None = 3) -> dict:
+                      lookback_days: int | None = 3) -> dict:
     """적재 계획 산출.
 
     반환: {
@@ -61,7 +60,7 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
       pending_keep: [...], pending_expired: [...], no_watermark: bool,
     }
 
-    워터마크 이후의 **완료 run 을 시간순으로 전부 적재**(사용자: "raw 폴더를 처음부터 읽어 적재").
+    워터마크 이후(미적재)이면서 **최근 lookback_days 일 창**에 든 완료 run 을 시간순 적재(#223).
     포맷 무관 — page-NDJSON(첫 full)·row-NDJSON(증분) 모두 로더가 흡수(과거 데이터 보존).
     identical(파일 없음)은 적재 없이 전진. incomplete 는 pending(관측).
 
@@ -81,7 +80,7 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
         wm = watermark.get(short, "")
         first_load = not wm                                   # 이 데이터셋 bronze 최초 적재?
         base_done = False                                     # 첫 파일(전체 재적재)을 이미 배정했나
-        cands = _bound_by_dates([r for r in all_runs if r > wm], max_dates)
+        cands = _within_lookback([r for r in all_runs if r > wm], today, lookback_days)
         for rid in cands:
             rdate = rid[:10]
             completed = markers.completed_shorts(storage, prefix, rid)

@@ -48,10 +48,11 @@ log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 COLLECTIBLE_SHORTS = [d.short for d in registry.enabled_for_schedule("daily")]
-_DEFAULT_MAX_DATES = int(os.getenv("COMMERCE_LOAD_MAX_DATES", "3") or "3")
+_DEFAULT_LOOKBACK_DAYS = int(os.getenv("COMMERCE_LOAD_LOOKBACK_DAYS", "3") or "3")
 _DEFAULT_ARGS = {"owner": "data-eng", "retries": 2, "retry_delay": pendulum.duration(minutes=3)}
-_PARAMS = {"max_dates": Param(default=_DEFAULT_MAX_DATES, type="integer",
-           description="실행당 적재할 최대 날짜 수(0=무제한). backfill catch-up 은 재실행이 이어감.")}
+_PARAMS = {"lookback_days": Param(default=_DEFAULT_LOOKBACK_DAYS, type="integer",
+           description="최근 N일 창(today-N~today)의 미적재 run 만 적재(0=무제한). "
+                       "ENV: COMMERCE_LOAD_LOOKBACK_DAYS. #223 이전엔 '가장 이른 N날짜'였음(신규셋 배제 버그).")}
 
 
 @task
@@ -60,14 +61,14 @@ def resolve_plan(**ctx) -> dict:
     storage = get_storage()
     prefix = get_settings().storage_prefix
     today = datetime.now(KST).strftime("%Y-%m-%d")
-    max_dates = int(ctx["params"].get("max_dates") or 0)
+    lookback_days = int(ctx["params"].get("lookback_days") or 0)
     plan = load_plan.resolve_load_plan(
         storage, prefix=prefix, datasets=list(COLLECTIBLE_SHORTS),
         watermark=load_state.read_watermark(storage, prefix),
         pending=load_state.read_pending(storage, prefix),
-        today=today, max_dates=max_dates or None)
-    log.info("계획: units=%d, pending 유지=%d 폐기=%d, no_watermark=%s",
-             len(plan["units"]), len(plan["pending_keep"]),
+        today=today, lookback_days=lookback_days or None)
+    log.info("계획: units=%d(lookback=%s일), pending 유지=%d 폐기=%d, no_watermark=%s",
+             len(plan["units"]), lookback_days or "∞", len(plan["pending_keep"]),
              len(plan["pending_expired"]), plan["no_watermark"])
     return plan
 
