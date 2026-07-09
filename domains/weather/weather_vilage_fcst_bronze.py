@@ -63,7 +63,8 @@ from weather_ingest.kma import (  # noqa: E402
 
 KMA_PUBLISH_CRON_KST = "20 2,5,8,11,14,17,20,23 * * *"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
-KMA_REQUEST_DELAY_SECONDS = 5
+KMA_REQUEST_DELAY_SECONDS = 4.0
+KMA_429_BACKOFF_SECONDS = (3600.0, 5400.0, 7200.0)
 KMA_RETRY_STATUSES = (429, 500, 502, 503, 504)
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
@@ -71,6 +72,10 @@ LOGGER = logging.getLogger(__name__)
 DAG_ID = "weather_vilage_fcst_bronze"
 RECOLLECT_DAG_ID = "weather_vilage_fcst_recollect"
 BACKFILL_DAG_ID = "weather_vilage_fcst_bronze_backfill"
+RECOVERY_HINT_MAX_KEYS = 8
+RECOVERY_HINT_MAX_CHARS = 1400
+KMA_RAW_TASK_ID_LAND = "land_kma_raw"
+KMA_RAW_TASK_ID_LAND_FROM_KEYS = "land_kma_raw_from_keys"
 KMA_RAW_KEY_RE = re.compile(
     r"/load_date=(?P<load_date>\d{4}-\d{2}-\d{2})/nx=(?P<nx>\d+)/ny=(?P<ny>\d+)/"
     r"(?P<collected>\d{8}T\d{6})KST_base-(?P<base_date>\d{8})(?P<base_time>\d{4})_"
@@ -101,6 +106,26 @@ def raw_object_keys_from_conf(context: dict) -> list[str]:
 
 def current_dag_id(context: dict) -> str:
     return getattr(context.get("dag"), "dag_id", DAG_ID)
+
+
+def pull_kma_raw_result(context: dict) -> dict:
+    ti = context["ti"]
+    raw_result = ti.xcom_pull(task_ids=KMA_RAW_TASK_ID_LAND) or {}
+    if not raw_result:
+        raw_result = ti.xcom_pull(task_ids=KMA_RAW_TASK_ID_LAND_FROM_KEYS) or {}
+    return raw_result
+
+
+def format_raw_object_keys_for_recovery(raw_object_keys: list[str]) -> str:
+    if not raw_object_keys:
+        return "raw_object_keys=none"
+    preview = raw_object_keys[:RECOVERY_HINT_MAX_KEYS]
+    formatted = f"raw_object_keys(count={len(raw_object_keys)}): {','.join(preview)}"
+    if len(raw_object_keys) > len(preview):
+        formatted += f", +{len(raw_object_keys) - len(preview)} more"
+    if len(formatted) > RECOVERY_HINT_MAX_CHARS:
+        formatted = f"{formatted[:RECOVERY_HINT_MAX_CHARS-3]}..."
+    return formatted
 
 
 def safe_object_key_segment(value: object) -> str:
@@ -266,6 +291,11 @@ def notify_weather_bronze_failure(context) -> None:
     task_id = getattr(ti, "task_id", "N/A")
     exc = context.get("exception")
     run_id = context.get("run_id", "N/A")
+    raw_keys = []
+    try:
+        raw_keys = pull_kma_raw_result(context).get("raw_object_keys", [])
+    except Exception:
+        raw_keys = []
     send_weather_discord(
         f"기상청 단기예보 수집 실패 - {discord_report_date(context)} (target={target_name()})",
         "\n".join(
@@ -275,6 +305,7 @@ def notify_weather_bronze_failure(context) -> None:
                 f"❌ 실패 task: `{task_id}`",
                 f"❌ 오류 유형: `{type(exc).__name__ if exc else 'N/A'}`",
                 "",
+                f"raw_object_keys_hint: {format_raw_object_keys_for_recovery(raw_keys)}",
                 f"Airflow 로그: {getattr(ti, 'log_url', 'N/A')}",
             ]
         ),
@@ -325,6 +356,7 @@ def land_kma_raw(**context) -> dict:
             max_attempts=4,
             retry_statuses=KMA_RETRY_STATUSES,
             retry_base_delay_seconds=30,
+            retry_429_backoff_seconds=KMA_429_BACKOFF_SECONDS,
         )
         metadata, rows = parse_kma_response(raw_bytes)
         raw_hash = sha256_hex(raw_bytes)
@@ -478,10 +510,13 @@ def land_kma_raw_object_keys(**context) -> dict:
 
 
 def load_kma_bronze(**context) -> dict:
-    raw_result = context["ti"].xcom_pull(task_ids="land_kma_raw") or {}
+    raw_result = pull_kma_raw_result(context)
     raw_objects = raw_result.get("raw_objects") or []
     if not raw_objects:
         raise RuntimeError("KMA raw landing result is empty; cannot load bronze rows.")
+    # 페이지네이션 도입(2026-07-06) 이전 raw 는 2페이지가 존재하지 않아 완결 검증을 통과할
+    # 수 없다 — 운영자가 conf 로 명시했을 때만 부분 적재를 허용한다.
+    allow_partial_pages = bool(dag_run_conf(context).get("allow_partial_pages"))
     cursor, catalog, schema = trino_cursor()
     qualified_table = create_kma_bronze_table(cursor, catalog, schema)
     parsed_pages = []
@@ -530,12 +565,15 @@ def load_kma_bronze(**context) -> dict:
         total_count = int(summary["total_count"])
         if not expected_pages.issubset(summary["pages"]) or parsed_rows < total_count:
             base_date, base_time, nx, ny = grid_key
-            raise RuntimeError(
+            message = (
                 "KMA bronze pagination incomplete: "
                 f"base_date={base_date}, base_time={base_time}, nx={nx}, ny={ny}, "
                 f"total_count={total_count}, parsed_rows={parsed_rows}, "
                 f"expected_pages={sorted(expected_pages)}, actual_pages={sorted(summary['pages'])}"
             )
+            if not allow_partial_pages:
+                raise RuntimeError(message)
+            print(f"Loading partial pages (allow_partial_pages=true) — {message}")
 
     batch_inputs = []
     for page in sorted(
@@ -622,11 +660,13 @@ def record_kma_backfill_run_started(**context) -> str:
 
 def record_kma_run_failed(context) -> None:
     try:
-        ti = context.get("ti") or context.get("task_instance")
-        raw_result = {}
-        if ti is not None:
-            raw_result = ti.xcom_pull(task_ids="land_kma_raw") or {}
+        raw_result = pull_kma_raw_result(context)
         raw_keys = raw_result.get("raw_object_keys") or []
+        failure_reason = failure_reason_from_context(context)
+        if raw_keys:
+            failure_reason = (
+                f"{failure_reason} | {format_raw_object_keys_for_recovery(raw_keys)}"
+            )
         cursor, catalog, schema = trino_cursor()
         record_bronze_run_event(
             cursor,
@@ -642,7 +682,7 @@ def record_kma_run_failed(context) -> None:
                 else (len(raw_keys) or None)
             ),
             actual_raw_objects=(len(raw_keys) or None),
-            failure_reason=failure_reason_from_context(context),
+            failure_reason=failure_reason,
         )
     except Exception as exc:
         print(f"Failed to record KMA run manifest failure: {type(exc).__name__}")
@@ -697,7 +737,7 @@ def build_kma_bronze_dag(dag_id: str, schedule: str | None, description: str, ta
         )
 
         land_raw = PythonOperator(
-            task_id="land_kma_raw",
+            task_id=KMA_RAW_TASK_ID_LAND,
             python_callable=land_kma_raw,
             retries=3,
             retry_delay=timedelta(minutes=1),
@@ -717,7 +757,6 @@ def build_kma_bronze_dag(dag_id: str, schedule: str | None, description: str, ta
         verify_bronze = PythonOperator(
             task_id="verify_kma_bronze_runtime",
             python_callable=verify_kma_bronze_runtime,
-            on_success_callback=notify_weather_bronze_success,
             on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
             outlets=[Asset(WEATHER_BRONZE_ASSET)],
         )
@@ -744,7 +783,7 @@ def build_kma_bronze_backfill_dag():
         )
 
         land_raw = PythonOperator(
-            task_id="land_kma_raw",
+            task_id=KMA_RAW_TASK_ID_LAND_FROM_KEYS,
             python_callable=land_kma_raw_object_keys,
             on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
         )

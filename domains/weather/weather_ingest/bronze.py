@@ -1,4 +1,5 @@
 import os
+from time import sleep
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -42,6 +43,12 @@ KMA_BRONZE_COLUMNS = (
     "load_date",
     "dag_run_id",
 )
+
+
+try:
+    from pyiceberg.exceptions import CommitFailedException
+except Exception:
+    CommitFailedException = Exception
 
 
 def ensure_kma_bronze_schema(cursor, qualified_table: str) -> None:
@@ -232,37 +239,60 @@ def append_kma_bronze_row_batches_pyiceberg(
     *,
     delete_existing: bool = True,
     chunk_rows: int = PYICEBERG_CHUNK_ROWS,
+    max_retry_attempts: int = 4,
+    retry_base_delay_seconds: float = 3.0,
     table=None,
 ) -> int:
     if not row_batches:
         return 0
     if chunk_rows <= 0:
         raise ValueError(f"chunk_rows must be positive: {chunk_rows}")
+    if max_retry_attempts <= 0:
+        raise ValueError(f"max_retry_attempts must be positive: {max_retry_attempts}")
     for batch in row_batches:
         validate_kma_bronze_row_batch(batch)
 
-    iceberg_table = table or _pyiceberg_table(schema)
-    total = 0
-    chunk: list[dict] = []
+    def append_once(iceberg_table) -> int:
+        total = 0
+        chunk: list[dict] = []
 
-    with iceberg_table.transaction() as txn:
-        if delete_existing:
-            txn.delete(_kma_pyiceberg_delete_filter(dag_run_id))
+        with iceberg_table.transaction() as txn:
+            if delete_existing:
+                txn.delete(_kma_pyiceberg_delete_filter(dag_run_id))
 
-        def flush() -> None:
-            nonlocal total
-            if not chunk:
-                return
-            txn.append(_arrow_table(chunk))
-            total += len(chunk)
-            chunk.clear()
+            def flush() -> None:
+                nonlocal total
+                if not chunk:
+                    return
+                txn.append(_arrow_table(chunk))
+                total += len(chunk)
+                chunk.clear()
 
-        for record in iter_kma_bronze_records(row_batches, dag_run_id):
-            chunk.append(record)
-            if len(chunk) >= chunk_rows:
-                flush()
-        flush()
-    return total
+            for record in iter_kma_bronze_records(row_batches, dag_run_id):
+                chunk.append(record)
+                if len(chunk) >= chunk_rows:
+                    flush()
+            flush()
+        return total
+
+    for attempt in range(1, max_retry_attempts + 1):
+        iceberg_table = table or _pyiceberg_table(schema)
+        try:
+            return append_once(iceberg_table)
+        except CommitFailedException as exc:
+            if attempt >= max_retry_attempts:
+                raise
+            if table is None:
+                try:
+                    iceberg_table.refresh()
+                except Exception:
+                    pass
+            delay = min(retry_base_delay_seconds * (2 ** (attempt - 1)), 30.0)
+            print(
+                "Retrying KMA bronze append after optimistic lock conflict "
+                f"(attempt {attempt}/{max_retry_attempts}) in {delay:.1f}s: {type(exc).__name__}"
+            )
+            sleep(delay)
 
 
 def insert_kma_bronze_rows(

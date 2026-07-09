@@ -82,13 +82,22 @@ def sha256_hex(payload: bytes) -> str:
 _HTTP = HttpCore(source="weather_kma", timeout=30.0, max_attempts=1, rate_limit=None)
 
 
-def http_retry_delay(response_headers: dict[str, str] | None, attempt: int, base_delay_seconds: float) -> float:
+def http_retry_delay(
+    response_headers: dict[str, str] | None,
+    attempt: int,
+    base_delay_seconds: float,
+    *,
+    status_429_backoff_seconds: tuple[float, ...] | None = None,
+) -> float:
     for key, value in (response_headers or {}).items():
         if key.lower() == "retry-after":
             try:
                 return max(0.0, float(value))
             except ValueError:
                 break
+    if status_429_backoff_seconds:
+        if 0 <= attempt - 1 < len(status_429_backoff_seconds):
+            return max(0.0, float(status_429_backoff_seconds[attempt - 1]))
     return min(base_delay_seconds * (2 ** (attempt - 1)), 300.0)
 
 
@@ -105,6 +114,7 @@ def fetch_url(
     max_attempts: int = 1,
     retry_statuses: tuple[int, ...] = (),
     retry_base_delay_seconds: float = 1.0,
+    retry_429_backoff_seconds: tuple[float, ...] | None = None,
 ) -> tuple[int, bytes]:
     retry_codes = set(retry_statuses)
     auth = QueryKey("serviceKey", required_env("KMA_SERVICE_KEY"))
@@ -140,7 +150,14 @@ def fetch_url(
                 source_system="weather_kma",
             )
 
-        delay = http_retry_delay(response.headers, attempt, retry_base_delay_seconds)
+        delay = http_retry_delay(
+            response.headers,
+            attempt,
+            retry_base_delay_seconds,
+            status_429_backoff_seconds=(
+                retry_429_backoff_seconds if response.status == 429 else None
+            ),
+        )
         print(
             f"Source API HTTP {response.status}; retrying in {delay:.1f}s "
             f"(attempt {attempt + 1}/{max_attempts})"
