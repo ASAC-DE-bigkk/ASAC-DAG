@@ -93,7 +93,7 @@ response:
   준공통 5(`DCBYMD`/`TRDSTATENM`/`SITETEL`/`SITEWHLADDR`/`SITEPOSTNO`, 1~2종 결측) + API별 비공통(45 스키마 변형).
 - **식별값 `OPNSFTEAMCODE`·`MGTNO`·`UPDATEDT`·`LASTMODTS` = 107/107** → bronze 정렬/식별키·silver 그레인·
   `content_hash`·`TRDSTATEGBN`(상태) 그대로 유효. silver 는 `record_json` schema-on-read(`nullif`)라 비공통/누락 무손실.
-- 문서: [docs/pipeline/bronze/api-field-coverage.md](docs/pipeline/bronze/api-field-coverage.md) 신설 + bronze README 인덱스 추가.
+- 문서: [docs/pipeline/raw/api-field-coverage.md](docs/pipeline/raw/api-field-coverage.md) 신설 + bronze README 인덱스 추가.
 - 검증: 전체 pytest 295 통과 + 신규 culture 1종(`traditional_temple`) bronze raw end-to-end 스모크
   (격리 프리픽스 `_verify207` → status=ok, NDJSON+마커+diff-target 생성, 식별값 4개 보존, 검증 후 삭제).
 - 주의: bronze 정렬키의 `OPNSFTEAMCODE`/`LASTMODTS` 포함(#198/#193)은 별도 브랜치 → 107종 완전 적용은 #193·#198
@@ -824,7 +824,7 @@ response:
 - **step0**: `seed_diff_target`(1회성 diff-target/검증키 시드). 미실행이어도 첫 수집이 self-seed 하므로 선택.
 - **step4**: 본 모델은 raw 페이지가 휘발(메모리)이라 "수집 파일 삭제" 별도 대상 없음 → "미저장(status!=ok) +
   재검증"으로 갈음(단위테스트로 first/identical/changed 재검증).
-- **docs**: [docs/pipeline/bronze/incremental-sort-diff.md](docs/pipeline/bronze/incremental-sort-diff.md)
+- **docs**: [docs/pipeline/raw/incremental-sort-diff.md](docs/pipeline/raw/incremental-sort-diff.md)
   (모델·정렬·검증키·diff·수집흐름·step0·검증). 단위테스트 **14 통과**.
 - **라이브 end-to-end 검증 완료(실 Seoul API, 격리 프리픽스 `_verify58`)**: run1=first(row-NDJSON 확인:
   MGTNO 있음/LOCALDATA 봉투 아님) + diff-target 생성 → run2 동일 데이터=identical(증분 파일 미생성) →

@@ -1,7 +1,8 @@
-# bronze — 서울 OpenAPI 페이지네이션 정렬 분석
+# raw — 서울 OpenAPI 페이지네이션 정렬 분석
 
-> 분석일 2026-06-30 · 대상: LOCALDATA 39종 중 **service_name 해석된 12종** · 사용 키:
-> `sample`(환경에 실키 부재) · base `http://openapi.seoul.go.kr:8088`
+> 분석일 2026-06-30 · 표본: **39종 시점 LOCALDATA 39종 중 service_name 해석된 12종**(historical) ·
+> 현재 수집 대상 152종(v1 139 + v2 13) · 사용 키: `sample`(환경에 실키 부재) ·
+> base `http://openapi.seoul.go.kr:8088`
 > 관련: [../common_info.md](../common_info.md) §4-1(페이지네이션·완전성) · [../../CLAUDE.md](../../../CLAUDE.md) §2(bronze 원본 보존)
 
 ## 결론 (TL;DR)
@@ -77,7 +78,7 @@ curl -s "http://openapi.seoul.go.kr:8088/sample/json/LOCALDATA_072404/1/10/"
 
 일관된 정렬 컬럼이 **존재하지 않음** = 정렬 기준 값 없음(내부 기본 순서).
 
-## 의미 — bronze 수집에 미치는 영향
+## 의미 — raw 수집에 미치는 영향
 
 안정적인 **정렬 키가 없다**는 점은 전수 순회(`SEOUL_MAX_PAGES` 미설정=무제한)에 다음 함의를 준다:
 
@@ -88,8 +89,9 @@ curl -s "http://openapi.seoul.go.kr:8088/sample/json/LOCALDATA_072404/1/10/"
   부분 수집을 잡아 `partial` 로 남기고 **다음 실행에서 재수집**한다([../common_info.md](../common_info.md) §4-1).
   다만 이는 **건수** 보장이지 행 단위 일치 보장은 아니다.
 - 권장: **bronze 는 원본 페이지를 그대로 보존**(정렬과 무관, CLAUDE.md §2.2)하고,
-  **다운스트림(silver)에서 `MGTNO` 로 중복 제거**한다. `MGTNO` 가 인허가 단위 식별자이므로
-  페이지 경계 중복/순서 흔들림을 흡수할 수 있다.
+  **다운스트림(silver)에서 `(OPNSFTEAMCODE, MGTNO)` 로 중복 제거**한다. `MGTNO` 는 발급 자치단체
+  안에서만 유니크하므로 `OPNSFTEAMCODE`(자치단체) 를 포함한 복합키로 페이지 경계 중복/순서
+  흔들림을 흡수한다.
 
 ## 한계 & 실키 재검증 레시피
 

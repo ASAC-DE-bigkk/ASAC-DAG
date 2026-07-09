@@ -1,5 +1,9 @@
 # Silver/Gold 적재 계획 — marker 증분과 DAG 경계
 
+> ⚠️ **역사적 적재 계획(2026-07-07).** 현행 살아있는 문서는 [silver/](silver/README.md) ·
+> [gold/](gold/README.md) · [data-model.md](data-model.md) 다. 이 문서 이후 반영된 것: silver
+> current/detail **증분화**(#81)·**분야별 detail** 모델(#80)·**v1/v2 통합(lf 매크로)**. gold 는 여전히 미구현.
+
 작성일: 2026-07-07
 
 ## 1. 판단

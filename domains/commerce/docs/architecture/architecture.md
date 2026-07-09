@@ -1,8 +1,10 @@
 # Architecture
 
-CLAUDE.md 원칙을 코드로 옮긴 배치 아키텍처. 현재 **DAG 라인은 bronze(원본 수집) 전용**이며,
-silver 가공 로직은 보존하되 오케스트레이션에서 분리되어 있다(§DAG 구조 참고). 서빙 DB·외부
-매니페스트 없이 **run_id 폴더의 마커**로 상태를 관리한다(파싱/serving 계층 없음).
+CLAUDE.md 원칙을 코드로 옮긴 배치 아키텍처. **메달리온 레이어**(raw→bronze→silver→gold)를 DAG 로
+오케스트레이션한다: 수집(`commerce_collect_raw`/`recollect_raw`) → Iceberg 적재
+(`commerce_load_bronze`) → dbt 정규화(`commerce_load_silver`). gold 는 미구현. 서빙 DB·외부
+매니페스트 없이 **run_id 폴더 마커 + Iceberg 발행 manifest + silver DONE 마커**로 상태를 관리한다.
+전체 계보·테이블 정의: [../pipeline/data-model.md](../pipeline/data-model.md).
 
 ## 실행 모드
 
@@ -13,23 +15,28 @@ silver 가공 로직은 보존하되 오케스트레이션에서 분리되어 �
 ## 데이터 흐름
 
 ```text
-discover(registry) ──> fetch(끝까지 순회) ──> [BRONZE]            ┊┄> normalize ┄> [SILVER]
- (수집 대상)            (원본 페이지)         run_id 폴더:          (로직만 보존)  parquet
-                                            <short>.jsonl + 마커   (DAG 미와이어링)
-                                                  │
-                                                  └──> [_markers] (completed|incomplete — DB·매니페스트 대체)
+discover(registry 152종) ─> fetch(끝까지 순회) ─> [raw] run_id 폴더: <short>.jsonl + _markers
+                                                        │  commerce_load_bronze(최근 N일 증분)
+                                                        ▼
+                                                   [bronze] Iceberg bronze_localdata_license
+                                                     record_json 통짜(schema-on-read) + 발행 manifest
+                                                        │  commerce_load_silver(dbt/Trino)
+                                                        ▼
+                                                   [silver] history/current/detail (v1/v2 통합 = lf 매크로)
+                                                        ┊┄> [gold] (미구현)
 ```
-*(DAG 오케스트레이션은 BRONZE 까지. `┊┄>` 구간은 [include/silver/](../../include/silver/) 에 로직만 보존되고 DAG 결선 없음.)*
+*(수집=raw(R2 NDJSON), 적재=bronze(Iceberg), 정규화=silver(dbt). v1/v2 필드는 silver 에서 하나로 합쳐진다 — [../pipeline/data-model.md §2](../pipeline/data-model.md).)*
 
 각 계층의 책임(CLAUDE.md §9):
 
 | 계층 | 포맷 | 책임 | 변경성 |
 |---|---|---|---|
-| **bronze** | `<short>.jsonl`(원본 페이지 NDJSON) | 소스 truth 보존(끝까지 순회) | run_id 스냅샷, 불변 |
-| **마커** | `_markers/<short>.completed\|.incomplete`(JSON) | 수집 결과·리니지·이력 | ingest 가 API당 1개 |
-| **silver** | Parquet | 공통 19컬럼 정규화·다운스트림용 | `observed_date` 파티션 재생성 |
+| **raw** | R2 `<short>.jsonl`(row-NDJSON) + `_markers/` | 소스 truth 보존(끝까지 순회)·수집 상태 | run_id 스냅샷, 불변 |
+| **bronze** | Iceberg `bronze_localdata_license` | `record_json` 통짜(schema-on-read) 변경로그 + 발행 `manifest` | append-only, 멱등 `(dataset, bronze_run_id)` |
+| **silver** | dbt(Trino/Iceberg) | **152종 공통(v1/v2 통합, `lf()` 매크로)** 정규화 — history/current/detail | incremental(marker 기반) |
+| **gold** | — | (미구현) silver current 집계 예정 | — |
 
-> 파싱(parsed)·serving DB·벡터 계층은 미포함. 필요 시 silver 이후 파생물로 추가(CLAUDE.md §10).
+> 파싱(parsed)·serving DB·벡터 계층은 미포함. 필요 시 gold 이후 파생물로 추가(CLAUDE.md §10).
 
 ## DAG 구조 (`commerce_collect_raw` · `commerce_recollect_raw`)
 
@@ -43,8 +50,10 @@ check_api_key (gate) ──┤
 (plan_all|find_incomplete)─┴─> ingest_one.expand ──> finalize_run ─> (_RUN 마커/metrics)
 ```
 
-> **silver 분리**: 이 DAG 라인은 **bronze(원본 수집) 전용**이다. silver 가공은 DAG 오케스트레이션에서
-> 분리되어 있고, 가공 로직만 [../../include/silver/](../../include/silver/) 에 보존된다(별도 silver DAG 없음).
+> **이 절은 수집(raw) DAG 만 다룬다.** 이후 레이어는 별도 DAG 다: **`commerce_load_bronze`**(04:00 KST,
+> raw→Iceberg 적재 + Iceberg 유지보수) · **`commerce_load_silver`**(05:00 KST, dbt 정규화·보강·테스트·리포트) ·
+> **`commerce_collect_watchdog`**(수집 누락 감시 알림). 상세: [../pipeline/bronze/](../pipeline/bronze/README.md) ·
+> [../pipeline/silver/](../pipeline/silver/README.md).
 
 - `catchup=False`, `max_active_runs=1`, `retries=2`, `retry_delay=3m`.
 - **`make_bronze_run_id`**: 실행시각(KST·ms) 폴더명을 1회 계산 → 모든 ingest 가 공유(같은 run_id 폴더).
@@ -56,15 +65,15 @@ check_api_key (gate) ──┤
 - **gate**: `check_api_key` 가 인증키를 선검증 → 키 오류면 전체 빠른 실패.
 - 태스크 간에는 **저장 키/요약(작은 dict)** 만 XCom 으로 전달, 페이로드는 스토리지 재조회.
 - `params`: `observed_date`(silver 논리일 override). force 없음 — 매 실행이 전체 수집.
-- **알림 인터페이스**(예외→알림, [common/notify.py](../../include/commerce_core/notify.py))는 제공되나 **미와이어링/비활성**
-  (기본 no-op) — [../operations/recollect-and-alerts.md](../operations/recollect-and-alerts.md) §2.
+- **알림**: DAG 완료 리포트(#218)·품질 경고·`commerce_collect_watchdog`(수집 누락)로 **Discord 통지가 동작**한다
+  (webhook URL 을 env 로 설정한 경우) — [../operations/recollect-and-alerts.md](../operations/recollect-and-alerts.md) §2.
 
 태스크는 모두(CLAUDE.md §11): **재시도 안전**(같은 run_id 폴더에 덮어씀) · **관찰 가능**
-(마커 + finalize metrics) · **작게 분리**. 중복 제거는 silver 가 `MGTNO` 로.
+(마커 + finalize metrics) · **작게 분리**. 중복 제거는 silver 가 `(OPNSFTEAMCODE, MGTNO)` 로.
 
 ## 멱등성 & 백필
 
-- 매 실행이 전체 수집 → 별도 스킵/force 없음. 같은 업장 중복은 **silver 가 `MGTNO` 로 제거**.
+- 매 실행이 전체 수집 → 별도 스킵/force 없음. 같은 업장 중복은 **silver 가 `(OPNSFTEAMCODE, MGTNO)` 로 제거**.
 - `incomplete` API 는 다음 실행에서 자연히 재수집. 특정 실행 무효화는 그 `run_id` 폴더 삭제.
 - 특정일: `observed_date` 파라미터(silver 파티션) / 범위: `airflow dags backfill`.
 - 자세한 절차는 [operations.md](../operations/operations.md), 완전성 점검은 [common_info.md](../pipeline/common_info.md) §4-1.
@@ -80,13 +89,13 @@ check_api_key (gate) ──┤
        │               │ storage(local/R2)│
        └───────┬───────┴──────────────────┘
          ┌─────▼──────┐        ┌──────────┐
-         │  postgres  │        │  trino   │ (dbt/iceberg — commerce 미사용)
+         │  postgres  │        │  trino   │ (dbt/iceberg — bronze 적재·silver dbt)
          │ (metadata) │        └──────────┘
          └────────────┘
 ```
 
 - **LocalExecutor** — 별도 워커/브로커(Celery/Redis) 없음. 태스크는 scheduler 프로세스가 실행.
 - Postgres 는 **Airflow 메타데이터 전용**(serving DB 없음).
-- Trino/Iceberg/dbt 는 호스트의 다른 스모크 라인용 — commerce 파이프라인은 사용하지 않는다.
+- Trino/Iceberg/dbt(R2 Data Catalog) 는 commerce 의 **bronze 적재**(PyIceberg/Trino)와 **silver 정규화**(dbt)에 사용된다.
 - 호스트 컴포즈/이미지는 이 번들 밖(별도 리포). 환경/인자: [environments.md](../configuration/environments.md) ·
   [configuration.md](../configuration/configuration.md).

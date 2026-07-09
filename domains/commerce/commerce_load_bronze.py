@@ -99,7 +99,7 @@ def ensure_warehouse(plan: dict) -> bool:
 def load_one(unit: dict, load_date: str, **ctx) -> dict:
     """적재 단위 1건(엔진 분기). raw 를 재읽어 멱등 적재 → 실패 시 태스크 재시도.
 
-    **직렬화**(max_active_tis_per_dagrun=1): 39종이 동일 Iceberg 테이블에 병렬 커밋하면
+    **직렬화**(max_active_tis_per_dagrun=1): 152종이 동일 Iceberg 테이블에 병렬 커밋하면
     낙관적 동시성 충돌(CommitFailedException)로 대부분 실패한다. 한 번에 한 단위만 적재한다.
     """
     try:

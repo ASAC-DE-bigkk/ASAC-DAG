@@ -1,4 +1,4 @@
-# bronze — 영업상태 추적 모델 (단일 row vs 이력)
+# raw — 영업상태 추적 모델 (단일 row vs 이력)
 
 > 분석일 2026-06-30 · 실측 키 `sample` · 예시 `general_restaurant`(LOCALDATA_072404)
 > 관련: [../common_info.md](../common_info.md) §2~3(공통 컬럼·UPDATEDT) · [pagination-ordering.md](pagination-ordering.md)
@@ -15,7 +15,7 @@
 
 - LOCALDATA 응답은 **업장당 1행(현재 상태 스냅샷)**. `MGTNO`(관리번호)가 인허가 단위 식별자.
 - 상태는 **고정된 컬럼 집합**으로 표현된다(아래 §evidence). 상태 변경 시:
-  - **새 컬럼 추가 ✗** — 스키마는 고정(19 공통 컬럼 + 업종 고유 컬럼).
+  - **새 컬럼 추가 ✗** — 스키마는 고정(v1 공통 14컬럼 + 업종 고유 컬럼).
   - **새 row 추가 ✗** — 이벤트 로그/이력 테이블이 아니다.
   - **같은 row 갱신 ✓** — `TRDSTATEGBN`/`DCBYMD` 등이 최신 값으로 바뀌고,
     `LASTMODTS`(최종수정시점)·`UPDATEDT`(데이터갱신일자)·`UPDATEGBN`(I/U)이 갱신을 표시.
@@ -62,11 +62,11 @@
 - API 가 이력을 주지 않으므로, **상태 변화 시계열은 우리가 직접 만들어야 한다.** bronze 가
   **run_id 폴더(실행시각)로 스냅샷을 누적**([../../architecture/storage.md](../../architecture/storage.md))하므로, 그 스냅샷들을
   비교해 **SCD Type 2(이력)** 를 silver/다운스트림에서 구성한다.
-- 스냅샷 간 변경 감지 키: `MGTNO`(식별) + `TRDSTATEGBN`/`DTLSTATEGBN`(상태) +
+- 스냅샷 간 변경 감지 키: `(OPNSFTEAMCODE, MGTNO)`(식별) + `TRDSTATEGBN`/`DTLSTATEGBN`(상태) +
   `LASTMODTS`/`UPDATEDT`(변경 시점). `UPDATEGBN`(I/U)로 신규/수정 구분
   ([../common_info.md](../common_info.md) §3).
 - 같은 업장이 페이지 경계에서 흔들리거나 중복될 수 있으므로(정렬 키 부재,
-  [pagination-ordering.md](pagination-ordering.md)) silver 는 **`MGTNO` 로 dedupe** 후 상태
+  [pagination-ordering.md](pagination-ordering.md)) silver 는 **`(OPNSFTEAMCODE, MGTNO)` 로 dedupe** 후 상태
   타임라인을 만든다.
 
 > 요약: **추적은 1행 in-place**. 변경 = 컬럼/행 추가가 아니라 **그 행의 값 갱신**. 따라서

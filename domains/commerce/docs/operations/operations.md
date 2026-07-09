@@ -78,7 +78,7 @@ docker compose exec airflow-scheduler \
 
 ```bash
 docker compose exec airflow-scheduler python -m bronze.resolve verify
-# (.env.commerce 의 SEOUL_API_KEY_COMM 를 자동 적재 → 39종 실호출 점검)
+# (.env.commerce 의 SEOUL_API_KEY_COMM 를 자동 적재 → 152종 실호출 점검)
 ```
 
 ## 새 데이터셋 추가

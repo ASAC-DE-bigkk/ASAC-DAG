@@ -21,7 +21,7 @@ DAG 2개(공통 태스크 공유):
 - 데이터셋 간 실패 격리: ingest 가 비인증 오류를 status=failed(=incomplete 마커)로 반환.
 
 코드: dags/domains/commerce/include/ · 레지스트리: config/dataset_registry.yaml
-저장 경로/마커: docs/pipeline/bronze/caveats.md · docs/architecture/storage.md
+저장 경로/마커: docs/pipeline/raw/caveats.md · docs/pipeline/common_info.md · docs/architecture/storage.md
 재수집/알림: docs/operations/recollect-and-alerts.md
 """
 from __future__ import annotations

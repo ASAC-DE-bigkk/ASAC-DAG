@@ -1,20 +1,33 @@
-# docs/pipeline — 파이프라인(도메인)
+# docs/pipeline — 파이프라인 (레이어별)
 
-commerce 도메인 데이터 계약과 원천 수집(bronze) 실호출 분석. 진입점: [../README.md](../README.md).
+commerce(서울 **LOCALDATA 인허가**) 도메인의 메달리온 파이프라인 문서. **152종**(v1 인허가 139 +
+v2 환경 13)을 raw → bronze → silver → gold 로 흘린다. 진입점: [../README.md](../README.md).
 
-| 문서 | 내용 |
-|---|---|
-| [common_info.md](common_info.md) | **공통 19컬럼·`UPDATEDT` 검증·저장/마커 계약·39종 카탈로그·재수집(backfill)·서비스명 채우기** |
-| [medallion-implementation-plan.md](medallion-implementation-plan.md) | **medallion 구현 계획(제안)** — raw→bronze(Iceberg)→silver→gold 레이어 역할·단계별 구현 방법·**주소 기반 좌표 보정(geocode)** 설계 |
-| [silver-gold-load-plan.md](silver-gold-load-plan.md) | **silver/gold 적재 계획** — bronze_run_id marker 증분, DAG 경계, gold 포장 계획 |
-| [non-license-datasets.md](non-license-datasets.md) | **인허가 외 격리 2종** — 위치정보·현황(비-LOCALDATA, 수집 대상 아님, monthly/irregular DAG 비활성) |
-| [bronze/](bronze/) | **원천 수집 실호출 분석** — 페이지네이션 정렬 · API 호출량 · 영업상태 추적 모델 · 수집 불가 원인·해소 |
-
-## bronze 분석 ([bronze/](bronze/))
+## 먼저 볼 것
 
 | 문서 | 내용 |
 |---|---|
-| [bronze/pagination-ordering.md](bronze/pagination-ordering.md) | 페이징은 위치 기반·안정이나 **정렬 기준 컬럼 없음** → silver `MGTNO` dedupe 권장 |
-| [bronze/api-call-volume.md](bronze/api-call-volume.md) | API별·전체 호출량 — 수집 1회 **1,361회**(39종, ~134만 건) |
-| [bronze/status-tracking-model.md](bronze/status-tracking-model.md) | 영업상태 = **업장당 1행 in-place 갱신**(컬럼/행 추가 아님) |
-| [bronze/uncollectable-datasets.md](bronze/uncollectable-datasets.md) | **수집 불가 원인·해소** — `service_name` 코드 미입력(데이터 부재 아님), **39종 전 종 해소** |
+| [data-model.md](data-model.md) | **⭐ 데이터 모델** — 레이어 계보, 조인키, 테이블 정의 인덱스, **139(v1)→152 공통화 관계**(bronze schema-on-read vs silver `lf()` 병합) |
+| [common_info.md](common_info.md) | **API 응답 컬럼 계약** — v1 공통 14 + 준공통 5 + v2(환경) 별칭, 식별값·저장/마커 계약 |
+| [non-license-datasets.md](non-license-datasets.md) | **인허가 외 격리** — 위치정보·현황(비-LOCALDATA, 수집 대상 아님) |
+
+## 레이어별
+
+| 레이어 | 폴더 | 담당 | 산출 |
+|---|---|---|---|
+| **raw** | [raw/](raw/README.md) | 수집(`commerce_collect_raw`) | R2 NDJSON + 마커 + 롤링 diff. 필드 커버리지·호출량·정렬·상태추적·증분 |
+| **bronze** | [bronze/](bronze/README.md) | 적재(`commerce_load_bronze`) | Iceberg `bronze_localdata_license`(record_json 통짜) + 발행 manifest. 엔진분기·워터마크·유지보수 |
+| **silver** | [silver/](silver/README.md) | 정규화·보강(`commerce_load_silver`) | dbt history/current/detail. **v1/v2 통합**·중복제거·주소/좌표 보강 |
+| **gold** | [gold/](gold/README.md) | 서빙 집계 | ⚠️ **미구현**(계획) |
+
+## 참고 (역사적 설계 기록)
+
+| 문서 | 상태 |
+|---|---|
+| [medallion-implementation-plan.md](medallion-implementation-plan.md) | 역사적 설계 기록(2026-07-03 제안). 현행은 위 레이어 문서/data-model 참조 |
+| [silver-gold-load-plan.md](silver-gold-load-plan.md) | 역사적 적재 계획. 현행은 silver/·gold/ 참조 |
+
+## 분류·정책
+
+3단 분류(대분류 4 / 중분류 / 소분류)와 리포트·재개·워크플로 정책은 **단일 소스**
+[../PROJECT.md](../PROJECT.md). 코드 규약은 [../../CLAUDE.md](../../CLAUDE.md).

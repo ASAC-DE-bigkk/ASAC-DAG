@@ -1,5 +1,10 @@
 # Medallion 구현 계획 — raw → bronze(Iceberg) → silver → gold + 좌표 보정
 
+> ⚠️ **역사적 설계 기록(2026-07-03 제안, 39종 시점).** 현행 구조는 152종(v1 139 + v2 13) 기준이며,
+> 살아있는 문서는 [data-model.md](data-model.md)(레이어 계보·테이블 정의·139→152 공통화) ·
+> [raw/](raw/README.md) · [bronze/](bronze/README.md) · [silver/](silver/README.md) · [gold/](gold/README.md)
+> 이다. 이 문서는 초기 설계 근거와 결정 이력을 보존하기 위해 남겨 둔다(코드 경로·수치는 당시 기준).
+
 작성일 2026-07-03 · 상태 **제안(초안, 멘토 승인 대기 항목 포함 — §7)** ·
 갱신 2026-07-05 — silver **암묵 버저닝** 확정(SCD2 컬럼 제거, §2.2) + transform DAG 구현(Step 10)
 선행 결정: raw/bronze 용어 확정(`dags/docs/plans/2026-07-02-feat-r2-raw-prefix.md`, #75) ·
@@ -16,13 +21,13 @@
 
 | 사실 | 근거 |
 |---|---|
-| `commerce_collect_raw`(@daily)가 39종 인허가 전량을 수집, run당 API 호출 ~1,361회 / ~134만 행 | [commerce_raw.py](../../commerce_raw.py) · [bronze/api-call-volume.md](bronze/api-call-volume.md) |
-| **저장은 증분**: 전량 fetch → `_diff_target/` 롤링 전체본과 정렬-diff → 변경분만 run 폴더에 저장(최초 run만 full). 실측 일 1,248MB → 0.48MB | [incremental.py](../../include/bronze/incremental.py) · [incremental-sort-diff.md](bronze/incremental-sort-diff.md) · change-log #22 |
+| `commerce_collect_raw`(@daily)가 39종 인허가 전량을 수집, run당 API 호출 ~1,361회 / ~134만 행 | [commerce_raw.py](../../commerce_raw.py) · [bronze/api-call-volume.md](raw/api-call-volume.md) |
+| **저장은 증분**: 전량 fetch → `_diff_target/` 롤링 전체본과 정렬-diff → 변경분만 run 폴더에 저장(최초 run만 full). 실측 일 1,248MB → 0.48MB | [incremental.py](../../include/bronze/incremental.py) · [incremental-sort-diff.md](raw/incremental-sort-diff.md) · change-log #22 |
 | run_id = KST 실행시각 `YYYY-MM-DD_HHMMSS_mmm`(6자리=HHMMSS, 뒤 3자리=밀리초) | [commerce_raw.py](../../commerce_raw.py) `make_bronze_run_id` |
 | raw = R2 오브젝트 랜딩(`raw/commerce/...` + 마커 + `_diff_target/`), bronze = **Iceberg 웨어하우스 원본층** — 용어는 팀 결정 #75로 확정, commerce 는 접두 리네임까지 완료 | change-log #21 |
 | Trino 에는 iceberg(REST, R2 Data Catalog) 커넥터만 있음 → R2 의 JSONL 은 dbt/Trino 에서 직접 질의 불가 | `sample/trino/catalog/iceberg*.properties` |
-| 공통 19컬럼에 좌표는 `X`,`Y` 뿐(**좌표계 미표기**), 주소는 `SITEWHLADDR`(지번)·`RDNWHLADDR`(도로명). **위경도 컬럼은 없음** → WGS84 위경도는 파생·보정 산출물 | [schemas.py](../../include/common/schemas.py) · [common_info.md](common_info.md) |
-| silver 는 라이브러리 코드만 존재(미배선, pandas→parquet). row-NDJSON 전환 후 파서 미조정 이슈 열림 | [silver_tasks.py](../../include/silver/silver_tasks.py) · [incremental-sort-diff.md](bronze/incremental-sort-diff.md) §6 |
+| 공통 19컬럼에 좌표는 `X`,`Y` 뿐(**좌표계 미표기**), 주소는 `SITEWHLADDR`(지번)·`RDNWHLADDR`(도로명). **위경도 컬럼은 없음** → WGS84 위경도는 파생·보정 산출물 | [schemas.py](../../include/commerce_core/schemas.py) · [common_info.md](common_info.md) |
+| silver 는 라이브러리 코드만 존재(미배선, pandas→parquet). row-NDJSON 전환 후 파서 미조정 이슈 열림 | [silver_tasks.py](../../include/silver/silver_tasks.py) · [incremental-sort-diff.md](raw/incremental-sort-diff.md) §6 |
 | dbt commerce 프로젝트 없음. Airflow 이미지 메인 venv 에 `trino` 패키지 있음(dbt 는 별도 venv, `common_dbt_smoke.py` 계약) | `sample/Dockerfile.airflow` · `sample/dags/common_dbt_smoke.py` |
 
 **결정: raw 를 bronze 로 개명·통합하지 않는다.** 부족한 것은 명칭이 아니라
@@ -243,7 +248,7 @@ Iceberg 테이블 + 이 상태파일을 삭제해도 raw 는 불변이라 **전�
   `raw/common/admin_dong` 최신본을 읽어 commerce 스키마의 `bronze_ref_admin_dong` 만 갱신한다.
 - **잔여(후속)**: 기존 pandas silver([silver_tasks.py](../../include/silver/silver_tasks.py))
   deprecated 표기, [storage.md](../architecture/storage.md) 의 구식 기술("전체 페이지 NDJSON")
-  갱신, [incremental-sort-diff.md](bronze/incremental-sort-diff.md) §6 오픈 이슈 종결,
+  갱신, [incremental-sort-diff.md](raw/incremental-sort-diff.md) §6 오픈 이슈 종결,
   분기별 full_reconcile 운영 캘린더 문서화.
 - **완료 기준**: dev 에서 수집 → bronze 적재 → geocode → transform 이 하루 사이클로
   end-to-end 성공. 기존 R2-parquet silver 경로에 신규 기록 없음.

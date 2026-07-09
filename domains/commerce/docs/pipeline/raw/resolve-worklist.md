@@ -1,7 +1,8 @@
-# bronze — 14종 해석 워크리스트 (✅ 전부 해소 완료, 이력 보관)
+# raw — 14종 해석 워크리스트 (✅ 전부 해소 완료, 이력 보관)
 
 > **✅ 2026-06-30 해소 완료.** 아래 14종은 사용자가 전달한 **포털 정본 LOCALDATA 코드**로 전부
-> 레지스트리에 입력·API 검증(`INFO-000`)됐다. 더는 미해석 항목이 없다(`enabled=39, pending=0`).
+> 레지스트리에 입력·API 검증(`INFO-000`)됐다. 더는 미해석 항목이 없다(당시 `enabled=39, pending=0`).
+> **이 문서는 완료된 해석 작업의 이력 기록이다 — 현재 수집 대상은 152종(v1 139 + v2 13), 전부 service_name 해소·pending 0.**
 > 최종 코드 표: [uncollectable-datasets.md](uncollectable-datasets.md) §2-2 · 카탈로그: [../common_info.md](../common_info.md) §5.
 >
 > | short | 최종 코드 | short | 최종 코드 |

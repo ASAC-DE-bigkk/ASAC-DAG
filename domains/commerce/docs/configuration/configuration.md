@@ -155,7 +155,7 @@ PYTHONPATH=dags/domains/commerce/include \
 
 # 2) 인증키/서비스명 검증(컨테이너)
 docker compose exec airflow-scheduler \
-  python -m bronze.resolve verify        # SEOUL_API_KEY_COMM 적재 후 39종 점검
+  python -m bronze.resolve verify        # SEOUL_API_KEY_COMM 적재 후 152종 점검
 
 # 3) 단위 테스트(Docker 불필요)
 PYTHONPATH=dags/domains/commerce/include python -m pytest dags/domains/commerce/tests -q
