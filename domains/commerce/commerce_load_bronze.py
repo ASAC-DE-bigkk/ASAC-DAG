@@ -110,8 +110,22 @@ def load_one(unit: dict, load_date: str, **ctx) -> dict:
 
 
 @task(trigger_rule=TriggerRule.ALL_DONE)
-def finalize(plan: dict, load_results: list[dict]) -> dict:
-    """워터마크 전진(적재 성공분까지) · pending 갱신 · manifest 발행."""
+def iceberg_maintenance(_loaded) -> list[dict]:
+    """적재 후 Iceberg 유지보수(optimize/expire/orphan) — **매일**(#226). bronze 테이블 대상.
+
+    (테이블,op) 단위 멱등 — 중단 후 재실행해도 안전(재개 표준). 결과는 finalize 가 DAG 리포트의
+    '🧹 유지보수' 섹션으로 흡수. 자원(소요시간/CPU/peak RAM)은 Trino 쿼리 stats 로 캡처.
+    ALL_DONE — 적재 일부 실패해도 유지보수는 수행.
+    """
+    from bronze import maintenance
+
+    days = int(os.getenv("COMMERCE_ICEBERG_EXPIRE_DAYS", "7") or "7")
+    return maintenance.run_table_maintenance(tables=("bronze_localdata_license",), expire_days=days)
+
+
+@task(trigger_rule=TriggerRule.ALL_DONE)
+def finalize(plan: dict, load_results: list[dict], maint_results: list[dict] | None = None) -> dict:
+    """워터마크 전진(적재 성공분까지) · pending 갱신 · manifest 발행 · 리포트(+유지보수 섹션)."""
     storage = get_storage()
     prefix = get_settings().storage_prefix
     results = [r for r in (load_results or []) if r]
@@ -148,10 +162,11 @@ def finalize(plan: dict, load_results: list[dict]) -> dict:
         rr += [{"short": sh, "status": "failed", "error": "적재 실패(다음 실행 재시도)",
                 "task": "load_one"} for (sh, _run) in failed]
         if rr:
+            extra = [run_report.maintenance_section(maint_results)] if maint_results else None
             metrics["report"] = run_report.send_run_report(
                 dag_id="commerce_load_bronze", run_id=metrics["finalized_at"],
                 observed_date=datetime.now(KST).strftime("%Y-%m-%d"),
-                stage="bronze_load", results=rr)
+                stage="bronze_load", results=rr, extra_sections=extra)
     except Exception as exc:  # noqa: BLE001
         log.warning("run report 스킵(무시): %s", type(exc).__name__)
     return metrics
@@ -168,7 +183,8 @@ def commerce_load_bronze():
     prep = ensure_warehouse(plan)
     loaded = load_one.partial(load_date=load_date).expand(unit=units)
     prep >> loaded
-    finalize(plan, loaded)
+    maint = iceberg_maintenance(loaded)          # 적재 후 유지보수(#226) → 리포트 섹션
+    finalize(plan, loaded, maint)
 
 
 commerce_load_bronze()
