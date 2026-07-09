@@ -198,6 +198,12 @@ def _pyiceberg_catalog():
             "s3.access-key-id": r2_env("R2_ACCESS_KEY_ID"),
             "s3.secret-access-key": r2_env("R2_SECRET_ACCESS_KEY"),
             "s3.region": os.environ.get(r2_env_name("R2_REGION"), "auto"),
+            # AWS SDK 기본 요청 타임아웃(3초)은 저속 컷(3초간 1B/s 미만)으로 작동해
+            # 순간 네트워크 정체에도 커밋이 죽는다(2026-07-09 새벽 try 1~3 연속 실패).
+            # 재시도 1회 비용(raw 재다운로드 + 파일 재작성)이 대기 몇 초보다 훨씬 크다.
+            "s3.request-timeout": os.environ.get(
+                r2_env_name("R2_S3_REQUEST_TIMEOUT"), "10"
+            ),
         },
     )
 
