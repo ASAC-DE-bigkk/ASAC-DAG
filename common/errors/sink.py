@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from datetime import timezone
 from typing import Any, Callable
@@ -38,20 +37,17 @@ def _safe_segment(value: str | None) -> str:
     return _UNSAFE_SEGMENT_CHARS.sub("-", value)
 
 
-def is_dev_target() -> bool:
-    return os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod")) == "dev"
-
-
 def _r2_env(name: str) -> str:
-    """dev 타깃이면 R2_DEV_* 를 우선 사용(버킷 분리 규약 — traffic runtime 과 동일)."""
-    if is_dev_target():
-        dev_name = "R2_DEV_" + name.removeprefix("R2_")
-        if os.environ.get(dev_name):
-            return os.environ[dev_name]
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
+    """R2 자격증명 — 전 도메인 단일 규약(#230): common.storage.r2_env 로 위임.
+
+    과거엔 is_dev_target(ASK_SEOUL_TARGET) 게이팅이라, R2_DEV_* 만 세팅하고 타깃을
+    미설정(기본 prod)한 dev 박스에서 errors/metrics 가 미설정 prod R2_* 를 읽어
+    RuntimeError → 콜백이 삼켜 조용히 유실됐다. admin_dong(raw 랜딩)과 동일한
+    '존재 우선' 규약으로 통일해 같은 버킷으로 일관되게 간다.
+    """
+    from common.storage import r2_env
+
+    return r2_env(name)
 
 
 def build_object_key(problem: Problem, *, prefix: str = DEFAULT_PREFIX) -> str:

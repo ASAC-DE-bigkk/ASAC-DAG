@@ -210,6 +210,25 @@ def test_http_counters_aggregated(tmp_path):
     assert record["retries"] == 1
 
 
+def test_http_counters_recorded_on_failure(tmp_path):
+    # 실패 런도 재시도 소진 카운트를 기록해야 한다(#230 A4 — 과거엔 http_counter=None 로 0 공백).
+    sink = MetricsFileSink(root=tmp_path)
+
+    @track(layer="bronze", domain="transit", sink=sink)
+    def f(**context):
+        runmetrics.note_http_request()
+        runmetrics.note_http_request()
+        runmetrics.note_http_retry()
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        f(**_context())
+    _, record = _read_only_record(tmp_path)
+    assert record["status"] == "failed"
+    assert record["api_calls"] == 2
+    assert record["retries"] == 1
+
+
 def test_http_counters_noop_when_inactive():
     # 컬렉터 비활성(기본)에서는 no-op — 예외 없이 조용히 무시.
     runmetrics.note_http_request()
