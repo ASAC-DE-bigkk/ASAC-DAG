@@ -82,16 +82,17 @@ with DAG(
 
     # **인구(seoul_ppltn) + citydata(seoul_citydata) 전 모델** 빌드 — 인구 silver 도 이제
     # citydata bronze(LIVE_PPLTN_STTS)에서 나온다. asac_axes 패키지 내부 모델은 제외.
+    # tag:cross_domain(타 도메인 스키마 의존)도 제외 — 라이브 SLA 를 타 도메인에 결합하지 않음.
     run_models = BashOperator(
         task_id="dbt_run",
-        bash_command=_dbt("run --exclude package:asac_axes"),
+        bash_command=_dbt("run --exclude package:asac_axes tag:cross_domain"),
         on_failure_callback=record_citydata_problem,
     )
 
-    # 품질 테스트 — 우리 모델만(패키지 자체 테스트는 패키지 CI 소관).
+    # 품질 테스트 — 우리 모델만(패키지 자체 테스트는 패키지 CI 소관). cross_domain 제외.
     test_models = BashOperator(
         task_id="dbt_test",
-        bash_command=_dbt("test --exclude package:asac_axes"),
+        bash_command=_dbt("test --exclude package:asac_axes tag:cross_domain"),
         on_failure_callback=record_citydata_problem,
     )
 
