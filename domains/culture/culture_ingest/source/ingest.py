@@ -381,14 +381,19 @@ def write_run_report(
 
 # --- 런타임 빌더 ---------------------------------------------------------------
 
-def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
-    """직전 run_report 에서 {dataset: rows} 볼륨 HWM 을 읽는다(#147).
+_BASELINE_SCAN_REPORTS = 5  # 부분 run(주간 refresh·백필)이 껴도 이 안에 전체 run 이 있도록
 
-    ``before_ingest_ts`` 이전(=이번 실행보다 과거)의 리포트 중 최신 1건을 쓴다 —
-    리포트 경로의 ingest_ts 는 UTC 문자열이라 사전순 = 시간순. error 가 있던
-    데이터셋은 제외(실패 런의 부분 rows 로 기준선을 끌어내리지 않기 위해).
-    리포트가 없거나 읽기 실패 시 {} — 첫 런/사고 시 볼륨 검사가 조용히 생략될 뿐
-    수집 자체는 막지 않는다(fail-open).
+
+def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
+    """직전 run_report 들에서 {dataset: rows} 볼륨 HWM 을 읽는다(#147, 병합 #206).
+
+    ``before_ingest_ts`` 이전(=이번 실행보다 과거) 리포트를 최신순으로 최대
+    ``_BASELINE_SCAN_REPORTS`` 건 훑어 데이터셋별 가장 최근 rows 를 채운다 —
+    부분 run(주간 facility refresh 등) 리포트가 최신이어도 나머지 데이터셋
+    기준선이 과거 전체 run 에서 보충된다. 리포트 경로의 ingest_ts 는 UTC
+    문자열이라 사전순 = 시간순. error 가 있던 데이터셋은 제외(실패 런의 부분
+    rows 로 기준선을 끌어내리지 않기 위해). 리포트가 없거나 읽기 실패 시 {} —
+    볼륨 검사가 조용히 생략될 뿐 수집 자체는 막지 않는다(fail-open).
     """
     try:
         keys = sink.list(f"{root}/_reports/")
@@ -398,15 +403,13 @@ def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
             m = re.search(r"ingest_ts=([0-9TZ]+)", k)
             if m and m.group(1) < before_ingest_ts:
                 candidates.append((m.group(1), k))
-        if not candidates:
-            return {}
-        _, latest_key = max(candidates)
-        report = json.loads(sink.get(latest_key))
-        return {
-            s["name"]: int(s["rows"])
-            for s in report.get("datasets", [])
-            if s.get("rows") and not s.get("error")
-        }
+        merged: dict[str, int] = {}
+        for _, key in sorted(candidates, reverse=True)[:_BASELINE_SCAN_REPORTS]:
+            report = json.loads(sink.get(key))
+            for s in report.get("datasets", []):
+                if s.get("rows") and not s.get("error") and s["name"] not in merged:
+                    merged[s["name"]] = int(s["rows"])
+        return merged
     except Exception as exc:  # noqa: BLE001 -- baseline 은 보조 신호, 수집을 막지 않는다
         print(f"[baselines] 직전 리포트 조회 실패(볼륨 검사 생략): {type(exc).__name__}")
         return {}

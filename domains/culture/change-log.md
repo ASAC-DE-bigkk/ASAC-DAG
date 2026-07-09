@@ -3,6 +3,17 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-08 — #206 facility 상세 주간 크롤 분리
+
+- `Dataset.refresh`("daily"/"weekly") 추가, `kopis_facility_detail`을 weekly로 —
+  자정런 제외(KOPIS -200콜/일, #201 압력↓). 선택 로직은 `plan_dataset_names`로
+  추출(airflow 없이 테스트 가능). → `source/datasets.py` · `culture_bronze.py`
+- `culture_facility_refresh` DAG 신규(일 05:30 KST) — culture_bronze를 목록+상세
+  전수(`max_detail=2000`)로 트리거. 커버리지 200/1,686(11.9%)→전량.
+- `load_baselines` 다중 리포트 병합(최신 5건) — 부분 run(주간·백필) 리포트가
+  다음 자정런 볼륨 HWM을 가리던 결함 수정. → `source/ingest.py`
+- 설계: [docs/design/2026-07-08-culture-facility-weekly-refresh.md](docs/design/2026-07-08-culture-facility-weekly-refresh.md)
+
 ## 2026-07-08 — load_bronze 진행 로그 (26분 블랙박스 해소) (#202)
 
 - **26분 블랙박스 해소** — 7/8 실측: load_bronze = run 30분의 87%, 원인은 Trino INSERT
