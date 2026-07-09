@@ -1,28 +1,29 @@
-# API 응답 필드 커버리지 — 공통/비공통 분리 · 식별값 유효성 (107종)
+# API 응답 필드 커버리지 — 공통/비공통 분리 · 식별값 유효성 (152종)
 
-> 실측일 2026-07-08 · **107종 전량 라이브 샘플**(각 `LOCALDATA_*` 1/5 호출)로 응답 `row` 필드셋을
+> 실측일 2026-07-09 · **152종 전량 라이브 샘플**(각 `service_name` 1/5 호출)로 응답 `row` 필드셋을
 > 수집·집계. 목적: (1) 수집 정상 여부, (2) 공통 vs API별 비공통 필드 분리, (3) 기존 bronze/silver
-> 라인의 **식별값**이 107종 전체에 그대로 유효한지 검증. 근거 컬럼 계약: [../common_info.md](../common_info.md).
+> 라인의 **식별값**이 152종 전체에 그대로 유효한지 검증. 근거 컬럼 계약: [../common_info.md](../common_info.md).
+> 분류 체계(대분류/중분류/소분류): [../../PROJECT.md](../../PROJECT.md).
 
 ## 0. 결론 (요약)
 
-- **수집 정상**: 107 / 107 **OK**, 실패 0. (모든 `service_name` 응답 `INFO-000`.)
-- **식별값 전량 유효**: **OPNSFTEAMCODE·MGTNO·UPDATEDT·LASTMODTS = 107/107**. 즉 기존
-  bronze 정렬/식별키 `(UPDATEDT → LASTMODTS → OPNSFTEAMCODE → MGTNO)` 와 silver 그레인
-  `(dataset, opnsfteamcode, mgtno)` **그대로 사용 가능**. `content_hash` 는 레코드 전체 해시라
-  스키마 무관하게 동작. 영업상태 `TRDSTATEGBN` 도 107/107.
-- **공통 14 + 준공통 5 + 비공통(대다수)**: 진짜 전 종 공통은 14컬럼. 기존 "공통 19"는 5개가
-  1~2개 데이터셋에서 빠져 **준공통**. 그 외는 업종별 시설/설비 컬럼(비공통, 45개 스키마 변형).
+- **수집 정상**: **152 / 152 OK**, 실패 0. (v1 139종 + v2 13종=환경.)
+- **식별값 전량 유효(canonical)**: `OPNSFTEAMCODE·MGTNO·UPDATEDT·LASTMODTS = **152/152**`. v2(환경)는
+  컬럼명이 달라도(§6) `schemas.py`의 v1/v2 별칭으로 흡수되어 식별값이 전 종 유효하다. 즉 bronze 정렬/식별키
+  `(UPDATEDT → LASTMODTS → OPNSFTEAMCODE → MGTNO)` 와 silver 그레인 `(dataset, opnsfteamcode, mgtno)`
+  **그대로 사용 가능**. `content_hash` 는 레코드 전체 해시라 스키마 무관.
+- **v1 공통 14 + 준공통 5 + 비공통(대다수)**: 139종 v1 전 종 공통은 **14컬럼**. 5개는 소수 데이터셋에서
+  빠져 **준공통**. 나머지는 업종별 시설/설비 컬럼(비공통). **v2(환경 13종)은 별도 컬럼셋(§6).**
   silver 는 `record_json` **schema-on-read**(있으면 파싱, 없으면 null)라 비공통/누락은 **무손실**.
 
 ## 1. 수집 정상 여부
 
-`bronze.clients.SeoulOpenApiClient.fetch_page(svc, 1, 5)` 로 107종 호출 → **전부 OK**(`RESULT.CODE=INFO-000`,
-`list_total_count` 반환). 재현: `python -m bronze.resolve verify` (PYTHONPATH=include, 컨테이너).
+`bronze.clients.SeoulOpenApiClient.fetch_page(svc, 1, 5)` 로 152종 호출 → **전부 OK**(응답 row 반환).
+재현: §5.
 
-## 2. 공통 영역 (전 종 공통 = 14컬럼)
+## 2. 공통 영역 (v1 139종 전 종 공통 = 14컬럼)
 
-107종 응답 `row` 키의 **교집합**:
+139종(v1) 응답 `row` 키의 **교집합**:
 
 ```text
 OPNSFTEAMCODE, MGTNO, BPLCNM, APVPERMYMD,
@@ -30,69 +31,103 @@ TRDSTATEGBN, DTLSTATEGBN, DTLSTATENM,
 RDNWHLADDR, RDNPOSTNO, LASTMODTS, UPDATEGBN, UPDATEDT, X, Y
 ```
 
-### 준공통 (기존 "공통 19" 중 전 종은 아님 — 1~2개 데이터셋 결측)
+### 준공통 (전 종은 아님 — 소수 데이터셋 결측, optional 처리)
 
-| 컬럼 | 커버리지 | 결측 데이터셋 | 비고 |
-|---|---:|---|---|
-| `TRDSTATENM` | 106/107 | full_amusement_park | 상태**명**. 코드 `TRDSTATEGBN` 는 107/107 → 매핑으로 복원 가능 |
-| `SITETEL` | 106/107 | lodging | 전화 |
-| `SITEWHLADDR` | 106/107 | lodging | 지번주소. lodging 은 `LOTNO_ADDR` 제공 → **silver 이미 폴백 처리** |
-| `DCBYMD` | 105/107 | lodging, culture_arts_corporation | 폐업일 |
-| `SITEPOSTNO` | 105/107 | culture_arts_corporation, outdoor_advertising | 지번우편번호 |
+| 컬럼 | 커버리지(v1) | 비고 |
+|---|---:|---|
+| `SITEWHLADDR` | 138/139 | 지번주소. 결측 시 `LOTNO_ADDR`(숙박 등)→Juso 폴백(silver 처리됨) |
+| `TRDSTATENM` | 138/139 | 상태**명**. 코드 `TRDSTATEGBN` 는 139/139 → 매핑으로 복원 |
+| `SITETEL` | 134/139 | 소재지 전화 |
+| `DCBYMD` | 131/139 | 폐업일자 |
+| `SITEPOSTNO` | 127/139 | 지번 우편번호 |
 
-→ 모두 **optional(있으면 파싱, 없으면 null)** 로 다뤄야 하며, 실제로 silver 는 그렇게 처리한다
-(§4). `schemas.py` 의 `COMMON_COLUMNS(19)` 는 정규화 기준 스키마일 뿐 존재 보장이 아니다.
+→ 모두 **optional(있으면 파싱, 없으면 null)**. `schemas.py`의 `COMMON_COLUMNS(19)`는 정규화 기준
+스키마일 뿐 존재 보장이 아니다(`NEAR_COMMON_COLUMNS` 로 준공통 처리).
 
-## 3. 비공통 영역 (API별 시설·설비 컬럼)
+## 3. 비공통 영역 (v1 API별 시설·설비 컬럼)
 
-공통 14를 뺀 나머지는 업종별 컬럼으로, **45개 서로 다른 스키마 변형**이 존재. 빈도 상위(거의 준공통)
-→ 하위(업종 특화)로 갈수록 특정 업종에만 등장. 대표 군집:
+공통 14 + 준공통 5 를 뺀 나머지는 업종별 컬럼. **대분류/중분류(업종군)별 비공통 필드 수**(공통·준공통 밖):
 
-| 업종군(category) | 대표 비공통 컬럼 | 예 데이터셋 |
-|---|---|---|
-| 식품·제조 (food) | `FCTY*EPCNT`, `WMEIPCNT`, `MANEIPCNT`, `WTRSPLYFACILSENM`, `SITEAREA`, `SNTUPTAENM` | bakery, food_mfg, hfood_general_sale, contract_meal_service |
-| 문화 시설 (culture) | `CULPHYEDCOBNM`, `FACILAR`, `JISGNUMLAY`/`UNDERNUMLAY`, `NEARENVNM`, `REGNSENM`, `TOTNUMLAY` | cinema, video_*, game_*, performance_hall, convention_*, amusement_* |
-| 여행·관광 (culture) | `INSUR*DT`, `SHPTOTTONS`, `SHPCNT`, `ENGSTNTRNM*`, `MEETSAMTIMESYGSTF` | *_travel_agency, tour_cruise, tourism_operator |
-| 체육·회원제 (culture) | `BUPNM`, `LDERCNT`, `MEMCOLLTOTSTFNUM`, `PUPRSENM`, `INSURJNYNCODE`, `BDNGYAREA` | golf_course, dance_hall, billiard_hall, fitness_center, martial_arts_gym |
-| 위생·미용 (hygiene_beauty) | `SNTUPTAENM`, `USEJISG*FLR`/`USEUNDER*FLR`, `MANEIPCNT`, `CNDPERM*` | barber_shop, beauty_shop, laundry, bathhouse |
-| 의료 (health_medical) | `HSTRMNUM`, `MEDEXTRITEMSCN(NM)`, `SICBNUM`, `TOTAR`, `METR*` | hospital, clinic, affiliated_medical, medical_similar, medical_corporation |
-| 축산·동물 (livestock/animal) | `LIND*`, `RGTMBDSNO`, `ROPNYMD`, `SITEAREA`, `CFRMGBNCTN` | livestock_*, animal_* |
-| 특화 1-종 | optical(`LENSCUTNUM`/`EYEPYONUM`…), dental(`CRFTUSE*`/`DENTIUSEPRESSNUM`…), disinfection(살포기 `*SPRAYNUM`), postpartum(`NURSECNT`/`BABYRGLSTNUM`…) | optical_shop, dental_lab, disinfection, postpartum_care |
+| 대분류 | category | 비공통 개별필드 수 | 대표 컬럼 |
+|---|---|---:|---|
+| 문화 | culture | **82** | 시설 `FACILAR`/`*NUMLAY`, 관광 `INSUR*DT`/`SHP*`, 체육 `LDERCNT`/`MEMCOLL*`, `CULPHYEDCOBNM` |
+| 산업 | industry | **74** | `CAPT`, `ROPNYMD`, 판매/계량/가스/석유/담배/장사/직업소개 등 업종 특화 다수 |
+| 보건·식품 | food | **49** | 종업원 `HOFFEPCNT`/`MANEIPCNT`/`WMEIPCNT`, 업태 `TRDPJUBNSENM`/`SNTUPTAENM`, `BDNGOWNSENM`, `MONAM` |
+| 보건·의료 | health_medical | **42** | `HSTRMNUM`, `MEDEXTRITEMSCN(NM)`, `SICBNUM`, `TOTAR`, `METR*`, 산후조리 `*AR`/`NURSECNT` |
+| 보건·위생미용 | hygiene_beauty | **35** | `SITEAREA`, 층수 `USE*FLR`, 인력 `MANEIPCNT`/`WMEIPCNT`, 조건부허가 `CNDPERM*` |
+| 보건·안경치과 | optical_dental | **28** | 렌즈/검안 `PUPILDISTMEASNUM`/`DEFPTRFRTGGNUM`, 치과기공 `CRFTUSE*`, `TOTAR` |
+| 보건·숙박 | lodging | **20** | 한실/양실, 층수 `BDNG*FLRCNT`, `CNDPERM*`, `LOTNO_ADDR` |
+| 보건·축산 | livestock | **10** | `LIND*`, `RGTMBDSNO`, `ROPNYMD`, `SITEAREA` |
+| 보건·동물 | animal | **9** | `RGTMBDSNO`, `ROPNYMD`, `CFRMGBNCTN` |
+| 보건·약국 | pharmacy | **5** | `PHARMTRDAR`, `ASGNYMD` |
 
-- **준공통 다음 빈도**: `CLGSTDT`/`CLGENDDT`(휴업 82/81), `APVCANCELYMD`(인허가취소 80), `SITEAREA`(40),
-  `UPTAENM`(33) — 이미 `schemas.py`의 `NEAR_COMMON_COLUMNS` 로 optional 처리 중.
-- 특이: lodging 은 `LOTNO_ADDR`·`SNTTN_BZSTAT_NM`(1/107) 등 고유 컬럼. outdoor_advertising 은
-  `TRDCTN`(거래내용) 등 최소 스키마(22컬럼). 전체 컬럼폭은 22~50.
-
-전체 per-dataset 필드 목록은 §5 방법으로 재현 가능(레포에 원자료는 두지 않음).
+- **준공통 다음 빈도(여러 업종군 공유)**: `CLGSTDT`/`CLGENDDT`(휴업), `APVCANCELYMD`(인허가취소),
+  `SITEAREA`(면적), `UPTAENM`(업태) — `schemas.py`의 `NEAR_COMMON_COLUMNS` 로 optional 처리 중.
+- 전체 per-dataset 필드 목록은 §5 방법으로 재현(레포에 원자료는 두지 않음). 보건 대분류의 상세 추출은
+  dbt `silver_license_detail_health`(#80)로 컬럼화됨 — [dbt dataset-columns.md](../../../../../dbt/domains/commerce/docs/dataset-columns.md).
 
 ## 4. 식별값 유효성 — 기존 bronze/silver 라인 그대로 사용 가능
 
-| 용도 | 사용 값 | 107종 커버리지 | 결론 |
+| 용도 | 사용 값 | 152종 커버리지 | 결론 |
 |---|---|---:|---|
-| **업소 식별(중복·이력)** | `OPNSFTEAMCODE` + `MGTNO` | 107/107 · 107/107 | ✅ 그대로 (MGTNO 는 발급 자치단체 안에서만 유니크 → OPNSFTEAMCODE 필수, #198) |
-| **버전 정렬(증분 diff)** | `UPDATEDT` → `LASTMODTS` | 107/107 · 107/107 | ✅ 그대로 (UPDATEDT None 폴백 #193 유효) |
-| **내용 변경 감지** | `content_hash`(레코드 canonical sha256) | 스키마 무관 | ✅ 비공통 컬럼 포함 전체 해시 |
-| **영업상태 추적** | `TRDSTATEGBN`(코드) / `DTLSTATEGBN` | 107/107 | ✅ 상태명 `TRDSTATENM` 은 106 → 코드→명 매핑 |
-| **주소·행정동** | `RDNWHLADDR`(도로명) / `SITEWHLADDR`(지번)·`LOTNO_ADDR` | 107 / 106(+lodging 폴백) | ✅ silver 지번 폴백 이미 처리 |
-| **좌표** | `X`, `Y`(EPSG:5174) | 107/107 · 107/107 | ✅ silver 좌표 변환 그대로 |
-| **인허가/수집 계보** | `APVPERMYMD`, `LASTMODTS`, run/observed 메타 | 107/107 | ✅ |
+| **업소 식별(중복·이력)** | `OPNSFTEAMCODE` + `MGTNO` | 152/152 | ✅ (v2=OGDP_INST_CD+MNG_NO 별칭 흡수. MGTNO 는 발급 자치단체 안 유니크 → OPNSFTEAMCODE 필수, #198) |
+| **버전 정렬(증분 diff)** | `UPDATEDT` → `LASTMODTS` | 152/152 | ✅ (v2=DATA_UPDT_YMD+LAST_MDFCN_YMD. UPDATEDT None 폴백 #193 유효) |
+| **내용 변경 감지** | `content_hash`(레코드 canonical sha256) | 스키마 무관 | ✅ 비공통 포함 전체 해시 |
+| **영업상태 추적** | `TRDSTATEGBN`(코드)/`DTLSTATEGBN` | 139/139(v1) | ✅ v2=SALS_STTS_CD/DTL_SALS_STTS_CD 별칭 |
+| **주소·행정동** | `RDNWHLADDR`/`SITEWHLADDR`·`LOTNO_ADDR` | 138(+폴백) | ✅ silver 지번 폴백 처리 |
+| **좌표** | `X`,`Y`(EPSG:5174) | 139/139(v1) | ✅ v2=XCRD/YCRD 별칭. silver 좌표 변환 그대로 |
 
-**silver 무손실 근거**: silver 모델([silver_license_history.sql](../../../../../dbt/domains/commerce/models/silver/silver_license_history.sql))은
-`json_extract_scalar(record_json, '$.<FIELD>')` + `nullif(trim(...), '')` 로 필드를 뽑는다 →
-**없는 키는 null**, 비공통 컬럼은 무시(record_json 원본 보존). 따라서 45개 스키마 변형이 섞여도
-silver 정형은 **동일 규칙으로 안전**하며, 신규 업종 특화 컬럼이 필요해지면 그때 파생만 추가한다.
+**silver 무손실 근거**: silver 모델은 `json_extract_scalar(record_json,'$.<FIELD>') + nullif(trim(...),'')`
+(v1/v2 는 `lf()` 매크로로 정본 우선·별칭 폴백) → **없는 키는 null**, 비공통은 record_json 원본 보존.
 
 ## 5. 재현 방법
 
 ```bash
-# 107종 수집 정상 여부(OK/FAIL + total)
-docker compose run --rm --no-deps -T \
-  -e PYTHONPATH=/opt/airflow/dags/domains/commerce/include:/opt/airflow/dags \
-  airflow-scheduler python -m bronze.resolve verify
-
-# 필드셋/공통·비공통/식별값 커버리지 (probe 스크립트를 stdin 으로: registry 전 종 1/5 샘플 → 집계)
-#   각 dataset 응답 row 키의 교집합=공통, 합집합-공통=비공통, 4개 식별필드 보유 카운트.
+# 152종 응답 필드셋 + 공통/비공통 + 식별값 커버리지 프로브(컨테이너)
+docker exec <scheduler> python -u -c '
+import sys; sys.path.insert(0,"/opt/airflow/dags/domains/commerce/include"); sys.path.insert(0,"/opt/airflow/dags")
+from commerce_core.env import load_commerce_env; load_commerce_env()
+from commerce_core import registry
+from commerce_core.settings import get_settings
+from commerce_core.schemas import canonical_get
+from bronze.clients import SeoulOpenApiClient
+import time
+s=get_settings(); c=SeoulOpenApiClient(key=s.seoul_openapi_key, base_url=s.seoul_openapi_base_url)
+for d in registry.all_datasets():
+    page=c.fetch_page(d.service_name,1,5)          # row 키 = 필드셋
+    time.sleep(0.12)
+'   # 각 dataset row 키의 교집합=공통(v1), 합집합-공통=비공통, canonical_get 로 식별값 카운트
 ```
 
 인증키는 클라이언트가 URL·로그에서 마스킹하며(CLAUDE.md §2.5), 본 분석 산출물에도 키/URL 미포함.
+
+## 6. v2(환경) 컬럼셋 — 신형 표준 (13종)
+
+환경 대분류(13종)는 **v2 신형 컬럼명**을 쓴다(구형 v1과 이름만 다르고 개념은 대응). 응답 키셋:
+
+```text
+MNG_NO, OGDP_INST_CD, BPLC_NM, BPLC_SE_NM,
+SALS_STTS_CD, SALS_STTS_NM, DTL_SALS_STTS_CD, DTL_SALS_STTS_NM,
+ROAD_NM_ADDR, ROAD_NM_ZIP, LOTNO_ADDR, LCTN_ZIP, TELNO,
+DATA_UPDT_YMD, DATA_UPDT_SE, LAST_MDFCN_YMD, LCPMT_YMD, CLSBIZ_YMD,
+TCBIZ_BGNG_YMD, TCBIZ_END_YMD, ROBIZ_YMD, XCRD, YCRD,
+CTGRY_NM, BZSTAT_SE_NM, ENVM_TASK_SE_NM, TPBIZ_SE_NM
+```
+
+### v1↔v2 별칭 (식별/공통 대응 — `schemas.py COLUMN_ALIASES_V2`)
+
+| 개념 | v1 | v2 |
+|---|---|---|
+| 관리번호 | `MGTNO` | `MNG_NO` |
+| 개방자치단체코드 | `OPNSFTEAMCODE` | `OGDP_INST_CD` |
+| 사업장명 | `BPLCNM` | `BPLC_NM` |
+| 영업상태 코드/명 | `TRDSTATEGBN`/`TRDSTATENM` | `SALS_STTS_CD`/`SALS_STTS_NM` |
+| 상세상태 코드/명 | `DTLSTATEGBN`/`DTLSTATENM` | `DTL_SALS_STTS_CD`/`DTL_SALS_STTS_NM` |
+| 도로명/지번 주소 | `RDNWHLADDR`/`SITEWHLADDR` | `ROAD_NM_ADDR`/`LOTNO_ADDR` |
+| 데이터갱신일/최종수정 | `UPDATEDT`/`LASTMODTS` | `DATA_UPDT_YMD`/`LAST_MDFCN_YMD` |
+| 인허가/폐업일 | `APVPERMYMD`/`DCBYMD` | `LCPMT_YMD`/`CLSBIZ_YMD` |
+| 좌표 | `X`/`Y` | `XCRD`/`YCRD` |
+
+- **비공통(환경 고유)**: `BPLC_SE_NM`(사업장구분), `CTGRY_NM`(분류), `ENVM_TASK_SE_NM`(환경업무구분),
+  `TPBIZ_SE_NM`/`BZSTAT_SE_NM`, `TCBIZ_*`(휴업), `ROBIZ_YMD`(재개업) 등. silver 는 `lf('MGTNO','MNG_NO')`
+  식으로 공통축을 흡수하고 비공통은 record_json 보존(무손실).
