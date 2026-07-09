@@ -27,6 +27,7 @@ from culture_ingest.source.ingest import IngestOptions, build_run_report, ingest
 # 실키 금지 — 길이만 literal 등록 조건(≥6)을 충족하는 가짜 값.
 FAKE_KOPIS = "FAKEKOPISKEY1234567890"
 FAKE_SEOUL = "FAKESEOULKEY0987654321"
+FAKE_CULT = "FAKECULTKEY1122334455"
 
 LEAKY_URL = f"http://www.kopis.or.kr/openApi/restful/prfplc?service={FAKE_KOPIS}&cpage=1"
 
@@ -172,6 +173,7 @@ def test_build_clients_registers_source_keys(monkeypatch):
             red._literals.remove(k)
     monkeypatch.setenv("KOPIS_SERVICE_KEY", FAKE_KOPIS)
     monkeypatch.setenv("SEOUL_API_KEY_CULT", FAKE_SEOUL)
+    monkeypatch.setenv("PUBLIC_DATA_API_KEY_CULT", FAKE_CULT)  # #196 cult 키 필수화
 
     from culture_ingest.source.ingest import build_clients
     build_clients()
