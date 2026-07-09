@@ -34,6 +34,7 @@ from culture_ingest.common.http import Page  # noqa: E402
 log = logging.getLogger(__name__)
 
 KOPIS_BASE = "http://www.kopis.or.kr/openApi/restful"
+KOBIS_BASE = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice"
 
 # KOPIS 목록 페이지는 XML <dbs><db>...</db></dbs> 형태 -- 페이지당 <db> 개수를 센다.
 _KOPIS_DB_RE = re.compile(r"<db>")
@@ -47,6 +48,10 @@ class KopisError(RuntimeError):
 
 class SeoulError(RuntimeError):
     """서울 열린데이터 응답 코드가 정상이 아닐 때 발생."""
+
+
+class KobisError(RuntimeError):
+    """KOBIS 응답이 faultInfo(에러)를 담고 있을 때 발생."""
 
 
 class KopisClient:
@@ -213,3 +218,33 @@ class SeoulClient:
             probed += len(rows)
             yield Page(index=start, body=body, row_count=len(rows), ext="json")
             start = end + 1
+
+
+class KobisClient:
+    """KOBIS 영화진흥위원회 오픈API — 일별 박스오피스 (JSON, 단일 GET)."""
+
+    def __init__(self, service_key: str, timeout: int = 30, core: HttpCore | None = None):
+        self.service_key = service_key
+        self.core = core or HttpCore(source="kobis", timeout=timeout)
+
+    def daily_boxoffice(self, target_dt: str, wide_area_cd: str | None = None) -> Page:
+        """일별 박스오피스 단일 GET(page-0001.json).
+
+        ``target_dt`` = YYYYMMDD(전일). ``wide_area_cd`` 가 있으면 상영지역 한정
+        (서울 = "0105001"), 없으면 전국. 키는 ``QueryKey("key")`` 로 params 에
+        병합돼 URL 문자열엔 안 들어간다(#144). 페이징 없음 — 응답은 top10 배열.
+        429/5xx·연결 오류는 core 가 backoff 재시도 후 HttpProblemError 로 던진다(#152);
+        KOBIS 는 KOPIS 식 자정 400 이슈가 없어 도메인 400 재시도는 두지 않는다.
+        """
+        params: dict = {"targetDt": target_dt}
+        if wide_area_cd:
+            params["wideAreaCd"] = wide_area_cd
+        auth = QueryKey("key", self.service_key)
+        resp = self.core.get(
+            f"{KOBIS_BASE}/searchDailyBoxOfficeList.json", params=params, auth=auth)
+        body = resp.content
+        data = json.loads(body.decode("utf-8", "ignore"))
+        if "faultInfo" in data:
+            raise KobisError(redact(f"KOBIS fault for {target_dt}: {data['faultInfo']}"))
+        rows = (data.get("boxOfficeResult") or {}).get("dailyBoxOfficeList") or []
+        return Page(index=1, body=body, row_count=len(rows), ext="json")
