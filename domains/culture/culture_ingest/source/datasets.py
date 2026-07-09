@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class Dataset:
     name: str  # 안정적인 슬러그 = 파티션 폴더명
-    source: str  # "kopis" | "seoul" | "kobis"
-    kind: str  # "kopis_list" | "kopis_detail" | "kopis_boxoffice" | "seoul_list" | "kobis_boxoffice"
-    # endpoint: KOPIS 경로(예: "pblprfr") 또는 서울 서비스명(예: "culturalEventInfo")
+    source: str  # "kopis" | "seoul" | "kcisa" | "kobis"
+    kind: str  # kopis_list|kopis_detail|kopis_boxoffice|seoul_list|kcisa_list|kobis_boxoffice
+    # endpoint: KOPIS 경로(예: "pblprfr") / 서울 서비스명(culturalEventInfo) / KCISA(area2) / KOBIS(searchDailyBoxOfficeList)
     endpoint: str
     load_pattern: str  # "interval_append"(구간) | "snapshot_append"(스냅샷) | "scd2_dim"(차원)
     # ※ scd2_dim 은 설계 의도 — silver v1(ASAC-DBT#50)은 최신본 dim 으로 보류(bronze 가
@@ -196,6 +196,24 @@ SEOUL_DATASETS = [
     ),
 ]
 
+# --- KCISA (XML) -- 한눈에보는문화정보(data.go.kr B553457)(#196) ------------------
+KCISA_DATASETS = [
+    Dataset(
+        name="kcisa_seoul_event",
+        source="kcisa",
+        kind="kcisa_list",
+        endpoint="area2",
+        load_pattern="snapshot_append",
+        title="KCISA 한눈에보는문화정보 — 서울 공연·전시(area2, sido=서울)",
+        base_params={"sido": "서울"},
+        row_tag="item",
+        min_rows=300,          # 실측 498 의 보수적 하한(#150 그물)
+        volume_drop_threshold=0.7,
+        key_fields=("seq", "title"),
+        note="현재 활성 스냅샷. 국립기관 최신 전시 구멍 보강(#196). 좌표 gpsX/gpsY 내장.",
+    ),
+]
+
 # --- KOBIS (JSON) -- 영화진흥위원회 일별 박스오피스(#197) ------------------------
 # 단일 GET 스냅샷(페이징 없음). 전국 + 서울 한정(wideAreaCd) 2벌 = 일 2요청.
 # "전국을 서울 소비 온도로" 프록시 오류를 상영지역 필터로 보정 — 진짜 서울 영화소비
@@ -231,7 +249,7 @@ KOBIS_DATASETS = [
     ),
 ]
 
-ALL_DATASETS = KOPIS_DATASETS + SEOUL_DATASETS + KOBIS_DATASETS
+ALL_DATASETS = KOPIS_DATASETS + SEOUL_DATASETS + KCISA_DATASETS + KOBIS_DATASETS
 BY_NAME = {ds.name: ds for ds in ALL_DATASETS}
 
 

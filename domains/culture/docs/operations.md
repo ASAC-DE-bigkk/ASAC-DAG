@@ -3,7 +3,8 @@
 ## 시크릿 (env)
 
 DAG는 키를 **환경변수에서만** 읽는다. `docker-compose`가 `sample/.env`를 (`env_file:`로) 모든
-Airflow 컨테이너에 주입: `KOPIS_SERVICE_KEY`, `SEOUL_API_KEY_CULT`, `KOBIS_SERVICE_KEY`, `R2_DEV_*`.
+Airflow 컨테이너에 주입: `KOPIS_SERVICE_KEY`, `SEOUL_API_KEY_CULT`, `PUBLIC_DATA_API_KEY_CULT`(KCISA #196), `KOBIS_SERVICE_KEY`(#197), `R2_DEV_*`.
+네 소스 키는 **모두 필수** — `build_clients`가 하나라도 없으면 `RuntimeError`(전 fetch_raw 실패).
 **키는 절대 커밋하지 않는다** — `.env`는 상위 레포에서 gitignore.
 
 ## 로컬 실행 (CLI · Airflow 없이)

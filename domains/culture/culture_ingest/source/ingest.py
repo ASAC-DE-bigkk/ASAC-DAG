@@ -34,7 +34,14 @@ from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_set
 from common.http.errors import HttpProblemError  # noqa: E402  (security 가 루트 보장 후)
 
 from . import config as culture_config
-from .clients import KobisClient, KopisClient, KopisError, SeoulClient
+from .clients import (
+    KCISA_ROWS,
+    KcisaClient,
+    KobisClient,
+    KopisClient,
+    KopisError,
+    SeoulClient,
+)
 from .datasets import ALL_DATASETS, BY_NAME, Dataset, select
 
 
@@ -45,7 +52,7 @@ class IngestOptions:
     date_from: str = ""  # 날짜창 엔드포인트용 시작일 YYYYMMDD
     date_to: str = ""  # 종료일 YYYYMMDD
     kopis_rows: int = 100  # KOPIS 목록 엔드포인트 페이지 크기
-    max_pages: int | None = None  # KOPIS 목록 페이지 상한 (None = 전체)
+    max_pages: int | None = None  # KOPIS·KCISA 목록 페이지 상한 (None = 전체)
     max_rows: int | None = None  # 서울 행 수 상한 (None = 전체)
     max_detail: int = 200  # KOPIS 상세 엔드포인트에서 크롤할 id 상한
     include_detail: bool = False  # kopis_detail 데이터셋 실행 여부
@@ -60,6 +67,7 @@ class Clients:
 
     kopis: KopisClient
     seoul: SeoulClient
+    kcisa: KcisaClient
     kobis: KobisClient
 
 
@@ -196,6 +204,19 @@ def ingest_dataset(
             for page in clients.seoul.list_pages(ds.endpoint, opts.max_rows):
                 filename = f"page-{page.index:06d}.json"
                 key = landing.write_page(prefix, filename, page.body, "json")
+                result.pages += 1
+                result.rows += page.row_count
+                result.bytes_written += len(page.body)
+                result.object_keys.append(key)
+                _record_page(page.body)
+
+        elif ds.kind == "kcisa_list":
+            # KCISA area2: PageNo 페이징(numOfrows=KCISA_ROWS)을 page-NNNN.xml 로 적재.
+            params = {**ds.base_params, "numOfrows": KCISA_ROWS}  # 매니페스트 기록용 요청 파라미터
+            for page in clients.kcisa.list_pages(ds.endpoint, ds.base_params, rows=KCISA_ROWS,
+                                                 max_pages=opts.max_pages):
+                filename = f"page-{page.index:04d}.xml"
+                key = landing.write_page(prefix, filename, page.body, "xml")
                 result.pages += 1
                 result.rows += page.row_count
                 result.bytes_written += len(page.body)
@@ -461,11 +482,13 @@ def build_clients(env_file: str | None = None) -> Clients:
         raise RuntimeError(f"Missing culture source keys: {', '.join(missing)}")
     register_secret(keys.kopis)
     register_secret(keys.seoul)
+    register_secret(keys.cult)
     register_secret(keys.kobis)
     refresh_env_secrets()  # R2 자격증명 등 이름 기반 env 시크릿도 함께 등록
     return Clients(
         kopis=KopisClient(keys.kopis),
         seoul=SeoulClient(keys.seoul),
+        kcisa=KcisaClient(keys.cult),
         kobis=KobisClient(keys.kobis),
     )
 

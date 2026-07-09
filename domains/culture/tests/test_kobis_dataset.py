@@ -80,7 +80,7 @@ def _run_kobis(tmp_path, name):
     ctx = RunContext(load_date="2026-07-09", ingest_ts="20260709T030000Z", run_id="t")
     landing = Landing(LocalSink(str(tmp_path)), "raw/culture", ctx)
     fake = _FakeKobis()
-    clients = Clients(kopis=None, seoul=None, kobis=fake)
+    clients = Clients(kopis=None, seoul=None, kcisa=None, kobis=fake)
     res = ingest_dataset(ds, clients, landing, IngestOptions())
     return res, fake
 

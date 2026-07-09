@@ -15,15 +15,17 @@ LANDING_ROOT = "raw/culture"
 
 KOPIS_KEY_ENV = "KOPIS_SERVICE_KEY"   # KOPIS 인증키 환경변수 이름
 SEOUL_KEY_ENV = "SEOUL_API_KEY_CULT"   # 서울 열린데이터 인증키 환경변수 이름
+CULT_KEY_ENV = "PUBLIC_DATA_API_KEY_CULT"   # 한눈에보는문화정보(KCISA, data.go.kr) 인증키
 KOBIS_KEY_ENV = "KOBIS_SERVICE_KEY"   # KOBIS(영화진흥위원회) 인증키 환경변수 이름(#197)
 
 
 @dataclass(frozen=True)
 class SourceKeys:
-    """세 소스의 인증키 묶음."""
+    """네 소스의 인증키 묶음."""
 
     kopis: str
     seoul: str
+    cult: str
     kobis: str
 
 
@@ -33,6 +35,7 @@ def source_keys(env_file: str | None = None) -> SourceKeys:
     return SourceKeys(
         kopis=pick(KOPIS_KEY_ENV, env),
         seoul=pick(SEOUL_KEY_ENV, env),
+        cult=pick(CULT_KEY_ENV, env),
         kobis=pick(KOBIS_KEY_ENV, env),
     )
 
@@ -44,6 +47,8 @@ def missing_keys(keys: SourceKeys) -> list[str]:
         missing.append(KOPIS_KEY_ENV)
     if not keys.seoul:
         missing.append(SEOUL_KEY_ENV)
+    if not keys.cult:
+        missing.append(CULT_KEY_ENV)
     if not keys.kobis:
         missing.append(KOBIS_KEY_ENV)
     return missing
