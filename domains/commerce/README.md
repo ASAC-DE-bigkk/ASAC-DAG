@@ -1,6 +1,6 @@
 # commerce — 서울 인허가(LOCALDATA) 수집·가공 번들
 
-서울 열린데이터광장 **인허가(LOCALDATA) 39종**을 `commerce` 도메인으로 수집·가공하는
+서울 열린데이터광장 **인허가(LOCALDATA) 152종(v1 139 + v2 환경 13)**을 `commerce` 도메인으로 수집·가공하는
 Airflow 카테고리 번들이다. **서빙 DB·외부 매니페스트 없이** run_id 폴더의 마커로 수집 결과·이력을
 관리한다. 코드·설정·테스트·문서·규약·런타임 인자(`.env.commerce`)가 **이 폴더 안에 자립**한다.
 
@@ -103,7 +103,7 @@ dags/
       │  ├─ common/               # settings · env · storage · paths · schemas · hashing · registry · notify(알림 IF)
       │  ├─ bronze/               # clients · validators · bronze_tasks(NDJSON+마커) · markers(재수집) · resolve
       │  └─ silver/               # validators · silver_tasks
-      ├─ config/                  # dataset_registry.yaml(인허가 39종) · non_license_datasets.yaml(격리, 로드 X)
+      ├─ config/                  # dataset_registry.yaml(152종: v1 139 + v2 13) · non_license_datasets.yaml(격리, 로드 X)
       ├─ tests/                   # test_clients · test_bronze_tasks · test_silver_tasks · test_markers · test_notify
       ├─ docs/                    # 주제별 폴더: architecture/ · configuration/ · operations/ · pipeline/(+bronze/)
       ├─ requirements.txt         # 번들 런타임 의존성 명세(boto3/pandas/pyarrow 등 — 이미지 기본 포함)

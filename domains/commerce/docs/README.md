@@ -11,7 +11,7 @@ commerce 카테고리 문서 모음. 코드·설정·테스트·문서·규약(C
 | [architecture/](architecture/) | 설계·구조 규약 — 아키텍처 · 저장 레이아웃 · 폴더 구성(heritage) | [architecture/README.md](architecture/README.md) |
 | [configuration/](configuration/) | 설정·환경 — 실행 인자/환경변수 · 환경(local/r2) 분리 | [configuration/README.md](configuration/README.md) |
 | [operations/](operations/) | 운영·배포 — 런북 · local/dev/prod 배포 | [operations/README.md](operations/README.md) |
-| [pipeline/](pipeline/) | 파이프라인(도메인) — 공통 계약 · 원천 수집(bronze) 분석 | [pipeline/README.md](pipeline/README.md) |
+| [pipeline/](pipeline/) | 파이프라인 — 데이터 모델 · 레이어별(raw/bronze/silver/gold) | [pipeline/README.md](pipeline/README.md) |
 | [security/](security/) | 보안 — 시크릿 마스킹 · 입력검증 · **단일 포인트 종합검증** | [security/README.md](security/README.md) |
 
 ## 빠른 진입
@@ -19,8 +19,8 @@ commerce 카테고리 문서 모음. 코드·설정·테스트·문서·규약(C
 - **컨텍스트 분리 진입점**: [../Share.md](../Share.md)
 - **작업 경계 + 규약**: [../CLAUDE.md](../CLAUDE.md) (Working Scope·§19)
 - **정상 동작 조건(환경변수)**: [configuration/configuration.md](configuration/configuration.md)
+- **데이터 모델(레이어 계보·테이블·139→152 공통화)**: [pipeline/data-model.md](pipeline/data-model.md)
 - **파이프라인 계약(컬럼·마커·카탈로그)**: [pipeline/common_info.md](pipeline/common_info.md)
-- **silver/gold 적재 계획**: [pipeline/silver-gold-load-plan.md](pipeline/silver-gold-load-plan.md)
 - **폴더 구성 규약(heritage)**: [architecture/project_setting.md](architecture/project_setting.md)
 - **보안 종합검증(단일 포인트)**: [security/security.md](security/security.md) · `python -m security`
 - **변경 이력(대단위 변경 기록)**: [../change-log.md](../change-log.md)
@@ -32,8 +32,11 @@ docs/
 ├─ architecture/   project_setting.md · architecture.md · storage.md
 ├─ configuration/  configuration.md · environments.md
 ├─ operations/     operations.md · deploy-local.md · deploy-dev.md · deploy-prod.md
-├─ pipeline/       common_info.md · medallion-implementation-plan.md · silver-gold-load-plan.md
-│  └─ bronze/      pagination-ordering.md · api-call-volume.md · status-tracking-model.md · uncollectable-datasets.md
+├─ pipeline/       data-model.md · common_info.md · non-license-datasets.md · (역사: medallion-implementation-plan.md · silver-gold-load-plan.md)
+│  ├─ raw/         api-field-coverage.md · api-call-volume.md · pagination-ordering.md · status-tracking-model.md · incremental-sort-diff.md · uncollectable-datasets.md · resolve-worklist.md · caveats.md
+│  ├─ bronze/      README.md (Iceberg 적재: 테이블·엔진·manifest·유지보수)
+│  ├─ silver/      README.md (dbt 모델·v1/v2 통합·보강·증분)
+│  └─ gold/        README.md (미구현)
 └─ security/       security.md · adoption.md
 ```
 

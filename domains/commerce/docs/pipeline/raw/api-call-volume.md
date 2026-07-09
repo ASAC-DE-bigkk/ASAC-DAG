@@ -1,4 +1,4 @@
-# bronze — API 호출량 산정 (수집 1회 기준)
+# raw — API 호출량 산정 (수집 1회 기준)
 
 > 산정일 2026-06-30 · 페이지 크기 `SEOUL_PAGE_SIZE=1000`(서울 상한) · 실측 키로
 > `list_total_count` 확보(전체 건수는 5건 제한과 무관하게 응답에 포함됨)
@@ -18,12 +18,17 @@ calls(dataset) = ceil(list_total_count / SEOUL_PAGE_SIZE)   # SEOUL_PAGE_SIZE = 
 `check_api_key` 게이트가 **1회**(LOCALDATA_072404 `1/1`) 추가된다.
 
 > **job 단위 = API 단위**: 데이터셋(LOCALDATA API) 1개 = 매핑 태스크 `ingest_one[<short>]`
-> 1 인스턴스 = job 1개. 아래 39행 = 39 job. (category 는 그룹 라벨일 뿐 job 수와 무관.)
+> 1 인스턴스 = job 1개. **현재 대상 152종(v1 139 + v2 13) = 152 job**. 아래 표는 39종 시점
+> 실측이라 39행 = 39 job. (category 는 그룹 라벨일 뿐 job 수와 무관.)
 
-## API별 호출량 (수집 대상 39종 전체)
+## API별 호출량 (39종 시점 실측 · historical)
 
-39종 모두 `service_name`(LOCALDATA 코드)이 채워져 **전부 수집 대상**이다(2026-06-30 포털 정본
-코드로 14종 추가 입력, [uncollectable-datasets.md](uncollectable-datasets.md)). 호출량 많은 순:
+> 아래 표·총계는 **39종 시점 실측(2026-06~07)** 이다. 현재 수집 대상은 **152종(v1 139 + v2 13)**
+> 이며, 152종 총량은 여기서 산술하지 말고 **registry 기준으로 재측정**한다(문서 하단 재산정 레시피,
+> `enabled_for_schedule("daily")`).
+
+(당시) 39종 모두 `service_name`(LOCALDATA 코드)이 채워져 **전부 수집 대상**이었다(2026-06-30 포털
+정본 코드로 14종 추가 입력, [uncollectable-datasets.md](uncollectable-datasets.md)). 호출량 많은 순:
 
 | short | service_name | 주기 | 전체 건수 | 호출 수 |
 |---|---|---|---:|---:|
@@ -68,7 +73,7 @@ calls(dataset) = ceil(list_total_count / SEOUL_PAGE_SIZE)   # SEOUL_PAGE_SIZE = 
 | tour_entertainment_bar | LOCALDATA_072402 | daily | 2 | **1** |
 | **합계** | **(39종)** | | **1,342,222** | **1,360** |
 
-## 전체 호출량
+## 전체 호출량 (39종 시점 실측)
 
 ```text
 데이터 호출       1,360
@@ -77,10 +82,11 @@ calls(dataset) = ceil(list_total_count / SEOUL_PAGE_SIZE)   # SEOUL_PAGE_SIZE = 
 1회 전체 수집     1,361 회
 ```
 
-- 39종 모두 `daily` 라 **`commerce_collect_raw` 1회 = 1,361 회**. `monthly`/`irregular` 주기는
+- 152종 모두 `daily` 라 **`commerce_collect_raw` 1회에 전 종을 수집**한다. 위 **1,361 회는
+  39종 시점 실측 총량**이며 152종 총량은 registry 기준 재측정한다. `monthly`/`irregular` 주기는
   인허가 대상이 0종이라 **DAG 비활성**(인허가 외 2종 격리: [../non-license-datasets.md](../non-license-datasets.md)).
 - 인허가는 과거 시점 스냅샷이 없어 **매 `observed_date` 마다 전체 재수집** →
-  일 단위로 약 **1,361 회/일**, 월 약 **~40,830 회/월**.
+  일 단위로 약 **1,361 회/일**, 월 약 **~40,830 회/월**(둘 다 39종 시점 실측 — 152종은 재측정).
 - 매 실행이 전체 수집(스킵 없음) → 같은 날 두 번 돌리면 호출도 2배. bronze 는 `run_id` 폴더로 분리.
 
 ## 비용 분포 / 주의
@@ -88,7 +94,7 @@ calls(dataset) = ceil(list_total_count / SEOUL_PAGE_SIZE)   # SEOUL_PAGE_SIZE = 
 - **general_restaurant 한 종이 535/1,360 ≈ 39%** 를 차지. 상위 3종(072404·072219·072405)이
   836/1,360 ≈ **61%**. 부하/한도 관리는 이 상위 종을 기준으로 본다.
 - **건수는 매일 변한다**(신규 인허가/폐업 반영) → 호출 수도 ±1 수준에서 변동. 위 표는
-  2026-06-30 실측.
+  2026-06-30 실측(39종 시점).
 - **재시도**: 태스크 `retries=2` → 실패 페이지는 최대 3회까지. 위 수치는 무실패 기준.
 - **호출 횟수 제한**: 일반(인증키) API 는 **호출 횟수 제한이 없는 것으로 확인**됨 → 횟수 캡
   없이 끝까지 순회한다(`SEOUL_MAX_PAGES` 미설정=무제한). 부분 수집이 필요한 개발 상황에서만

@@ -64,7 +64,7 @@ RDNWHLADDR, RDNPOSTNO, LASTMODTS, UPDATEGBN, UPDATEDT, X, Y
 - **준공통 다음 빈도(여러 업종군 공유)**: `CLGSTDT`/`CLGENDDT`(휴업), `APVCANCELYMD`(인허가취소),
   `SITEAREA`(면적), `UPTAENM`(업태) — `schemas.py`의 `NEAR_COMMON_COLUMNS` 로 optional 처리 중.
 - 전체 per-dataset 필드 목록은 §5 방법으로 재현(레포에 원자료는 두지 않음). 보건 대분류의 상세 추출은
-  dbt `silver_license_detail_health`(#80)로 컬럼화됨 — [dbt dataset-columns.md](../../../../../dbt/domains/commerce/docs/dataset-columns.md).
+  dbt `silver_license_detail_health`(#80)로 컬럼화됨 — [dbt dataset-columns.md](../../../../../../dbt/domains/commerce/docs/dataset-columns.md).
 
 ## 4. 식별값 유효성 — 기존 bronze/silver 라인 그대로 사용 가능
 

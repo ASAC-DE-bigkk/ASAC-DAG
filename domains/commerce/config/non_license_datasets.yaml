@@ -16,4 +16,4 @@ non_license_datasets:
     category: "food"
     schedule: "irregular"
     service_name: "SeoulFoodHygieneBizHealthImport"   # 53컬럼·~119만건, 비-LOCALDATA 스키마
-    reason: "'현황' 집계형. 봉투는 호출되나 공통 19컬럼(MGTNO 등) 없음 → silver 정규화 부적합."
+    reason: "'현황' 집계형. 봉투는 호출되나 LOCALDATA 공통 컬럼(MGTNO 등) 없음 → silver 정규화 부적합."

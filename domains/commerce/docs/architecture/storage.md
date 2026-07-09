@@ -27,8 +27,12 @@ bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **연/월/�
 {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
 {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커(JSON, 리니지 포함)
 {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
-{prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet                       # 공통 19컬럼 정규화
+{prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet                       # [DEPRECATED] 구 R2 parquet silver(152종 공통=v1 공통 14 + v2 별칭 통합) — 현행 silver 는 dbt/Iceberg 테이블
 ```
+
+> **silver 는 현재 R2 parquet 이 아니라 dbt/Iceberg 테이블**이다(schema `commerce`:
+> `silver_license_history`/`silver_license_current`/`silver_license_detail_health`). 위 parquet 경로는
+> 구현 이력용(legacy) — v1/v2 필드 통합은 silver 의 `lf()` 매크로가 담당한다.
 
 예시(2026-06-30 14:30:25.123 KST 실행):
 

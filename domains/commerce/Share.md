@@ -27,9 +27,9 @@
 
 | 자료 | 내용 |
 |---|---|
-| [docs/common_info.md](docs/pipeline/common_info.md) | 공통 19컬럼·`UPDATEDT` 검증·저장/마커 계약·39종 카탈로그·재수집(backfill)·서비스명 채우기 |
-| [docs/silver-gold-load-plan.md](docs/pipeline/silver-gold-load-plan.md) | silver/gold 적재 계획 — bronze_run_id marker 증분, DAG 경계, gold 포장 |
-| [docs/bronze/](docs/pipeline/bronze/) | 원천 수집 실호출 분석 — 페이지네이션 정렬(컬럼 정렬 없음) · API 호출량(1,361회/수집, 39종) · 영업상태 추적 모델(1행 in-place) · 수집 불가 원인·해소(39종 전 종 해소) |
+| [docs/data-model.md](docs/pipeline/data-model.md) | **데이터 모델** — 레이어 계보·조인키·테이블 정의·**139(v1)→152 공통화**(bronze schema-on-read vs silver `lf()` 병합) |
+| [docs/common_info.md](docs/pipeline/common_info.md) | API 공통 컬럼 계약(152종: v1 공통 14+준공통 5+v2 별칭)·식별값·저장/마커 계약 |
+| [docs/pipeline/](docs/pipeline/README.md) | 레이어별 — [raw/](docs/pipeline/raw/README.md)(수집) · [bronze/](docs/pipeline/bronze/README.md)(Iceberg) · [silver/](docs/pipeline/silver/README.md)(dbt) · [gold/](docs/pipeline/gold/README.md)(미구현) |
 | [docs/README.md](docs/README.md) | 카테고리 코드 위치·문서 인덱스·빠른 실행 |
 | [config/dataset_registry.yaml](config/dataset_registry.yaml) | 수집 대상 단일 진실 공급원 |
 

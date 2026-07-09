@@ -1,4 +1,4 @@
-# bronze 증분화 — UPDATEDT·LASTMODTS 정렬 · 검증키 · diff (feat/58, #193)
+# raw 증분화 — UPDATEDT·LASTMODTS 정렬 · 검증키 · diff (feat/58, #193)
 
 매 수집이 전체 데이터를 다시 저장하던 것을, **정렬본 기준으로 전날과 다른 신규 row만** 저장하도록
 바꾼다. 코드: [../../../include/bronze/incremental.py](../../../include/bronze/incremental.py) ·
