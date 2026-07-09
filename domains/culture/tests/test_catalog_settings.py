@@ -81,3 +81,27 @@ def test_build_catalog_settings_rejects_bad_target(_dev_env):
     from culture_ingest.common.config import build_catalog_settings
     with pytest.raises(ValueError):
         build_catalog_settings("prd")
+
+
+# ── build_warehouse 엔진 디스패치 (#203) ─────────────────────────────────────
+
+def test_build_warehouse_default_is_pyiceberg(_dev_env, monkeypatch):
+    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    from culture_ingest.common.warehouse import PyicebergBronzeWarehouse
+    from culture_ingest.source.ingest import build_warehouse
+    wh = build_warehouse("dev")
+    assert isinstance(wh, PyicebergBronzeWarehouse)
+
+
+def test_build_warehouse_trino_rollback_lever(_dev_env):
+    from culture_ingest.common.warehouse import BronzeWarehouse, PyicebergBronzeWarehouse
+    from culture_ingest.source.ingest import build_warehouse
+    wh = build_warehouse("dev", engine="trino")
+    assert isinstance(wh, BronzeWarehouse)
+    assert not isinstance(wh, PyicebergBronzeWarehouse)
+
+
+def test_build_warehouse_rejects_unknown_engine(_dev_env):
+    from culture_ingest.source.ingest import build_warehouse
+    with pytest.raises(ValueError, match="engine"):
+        build_warehouse("dev", engine="spark")

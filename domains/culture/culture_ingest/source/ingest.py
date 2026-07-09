@@ -23,13 +23,18 @@ import requests
 from culture_ingest.common.checks import evaluate_landing, extract_record_fields
 from culture_ingest.common.config import (
     RunContext,
+    build_catalog_settings,
     build_r2_settings,
     missing_r2,
 )
 from culture_ingest.common.landing import DatasetResult, Landing, LocalSink, R2Sink
 from culture_ingest.common.records import parse_records
 from culture_ingest.common.security import redact, refresh_env_secrets, register_secret
-from culture_ingest.common.warehouse import BronzeWarehouse, build_warehouse_settings
+from culture_ingest.common.warehouse import (
+    BronzeWarehouse,
+    PyicebergBronzeWarehouse,
+    build_warehouse_settings,
+)
 
 from common.http.errors import HttpProblemError  # noqa: E402  (security 가 루트 보장 후)
 
@@ -512,9 +517,17 @@ def build_landing(
     return Landing(R2Sink(settings), root, ctx)
 
 
-def build_warehouse(target: str = "dev") -> BronzeWarehouse:
-    """bronze Iceberg 적재용 Trino 웨어하우스(환경변수 기반)."""
-    return BronzeWarehouse(build_warehouse_settings(target))
+ENGINES = ("pyiceberg", "trino")  # trino = 전환기 롤백 레버(#203) — 일몰 계획은 operations.md
+
+
+def build_warehouse(target: str = "dev", engine: str = "pyiceberg"):
+    """bronze Iceberg 적재 웨어하우스. 기본 pyiceberg(커밋 1회), trino 는 롤백 레버."""
+    if engine not in ENGINES:
+        raise ValueError(f"engine must be one of {ENGINES}, got {engine!r}")
+    settings = build_warehouse_settings(target)
+    if engine == "trino":
+        return BronzeWarehouse(settings)
+    return PyicebergBronzeWarehouse(settings, build_catalog_settings(target))
 
 
 def load_bronze_from_raw(
@@ -570,14 +583,15 @@ def load_bronze(
     *,
     target: str = "dev",
     env_file: str | None = None,
+    engine: str = "pyiceberg",
 ) -> dict[str, int]:
-    """R2 싱크·Trino 웨어하우스를 만들어 ``load_bronze_from_raw``를 실행 (DAG/CLI 공용)."""
+    """R2 싱크·웨어하우스를 만들어 ``load_bronze_from_raw``를 실행 (DAG/CLI 공용)."""
     settings = build_r2_settings(target, env_file)
     missing = missing_r2(settings)
     if missing:
         raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
     return load_bronze_from_raw(
-        ctx, summaries, sink=R2Sink(settings), warehouse=build_warehouse(target)
+        ctx, summaries, sink=R2Sink(settings), warehouse=build_warehouse(target, engine)
     )
 
 
