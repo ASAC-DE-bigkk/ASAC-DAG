@@ -15,11 +15,11 @@ import xml.etree.ElementTree as ET
 def parse_records(source: str, body: bytes, row_tag: str, endpoint: str) -> list[dict]:
     """페이지 1장에서 레코드 dict 목록을 뽑는다.
 
-    * KOPIS(XML): ``<row_tag>`` 요소마다 ``{자식태그: 텍스트}`` dict.
+    * KOPIS·KCISA(XML): ``<row_tag>`` 요소마다 ``{자식태그: 텍스트}`` dict.
     * 서울(JSON): 서비스 컨테이너의 ``row`` 배열(이미 dict 목록).
     """
     try:
-        if source == "kopis":
+        if source in ("kopis", "kcisa"):
             root = ET.fromstring(body)
             out: list[dict] = []
             for elem in root.iter(row_tag):
