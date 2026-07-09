@@ -1,13 +1,15 @@
-"""bronze Iceberg 적재 — Trino HTTP API 경유.
+"""bronze Iceberg 적재 — 두 엔진: 기본 pyiceberg, Trino HTTP API는 DDL·롤백 레버.
 
 R2의 culture raw 객체를 파싱한 레코드를 ``<catalog>.<schema>.bronze_<dataset>``
-Iceberg 테이블로 ``INSERT`` 한다. 메인 Airflow 파이썬에 ``trino`` 클라이언트가
-없으므로(이미지가 dbt-trino를 별도 venv에 둠) 표준 Trino **HTTP API**(`requests`)를
-직접 쓴다 — 형제 도메인의 ``trino.dbapi`` 사용과 기능적으로 동일하다.
+Iceberg 테이블에 적재한다. 기본 엔진은 ``PyicebergBronzeWarehouse`` — R2 Data
+Catalog(Iceberg REST)에 delete+append 트랜잭션으로 **커밋 1회** 직접 write한다(#203).
+``BronzeWarehouse``는 표준 Trino **HTTP API**(`requests`, 메인 Airflow 파이썬에
+``trino`` 클라이언트가 없어 직접 호출)로 DDL·count를 맡고, pyiceberg 경로 장애 시
+``engine=trino`` 롤백 레버(INSERT 기반, 느림)로 쓰인다.
 
 경계: 멘티는 자기 도메인 스키마에만 쓴다 → 기본 스키마 ``culture``
 (`iceberg.culture.bronze_*`). dev/prod는 카탈로그로 가른다(계획안 Slide 10).
-적재는 ``ingest_ts`` 파티션 기준 delete-then-insert로 **멱등**하게 만든다.
+적재는 ``ingest_ts`` 파티션 기준 delete-then-insert(또는 delete+append)로 **멱등**하게 만든다.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -229,3 +232,123 @@ class BronzeWarehouse:
             sql += f" WHERE ingest_ts = {_lit(ingest_ts)}"
         rows = self.client.execute(sql)
         return int(rows[0][0]) if rows else 0
+
+
+def _bronze_rows(ds, ctx, records: list) -> list[dict]:
+    """(raw_object_key, page_no, record) 목록 -> bronze 11컬럼 dict 행 목록.
+
+    값 구성은 Trino 경로(load)와 동일: record_json 은 ensure_ascii=False,
+    collected_at 은 tz 없는 UTC(테이블 timestamp(6) 과 일치).
+    """
+    collected_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    return [
+        {
+            "dataset": ds.name,
+            "source": ds.source,
+            "endpoint": ds.endpoint,
+            "record_seq": seq,
+            "record_json": json.dumps(record, ensure_ascii=False),
+            "raw_object_key": raw_object_key,
+            "page_no": page_no,
+            "load_date": ctx.load_date,
+            "ingest_ts": ctx.ingest_ts,
+            "run_id": ctx.run_id,
+            "collected_at": collected_at,
+        }
+        for seq, (raw_object_key, page_no, record) in enumerate(records)
+    ]
+
+
+def _arrow_table(rows: list[dict]):
+    """행 dict 목록 -> 기존 bronze 테이블 스키마와 정확히 일치하는 Arrow 테이블.
+
+    record_seq=int32(Trino integer), collected_at=timestamp(us), 나머지 string.
+    pyarrow 는 이미지 전용 — lazy import 로 파싱 경로를 보호한다.
+    """
+    import pyarrow as pa
+
+    types = {"record_seq": pa.int32(), "collected_at": pa.timestamp("us")}
+    fields = []
+    arrays = []
+    for column in _COLUMNS:
+        arrow_type = types.get(column, pa.string())
+        fields.append(pa.field(column, arrow_type))
+        arrays.append(pa.array([row[column] for row in rows], type=arrow_type))
+    return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+
+class PyicebergBronzeWarehouse:
+    """culture bronze 적재 — 쓰기만 pyiceberg(delete+append), DDL·count 는 Trino 위임.
+
+    Trino INSERT VALUES 는 SQL 텍스트로 데이터를 날라 800KB 배치 = 커밋 1개가
+    구조적(216커밋/일·26분, #203). 여기서는 트랜잭션 하나(delete+append)로
+    데이터셋당 커밋 1회. ensure_table 을 Trino 에 남겨 기존 테이블과 타입
+    드리프트가 없다(weather 선례). pyiceberg import 는 전부 lazy — 이미지에
+    없어도 DAG 파싱은 살아야 한다.
+    """
+
+    MAX_COMMIT_ATTEMPTS = 4  # culture_maintenance 스냅샷 정리와의 낙관적 잠금 경합 대비
+
+    def __init__(self, settings: WarehouseSettings, catalog, *, table_loader=None, sleep=time.sleep):
+        self._trino = BronzeWarehouse(settings)
+        self.catalog = catalog
+        self._table_loader = table_loader or self._load_table
+        self._sleep = sleep
+
+    # ── Trino 위임 (인터페이스 유지 — FakeWarehouse/기존 호출부와 동일 표면) ──
+    def qualified(self, dataset: str) -> str:
+        return self._trino.qualified(dataset)
+
+    def ensure_table(self, dataset: str) -> str:
+        return self._trino.ensure_table(dataset)
+
+    def count(self, dataset: str, ingest_ts: str | None = None) -> int:
+        return self._trino.count(dataset, ingest_ts)
+
+    # ── pyiceberg 쓰기 경로 ────────────────────────────────────────────────
+    def _load_table(self, dataset: str):
+        from pyiceberg.catalog.rest import RestCatalog
+
+        catalog = RestCatalog(
+            "culture",
+            uri=self.catalog.uri,
+            warehouse=self.catalog.warehouse,
+            token=self.catalog.token,
+            **{
+                "s3.endpoint": self.catalog.s3_endpoint,
+                "s3.access-key-id": self.catalog.s3_access_key_id,
+                "s3.secret-access-key": self.catalog.s3_secret_access_key,
+                "s3.region": self.catalog.s3_region,
+            },
+        )
+        return catalog.load_table(f"{self._trino.s.schema}.bronze_{dataset}")
+
+    def load(self, ds, ctx, records: list, *, chunk_rows: int = 50_000) -> int:
+        """레코드를 bronze 에 멱등 적재(같은 ingest_ts 삭제 후 append) — 커밋 1회.
+
+        청크는 Arrow 변환 메모리 안전용(세종 88MB)일 뿐, 같은 트랜잭션 안이라
+        커밋 수와 무관하다. 커밋 전 실패 = 테이블 무변화(부분 적재 없음).
+        """
+        if not records:
+            return 0
+        self.ensure_table(ds.name)
+        from pyiceberg.exceptions import CommitFailedException
+        from pyiceberg.expressions import EqualTo
+
+        rows = _bronze_rows(ds, ctx, records)
+        table = self._table_loader(ds.name)
+        for attempt in range(1, self.MAX_COMMIT_ATTEMPTS + 1):
+            try:
+                with table.transaction() as txn:
+                    txn.delete(EqualTo("ingest_ts", ctx.ingest_ts))
+                    for start in range(0, len(rows), chunk_rows):
+                        txn.append(_arrow_table(rows[start:start + chunk_rows]))
+                return len(rows)
+            except CommitFailedException:
+                if attempt >= self.MAX_COMMIT_ATTEMPTS:
+                    raise
+                try:
+                    table.refresh()
+                except Exception:  # noqa: BLE001 -- refresh 실패는 재시도가 흡수
+                    pass
+                self._sleep(min(2 ** (attempt - 1), 30.0))

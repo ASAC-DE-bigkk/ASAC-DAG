@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))  # 한국 표준시 (UTC+9)
@@ -122,3 +122,61 @@ def landing_prefix(root: str, source: str, dataset: str, ctx: RunContext) -> str
         f"{root}/{source}/{dataset}"
         f"/load_date={ctx.load_date}/ingest_ts={ctx.ingest_ts}"
     )
+
+
+@dataclass(frozen=True)
+class CatalogSettings:
+    """R2 Data Catalog(Iceberg REST) 접속 설정 — pyiceberg 직접 write 용(#203).
+
+    Trino와 같은 카탈로그를 보므로(버킷당 1개) 여기 쓴 데이터를 Trino/dbt가 그대로 읽는다.
+    """
+
+    target: str  # "dev" | "prod"
+    uri: str
+    warehouse: str
+    # repr/print 표면에서 시크릿 제외 — redact() 미경유 출력(로그·디버거 등) 방어.
+    token: str = field(repr=False)
+    s3_endpoint: str
+    s3_access_key_id: str
+    s3_secret_access_key: str = field(repr=False)
+    s3_region: str
+
+
+def build_catalog_settings(target: str = "dev", env_file: str | None = None) -> CatalogSettings:
+    """``target``에 맞는 R2 Data Catalog 설정을 해석하고 시크릿을 redactor에 등록.
+
+    dev -> ``R2_DEV_DATA_CATALOG_*``, prod -> ``R2_DATA_CATALOG_*``. s3 자격은
+    ``build_r2_settings``와 동일 원천을 재사용한다. 필수값이 비면 이름을 적어
+    RuntimeError — 자정런이 원인 불명으로 죽지 않게 사전 점검이 즉시 말해준다.
+    """
+    from common.security.redaction import register_secret
+
+    target = normalize_target(target)
+    env = load_env_file(env_file)
+    prefix = "R2_DEV_DATA_CATALOG_" if target == "dev" else "R2_DATA_CATALOG_"
+    r2 = build_r2_settings(target, env_file)
+    settings = CatalogSettings(
+        target=target,
+        uri=pick(prefix + "URI", env),
+        warehouse=pick(prefix + "WAREHOUSE", env),
+        token=pick(prefix + "TOKEN", env),
+        s3_endpoint=r2.endpoint,
+        s3_access_key_id=r2.access_key_id,
+        s3_secret_access_key=r2.secret_access_key,
+        s3_region="auto",
+    )
+    missing = [
+        name
+        for name, value in (
+            (prefix + "URI", settings.uri),
+            (prefix + "WAREHOUSE", settings.warehouse),
+            (prefix + "TOKEN", settings.token),
+        )
+        if not value
+    ] + missing_r2(r2)
+    if missing:
+        raise RuntimeError(f"Missing R2 Data Catalog config: {', '.join(missing)}")
+    # 카탈로그 토큰·s3 secret 은 에러 표면(HTTP 401 본문 등)에 박힐 수 있다 — literal 등록(#144).
+    register_secret(settings.token)
+    register_secret(settings.s3_secret_access_key)
+    return settings

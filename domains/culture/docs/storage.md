@@ -22,7 +22,8 @@ raw/culture/<소스>/<데이터셋>/load_date=<KST>/ingest_ts=<UTC>/page-NNNN.<x
   상시 경로다. bronze만 실패한 run의 복구 → [operations.md](operations.md).
 - 이름: `iceberg.culture.bronze_<dataset>` (dev는 `iceberg_dev.culture.bronze_<dataset>`).
 - 포맷 Parquet, 파티션 `load_date`. 레코드 1건 = 1행, 원본은 `record_json`에 보존.
-- 생성/적재 코드: [`common/warehouse.py`](../culture_ingest/common/warehouse.py) (`BronzeWarehouse`).
+- 생성/적재 코드: [`common/warehouse.py`](../culture_ingest/common/warehouse.py)
+  (쓰기 `PyicebergBronzeWarehouse` 기본 · DDL/count·롤백 `BronzeWarehouse`, #203).
 
 | 컬럼 | 타입 | 의미 |
 |------|------|------|

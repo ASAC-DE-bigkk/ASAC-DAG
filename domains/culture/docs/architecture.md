@@ -101,7 +101,7 @@ raw와 bronze Iceberg를 둘 다 남기는 이유: raw는 재처리용 **원본 
 | [`culture_ingest/common/http.py`](../culture_ingest/common/http.py) | 페이지 묶음 `Page`. 전송(재시도·rate limit)은 루트 `common/http`(#78) 소비(#152). |
 | [`culture_ingest/common/landing.py`](../culture_ingest/common/landing.py) | R2/로컬 싱크, 페이지·`_manifest.json` 기록, 결과 `DatasetResult`. |
 | [`culture_ingest/common/checks.py`](../culture_ingest/common/checks.py) | 수집 계약 v0 검증(완전성·드리프트·freshness). → [reliability.md](reliability.md) |
-| [`culture_ingest/common/warehouse.py`](../culture_ingest/common/warehouse.py) | bronze Iceberg 테이블 생성/적재(`BronzeWarehouse`, Trino HTTP). → [storage.md](storage.md) |
+| [`culture_ingest/common/warehouse.py`](../culture_ingest/common/warehouse.py) | bronze Iceberg 적재 — 쓰기는 pyiceberg `delete+append`(커밋 1회, `PyicebergBronzeWarehouse`, #203), DDL·count 는 Trino HTTP(`BronzeWarehouse`, 롤백 레버 겸용). → [storage.md](storage.md) |
 | [`culture_ingest/source/config.py`](../culture_ingest/source/config.py) | 적재 루트 `raw/culture`, 소스 API 키 로딩. |
 | [`culture_ingest/source/clients.py`](../culture_ingest/source/clients.py) | KOPIS(XML)·서울(JSON) 클라이언트 — `common.http` 합성(#152), 원본 bytes만 받음. 페이징·probe(#147)·400 판정(#146)은 여기(도메인 소관). |
 | [`culture_ingest/source/datasets.py`](../culture_ingest/source/datasets.py) | 12데이터셋 레지스트리(단일 진실 원천 — 데이터셋 추가 = 여기 한 줄). → [sources.md](sources.md) |

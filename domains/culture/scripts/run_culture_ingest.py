@@ -45,6 +45,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-detail", type=int, default=200)
     p.add_argument("--include-detail", action="store_true")
     p.add_argument("--write-iceberg", action="store_true", help="R2 적재 후 bronze Iceberg에도 적재(fetch→load 순차 실행)")
+    p.add_argument("--engine", default="pyiceberg", choices=["pyiceberg", "trino"],
+                   help="bronze 적재 엔진 (trino = 롤백 레버, #203)")
     p.add_argument("--dry-run", action="store_true", help="로컬 디렉토리에 기록, R2 건너뜀")
     p.add_argument("--local-dir", default="./_dryrun")
     p.add_argument("--run-id", default="manual")
@@ -84,7 +86,8 @@ def main(argv=None) -> int:
     if args.write_iceberg and not args.dry_run:
         try:
             loaded = load_bronze(
-                ctx, [r.summary() for r in results], target=args.target, env_file=args.env_file
+                ctx, [r.summary() for r in results],
+                target=args.target, env_file=args.env_file, engine=args.engine,
             )
             for r in results:
                 r.iceberg_rows = loaded.get(r.name, 0)

@@ -3,6 +3,15 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-09 — bronze pyiceberg 직접 write 전환 (#203)
+
+- **#203 bronze pyiceberg 직접 write 전환** (2026-07-09): Trino `INSERT VALUES`
+  (SQL 텍스트 운반·800KB 배치 상한 → 216커밋/일·load_bronze 26분)를 pyiceberg
+  `delete+append` 트랜잭션(데이터셋당 커밋 1회)으로 교체. `engine` 파라미터
+  (기본 pyiceberg, trino=롤백 레버 — 자정런 7회 연속 성공 후 일몰), R2 Data
+  Catalog REST 설정 `build_catalog_settings`(+토큰 redaction #144). 스냅샷
+  216→12/일 — culture_maintenance 가 지우던 옛 metadata.json 의 생산자 제거.
+
 ## 2026-07-09 — KOBIS 일별 박스오피스 bronze 편입 (#197)
 
 - **신규 소스 `kobis`** — 영화진흥위원회 오픈API `searchDailyBoxOfficeList`(JSON,
@@ -60,8 +69,8 @@
   로그 + 데이터셋별 완료 로그(행수·소요) 추가 — 세종 88MB≈13분 병목이 눈에 보인다.
   → `common/warehouse.py` · `source/ingest.py`
 - **속도 개선은 #203(pyiceberg)에 위임** — 병렬화(ThreadPool, 26분→~13분)를 초안에
-  넣었다가 뺐다: pyiceberg 직접 write(#203)가 26분→2~3분으로 병렬화를 무의미하게
-  만든다(엔진당 데이터셋 적재가 이미 수 초). 버릴 코드를 안 만들고, 이 PR 은 어느
+  넣었다가 뺐다: pyiceberg 직접 write(#203)가 26분→약 5분(dev 실측 303s, 2026-07-09)으로
+  병렬화를 무의미하게 만든다(엔진당 데이터셋 적재가 이미 수 초). 버릴 코드를 안 만들고, 이 PR 은 어느
   엔진에서도 살아남는 **관측(로그)** 만 남긴다. #203 은 이미지 의존성이 멘토 게이트.
 
 ## 2026-07-08 — 전멸 run 정직성: report 가 상류 전멸 시 스스로 실패 (#185)
