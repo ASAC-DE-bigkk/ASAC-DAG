@@ -120,7 +120,10 @@ with DAG(
             "assert_silver_kma_vilage_fcst_grain_unique "
             "assert_silver_kma_vilage_fcst_grid_coverage "
             "assert_silver_kma_uses_publishable_runs "
-            "assert_silver_kma_event_at_matches_forecast_at"
+            "assert_silver_kma_event_at_matches_forecast_at "
+            "--exclude "
+            "assert_gold_weather_counts_match_silver "
+            "assert_gold_weather_forecast_by_place_latest_silver_record"
         ),
         on_failure_callback=record_weather_problem,
     )

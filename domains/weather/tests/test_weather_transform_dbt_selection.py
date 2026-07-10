@@ -137,6 +137,11 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
         in task_commands["dbt_test_place_mapping_seed"]
     )
     assert "assert_silver_kma_event_at_matches_forecast_at" in task_commands["dbt_test_silver"]
+    assert "--exclude assert_gold_weather_counts_match_silver" in task_commands["dbt_test_silver"]
+    assert (
+        "assert_gold_weather_forecast_by_place_latest_silver_record"
+        in task_commands["dbt_test_silver"]
+    )
     assert "run --select dim_weather_place gold_weather_forecast_by_place" in task_commands["dbt_run_place_mart"]
     assert "dim_weather_place" in task_commands["dbt_test_place_mart"]
     assert "gold_weather_forecast_by_place" in task_commands["dbt_test_place_mart"]
