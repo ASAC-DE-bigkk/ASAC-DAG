@@ -19,6 +19,15 @@ def test_entity_ddl_contract():
                 "lastmodts_ts", "entity_type", "detail_table"):
         assert col in sql, col
     assert "primary key (entity_id)" in sql
+    # 타입 규격화: 원천 날짜 = date(text 아님), 파싱 시각 = timestamp, 코드 = text
+    assert "opened_at date" in sql and "closed_at date" in sql
+    assert "updatedt_ts timestamp" in sql and "gu_code text" in sql
+    assert "longitude double precision" in sql
+
+
+def test_history_date_types_standardized():
+    sql = _sql("commerce_business_entity_history", ddl.create_core_sql())
+    assert "opened_at date" in sql and "closed_at date" in sql and "observed_date date" in sql
 
 
 def test_history_and_marker_ddl():

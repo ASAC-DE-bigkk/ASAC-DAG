@@ -23,10 +23,24 @@ _ENTITY_EXPR = ("lower(to_hex(sha256(to_utf8(dataset || '|' || coalesce(opnsftea
                 "|| '|' || coalesce(mgtno, '')))))")
 _FETCH = 2000
 
-# silver 컬럼 → gold history 컬럼 매핑(entity_id·버전키 뒤에 붙는 순서 = ddl.HISTORY_COLUMNS[3:])
-_HISTORY_SELECT = ("bplcnm, trdstategbn, dtlstategbn, apvpermymd, dcbymd, road_address, "
-                   "jibun_address, gu_code, legal_code, admin_dong_code, longitude, latitude, "
-                   "updatedt, updatedt_ts, lastmodts_ts, observed_date")
+
+# ── 날짜 규격화(text → DATE, 무효값 NULL) — 원천 날짜를 date 타입으로 통일 ──
+def _date8(col: str) -> str:
+    """YYYYMMDD 문자열 → DATE. Trino 엄격 파싱(20090229 등 무효·빈값·오포맷은 try→NULL)."""
+    return f"try(cast(date_parse(nullif(trim({col}), ''), '%Y%m%d') as date))"
+
+
+def _date_iso(col: str) -> str:
+    """YYYY-MM-DD(ISO) 문자열 → DATE(무효·빈값 NULL)."""
+    return f"try(cast(nullif(trim({col}), '') as date))"
+
+
+# silver 컬럼 → gold history 컬럼 매핑(entity_id·버전키 뒤에 붙는 순서 = ddl.HISTORY_COLUMNS[3:]).
+# apvpermymd/dcbymd(원천 YYYYMMDD)·observed_date(YYYY-MM-DD)는 DATE 로 규격화.
+_HISTORY_SELECT = (f"bplcnm, trdstategbn, dtlstategbn, {_date8('apvpermymd')}, {_date8('dcbymd')}, "
+                   "road_address, jibun_address, gu_code, legal_code, admin_dong_code, "
+                   "longitude, latitude, updatedt, updatedt_ts, lastmodts_ts, "
+                   f"{_date_iso('observed_date')}")
 
 
 def _major(category: str) -> str:
@@ -141,7 +155,7 @@ def load_entity(tconn, qschema: str, pgconn, dataset_map: dict[str, dict], wm, h
     tcur = tconn.cursor()
     tcur.execute(f"""
 select {_ENTITY_EXPR}, c.dataset, c.opnsfteamcode, c.mgtno, c.bplcnm,
-       c.trdstategbn, c.dtlstategbn, c.apvpermymd, c.dcbymd, c.road_address, c.jibun_address,
+       c.trdstategbn, c.dtlstategbn, {_date8('c.apvpermymd')}, {_date8('c.dcbymd')}, c.road_address, c.jibun_address,
        c.gu_code, c.legal_code, c.admin_dong_code, c.longitude, c.latitude,
        c.updatedt, c.updatedt_ts, c.lastmodts_ts, f.first_collected_at, c.collected_at, c.content_hash
 from {qschema}.silver_license_current c

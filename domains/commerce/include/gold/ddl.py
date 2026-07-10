@@ -25,9 +25,12 @@ HISTORY_COLUMNS: list[str] = [
 ]
 DETAIL_KEY_COLUMNS: list[str] = ["entity_id", "dataset", "collected_at", "content_hash"]
 
+# 타입 규격화: 원천 날짜/시각을 제대로 된 date/timestamp 로 통일한다(text 도피 금지).
+# - date: 원천 YYYYMMDD/YYYY-MM-DD 를 로더가 안전 파싱(무효값 NULL)해 넣는다(loader._date8/_date_iso).
+# - timestamp: silver 가 파싱한 *_ts·collected_at 등.
+# - 코드(gu_code·status_code…)는 선행 0 보존이 필요해 text 유지. 좌표는 double.
 _DOUBLE = {"longitude", "latitude"}
-# 진짜 파싱된 타임스탬프만 timestamp. opened_at/closed_at 등은 원천 YYYYMMDD **문자열**(더러운 값
-# 예 "20090229"(윤년 아님) 가능)이라 text 로 보존한다 — silver 가 파싱한 *_ts/collected_at 만 timestamp.
+_DATE = {"opened_at", "closed_at", "observed_date"}
 _TIMESTAMP = {"collected_at", "first_collected_at", "last_collected_at", "event_at",
               "updatedt_ts", "lastmodts_ts", "marked_at", "measured_at", "requested_at"}
 
@@ -35,6 +38,8 @@ _TIMESTAMP = {"collected_at", "first_collected_at", "last_collected_at", "event_
 def _pgtype(col: str) -> str:
     if col in _DOUBLE:
         return "double precision"
+    if col in _DATE:
+        return "date"
     if col in _TIMESTAMP:
         return "timestamp"
     return "text"
