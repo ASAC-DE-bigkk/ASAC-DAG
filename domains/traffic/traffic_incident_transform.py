@@ -82,6 +82,12 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     )
 
+    dbt_test_traffic_incident_availability = BashOperator(
+        task_id="dbt_test_traffic_incident_availability",
+        bash_command=dbt_command("test --select assert_traffic_incident_row_availability"),
+        on_failure_callback=record_traffic_problem,
+    )
+
     dbt_seed_asac_axes = BashOperator(
         task_id="dbt_seed_asac_axes",
         bash_command=dbt_command("seed --select asac_axes"),
@@ -136,6 +142,7 @@ with DAG(
     (
         dbt_deps
         >> dbt_source_freshness
+        >> dbt_test_traffic_incident_availability
         >> dbt_seed_asac_axes
         >> dbt_run_silver
         >> dbt_test_silver
