@@ -101,6 +101,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     expected_task_order = [
         "dbt_deps",
         "dbt_source_freshness",
+        "dbt_test_traffic_incident_availability",
         "dbt_seed_asac_axes",
         "dbt_run_silver",
         "dbt_test_silver",
@@ -119,6 +120,10 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
 
     assert "deps" in task_commands["dbt_deps"]
     assert "source freshness" in task_commands["dbt_source_freshness"]
+    assert (
+        "test --select assert_traffic_incident_row_availability"
+        in task_commands["dbt_test_traffic_incident_availability"]
+    )
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
     assert "run --select silver_seoul_traffic_incident" in task_commands["dbt_run_silver"]
     assert "--target '{{ params.target }}'" in task_commands["dbt_deps"]
