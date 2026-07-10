@@ -7,6 +7,39 @@
 
 ## 2026-07-10
 
+### 52. gold entity_seq(bigint 서러게이트) 전환 + 정규화(코드 테이블) + view-구성 인덱스 6개
+
+request:
+- 정규화(저카디널리티 detail 컬럼) 진행 시, view 생성에 쓰이는 요소로 인덱스도 적용할 것.
+- entity_id 가 해시 문자열인데, 그럴 거면 시퀀스로 숫자를 배정하고 인덱싱하는 게 맞지 않은지 의견을
+  묻고, 맞다고 판단되면 적용. 이후 commerce 쪽 초기화하고 gold 레이어 재실행.
+
+response:
+- **의견 채택 근거**: entity_id(sha256 text 64자)는 "각 로더가 조율 없이 독립 계산" 이점을 노렸으나
+  gold 는 일 1회 배치 적재라 그 이점이 실제로 쓰이지 않고, 85개 테이블 전체 PK/FK·조인이 64byte
+  text 를 물어 조인/인덱스 비용만 키우고 있었음 → **bigint 시퀀스가 맞다고 판단해 적용**.
+- **entity_seq 전환**: `commerce_entity_key(dataset,opnsfteamcode,mgtno) -> entity_seq bigserial`
+  영구 매핑 테이블 신설(**재적재/초기화에도 항상 보존** — 지우면 같은 업소가 다음 적재 때 다른 번호를
+  받아 정합성이 깨짐, manifest 사고와 동일 클래스 위험). 자연키는 entity 컬럼으로 그대로 보존(소스
+  식별성 유지). `ddl.py`(ENTITY/HISTORY_COLUMNS·DETAIL_KEY_COLUMNS·PK·뷰 조인) + `loader.py`(SQL 측
+  sha256 계산 제거 → 배치 단위 Postgres 왕복으로 entity_seq 해석·발급, `resolve_entity_keys`) 전면
+  개정. `pg.execute_values` 에 `fetch=True`(RETURNING) 지원 추가.
+- **정규화(Option 1, 공유 코드 테이블)**: `normalization-plan.md` §4 Option 1 채택 — detail 스키마는
+  불변, `commerce_code_value(domain, value, n_occurrences)` 1개만 신설(테이블 폭증 방지). 후보
+  109쌍을 **실제 값 표본으로 전수 재검증**해 72쌍 채택(37쌍은 상수·결측·0/1플래그로 제외, 예:
+  `mail_order_sale.uptaenm` 은 동일 필드명이라도 977종 준자유텍스트라 제외). `include/gold/
+  code_values.py`(`CANDIDATES`·`build_code_values`) 신설, DAG 신규 task `build_code_values`.
+- **인덱스 6개**: `ddl.create_index_sql()` — view SQL 이 **실제로 쓰는 JOIN/WHERE 컬럼만** 인덱싱
+  (`commerce_business_entity`/`_history` × dataset·admin_dong_code·(status_code,detail_status_code)).
+  구현 중 원안(cluster detail 8개 dataset 인덱스) 은 view 가 detail.dataset 을 predicate 로 쓰지
+  않음을 재확인해 **제외**(과반영 회피).
+- **검증**: 337 테스트 통과 + 보안 게이트 PASS. **commerce(gold Postgres) 초기화 후 전면 재적재**
+  (view 320+table 85 drop → build_catalog → load_gold → build_code_values, 총 1,728s·868만행).
+  라이브: `commerce_entity_key` 2,891,707건(entity 와 1:1) · `commerce_code_value` 72도메인·1,049값 ·
+  선택도 낮은 API(pharmacy, 0.76%) 조회 **1187ms→18ms**(Bitmap Index Scan 확인) · 고선택도 API
+  (general_restaurant, 18.5%) 는 여전히 seq scan — **정상**(플래너가 그 선택도에서 seq scan 이 실제로
+  더 빠르다고 올바르게 판단, 인덱스 미적용 문제 아님). marker 83/83 DONE.
+
 ### 50. manifest 메타 불일치 원인 규명 + 조치(유지보수 포함 + write_manifest 커밋 배칭)
 
 request:

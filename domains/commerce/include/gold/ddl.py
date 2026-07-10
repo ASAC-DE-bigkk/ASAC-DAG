@@ -1,29 +1,37 @@
 """gold DDL/뷰 생성 — 카탈로그 → Postgres CREATE 문(순수 문자열 생성, I/O 없음).
 
 계약(dbt/domains/commerce/docs/DB/gold/*.md):
-- 모든 detail 은 history-form: PK (entity_id, collected_at, content_hash). 공통 컬럼 재저장 없음.
+- 모든 detail 은 history-form: PK (entity_seq, collected_at, content_hash). 공통 컬럼 재저장 없음.
 - entity 는 위치 매핑 키(gu_code·admin_dong_code·legal_code)와 시간축(updatedt·updatedt_ts·
   lastmodts_ts)을 반드시 노출(사용자: 시군구/행정동 코드 매핑 + 업데이트 일자 조건문).
 - view 는 코드 컬럼을 이름과 함께 상시 노출(크로스도메인 조인은 코드 기준).
-- 타입: 원문 필드=text(소스 충실), *_ts/*_at=timestamp, 좌표=double precision.
+- 타입: 원문 필드=text(소스 충실), *_ts/*_at=timestamp, 좌표=double precision, entity_seq=bigint.
+
+**entity_seq(정수 서러게이트, #normalization-plan) — 설계 배경**: 기존 `entity_id`(sha256 해시,
+64자 text)는 각 로더가 조율 없이 독립 계산 가능하다는 장점이 있었으나, gold 는 일 1회 배치 적재라 그
+장점이 실제로 쓰이지 않고 85개 테이블 전체의 PK/FK·조인 비용만 키웠다(64byte text vs 8byte bigint).
+`commerce_entity_key(dataset,opnsfteamcode,mgtno) -> entity_seq` 매핑을 **영구 테이블**로 두고
+Postgres 시퀀스로 발급한다. **이 테이블은 gold 재적재/초기화에서 항상 보존**해야 한다 — 지우면
+같은 업소가 재적재 시 다른 번호를 받아 정합성이 깨진다(manifest 사고와 동일 클래스의 위험).
+자연키(dataset/opnsfteamcode/mgtno)는 entity 컬럼으로 그대로 남아 소스 식별성은 보존된다.
 """
 from __future__ import annotations
 
 # ── 컬럼 계약(카탈로그 core 정의와 1:1) ──────────────────────────────────────
 ENTITY_COLUMNS: list[str] = [
-    "entity_id", "dataset", "opnsfteamcode", "mgtno", "entity_type", "detail_table",
+    "entity_seq", "dataset", "opnsfteamcode", "mgtno", "entity_type", "detail_table",
     "business_name", "status_code", "detail_status_code", "opened_at", "closed_at",
     "road_address", "jibun_address", "gu_code", "legal_code", "admin_dong_code",
     "longitude", "latitude", "updatedt", "updatedt_ts", "lastmodts_ts",
     "first_collected_at", "last_collected_at", "content_hash",
 ]
 HISTORY_COLUMNS: list[str] = [
-    "entity_id", "collected_at", "content_hash", "dataset", "business_name",
+    "entity_seq", "collected_at", "content_hash", "dataset", "business_name",
     "status_code", "detail_status_code", "opened_at", "closed_at", "road_address",
     "jibun_address", "gu_code", "legal_code", "admin_dong_code", "longitude", "latitude",
     "updatedt", "updatedt_ts", "lastmodts_ts", "observed_date",
 ]
-DETAIL_KEY_COLUMNS: list[str] = ["entity_id", "dataset", "collected_at", "content_hash"]
+DETAIL_KEY_COLUMNS: list[str] = ["entity_seq", "dataset", "collected_at", "content_hash"]
 
 # 타입 규격화: 원천 날짜/시각을 제대로 된 date/timestamp 로 통일한다(text 도피 금지).
 # - date: 원천 YYYYMMDD/YYYY-MM-DD 를 로더가 안전 파싱(무효값 NULL)해 넣는다(loader._date8/_date_iso).
@@ -36,6 +44,8 @@ _TIMESTAMP = {"collected_at", "first_collected_at", "last_collected_at", "event_
 
 
 def _pgtype(col: str) -> str:
+    if col == "entity_seq":
+        return "bigint"
     if col in _DOUBLE:
         return "double precision"
     if col in _DATE:
@@ -50,17 +60,28 @@ def _cols_sql(cols: list[str]) -> str:
 
 
 def create_core_sql() -> list[tuple[str, str]]:
-    """core(entity/history) + marker + catalog 테이블 DDL(멱등)."""
+    """core(entity/history) + marker + catalog + entity_key + code_value 테이블 DDL(멱등)."""
     return [
+        # 자연키(dataset,opnsfteamcode,mgtno) -> entity_seq(bigint) 영구 매핑. **재적재/초기화에서
+        # 항상 보존** — 지우면 같은 업소가 다음 적재 때 다른 번호를 받는다(ddl.py 모듈 docstring 참고).
+        ("commerce_entity_key", """
+create table if not exists commerce_entity_key (
+  entity_seq bigserial primary key,
+  dataset text not null,
+  opnsfteamcode text not null,
+  mgtno text not null,
+  created_at timestamp not null default now(),
+  unique (dataset, opnsfteamcode, mgtno)
+)"""),
         ("commerce_business_entity", f"""
 create table if not exists commerce_business_entity (
   {_cols_sql(ENTITY_COLUMNS)},
-  primary key (entity_id)
+  primary key (entity_seq)
 )"""),
         ("commerce_business_entity_history", f"""
 create table if not exists commerce_business_entity_history (
   {_cols_sql(HISTORY_COLUMNS)},
-  primary key (entity_id, collected_at, content_hash)
+  primary key (entity_seq, collected_at, content_hash)
 )"""),
         ("commerce_load_run_marker", """
 create table if not exists commerce_load_run_marker (
@@ -80,7 +101,31 @@ create table if not exists commerce_catalog (
   catalog_version text,
   measured_at timestamp
 )"""),
+        # 정규화 검토(normalization-plan.md Option 1) — 공유 코드 테이블. detail 스키마는 바꾸지
+        # 않는다(테이블 폭증 방지 — 후보가 몇 개든 신규 테이블은 이 1개뿐). domain = "<detail
+        # 테이블>.<컬럼>"(표본검증으로 진짜 통제어휘만 채택 — code_values.py CANDIDATES 참고).
+        ("commerce_code_value", """
+create table if not exists commerce_code_value (
+  domain text,
+  value text,
+  n_occurrences bigint,
+  primary key (domain, value)
+)"""),
     ]
+
+
+def create_index_sql() -> list[tuple[str, str]]:
+    """view 구성 시 실제 JOIN/WHERE 에 쓰이는 요소만 인덱싱(view_domain_sql/view_api_sql/_DIM_JOIN
+    근거 — 뷰가 안 쓰는 컬럼은 넣지 않는다. detail<->entity 조인은 detail 의 기존 PK(entity_seq,
+    collected_at, content_hash)로 이미 충분해 detail 쪽 추가 인덱스는 불필요)."""
+    stmts = []
+    for t in ("commerce_business_entity", "commerce_business_entity_history"):
+        stmts.append((f"{t}_dataset_idx", f"create index if not exists {t}_dataset_idx on {t} (dataset)"))
+        stmts.append((f"{t}_admin_dong_idx",
+                       f"create index if not exists {t}_admin_dong_idx on {t} (admin_dong_code)"))
+        stmts.append((f"{t}_status_idx",
+                       f"create index if not exists {t}_status_idx on {t} (status_code, detail_status_code)"))
+    return stmts
 
 
 def create_dim_sql() -> list[tuple[str, str]]:
@@ -110,14 +155,14 @@ create table if not exists commerce_dim_business_status (
 
 
 def create_detail_sql(detail: dict) -> tuple[str, str]:
-    """detail 1테이블 DDL — key(entity_id 매핑) + 비공통 payload(text)."""
+    """detail 1테이블 DDL — key(entity_seq 매핑) + 비공통 payload(text)."""
     cols = ",\n  ".join(
         [f"{c} {_pgtype(c)}" for c in DETAIL_KEY_COLUMNS]
         + [f"{c} text" for c in detail["payload"]])
     return detail["object"], f"""
 create table if not exists {detail["object"]} (
   {cols},
-  primary key (entity_id, collected_at, content_hash)
+  primary key (entity_seq, collected_at, content_hash)
 )"""
 
 
@@ -153,7 +198,7 @@ create or replace view commerce_v_{base} as
 select {_entity_select('e')}, {_payload_select(detail)}, {_DIM_NAME_COLS}
 from commerce_business_entity e
 join {detail['object']} d
-  on d.entity_id = e.entity_id
+  on d.entity_seq = e.entity_seq
  and d.collected_at = e.last_collected_at and d.content_hash = e.content_hash
 {_DIM_JOIN.format(a='e')}"""
     history = f"""
@@ -161,7 +206,7 @@ create or replace view commerce_v_{base}_history as
 select {_history_select('h')}, {_payload_select(detail)}, {_DIM_NAME_COLS}
 from commerce_business_entity_history h
 join {detail['object']} d
-  on d.entity_id = h.entity_id
+  on d.entity_seq = h.entity_seq
  and d.collected_at = h.collected_at and d.content_hash = h.content_hash
 {_DIM_JOIN.format(a='h')}"""
     return [(f"commerce_v_{base}", current), (f"commerce_v_{base}_history", history)]
@@ -174,7 +219,7 @@ create or replace view commerce_v_api_{short} as
 select {_entity_select('e')}, {_payload_select(detail)}, {_DIM_NAME_COLS}
 from commerce_business_entity e
 join {detail['object']} d
-  on d.entity_id = e.entity_id
+  on d.entity_seq = e.entity_seq
  and d.collected_at = e.last_collected_at and d.content_hash = e.content_hash
 {_DIM_JOIN.format(a='e')}
 where e.dataset = '{short}'"""
@@ -183,7 +228,7 @@ create or replace view commerce_v_api_{short}_history as
 select {_history_select('h')}, {_payload_select(detail)}, {_DIM_NAME_COLS}
 from commerce_business_entity_history h
 join {detail['object']} d
-  on d.entity_id = h.entity_id
+  on d.entity_seq = h.entity_seq
  and d.collected_at = h.collected_at and d.content_hash = h.content_hash
 {_DIM_JOIN.format(a='h')}
 where h.dataset = '{short}'"""
@@ -191,8 +236,8 @@ where h.dataset = '{short}'"""
 
 
 def generate_all(details: list[dict]) -> list[tuple[str, str]]:
-    """전 객체 DDL(순서 보장: catalog/marker/core → dim → detail → view)."""
-    out = create_core_sql() + create_dim_sql()
+    """전 객체 DDL(순서 보장: catalog/marker/core → 인덱스 → dim → detail → view)."""
+    out = create_core_sql() + create_index_sql() + create_dim_sql()
     for d in details:
         out.append(create_detail_sql(d))
     for d in details:
