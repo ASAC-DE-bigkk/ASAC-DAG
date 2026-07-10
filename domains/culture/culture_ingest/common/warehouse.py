@@ -225,14 +225,6 @@ class BronzeWarehouse:
         _flush()
         return inserted
 
-    def count(self, dataset: str, ingest_ts: str | None = None) -> int:
-        """검증용: 테이블(또는 특정 ingest_ts 파티션) 행 수."""
-        sql = f"SELECT count(*) FROM {self.qualified(dataset)}"
-        if ingest_ts:
-            sql += f" WHERE ingest_ts = {_lit(ingest_ts)}"
-        rows = self.client.execute(sql)
-        return int(rows[0][0]) if rows else 0
-
 
 def _bronze_rows(ds, ctx, records: list) -> list[dict]:
     """(raw_object_key, page_no, record) 목록 -> bronze 11컬럼 dict 행 목록.
@@ -301,9 +293,6 @@ class PyicebergBronzeWarehouse:
 
     def ensure_table(self, dataset: str) -> str:
         return self._trino.ensure_table(dataset)
-
-    def count(self, dataset: str, ingest_ts: str | None = None) -> int:
-        return self._trino.count(dataset, ingest_ts)
 
     # ── pyiceberg 쓰기 경로 ────────────────────────────────────────────────
     def _load_table(self, dataset: str):

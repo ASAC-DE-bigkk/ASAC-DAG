@@ -33,9 +33,6 @@ class Sink:
         """prefix 아래 객체 키 목록(#147 — 직전 run_report 조회용)."""
         raise NotImplementedError
 
-    def describe(self) -> str:  # pragma: no cover
-        raise NotImplementedError
-
 
 class R2Sink(Sink):
     """실제 R2 버킷에 객체를 올리는 싱크 (boto3 S3 클라이언트)."""
@@ -71,9 +68,6 @@ class R2Sink(Sink):
                 return keys
             token = resp["NextContinuationToken"]
 
-    def describe(self) -> str:
-        return f"r2://{self.bucket}"
-
 
 class LocalSink(Sink):
     """dry-run 싱크: 객체 경로 구조를 로컬 디렉토리에 그대로 재현한다."""
@@ -101,9 +95,6 @@ class LocalSink(Sink):
                 rel = os.path.relpath(full, self.root_dir)
                 keys.append(rel.replace(os.sep, "/"))
         return sorted(keys)
-
-    def describe(self) -> str:
-        return f"file://{self.root_dir}"
 
 
 # 확장자 -> HTTP Content-Type 매핑

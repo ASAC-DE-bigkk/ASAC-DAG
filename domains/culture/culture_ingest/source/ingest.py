@@ -76,8 +76,11 @@ class Clients:
     kobis: KobisClient
 
 
-# stdate/eddate 날짜창이 필요한 KOPIS 엔드포인트.
-DATE_WINDOW_ENDPOINTS = {"pblprfr", "prffest", "boxoffice"}
+# stdate/eddate 날짜창이 필요한 엔드포인트 — 진실원은 Dataset.uses_date_window 하나뿐이며
+# 여기서 파생한다(레지스트리에 창 데이터셋을 추가하면 자동 반영, 드리프트 제거). endpoint
+# 문자열로 키잉하는 이유: kopis_detail 의 fallback id-fetch(_with_date_window 를
+# id_source_endpoint 로 호출)가 목록과 같은 창을 받아 id 집합이 정합해야 하기 때문.
+DATE_WINDOW_ENDPOINTS = {ds.endpoint for ds in ALL_DATASETS if ds.uses_date_window}
 
 
 def _with_date_window(endpoint: str, params: dict, opts: IngestOptions) -> dict:
@@ -159,6 +162,14 @@ def ingest_dataset(
         nonlocal sample_body
         sample_body = sample_body or body
 
+    def _append_page(key: str, page) -> None:
+        """페이지 1건의 계측(pages/rows/bytes/object_keys)을 누적하고 드리프트 샘플로 기록."""
+        result.pages += 1
+        result.rows += page.row_count
+        result.bytes_written += len(page.body)
+        result.object_keys.append(key)
+        _record_page(page.body)
+
     try:
         if ds.kind == "kopis_list":
             # KOPIS 목록: 페이지를 끝까지 돌며 각 페이지를 page-NNNN.xml로 적재.
@@ -166,22 +177,14 @@ def ingest_dataset(
             for page in clients.kopis.list_pages(ds.endpoint, params, opts.kopis_rows, opts.max_pages):
                 filename = f"page-{page.index:04d}.xml"
                 key = landing.write_page(prefix, filename, page.body, "xml")
-                result.pages += 1
-                result.rows += page.row_count
-                result.bytes_written += len(page.body)
-                result.object_keys.append(key)
-                _record_page(page.body)
+                _append_page(key, page)
 
         elif ds.kind == "kopis_boxoffice":
             # 예매상황판: 페이징 없이 단일 GET 1건만 적재(page-0001.xml).
             params = _with_date_window(ds.endpoint, ds.base_params, opts)
             page = clients.kopis.fetch_once(ds.endpoint, params, ds.row_tag)
             key = landing.write_page(prefix, "page-0001.xml", page.body, "xml")
-            result.pages += 1
-            result.rows += page.row_count
-            result.bytes_written += len(page.body)
-            result.object_keys.append(key)
-            _record_page(page.body)
+            _append_page(key, page)
 
         elif ds.kind == "kobis_boxoffice":
             # KOBIS 일별 박스오피스: 단일 GET 1건(page-0001.json). targetDt=전일 확정분
@@ -195,11 +198,7 @@ def ingest_dataset(
             wide = ds.base_params.get("wideAreaCd")
             page = clients.kobis.daily_boxoffice(target_dt, wide)
             key = landing.write_page(prefix, "page-0001.json", page.body, "json")
-            result.pages += 1
-            result.rows += page.row_count
-            result.bytes_written += len(page.body)
-            result.object_keys.append(key)
-            _record_page(page.body)
+            _append_page(key, page)
             # write_manifest 용 params (설정 누락 시 UnboundLocalError → #196 실버그 교훈).
             params = {**ds.base_params, "targetDt": target_dt}
 
@@ -209,11 +208,7 @@ def ingest_dataset(
             for page in clients.seoul.list_pages(ds.endpoint, opts.max_rows):
                 filename = f"page-{page.index:06d}.json"
                 key = landing.write_page(prefix, filename, page.body, "json")
-                result.pages += 1
-                result.rows += page.row_count
-                result.bytes_written += len(page.body)
-                result.object_keys.append(key)
-                _record_page(page.body)
+                _append_page(key, page)
 
         elif ds.kind == "kcisa_list":
             # KCISA area2: PageNo 페이징(numOfrows=KCISA_ROWS)을 page-NNNN.xml 로 적재.
@@ -222,11 +217,7 @@ def ingest_dataset(
                                                  max_pages=opts.max_pages):
                 filename = f"page-{page.index:04d}.xml"
                 key = landing.write_page(prefix, filename, page.body, "xml")
-                result.pages += 1
-                result.rows += page.row_count
-                result.bytes_written += len(page.body)
-                result.object_keys.append(key)
-                _record_page(page.body)
+                _append_page(key, page)
 
         elif ds.kind == "kopis_detail":
             # 상세: 목록에서 id를 모아 건별 상세를 id=<값>.xml로 적재.
@@ -252,11 +243,7 @@ def ingest_dataset(
                     continue
                 filename = f"id={identifier}.xml"
                 key = landing.write_page(prefix, filename, page.body, "xml")
-                result.pages += 1
-                result.rows += page.row_count
-                result.bytes_written += len(page.body)
-                result.object_keys.append(key)
-                _record_page(page.body)
+                _append_page(key, page)
             # 일시적 단건 실패는 관용하되, 하나도 못 받거나 과반이 실패하면 실질 장애로
             # 보고 태스크를 실패시켜 재시도·알림한다.
             if ids and (not result.pages or len(detail_errors) > len(ids) // 2):
