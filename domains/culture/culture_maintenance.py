@@ -35,9 +35,10 @@ import pendulum
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 
+# 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-_DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DAGS_ROOT = os.path.dirname(_DAGS_ROOT)
+# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+_DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
