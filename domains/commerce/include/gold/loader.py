@@ -145,9 +145,9 @@ select {_ENTITY_EXPR}, c.dataset, c.opnsfteamcode, c.mgtno, c.bplcnm,
        c.gu_code, c.legal_code, c.admin_dong_code, c.longitude, c.latitude,
        c.updatedt, c.updatedt_ts, c.lastmodts_ts, f.first_collected_at, c.collected_at, c.content_hash
 from {qschema}.silver_license_current c
-join (select dataset, opnsfteamcode, mgtno, min(collected_at) as first_collected_at
+join (select dataset as jd, opnsfteamcode as jo, mgtno as jm, min(collected_at) as first_collected_at
       from {qschema}.silver_license_history group by 1, 2, 3) f
-  on f.dataset = c.dataset and f.opnsfteamcode = c.opnsfteamcode and f.mgtno = c.mgtno
+  on f.jd = c.dataset and f.jo = c.opnsfteamcode and f.jm = c.mgtno
 where c.collected_at > coalesce(cast(? as timestamp), timestamp '1970-01-01') and c.collected_at <= ?
 """, (wm, hi))  # security: allow-sql
     cols = ", ".join(ddl.ENTITY_COLUMNS)

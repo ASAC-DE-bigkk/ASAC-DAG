@@ -29,8 +29,8 @@ def connect():
     )
 
 
-def execute_values(cur, sql: str, rows: list[tuple], page_size: int = 500) -> None:
-    """psycopg2.extras.execute_values 래퍼(배치 insert)."""
+def execute_values(cur, sql: str, rows: list[tuple], page_size: int = 2000) -> None:
+    """psycopg2.extras.execute_values 래퍼(배치 insert). 대용량 초기 적재 라운드트립 감소."""
     from psycopg2.extras import execute_values as _ev
 
     _ev(cur, sql, rows, page_size=page_size)

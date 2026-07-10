@@ -26,12 +26,16 @@ HISTORY_COLUMNS: list[str] = [
 DETAIL_KEY_COLUMNS: list[str] = ["entity_id", "dataset", "collected_at", "content_hash"]
 
 _DOUBLE = {"longitude", "latitude"}
+# 진짜 파싱된 타임스탬프만 timestamp. opened_at/closed_at 등은 원천 YYYYMMDD **문자열**(더러운 값
+# 예 "20090229"(윤년 아님) 가능)이라 text 로 보존한다 — silver 가 파싱한 *_ts/collected_at 만 timestamp.
+_TIMESTAMP = {"collected_at", "first_collected_at", "last_collected_at", "event_at",
+              "updatedt_ts", "lastmodts_ts", "marked_at", "measured_at", "requested_at"}
 
 
 def _pgtype(col: str) -> str:
     if col in _DOUBLE:
         return "double precision"
-    if col.endswith("_ts") or col.endswith("_at"):
+    if col in _TIMESTAMP:
         return "timestamp"
     return "text"
 
