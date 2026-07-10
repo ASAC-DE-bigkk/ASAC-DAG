@@ -140,11 +140,25 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
     assert "--exclude assert_gold_weather_counts_match_silver" in task_commands["dbt_test_silver"]
     assert (
         "assert_gold_weather_forecast_by_place_latest_silver_record"
-        in task_commands["dbt_test_silver"]
+        not in task_commands["dbt_test_silver"]
     )
-    assert "run --select dim_weather_place gold_weather_forecast_by_place" in task_commands["dbt_run_place_mart"]
+    assert (
+        "run --select dim_weather_place silver_weather_forecast_by_admin_dong gold_weather_forecast_by_place"
+        in task_commands["dbt_run_place_mart"]
+    )
     assert "dim_weather_place" in task_commands["dbt_test_place_mart"]
+    assert "silver_weather_forecast_by_admin_dong" in task_commands["dbt_test_place_mart"]
     assert "gold_weather_forecast_by_place" in task_commands["dbt_test_place_mart"]
+    assert "assert_silver_weather_admin_dong_grain_unique" in task_commands["dbt_test_place_mart"]
+    assert "assert_silver_weather_admin_axis_consistent" in task_commands["dbt_test_place_mart"]
+    assert (
+        "assert_silver_weather_admin_event_at_matches_forecast_at"
+        in task_commands["dbt_test_place_mart"]
+    )
+    assert (
+        "assert_gold_weather_forecast_by_place_admin_axis_consistent"
+        in task_commands["dbt_test_place_mart"]
+    )
     assert "assert_gold_weather_forecast_by_place_grain_unique" in task_commands["dbt_test_place_mart"]
     assert "assert_gold_weather_forecast_by_place_major_coverage" in task_commands["dbt_test_place_mart"]
     assert "assert_dim_weather_place_admin_axis_consistent" in task_commands["dbt_test_place_mart"]

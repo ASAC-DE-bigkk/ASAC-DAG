@@ -122,8 +122,7 @@ with DAG(
             "assert_silver_kma_uses_publishable_runs "
             "assert_silver_kma_event_at_matches_forecast_at "
             "--exclude "
-            "assert_gold_weather_counts_match_silver "
-            "assert_gold_weather_forecast_by_place_latest_silver_record"
+            "assert_gold_weather_counts_match_silver"
         ),
         on_failure_callback=record_weather_problem,
     )
@@ -147,7 +146,12 @@ with DAG(
 
     dbt_run_place_mart = BashOperator(
         task_id="dbt_run_place_mart",
-        bash_command=dbt_command("run --select dim_weather_place gold_weather_forecast_by_place"),
+        bash_command=dbt_command(
+            "run --select "
+            "dim_weather_place "
+            "silver_weather_forecast_by_admin_dong "
+            "gold_weather_forecast_by_place"
+        ),
         on_failure_callback=record_weather_problem,
     )
 
@@ -156,9 +160,14 @@ with DAG(
         bash_command=dbt_command(
             "test --select "
             "dim_weather_place "
+            "silver_weather_forecast_by_admin_dong "
             "gold_weather_forecast_by_place "
+            "assert_silver_weather_admin_dong_grain_unique "
+            "assert_silver_weather_admin_axis_consistent "
+            "assert_silver_weather_admin_event_at_matches_forecast_at "
             "assert_gold_weather_forecast_by_place_grain_unique "
             "assert_gold_weather_forecast_by_place_major_coverage "
+            "assert_gold_weather_forecast_by_place_admin_axis_consistent "
             "assert_dim_weather_place_admin_axis_consistent "
             "assert_gold_weather_forecast_by_place_event_at_matches_forecast_at "
             "assert_gold_weather_forecast_by_place_latest_silver_record"
