@@ -59,7 +59,7 @@ def test_kma_create_table_uses_load_date_partitioning_for_fresh_tables():
     qualified_table = create_kma_bronze_table(cursor, "iceberg_dev", "weather_traffic_bronze")
 
     assert qualified_table == "iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst"
-    assert len(cursor.statements) == 4
+    assert len(cursor.statements) == 5
     assert cursor.statements[0] == "CREATE SCHEMA IF NOT EXISTS iceberg_dev.weather_traffic_bronze"
     assert "CREATE TABLE IF NOT EXISTS iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst" in cursor.statements[1]
     assert "partitioning = ARRAY['load_date']" in cursor.statements[1]
@@ -114,6 +114,7 @@ def test_kma_pyiceberg_batches_delete_and_appends_in_one_transaction(monkeypatch
     assert len(appends) == 2
     assert len(appends[0][1]) == 2
     assert len(appends[1][1]) == 1
+    assert all(record["page_no"] == 1 for record in appends[0][1] + appends[1][1])
 
 
 def test_kma_insert_replaces_same_retry_scope_before_append():
