@@ -80,11 +80,12 @@ with DAG(
         on_failure_callback=record_citydata_problem,
     )
 
-    # **인구(seoul_ppltn) + citydata(seoul_citydata) 전 모델** 빌드 — 인구 silver 도 이제
-    # citydata bronze(LIVE_PPLTN_STTS)에서 나온다. asac_axes 패키지 내부 모델은 제외.
+    # **인구 + citydata 전 모델** 빌드. asac_axes 중 dim_admin_dong 은 **빌드**한다 —
+    # dim_seoul_area 가 행안부 라이브 코드용으로 참조(#115, common.bronze_admin_dong_master
+    # 원천). 미사용 dim_beop_admin_link 만 제외.
     run_models = BashOperator(
         task_id="dbt_run",
-        bash_command=_dbt("run --exclude package:asac_axes"),
+        bash_command=_dbt("run --exclude asac_axes.dim_beop_admin_link"),
         on_failure_callback=record_citydata_problem,
     )
 
