@@ -76,8 +76,11 @@ class Clients:
     kobis: KobisClient
 
 
-# stdate/eddate 날짜창이 필요한 KOPIS 엔드포인트.
-DATE_WINDOW_ENDPOINTS = {"pblprfr", "prffest", "boxoffice"}
+# stdate/eddate 날짜창이 필요한 엔드포인트 — 진실원은 Dataset.uses_date_window 하나뿐이며
+# 여기서 파생한다(레지스트리에 창 데이터셋을 추가하면 자동 반영, 드리프트 제거). endpoint
+# 문자열로 키잉하는 이유: kopis_detail 의 fallback id-fetch(_with_date_window 를
+# id_source_endpoint 로 호출)가 목록과 같은 창을 받아 id 집합이 정합해야 하기 때문.
+DATE_WINDOW_ENDPOINTS = {ds.endpoint for ds in ALL_DATASETS if ds.uses_date_window}
 
 
 def _with_date_window(endpoint: str, params: dict, opts: IngestOptions) -> dict:
