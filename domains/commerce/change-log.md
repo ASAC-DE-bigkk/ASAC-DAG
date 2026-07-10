@@ -7,6 +7,33 @@
 
 ## 2026-07-10
 
+### 53. 검색·이력 공통축 인덱스 확장(entity/history 11개) + detail 자동 인덱싱(401개)
+
+request:
+- 시군구·행정동·법정동 코드, moddt·updatedt·createdt·id·opendate·closedate, 종업원수·평수 등
+  검색/조건 단위로 쓰기 좋고 이력과 연결될만한 컬럼은 모두 자동으로 인덱싱할 것.
+
+response:
+- **entity/history 확장(6→17개)**: legal_code·updatedt_ts(=updatedt)·lastmodts_ts(=moddt)·
+  opened_at(=opendate)·closed_at(=closedate) 를 두 테이블 모두에, natural_id(opnsfteamcode,mgtno,
+  =id — entity_seq 몰라도 업소 직접 조회)는 entity 전용(HISTORY_COLUMNS 에 없는 컬럼이라 대상 아님).
+- **detail 78개 자동 인덱싱**(`create_detail_index_sql`): 새 API 추가 시 카탈로그 갱신만으로 자동
+  적용되는 접미사 규칙 — 날짜(`ymd/dt/date`)·식별번호(`no/num/seqno/asgnno`, =id)·수량규모(`cnt/
+  epcnt/area/yarea/scp/tons/flr`, =종업원수·평수). 명칭/구분류(`nm/se/senm/gbn/gbnnm` — 업태명 등)
+  는 검색축이 아니라 값 자체가 목적이라 **정규화(commerce_code_value) 영역으로 제외**, 과다인덱싱
+  방지. 실측(78테이블/725 payload 컬럼): 401개 매칭(테이블당 평균 5.1개, 대부분 결측 위주 희소 컬럼).
+- **버그 수정(구현 중 발견)**: natural_id 인덱스를 처음엔 entity/history 공통으로 넣었다가
+  `UndefinedColumn: opnsfteamcode` 로 즉시 실패 — HISTORY_COLUMNS 에 opnsfteamcode/mgtno 가 없음을
+  재확인해 entity 전용으로 정정(트랜잭션 전체 롤백이라 데이터 영향 없음, 재적용으로 정상 완료).
+- **검증**: 338 테스트 통과 + 보안 게이트 PASS. 라이브 적용(스키마 파괴 없음 — 순수 CREATE INDEX
+  IF NOT EXISTS, 데이터 재적재 불필요): 인덱스 94→506(신규 412개, elapsed 29.3s), 행수 무손상
+  (entity 2,891,707/history 2,894,754/food_detail 1,122,616 그대로), natural_id 인덱스로 자연키
+  직접 조회 Index Scan 확인.
+
+---
+
+## 2026-07-10
+
 ### 52. gold entity_seq(bigint 서러게이트) 전환 + 정규화(코드 테이블) + view-구성 인덱스 6개
 
 request:

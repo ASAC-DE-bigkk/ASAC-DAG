@@ -53,9 +53,22 @@ def test_view_construction_indexes():
     stmts = ddl.create_index_sql()
     names = [n for n, _ in stmts]
     for t in ("commerce_business_entity", "commerce_business_entity_history"):
-        for suffix in ("dataset_idx", "admin_dong_idx", "status_idx"):
+        for suffix in ("dataset_idx", "admin_dong_idx", "status_idx", "legal_code_idx",
+                       "updatedt_idx", "lastmodts_idx", "opened_at_idx", "closed_at_idx"):
             assert f"{t}_{suffix}" in names
-    assert len(stmts) == 6                                # 2테이블 × 3인덱스 — 뷰가 실제 쓰는 요소만
+    assert "commerce_business_entity_natural_id_idx" in names
+    assert "commerce_business_entity_history_natural_id_idx" not in names  # HISTORY_COLUMNS 에 없는 컬럼
+    assert len(stmts) == 17                               # 2테이블×8 + entity 전용(natural_id)×1
+
+
+def test_detail_index_auto_classification():
+    # 날짜(ymd)·수량(cnt)만 매칭, 명칭류(uptaenm)는 정규화 대상이라 제외
+    cluster_idx = dict(ddl.create_detail_index_sql(_CLUSTER))
+    assert f"{_CLUSTER['object']}_chaircnt_idx" in cluster_idx
+    assert f"{_CLUSTER['object']}_uptaenm_idx" not in cluster_idx
+    detail_idx = dict(ddl.create_detail_index_sql(_DETAIL))
+    assert f"{_DETAIL['object']}_asgnymd_idx" in detail_idx
+    assert f"{_DETAIL['object']}_pharmtrdar_idx" not in detail_idx
 
 
 def test_detail_ddl_key_mapping_only():
@@ -81,8 +94,8 @@ def test_generate_all_order_and_count():
     details = [_CLUSTER, _DETAIL]
     stmts = ddl.generate_all(details)
     names = [n for n, _ in stmts]
-    # core(6: entity_key+entity+history+marker+catalog+code_value) + index(6) + dim(3) + detail(2)
-    # + 도메인뷰(cluster 1×2) + API뷰(멤버 3×2)
-    assert len(stmts) == 6 + 6 + 3 + 2 + 2 + 6
+    # core(6: entity_key+entity+history+marker+catalog+code_value) + index(17) + dim(3)
+    # + detail(2 테이블 × (DDL 1 + 자동 detail 인덱스 1) = 4) + 도메인뷰(cluster 1×2) + API뷰(멤버 3×2)
+    assert len(stmts) == 6 + 17 + 3 + 4 + 2 + 6
     assert names.index("commerce_catalog") < names.index("commerce_pharmacy_detail")
     assert names.index("commerce_pharmacy_detail") < names.index("commerce_v_api_pharmacy")

@@ -115,9 +115,13 @@ create table if not exists commerce_code_value (
 
 
 def create_index_sql() -> list[tuple[str, str]]:
-    """view 구성 시 실제 JOIN/WHERE 에 쓰이는 요소만 인덱싱(view_domain_sql/view_api_sql/_DIM_JOIN
-    근거 — 뷰가 안 쓰는 컬럼은 넣지 않는다. detail<->entity 조인은 detail 의 기존 PK(entity_seq,
-    collected_at, content_hash)로 이미 충분해 detail 쪽 추가 인덱스는 불필요)."""
+    """entity/history(공통 supertype) 인덱스 — ① view 구성 시 실제 JOIN/WHERE 에 쓰이는 요소
+    (dataset/admin_dong_code/status — view_domain_sql/view_api_sql/_DIM_JOIN 근거) ② 검색·조건
+    단위로 쓰기 좋고 이력과 연결되는 공통 축(위치코드·시간축·자연키 id) — 사용자 지시(2026-07-10):
+    시군구/행정동/법정동 코드, moddt(=lastmodts_ts)·updatedt·createdt(=first_collected_at)류
+    시간축, id(자연키 opnsfteamcode+mgtno), opendate/closedate. detail<->entity 조인은 detail 의
+    기존 PK(entity_seq, collected_at, content_hash)로 이미 충분해 detail 쪽 조인용 추가 인덱스는
+    불필요(detail 자체의 검색축 인덱스는 create_detail_index_sql 참고)."""
     stmts = []
     for t in ("commerce_business_entity", "commerce_business_entity_history"):
         stmts.append((f"{t}_dataset_idx", f"create index if not exists {t}_dataset_idx on {t} (dataset)"))
@@ -125,6 +129,56 @@ def create_index_sql() -> list[tuple[str, str]]:
                        f"create index if not exists {t}_admin_dong_idx on {t} (admin_dong_code)"))
         stmts.append((f"{t}_status_idx",
                        f"create index if not exists {t}_status_idx on {t} (status_code, detail_status_code)"))
+        stmts.append((f"{t}_legal_code_idx",
+                       f"create index if not exists {t}_legal_code_idx on {t} (legal_code)"))
+        stmts.append((f"{t}_updatedt_idx",
+                       f"create index if not exists {t}_updatedt_idx on {t} (updatedt_ts)"))
+        stmts.append((f"{t}_lastmodts_idx",
+                       f"create index if not exists {t}_lastmodts_idx on {t} (lastmodts_ts)"))
+        stmts.append((f"{t}_opened_at_idx", f"create index if not exists {t}_opened_at_idx on {t} (opened_at)"))
+        stmts.append((f"{t}_closed_at_idx", f"create index if not exists {t}_closed_at_idx on {t} (closed_at)"))
+    # natural_id(opnsfteamcode,mgtno) 는 ENTITY_COLUMNS 에만 있는 컬럼(HISTORY_COLUMNS 는 이 둘을
+    # 안 담는다 — entity_seq 로 이미 식별되고, 자연키는 entity 쪽에서만 조회 용도) — entity 전용.
+    t = "commerce_business_entity"
+    stmts.append((f"{t}_natural_id_idx",
+                   f"create index if not exists {t}_natural_id_idx on {t} (opnsfteamcode, mgtno)"))
+    return stmts
+
+
+# detail payload 자동 인덱싱(사용자 지시 2026-07-10) — 종업원수·평수류(수량/규모) + moddt류(날짜) +
+# 등록·지정번호류(id) 접미사로 카탈로그가 바뀌어도 새 API 의 해당 컬럼이 자동으로 인덱싱된다.
+# 명칭/구분류(uptaenm 등 — normalization-plan.md 의 정규화 대상)는 검색축이 아니라 값 자체가
+# 목적이라 제외(commerce_code_value 로 별도 커버). 실측(2026-07-10, 78테이블/725컬럼): 401개 매칭
+# (테이블당 평균 5.1개) — 전부 결측 위주 희소 컬럼이라 인덱스 크기는 작다.
+_DETAIL_DATE_SUFFIX = ("ymd", "dt", "date")
+_DETAIL_ID_SUFFIX = ("no", "num", "seqno", "asgnno")
+_DETAIL_METRIC_SUFFIX = ("cnt", "epcnt", "area", "yarea", "scp", "tons", "flr")
+
+
+def _detail_index_kind(col: str) -> str | None:
+    c = col.lower()
+    for suf in _DETAIL_DATE_SUFFIX:
+        if c.endswith(suf):
+            return "date"
+    for suf in _DETAIL_ID_SUFFIX:
+        if c.endswith(suf):
+            return "id"
+    for suf in _DETAIL_METRIC_SUFFIX:
+        if c.endswith(suf):
+            return "metric"
+    return None
+
+
+def create_detail_index_sql(detail: dict) -> list[tuple[str, str]]:
+    """detail 1테이블의 payload 컬럼 중 날짜/식별번호/수량·규모 패턴만 자동 인덱싱."""
+    t = detail["object"]
+    stmts = []
+    for col in detail["payload"]:
+        kind = _detail_index_kind(col)
+        if kind is None:
+            continue
+        name = f"{t}_{col}_idx"
+        stmts.append((name, f"create index if not exists {name} on {t} ({col})"))
     return stmts
 
 
@@ -236,10 +290,11 @@ where h.dataset = '{short}'"""
 
 
 def generate_all(details: list[dict]) -> list[tuple[str, str]]:
-    """전 객체 DDL(순서 보장: catalog/marker/core → 인덱스 → dim → detail → view)."""
+    """전 객체 DDL(순서 보장: catalog/marker/core → 인덱스 → dim → detail(+detail 인덱스) → view)."""
     out = create_core_sql() + create_index_sql() + create_dim_sql()
     for d in details:
         out.append(create_detail_sql(d))
+        out.extend(create_detail_index_sql(d))
     for d in details:
         if d["kind"] == "detail_cluster":
             out.extend(view_domain_sql(d))
