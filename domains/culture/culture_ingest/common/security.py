@@ -21,7 +21,6 @@ from common.security.redaction import (  # noqa: E402  (경로 보장 후 import
     redact,
     refresh_env_secrets,
     register_secret,
-    scrub_exception,
 )
 
 __all__ = [
@@ -29,5 +28,4 @@ __all__ = [
     "redact",
     "refresh_env_secrets",
     "register_secret",
-    "scrub_exception",
 ]
