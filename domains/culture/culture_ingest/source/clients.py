@@ -36,10 +36,35 @@ log = logging.getLogger(__name__)
 KOPIS_BASE = "http://www.kopis.or.kr/openApi/restful"
 KOBIS_BASE = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice"
 
-# KOPIS 목록 페이지는 XML <dbs><db>...</db></dbs> 형태 -- 페이지당 <db> 개수를 센다.
-_KOPIS_DB_RE = re.compile(r"<db>")
 # 서울 API는 한 번 요청 윈도우를 최대 1000행으로 제한한다.
 SEOUL_WINDOW = 1000
+
+
+def _count_tag(body: bytes, tag: str) -> int:
+    """XML body 안의 여는 태그 <tag> 개수 = 행 수(KOPIS <db>·KCISA <item>·예매 <boxof> 공통)."""
+    return body.decode("utf-8", "ignore").count(f"<{tag}>")
+
+
+def _paginate(fetch_page, count_body, rows, max_pages):
+    """목록 페이징 공용 골격. page=1부터 fetch_page(page)로 body를 받아 Page를 내보내고,
+    빈 페이지(count 0)·마지막 페이지(count<rows)·max_pages 도달·fetch_page가 None을
+    반환(소스가 '끝'으로 신호한 오버슛)하면 멈춘다. 소스별 파라미터명과 오버슛 처리
+    (KOPIS 자정 400=끝 vs KCISA 빈 item=끝)는 fetch_page 클로저가 흡수한다.
+    """
+    page = 1
+    while True:
+        if max_pages is not None and page > max_pages:
+            return
+        body = fetch_page(page)
+        if body is None:
+            return
+        count = count_body(body)
+        if count == 0:
+            return
+        yield Page(index=page, body=body, row_count=count, ext="xml")
+        if count < rows:
+            return
+        page += 1
 
 
 class KopisError(RuntimeError):
@@ -89,8 +114,7 @@ class KopisClient:
 
     @staticmethod
     def _count(body: bytes) -> int:
-        # 페이지 안의 <db> 개수 = 행 수.
-        return len(_KOPIS_DB_RE.findall(body.decode("utf-8", "ignore")))
+        return _count_tag(body, "db")  # 페이지 안의 <db> 개수 = 행 수
 
     def list_pages(self, path: str, base_params: dict, rows: int, max_pages: int | None):
         """KOPIS 목록 엔드포인트를 페이징하며 :class:`Page`를 하나씩 내보낸다.
@@ -100,25 +124,15 @@ class KopisClient:
         다음 페이지를 조회하게 되는데, KOPIS는 범위 밖 페이지에 HTTP 400을 준다 —
         이 오버슛 400은 '목록 끝'으로 처리한다(#84). 1페이지의 400은 진짜 오류.
         """
-        page = 1
-        while True:
-            if max_pages is not None and page > max_pages:
-                return
-            params = {**base_params, "cpage": page, "rows": rows}
+        def fetch_page(page: int) -> bytes | None:
             try:
-                body = self._get(path, params)
+                return self._get(path, {**base_params, "cpage": page, "rows": rows})
             except HttpProblemError as exc:
                 if page > 1 and exc.status == 400:
                     log.info("[kopis] %s cpage=%d 오버슛 400 — 목록 끝으로 종료", path, page)
-                    return
+                    return None  # 오버슛 400 = 목록 끝(#84)
                 raise
-            count = self._count(body)
-            if count == 0:
-                return
-            yield Page(index=page, body=body, row_count=count, ext="xml")
-            if count < rows:
-                return
-            page += 1
+        yield from _paginate(fetch_page, self._count, rows, max_pages)
 
     def detail(self, path: str, identifier: str) -> Page:
         body = self._get(f"{path}/{identifier}", {})
@@ -129,8 +143,7 @@ class KopisClient:
         <boxof> 아래로 한 번에 주고 cpage/rows를 무시한다.
         """
         body = self._get(path, params)
-        count = len(re.findall(rf"<{row_tag}>", body.decode("utf-8", "ignore")))
-        return Page(index=1, body=body, row_count=count, ext="xml")
+        return Page(index=1, body=body, row_count=_count_tag(body, row_tag), ext="xml")
 
     def list_ids(self, path: str, base_params: dict, id_field: str, limit: int) -> list[str]:
         """목록 엔드포인트에서 최대 ``limit``개의 id를 수집한다(상세 크롤용)."""
@@ -252,7 +265,6 @@ class KobisClient:
 
 KCISA_BASE = "https://apis.data.go.kr/B553457/cultureinfo"
 KCISA_ROWS = 200  # area2 페이지 크기(단일 진실원 — ingest 디스패치·매니페스트 공유)
-_KCISA_ITEM_RE = re.compile(r"<item>")
 
 
 class KcisaError(RuntimeError):
@@ -283,20 +295,10 @@ class KcisaClient:
 
     @staticmethod
     def _count(body: bytes) -> int:
-        return len(_KCISA_ITEM_RE.findall(body.decode("utf-8", "ignore")))
+        return _count_tag(body, "item")
 
     def list_pages(self, path: str, base_params: dict, rows: int, max_pages: int | None):
         """area2 를 PageNo 증가로 페이징. 빈 페이지(item 0) 또는 rows 미만이면 종료."""
-        page = 1
-        while True:
-            if max_pages is not None and page > max_pages:
-                return
-            params = {**base_params, "PageNo": page, "numOfrows": rows}
-            body = self._get(path, params)
-            count = self._count(body)
-            if count == 0:
-                return
-            yield Page(index=page, body=body, row_count=count, ext="xml")
-            if count < rows:
-                return
-            page += 1
+        def fetch_page(page: int) -> bytes:
+            return self._get(path, {**base_params, "PageNo": page, "numOfrows": rows})
+        yield from _paginate(fetch_page, self._count, rows, max_pages)
