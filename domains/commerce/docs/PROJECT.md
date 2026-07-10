@@ -120,8 +120,58 @@ commerce 도메인의 모든 변경은 **GitHub 이슈 → 이슈 번호 기반 
 
 ---
 
-## 5. 변경 이력
+## 5. 문서 지도 (뎁스별 인덱스)
 
+commerce 전체 문서를 **레포·폴더 뎁스**로 조망하는 마스터 인덱스. 각 폴더는 **자체 README** 로 다시
+진입하고, 그 README 가 폴더 안 파일을 인덱싱한다(폴더→README→파일 3단). 여기서는 최상위에서 **어디에
+무엇이 있는지**를 한 줄 요약으로 정리한다. 파이프라인·운영·보안·정책은 **dags 번들**,
+silver/gold 변환·DB 명세는 **dbt 번들**(별도 서브모듈 ASAC-DBT — 경로로 표기).
+
+### 5.1 dags/domains/commerce/docs/ — 수집~적재 파이프라인·운영·정책
+
+- [README.md](README.md) — 문서 최상위 인덱스(주제별 폴더 진입)
+- **PROJECT.md**(이 문서) — 프로젝트 고유 정책 단일 소스(분류·리포트·재개·워크플로·문서지도)
+- [architecture/](architecture/README.md) — 설계·구조
+  - [architecture.md](architecture/architecture.md) — 메달리온 배치 아키텍처(DAG·계층 책임·LocalExecutor)
+  - [project_setting.md](architecture/project_setting.md) — 카테고리 자립형 폴더 규약(heritage)·이식성
+  - [storage.md](architecture/storage.md) — 결정적 저장 경로·마커·리니지·R2
+- [configuration/](configuration/README.md) — 실행 인자·환경
+  - [configuration.md](configuration/configuration.md) — 환경변수·`.env.commerce` 주입·우선순위
+  - [environments.md](configuration/environments.md) — 스토리지 백엔드(local/r2) 환경 분리
+- [pipeline/](pipeline/README.md) — 레이어별 파이프라인
+  - [common_info.md](pipeline/common_info.md) — API 응답 컬럼 계약(v1 공통14+준공통5 / v2 별칭)·식별값
+  - [data-model.md](pipeline/data-model.md) — 레이어 계보·조인키·테이블 정의·**139→152 공통화(lf 매크로)**
+  - [non-license-datasets.md](pipeline/non-license-datasets.md) — 인허가 외 격리 사유·재활성 절차
+  - [raw/](pipeline/raw/README.md) — 수집 레이어 분석 8종(field-coverage·call-volume·caveats·incremental-sort-diff·pagination-ordering·status-tracking·resolve-worklist·uncollectable)
+  - [bronze/](pipeline/bronze/README.md) — Iceberg 적재(테이블·엔진분기·워터마크·유지보수·재개)
+  - [silver/](pipeline/silver/README.md) — dbt 정규화(모델·v1/v2 통합·보강·증분/재개 마커)
+  - [gold/](pipeline/gold/README.md) — 서빙·집계 gold(설계/계획)
+  - (역사적 계획: [medallion-implementation-plan.md](pipeline/medallion-implementation-plan.md) · [silver-gold-load-plan.md](pipeline/silver-gold-load-plan.md))
+- [operations/](operations/README.md) — 운영 런북
+  - [operations.md](operations/operations.md) · [deploy-local.md](operations/deploy-local.md) · [deploy-dev.md](operations/deploy-dev.md) · [deploy-prod.md](operations/deploy-prod.md) · [recollect-and-alerts.md](operations/recollect-and-alerts.md)
+- [security/](security/README.md) — 보안 게이트
+  - [security.md](security/security.md)(위협모델·가드·단일점검) · [usage.md](security/usage.md) · [techniques.md](security/techniques.md) · [adoption.md](security/adoption.md)
+
+### 5.2 dbt/domains/commerce/docs/ — silver/gold 변환·DB 명세 (ASAC-DBT 번들)
+
+> 별도 서브모듈이라 GitHub 상 상대링크가 끊기므로 **경로**로 표기한다. 진입점은
+> `dbt/domains/commerce/docs/README.md`(용도별 인덱스) → 하위 폴더 README.
+
+- `docs/README.md` — dbt 문서 용도별 인덱스(설계근거·규약·운영·DB명세·기계용)
+- 설계 근거: `silver-noncommon-catalogs.md`(**API 152종 실측 → 공통/비공통 분리·이력·cluster/single 경계**) · `dataset-columns.md`
+- 규약: `address-and-geo.md`(주소·행정동/법정동·좌표) · `timestamps-and-nulls.md`
+- 운영·학습: `rebuild-and-ops.md`(§6 청크 백필) · `beginner-guide.md`(모델 읽기·Trino 조회)
+- `DB/` (`DB/README.md` — ERD·키 규약)
+  - `DB/silver/` — silver 테이블(history/current/marker)
+  - `DB/gold/` — `tables.md`(entity+이력·dim·detail 78) · `views.md`(도메인8×2·API152×2) · `cluster-domain-coherence.md`(**cluster 8 도메인 정합성 검증**)
+- 기계용 산출물: `api-field-inventory.csv`(152) · `api-field-clusters.json` · `gold-catalog.csv`(103)
+
+---
+
+## 6. 변경 이력
+
+- 2026-07-10: **문서 지도(§5)** 신설 — 양 번들(dags/dbt) 문서를 폴더 뎁스로 인덱싱(폴더→README→파일).
+  dbt docs 에 폴더별 README(root·DB/gold·DB/silver) 추가로 3단 인덱싱 완성.
 - 2026-07-09: **정책 변경 시 §변경 이력에 요약 항목 남기기** 규정을 CLAUDE.md(Project policy)에 명문화
   (#241). PROJECT.md §변경 이력=정책 요약, `change-log.md`=구조 변경 운영 이력으로 역할 구분.
 - 2026-07-09: **작업 워크플로(이슈 → `{type}/{issue#}-{slug}` 브랜치 → `Closes #` PR)** 를 §4 로

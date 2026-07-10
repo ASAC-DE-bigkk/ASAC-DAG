@@ -121,7 +121,10 @@ def iceberg_maintenance(_loaded) -> list[dict]:
     from bronze import maintenance
 
     days = int(os.getenv("COMMERCE_ICEBERG_EXPIRE_DAYS", "7") or "7")
-    return maintenance.run_table_maintenance(tables=("bronze_localdata_license",), expire_days=days)
+    # bronze 가 쓰는 두 테이블 모두 유지보수 — manifest 는 delete-then-insert 로 커밋이 계속 쌓이므로
+    # 유지보수에서 빠지면 스냅샷/메타데이터가 무한 축적돼 R2 Data Catalog 메타 불일치를 유발(실측 원인).
+    return maintenance.run_table_maintenance(
+        tables=("bronze_localdata_license", "bronze_collection_run_manifest"), expire_days=days)
 
 
 @task(trigger_rule=TriggerRule.ALL_DONE)

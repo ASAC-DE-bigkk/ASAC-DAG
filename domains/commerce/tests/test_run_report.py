@@ -102,3 +102,42 @@ def test_send_no_webhook_is_safe(monkeypatch):
     counts = run_report.send_run_report(dag_id="d", run_id="r", observed_date="d",
                                         stage="collect", results=[_s(_shorts("food")[0], "ok", 1, 1)])
     assert counts["total"] == 1 and counts["new"] == 1
+
+
+def test_nonzero_never_omitted_and_paginates(monkeypatch):
+    # 전 152종 신규(new>0) — 전건 보존(생략 없음), 길면 여러 임베드로 분할 전송.
+    results = [_s(d.short, "ok", 100 + i, 1000) for i, d in enumerate(_DS)]
+    rep = _build(results)
+    assert "생략" not in rep["description"]                       # 신규>0 은 생략 금지
+    sent = []
+    monkeypatch.setattr(run_report, "send_embed",
+                        lambda title, desc, **kw: sent.append((title, desc)) or True)
+    run_report.send_run_report(dag_id="d", run_id="r", observed_date="x",
+                               stage="collect", results=results)
+    assert len(sent) >= 2                                        # 분할 전송(페이지네이션)
+    assert all("(1/" in t or "/" in t for t, _ in sent)         # 제목에 (i/N)
+    joined = "\n".join(d for _, d in sent)
+    for d in _DS:                                               # 전 API 가 어느 페이지엔가 존재
+        assert d.short in joined, d.short
+    assert all(len(d) <= run_report._MAX_DESC for _, d in sent)  # 각 페이지 한도 이하
+
+
+def test_zero_count_may_be_omitted():
+    # 미수집(⛔, 0건)은 요약(…외) 허용 — 0건은 임의 생략 가능
+    culture = [d.short for d in _DS if d.category == "culture"][:25]
+    assert len(culture) >= 22
+    rep = _build([_s(culture[0], "ok", 5, 10)], scope_shorts=culture)
+    assert "⛔ 미수집" in rep["description"] and "…외" in rep["description"]
+
+
+def test_elapsed_in_head():
+    d = _build([_s(_shorts("food")[0], "ok", 1, 1)], elapsed_seconds=125)["description"]
+    assert "⏱" in d and "2m 5s" in d
+
+
+def test_paginate_keeps_code_fence_balanced():
+    text = "a\n```\ntbl\n```\n" + "\n".join(f"line{i}" for i in range(300))
+    pages = run_report._paginate(text, 200)
+    assert len(pages) > 1
+    for p in pages:
+        assert p.count("```") % 2 == 0                          # 각 페이지 코드펜스 균형

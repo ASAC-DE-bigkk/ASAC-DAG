@@ -173,7 +173,7 @@ def test_load_unit_legacy_publishable_on_rows_positive(trino_env, monkeypatch):
     assert r["action"] == "loaded" and r["is_publishable"] is True and r["rows_loaded"] == 500
 
 
-def test_write_manifest_per_dataset(trino_env, monkeypatch):
+def test_write_manifest_batched(trino_env, monkeypatch):
     cur = _FakeCursor()
     monkeypatch.setattr(wh, "_connect", lambda c, s: _FakeConn(cur))
     results = [
@@ -186,6 +186,10 @@ def test_write_manifest_per_dataset(trino_env, monkeypatch):
     ]
     out = wh.write_manifest(results)
     assert out == {"published": 1, "datasets": 2}
-    statuses = [p[4] for (_s, p) in cur.of("INSERT")]
-    assert set(statuses) == {"SUCCESS", "FAILED"}
-    assert len(cur.of("DELETE")) == 2                            # 그레인 멱등
+    # 커밋 배칭 — 종별 delete+insert(=2N) 대신 단일 DELETE + 단일 INSERT(2행<100).
+    deletes, inserts = cur.of("DELETE"), cur.of("INSERT")
+    assert len(deletes) == 1 and len(inserts) == 1
+    assert len(deletes[0][1]) == 4                               # (source_id, run_id) 2쌍 = 4 파라미터
+    ins_params = inserts[0][1]
+    assert len(ins_params) == 24                                 # 2행 × 12칼럼 flatten
+    assert {ins_params[4], ins_params[4 + 12]} == {"SUCCESS", "FAILED"}  # status 는 각 행 offset 4

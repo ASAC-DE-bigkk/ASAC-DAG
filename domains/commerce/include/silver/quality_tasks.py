@@ -101,7 +101,7 @@ def notify_masked_address_dong_skip_summary() -> dict:
     return summary
 
 
-def report_silver_run() -> dict:
+def report_silver_run(elapsed_seconds: float | None = None) -> dict:
     """silver current 를 데이터셋(API)별로 집계해 DAG 완료 리포트 전송(#218, stage=silver).
 
     silver 는 dbt 로 전 데이터셋을 한 번에 변환하므로(태스크 단위 API 구분 없음) 변환 결과인
@@ -133,6 +133,7 @@ def report_silver_run() -> dict:
                     "error": "silver current 집계 실패(dbt run/test 결과 확인)"}]
     counts = run_report.send_run_report(
         dag_id="commerce_load_silver", run_id=observed, observed_date=observed,
-        stage="silver", results=results, count_label="현재", show_total=False)
+        stage="silver", results=results, count_label="현재", show_total=False,
+        elapsed_seconds=elapsed_seconds)
     log.info("silver run report: %s", counts)
     return counts

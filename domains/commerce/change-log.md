@@ -5,6 +5,31 @@
 
 ---
 
+## 2026-07-10
+
+### 50. manifest 메타 불일치 원인 규명 + 조치(유지보수 포함 + write_manifest 커밋 배칭)
+
+request:
+- manifest 손상 원인을 "가능성"이 아니라 **시나리오 검증 후 확정**하고, 확정되면 조치할 것.
+
+response:
+- **원인 확정(초기 가설 기각)**: 일일 Iceberg 유지보수(optimize/expire/orphan)가 발행 게이트 테이블
+  메타를 지웠다는 가설은 **검증 결과 기각** — 유지보수 대상이 `bronze_localdata_license` 하나였고,
+  R2 Data Catalog 는 테이블별 폴더(`__r2_data_catalog/<uuid>/<table>-<uuid>/`)로 **물리 격리**돼
+  bronze 대상 remove_orphan_files 가 manifest 파일을 건드릴 수 없음(location 속성으로 확인).
+  **실제 원인**: `bronze_collection_run_manifest` 가 **유지보수에서 빠진 채** write_manifest 가 종·run
+  단위 delete-then-insert 로 커밋을 계속 쌓아(재현: 5종 적재 → 스냅샷 2→7, 정리 5삭제 → 12) 스냅샷/
+  메타데이터가 무한 축적 → R2 Data Catalog 메타 불일치(ICEBERG_MISSING_METADATA) 유발.
+- **조치 ①(유지보수 포함)**: `bronze/maintenance.py` `DEFAULT_TABLES` + `commerce_load_bronze.py`
+  `iceberg_maintenance` 대상에 `bronze_collection_run_manifest` 추가 → 매일 optimize/expire(7d)/orphan.
+- **조치 ②(커밋 배칭)**: `warehouse.write_manifest` 를 종별 delete+insert(2N 커밋)에서 **단일 DELETE
+  (`(source_id,bronze_run_id) IN (VALUES …)`) + 청크 INSERT(100행)** 로 축소(값 전부 `?` 바인딩).
+- **검증**: 334 테스트 통과 + 보안 게이트 PASS. 실 Trino 라이브 — 배칭 DELETE `IN (VALUES …)` 구문
+  유효(무매칭 no-op), manifest `optimize` 정상 실행(= 이제 유지보수 대상에 실제 포함). 현재 12스냅샷은
+  당일 재현분이라 7d retention 이 보호(설계상 정상) — 매일 유지보수로 7일 경과분부터 만료.
+
+---
+
 ## 2026-07-08
 
 ### 49. silver v1/v2 정규화 + record_json 보존(API별 비공통) + raw→bronze→silver 전구간 검증
