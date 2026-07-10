@@ -44,6 +44,44 @@ KST = "Asia/Seoul"
 
 DEFAULT_PARAMS = {"target": "dev", "retention": "3d", "cleanup_hours": 6}
 
+# maintenance 의 optimize 가 silver/gold 데이터파일을 재작성하는 동안 transform 의
+# delete+insert 가 같은 행을 지우면 Iceberg 커밋 충돌 → 중복 발생. 그래서 maintenance
+# 동안 transform 을 pause 한다. bronze 는 append(새 ingest_ts)라 optimize 와 덜 충돌하고
+# 수집 SLA 를 위해 유지한다.
+TRANSFORM_DAG = "citydata_transform"
+
+
+def _set_transform_paused(paused: bool) -> None:
+    from airflow.models import DagModel
+    from airflow.utils.session import create_session
+    with create_session() as s:
+        dm = s.query(DagModel).filter(DagModel.dag_id == TRANSFORM_DAG).first()
+        if dm is not None:
+            dm.is_paused = paused
+
+
+def _pause_transform(**_) -> None:
+    """transform 을 pause + 진행 중 run 이 끝날 때까지 대기(최대 ~15분)."""
+    import time
+    from airflow.models import DagRun
+    from airflow.utils.session import create_session
+    _set_transform_paused(True)
+    print(f"[maintenance] {TRANSFORM_DAG} paused — 진행 중 run 대기")
+    for _ in range(60):  # 60 x 15s = 15분 상한
+        with create_session() as s:
+            running = s.query(DagRun).filter(
+                DagRun.dag_id == TRANSFORM_DAG, DagRun.state == "running").count()
+        if running == 0:
+            print("[maintenance] transform idle 확인 — 유지보수 진행")
+            return
+        time.sleep(15)
+    print("[maintenance] ⚠ transform run 이 15분 내 안 끝남 — 그래도 진행")
+
+
+def _resume_transform(**_) -> None:
+    _set_transform_paused(False)
+    print(f"[maintenance] {TRANSFORM_DAG} resumed")
+
 
 def _maintain(**context) -> None:
     params = context["params"]
@@ -77,7 +115,7 @@ def _storage_cleanup(**context) -> None:
 
 with DAG(
     dag_id="citydata_maintenance",
-    description="Weekly Iceberg maintenance (Trino optimize/expire/orphan + boto3 metadata/dropped-dir cleanup) for seoul_ppltn + seoul_citydata.",
+    description="Weekly Iceberg maintenance (optimize/expire/orphan + boto3 cleanup). maintenance 동안 transform 을 pause/resume 해 delete+insert↔optimize 충돌 방지 (bronze 는 유지).",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
     schedule="0 4 * * 0",  # 매주 일요일 04:00 KST (오프피크)
     catchup=False,
@@ -86,7 +124,11 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["maintenance", "citydata", "population", "iceberg", "r2"],
 ) as dag:
+    pause_transform = PythonOperator(task_id="pause_transform", python_callable=_pause_transform)
     maintain = PythonOperator(task_id="maintain", python_callable=_maintain)
     storage_cleanup = PythonOperator(task_id="storage_cleanup", python_callable=_storage_cleanup)
+    # maintain/cleanup 이 실패해도 transform 은 반드시 재개(pause 채 방치 방지).
+    resume_transform = PythonOperator(
+        task_id="resume_transform", python_callable=_resume_transform, trigger_rule="all_done")
 
-    maintain >> storage_cleanup
+    pause_transform >> maintain >> storage_cleanup >> resume_transform
