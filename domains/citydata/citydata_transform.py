@@ -73,10 +73,12 @@ with DAG(
         on_failure_callback=record_citydata_problem,
     )
 
-    # 참조 seed(area_geo + asac_axes crosswalk/boundary) 적재.
+    # 참조 seed(area_geo + asac_axes crosswalk/boundary) 적재. asac_axes 의
+    # seoul_gu_boundary 는 우리 그래프에서 아무 모델도 참조하지 않아(gu_code 는
+    # dim_admin_dong 라이브 코드에서 취득) 스키마 위생상 로드에서 제외한다 (#267).
     seed_refs = BashOperator(
         task_id="dbt_seed",
-        bash_command=_dbt("seed"),
+        bash_command=_dbt("seed --exclude asac_axes.seoul_gu_boundary"),
         on_failure_callback=record_citydata_problem,
     )
 
