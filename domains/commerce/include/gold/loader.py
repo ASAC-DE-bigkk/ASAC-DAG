@@ -24,23 +24,25 @@ _ENTITY_EXPR = ("lower(to_hex(sha256(to_utf8(dataset || '|' || coalesce(opnsftea
 _FETCH = 2000
 
 
-# ── 날짜 규격화(text → DATE, 무효값 NULL) — 원천 날짜를 date 타입으로 통일 ──
-def _date8(col: str) -> str:
-    """YYYYMMDD 문자열 → DATE. Trino 엄격 파싱(20090229 등 무효·빈값·오포맷은 try→NULL)."""
-    return f"try(cast(date_parse(nullif(trim({col}), ''), '%Y%m%d') as date))"
+# silver 컬럼 → gold history 컬럼(entity_id·버전키 뒤 순서 = ddl.HISTORY_COLUMNS[3:]). 원천 날짜는
+# raw text 로 뽑고 **Python 에서 DATE 로 규격화**(_to_date, 무효값 NULL)한다 — Trino 에서 try() 와
+# sha256(to_utf8()) 를 같은 SELECT 에 두면 옵티마이저 버그(Bind→Lambda)가 나므로 SQL try() 회피.
+_HISTORY_SELECT = ("bplcnm, trdstategbn, dtlstategbn, apvpermymd, dcbymd, road_address, "
+                   "jibun_address, gu_code, legal_code, admin_dong_code, longitude, latitude, "
+                   "updatedt, updatedt_ts, lastmodts_ts, observed_date")
 
 
-def _date_iso(col: str) -> str:
-    """YYYY-MM-DD(ISO) 문자열 → DATE(무효·빈값 NULL)."""
-    return f"try(cast(nullif(trim({col}), '') as date))"
-
-
-# silver 컬럼 → gold history 컬럼 매핑(entity_id·버전키 뒤에 붙는 순서 = ddl.HISTORY_COLUMNS[3:]).
-# apvpermymd/dcbymd(원천 YYYYMMDD)·observed_date(YYYY-MM-DD)는 DATE 로 규격화.
-_HISTORY_SELECT = (f"bplcnm, trdstategbn, dtlstategbn, {_date8('apvpermymd')}, {_date8('dcbymd')}, "
-                   "road_address, jibun_address, gu_code, legal_code, admin_dong_code, "
-                   "longitude, latitude, updatedt, updatedt_ts, lastmodts_ts, "
-                   f"{_date_iso('observed_date')}")
+def _to_date(val, col):
+    """원천 날짜 문자열(YYYYMMDD/YYYY-MM-DD) → date. DATE 규격 컬럼만 변환(무효·빈값·오포맷 NULL)."""
+    if col not in ddl._DATE:
+        return val
+    s = ("" if val is None else str(val)).strip().replace("-", "")
+    if len(s) < 8 or not s[:8].isdigit():
+        return None
+    try:
+        return datetime.strptime(s[:8], "%Y%m%d").date()
+    except ValueError:
+        return None
 
 
 def _major(category: str) -> str:
@@ -131,7 +133,8 @@ from {qschema}.silver_license_history
 where collected_at > coalesce(cast(? as timestamp), timestamp '1970-01-01') and collected_at <= ?
 """, (wm, hi))  # security: allow-sql - qschema 검증 식별자, 값은 바인딩
     return _stream(tcur, f"insert into commerce_business_entity_history ({cols}) values %s "
-                         "on conflict (entity_id, collected_at, content_hash) do nothing", pgconn)
+                         "on conflict (entity_id, collected_at, content_hash) do nothing", pgconn,
+                   transform=lambda row: tuple(_to_date(v, c) for c, v in zip(ddl.HISTORY_COLUMNS, row)))
 
 
 def load_detail(tconn, qschema: str, pgconn, detail: dict, wm, hi) -> int:
@@ -155,7 +158,7 @@ def load_entity(tconn, qschema: str, pgconn, dataset_map: dict[str, dict], wm, h
     tcur = tconn.cursor()
     tcur.execute(f"""
 select {_ENTITY_EXPR}, c.dataset, c.opnsfteamcode, c.mgtno, c.bplcnm,
-       c.trdstategbn, c.dtlstategbn, {_date8('c.apvpermymd')}, {_date8('c.dcbymd')}, c.road_address, c.jibun_address,
+       c.trdstategbn, c.dtlstategbn, c.apvpermymd, c.dcbymd, c.road_address, c.jibun_address,
        c.gu_code, c.legal_code, c.admin_dong_code, c.longitude, c.latitude,
        c.updatedt, c.updatedt_ts, c.lastmodts_ts, f.first_collected_at, c.collected_at, c.content_hash
 from {qschema}.silver_license_current c
@@ -169,10 +172,10 @@ where c.collected_at > coalesce(cast(? as timestamp), timestamp '1970-01-01') an
                        if c not in ("entity_id", "first_collected_at"))
 
     def _tf(r):
-        # (entity_id, dataset, ...) → entity_type/detail_table 를 dataset_map 에서 주입
+        # (entity_id, dataset, ...) → entity_type/detail_table 주입 후 ENTITY_COLUMNS 정렬 + 날짜 규격화
         m = dataset_map.get(r[1], {})
-        return (r[0], r[1], r[2], r[3], m.get("entity_type"), m.get("detail_table"),
-                *r[4:])
+        row = (r[0], r[1], r[2], r[3], m.get("entity_type"), m.get("detail_table"), *r[4:])
+        return tuple(_to_date(v, c) for c, v in zip(ddl.ENTITY_COLUMNS, row))
     return _stream(tcur, f"insert into commerce_business_entity ({cols}) values %s "
                          f"on conflict (entity_id) do update set {update}", pgconn, transform=_tf)
 

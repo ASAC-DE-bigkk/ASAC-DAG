@@ -121,10 +121,20 @@ def commerce_load_silver():
                    if dr and getattr(dr, "start_date", None) else None)
         return quality_tasks.report_silver_run(elapsed_seconds=elapsed)
 
-    run_silver = BashOperator(
-        task_id="dbt_run_silver",
-        bash_command=_dbt_command(f"run --select {SILVER_SELECT}"),
-    )
+    @task
+    def dbt_run_silver() -> dict:
+        """silver 모델 실행 — **전체 재빌드는 dataset 배치(청크)로, 평소 증분은 단일 실행**.
+
+        전체 재빌드(테이블 drop 후 최초)를 한 번에 하면 history window 연산이 Trino 노드 메모리를
+        초과(OOM)하므로, silver 가 비었으면 dataset 배치로 나눠 순차 적재한다. 증분은 unmarked run
+        만 처리해 소량이라 단일 실행. 절차: dbt/domains/commerce/docs/rebuild-and-ops.md §6.
+        """
+        from silver import chunked_run
+
+        return chunked_run.run_silver(select=SILVER_SELECT, project_dir=DBT_PROJECT_DIR,
+                                      dbt_bin=DBT_BIN, target=DBT_TARGET)
+
+    run_silver = dbt_run_silver()
     test_silver = BashOperator(
         task_id="dbt_test_silver",
         bash_command=_dbt_command(f"test --select {SILVER_SELECT}"),
