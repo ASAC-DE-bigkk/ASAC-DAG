@@ -62,10 +62,11 @@ def trino_catalog() -> str:
     return os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
 
 
-def smoke_schema() -> str:
-    if is_dev_target():
-        return os.environ.get("DEV_SMOKE_SCHEMA", "dev_local")
-    return os.environ.get("SMOKE_SCHEMA", "ops_smoke")
+def common_schema() -> str:
+    # 공유 마스터는 실행자별 스모크 스키마(dev_<id>)가 아니라 전용 common 스키마에 적재한다
+    # (raw/common/ 경로·common_* DAG 접두와 대칭, 개인 스키마 파편화 차단 — #154 코멘트).
+    # dev/prod 공통 이름이며 카탈로그(iceberg_dev/iceberg)로만 분기한다.
+    return os.environ.get("COMMON_SCHEMA", "common")
 
 
 def sql_identifier(value: str) -> str:
@@ -93,7 +94,7 @@ def _trino_cursor():
     import trino.dbapi
 
     catalog = sql_identifier(trino_catalog())
-    schema = sql_identifier(smoke_schema())
+    schema = sql_identifier(common_schema())
     connection = trino.dbapi.connect(
         host=os.environ.get("TRINO_HOST", "trino"),
         port=int(os.environ.get("TRINO_PORT", "8080")),
