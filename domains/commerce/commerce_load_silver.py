@@ -110,11 +110,16 @@ def commerce_load_silver():
         return quality_tasks.notify_masked_address_dong_skip_summary()
 
     @task(trigger_rule="all_done")
-    def report_silver() -> dict:
-        """DAG 완료 리포트(#218) — silver current 데이터셋(API)별 현재 행수. 실패해도 반드시 보고."""
+    def report_silver(**ctx) -> dict:
+        """DAG 완료 리포트(#218) — silver current 데이터셋(API)별 현재 행수 + 실행시간. 실패해도 보고."""
+        from datetime import datetime, timezone
+
         from silver import quality_tasks
 
-        return quality_tasks.report_silver_run()
+        dr = ctx.get("dag_run")
+        elapsed = ((datetime.now(timezone.utc) - dr.start_date).total_seconds()
+                   if dr and getattr(dr, "start_date", None) else None)
+        return quality_tasks.report_silver_run(elapsed_seconds=elapsed)
 
     run_silver = BashOperator(
         task_id="dbt_run_silver",

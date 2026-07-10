@@ -97,9 +97,45 @@ def _num(n: int) -> str:
     return f"{int(n):,}"
 
 
+def _fmt_elapsed(seconds: float | None) -> str:
+    s = int(seconds or 0)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    return f"{s // 3600}h {(s % 3600) // 60}m"
+
+
+def _paginate(text: str, limit: int) -> list[str]:
+    """text 를 limit 이하 페이지들로 분할(줄 경계, 코드펜스 균형 유지). **생략 없이 전량 보존**.
+
+    한 임베드 한도(Discord ~4096)를 넘는 신규 상세를 자르는 대신 여러 임베드로 나누기 위함.
+    코드펜스(```)가 페이지 경계에 걸리면 현재 페이지에서 닫고 다음 페이지에서 다시 연다.
+    """
+    pages: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    fence = False
+    for line in text.split("\n"):
+        add = len(line) + (1 if cur else 0)
+        if cur and cur_len + add > limit:
+            page = "\n".join(cur) + ("\n```" if fence else "")
+            pages.append(page)
+            cur = ["```"] if fence else []
+            cur_len = 3 if fence else 0
+        cur.append(line)
+        cur_len += len(line) + (1 if len(cur) > 1 else 0)
+        if line.lstrip().startswith("```"):
+            fence = not fence
+    if cur:
+        pages.append("\n".join(cur))
+    return pages or [""]
+
+
 def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str,
                      results: list[dict], scope_shorts: list[str] | None = None,
-                     count_label: str = "신규", show_total: bool = True) -> dict:
+                     count_label: str = "신규", show_total: bool = True,
+                     elapsed_seconds: float | None = None) -> dict:
     """results(API별) → Discord 임베드(대분류>중분류>소분류). scope_shorts 로 미수집까지 집계."""
     by_short = {d.short: d for d in registry.all_datasets()}
     results = [dict(s) for s in (results or []) if s]
@@ -147,6 +183,8 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
              f"✅{n['ok']} ⚠️{n['warn']} ❌{n['fail']}" + (f" ⛔{n['miss']}" if n["miss"] else ""))
     head = f"**{count_label} {_num(new_sum)}건**" + (f" · 전체수집 {_num(tot_sum)}건" if show_total else "")
     head += f" · 대상 {total}종"
+    if elapsed_seconds is not None:
+        head += f" · ⏱ {_fmt_elapsed(elapsed_seconds)}"
     lines = [head]
 
     # ── 대분류 집계 + 통계 표(ASCII 격자, 한글 이름은 줄 끝) ──
@@ -175,22 +213,19 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
     overview = list(lines)  # head + 대분류 통계 표
     err_sec, warn_sec, succ_sec = [], [], []
 
-    # (에러) 실패 — 어떤 DAG task 였는지 @task 로 명시
+    # (에러) 실패 — 어떤 DAG task 였는지 @task 로 명시. 실패는 중요하므로 생략하지 않는다
+    # (길면 send_run_report 가 페이지 분할). 이하 모든 섹션 동일 — 생략은 0건(미수집·변경없음)만.
     if buckets["fail"]:
         det = []
-        for s in buckets["fail"][:12]:
+        for s in buckets["fail"]:
             e = redact(str(s.get("error") or "")).splitlines()[0][:80] if s.get("error") else "failed"
             tk = f" `@{s.get('task')}`" if s.get("task") else ""
             det.append(f"- {api_lab(s)}{tk} — {e}")
-        if n["fail"] > 12:
-            det.append(f"- …외 {n['fail'] - 12}건")
         err_sec.append("**❌ 실패(에러)**\n" + "\n".join(det))
 
-    # (경고) 부분 수집 + 미수집
+    # (경고) 부분 수집 — 신규 건수가 있을 수 있으므로 생략하지 않는다
     if buckets["warn"]:
-        det = [f"- {api_lab(s)} — {_num(_new(s))}/{_num(_tot(s))}" for s in buckets["warn"][:12]]
-        if n["warn"] > 12:
-            det.append(f"- …외 {n['warn'] - 12}건")
+        det = [f"- {api_lab(s)} — {_num(_new(s))}/{_num(_tot(s))}" for s in buckets["warn"]]
         warn_sec.append("**⚠️ 경고(부분)**\n" + "\n".join(det))
     if buckets["miss"]:
         ms = ", ".join(api_lab(s) for s in buckets["miss"][:20])
@@ -208,11 +243,12 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
         parts = [f"{MAJOR_KO.get(m, m)} 하위 {c}개" for m, c in sorted(zero.items(), key=lambda x: -x[1])]
         zero_line = "**변경내역 없음(신규 0)**: " + " · ".join(parts)
 
+    # 신규(new>0) 는 **절대 생략하지 않는다** — 전 대분류·중분류·소분류를 다 담는다.
+    # 길어서 한 임베드를 넘으면 send_run_report 가 여러 임베드로 분할 전송(생략 대신 페이지네이션).
+    # (생략 허용은 신규 0건뿐 — 미수집(⛔)·변경내역 없음(zero_line) 은 요약 유지.)
     pos = [s for s in results if _new(s) > 0]
     if pos:
-        fixed = len("\n".join(overview + err_sec + warn_sec)) + len(zero_line)
-        budget = _MAX_DESC - fixed - 120
-        out, shown, used = [], 0, 0
+        out = []
         for mj in majors_by_new:
             mj_pos = [s for s in pos if major_of(s) == mj]
             if not mj_pos:
@@ -225,16 +261,10 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
                 arr = sorted(mids[mk], key=_new, reverse=True)
                 seg.append(f"{_INDENT}{MARK_MID} {mid_lab(arr[0])} · {count_label} {_num(sum(_new(x) for x in arr))}")
                 seg += [f"{_INDENT}{_INDENT}{MARK_API} {api_lab(s)} · {_num(_new(s))}" for s in arr]
-            seg_text = "\n".join(seg)
-            if used + len(seg_text) + 1 > budget:
-                break
-            out.append(seg_text)
-            used += len(seg_text) + 1
-            shown += len(mj_pos)
-        if out:
-            head_ln = f"**✅ API별 신규** (볼드=대분류 · {MARK_MID} 중분류 · {MARK_API} 소분류)"
-            tail = f"\n…외 {len(pos) - shown}종 생략" if len(pos) - shown > 0 else ""
-            succ_sec.append(head_ln + "\n" + "\n".join(out) + tail)
+            out.append("\n".join(seg))
+        head_ln = (f"**✅ API별 신규** (볼드=대분류 · {MARK_MID} 중분류 · {MARK_API} 소분류) "
+                   f"— 신규>0 {len(pos)}종 전건")
+        succ_sec.append(head_ln + "\n" + "\n".join(out))
     if zero_line:
         succ_sec.append(zero_line)
 
@@ -253,28 +283,33 @@ def build_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str
 def send_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str,
                     results: list[dict], scope_shorts: list[str] | None = None,
                     count_label: str = "신규", show_total: bool = True,
-                    extra_sections: list[str] | None = None) -> dict:
+                    extra_sections: list[str] | None = None,
+                    elapsed_seconds: float | None = None) -> dict:
     """리포트 빌드 + common.discord 전송(best-effort). 반환: counts(로그/테스트용).
 
     extra_sections: DAG 리포트에 흡수할 task 단위 섹션(예: 유지보수). '메시지 1건 = DAG 1회, task
-    산출물은 섹션'(리포트 묶기 원칙). 섹션이 있으면 본문 tail 을 줄여 섹션이 항상 보이게 한다.
+    산출물은 섹션'(리포트 묶기 원칙).
+    elapsed_seconds: DAG 실행 시간(리포트 머리말 ⏱).
+
+    본문이 한 임베드 한도를 넘으면 **잘라내지 않고 여러 임베드로 분할 전송**한다(신규>0 은 전건 유지 —
+    build_run_report 가 이미 생략 없이 담고, 여기서 페이지네이션만).
     """
     rep = build_run_report(dag_id=dag_id, run_id=run_id, observed_date=observed_date, stage=stage,
-                           results=results, scope_shorts=scope_shorts,
-                           count_label=count_label, show_total=show_total)
+                           results=results, scope_shorts=scope_shorts, count_label=count_label,
+                           show_total=show_total, elapsed_seconds=elapsed_seconds)
     desc = rep["description"]
     extra = [s for s in (extra_sections or []) if s]
     if extra:
-        tail = "\n\n" + "\n\n".join(extra)
-        room = 4000 - len(tail)
-        if len(desc) > room:
-            desc = desc[:room].rstrip() + " …"
-        desc += tail
-    try:
-        send_embed(rep["title"], desc, color=rep["color"], footer=rep["footer"], domain=_DOMAIN)
-    except Exception as exc:  # noqa: BLE001 — 알림 실패가 DAG 상태를 오염시키지 않게
-        log.warning("[commerce] run report 전송 실패(무시): %s", type(exc).__name__)
-    log.info("[commerce] run report(%s): %s", stage, rep["counts"])
+        desc += "\n\n" + "\n\n".join(extra)
+    pages = _paginate(desc, _MAX_DESC)
+    n_pages = len(pages)
+    for i, page in enumerate(pages, 1):
+        title = rep["title"] + (f" ({i}/{n_pages})" if n_pages > 1 else "")
+        try:
+            send_embed(title, page, color=rep["color"], footer=rep["footer"], domain=_DOMAIN)
+        except Exception as exc:  # noqa: BLE001 — 알림 실패가 DAG 상태를 오염시키지 않게
+            log.warning("[commerce] run report 전송 실패(무시): %s", type(exc).__name__)
+    log.info("[commerce] run report(%s): %s (pages=%d)", stage, rep["counts"], n_pages)
     return rep["counts"]
 
 

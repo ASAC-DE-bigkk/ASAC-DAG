@@ -104,7 +104,22 @@ def commerce_load_gold():
                 dataset_map[m] = {"entity_type": etype, "detail_table": d["object"]}
         return loader.run_load(details, dataset_map)
 
-    build_catalog() >> load_gold()
+    @task(trigger_rule="all_done")
+    def report_gold(**ctx) -> dict:
+        """실행시간 + 카탈로그 + 객체별 적재행 Discord 리포트(#218). 실패해도 반드시 보고."""
+        from datetime import datetime, timezone
+
+        from gold import report
+
+        ti = ctx["ti"]
+        catalog = ti.xcom_pull(task_ids="build_catalog")   # 실패 시 None → 실패 리포트
+        load = ti.xcom_pull(task_ids="load_gold")
+        dr = ctx.get("dag_run")
+        elapsed = ((datetime.now(timezone.utc) - dr.start_date).total_seconds()
+                   if dr and getattr(dr, "start_date", None) else None)
+        return report.send_gold_report(catalog=catalog, load=load, elapsed_seconds=elapsed)
+
+    build_catalog() >> load_gold() >> report_gold()
 
 
 commerce_load_gold()
