@@ -103,6 +103,19 @@ def _interval_end(context) -> pendulum.DateTime:
     return pendulum.instance(end)
 
 
+def _ctx_from_end(end, run_id: str) -> RunContext:
+    """data interval end 에서 파티션 키(load_date=KST, ingest_ts=UTC, run_id)를 유도한다.
+
+    plan·load_bronze(폴백)·report 세 태스크가 반드시 같은 파티션을 가리켜야 하므로,
+    포맷 문자열을 여기 한 곳에만 둔다(세 곳이 따로 유도하다 하나가 어긋나는 위험 제거).
+    """
+    return RunContext(
+        load_date=end.in_timezone(KST).strftime("%Y-%m-%d"),
+        ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
+        run_id=run_id,
+    )
+
+
 def _plan(**context) -> list[dict]:
     """적재할 데이터셋마다 op_kwargs dict 하나씩을 만들고, 실행 컨텍스트를 공유한다.
 
@@ -112,9 +125,8 @@ def _plan(**context) -> list[dict]:
     params = context["params"]
     target = normalize_target(params["target"])  # 오타 target을 plan에서 즉시 fail-fast
     end = _interval_end(context)
-    load_date = end.in_timezone(KST).strftime("%Y-%m-%d")
-    ingest_ts = end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ")
-    run_id = context["dag_run"].run_id
+    ctx = _ctx_from_end(end, context["dag_run"].run_id)
+    load_date, ingest_ts, run_id = ctx.load_date, ctx.ingest_ts, ctx.run_id
 
     # 날짜창: 명시 안 하면 [end-lookback_days, end] 롤링 윈도우 사용.
     date_from = params["date_from"]
@@ -206,12 +218,7 @@ def _load_bronze(**context) -> dict:
         first = planned[0]
         ctx = RunContext(load_date=first["load_date"], ingest_ts=first["ingest_ts"], run_id=first["run_id"])
     else:  # plan XCom 유실 시 폴백 — 스케줄/수동 run 모두 같은 값으로 재유도된다
-        end = _interval_end(context)
-        ctx = RunContext(
-            load_date=end.in_timezone(KST).strftime("%Y-%m-%d"),
-            ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
-            run_id=context["dag_run"].run_id,
-        )
+        ctx = _ctx_from_end(_interval_end(context), context["dag_run"].run_id)
     loaded = load_bronze(
         ctx, loadable,
         target=normalize_target(params["target"]),
@@ -231,12 +238,7 @@ def _report(**context) -> None:
     숫자로 surface 한다(계획안 Slide 6②·7). 위반이 있으면 run을 실패로 표시한다.
     """
     params = context["params"]
-    end = _interval_end(context)
-    ctx = RunContext(
-        load_date=end.in_timezone(KST).strftime("%Y-%m-%d"),
-        ingest_ts=end.in_timezone("UTC").strftime("%Y%m%dT%H%M%SZ"),
-        run_id=context["dag_run"].run_id,
-    )
+    ctx = _ctx_from_end(_interval_end(context), context["dag_run"].run_id)
     # 매핑 인스턴스 1개면 pull 이 dict 하나를 줄 수 있어 정규화 필수(#87).
     summaries = normalize_mapped_results(context["ti"].xcom_pull(task_ids="fetch_raw"))
     # load_bronze 결과(iceberg 행수)를 리포트에 반영 — fetch summary의 iceberg_rows=0 을 덮는다.
