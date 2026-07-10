@@ -383,28 +383,41 @@ def write_manifest(results: list[dict]) -> dict:
     cols = ("source_id", "dataset", "bronze_run_id", "dag_run_id", "status", "is_publishable",
             "rows_loaded", "rows_expected", "observed_date", "load_date", "engine", "event_at")
     event_at = _utcnow_ts()
+
+    # 종별 delete+insert(=2N 커밋) 대신 **단일 DELETE + 청크 INSERT** 로 배칭한다. manifest 는
+    # 유지보수 대상이지만, 커밋 자체를 줄여 스냅샷/메타데이터 축적(R2 Data Catalog 메타 불일치의 원인)을
+    # 근본 완화한다. 값은 전부 ? 바인딩(SQL 조립 없음).
+    pairs, rows, published = [], [], 0
+    for r in loaded:
+        short = r["short"]
+        source_id = f"{MANIFEST_SOURCE_PREFIX}_{short}"
+        ok = bool(r.get("is_publishable"))
+        pairs.append((source_id, r["run_id"]))
+        rows.append((source_id, short, r["run_id"], r.get("dag_run_id") or "",
+                     "SUCCESS" if ok else "FAILED", ok, r.get("rows_loaded", 0),
+                     r.get("rows_expected", 0), r.get("observed_date") or r.get("load_date"),
+                     r["load_date"], r.get("engine") or "", event_at))
+        published += 1 if ok else 0
+
     conn = _connect(catalog, schema)
-    published = 0
     try:
         cur = conn.cursor()
-        for r in loaded:
-            short = r["short"]
-            source_id = f"{MANIFEST_SOURCE_PREFIX}_{short}"
-            ok = bool(r.get("is_publishable"))
-            cur.execute(  # security: allow-sql
-                f"DELETE FROM {qtable} WHERE source_id = ? AND bronze_run_id = ?",
-                (source_id, r["run_id"]))
+        # 1) 단일 DELETE — 대상 (source_id, bronze_run_id) 전부(커밋 1회, 매칭 0이면 no-op).
+        del_ph = ", ".join(["(?, ?)"] * len(pairs))
+        cur.execute(  # security: allow-sql — qtable=_qualified(), 값은 ? 바인딩
+            f"DELETE FROM {qtable} WHERE (source_id, bronze_run_id) IN (VALUES {del_ph})",
+            [v for pair in pairs for v in pair])
+        cur.fetchall()
+        # 2) 청크 INSERT — 100행씩(커밋 소수). timestamp 만 CAST.
+        row_ph = "(" + ", ".join(["?"] * 11) + ", CAST(? AS timestamp(6)))"
+        for i in range(0, len(rows), 100):
+            batch = rows[i:i + 100]
+            cur.execute(  # security: allow-sql — 컬럼/플레이스홀더 상수, 값은 ? 바인딩
+                f"INSERT INTO {qtable} ({', '.join(cols)}) VALUES {', '.join([row_ph] * len(batch))}",
+                [v for row in batch for v in row])
             cur.fetchall()
-            cur.execute(  # security: allow-sql
-                f"INSERT INTO {qtable} ({', '.join(cols)}) VALUES "
-                f"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS timestamp(6)))",
-                (source_id, short, r["run_id"], r.get("dag_run_id") or "",
-                 "SUCCESS" if ok else "FAILED", ok, r.get("rows_loaded", 0),
-                 r.get("rows_expected", 0), r.get("observed_date") or r.get("load_date"),
-                 r["load_date"], r.get("engine") or "", event_at))
-            cur.fetchall()
-            published += 1 if ok else 0
-        log.info("manifest: %d종 기록(발행 %d)", len(loaded), published)
+        log.info("manifest: %d종 기록(발행 %d, 커밋 배칭 1+%d)", len(loaded), published,
+                 (len(rows) + 99) // 100)
         return {"published": published, "datasets": len(loaded)}
     finally:
         conn.close()

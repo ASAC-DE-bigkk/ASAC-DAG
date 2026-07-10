@@ -16,8 +16,12 @@ from bronze.warehouse import _connect, _qualified
 log = logging.getLogger(__name__)
 
 # 유지보수 대상 = commerce Iceberg 테이블(bronze + silver). 없는 테이블은 skip.
+# bronze_collection_run_manifest 포함 필수 — 이 발행 게이트 테이블은 write_manifest 가 종·run 단위
+# delete-then-insert 로 커밋을 계속 쌓으므로, 유지보수에서 빠지면 스냅샷/메타데이터가 무한 축적돼
+# R2 Data Catalog 메타데이터 불일치(metadata not found)를 유발한다(실측 원인).
 DEFAULT_TABLES = (
     "bronze_localdata_license",
+    "bronze_collection_run_manifest",
     "silver_license_history",
     "silver_license_current",
     "silver_license_detail_health",
