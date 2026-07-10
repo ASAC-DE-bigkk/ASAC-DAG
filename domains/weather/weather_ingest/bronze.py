@@ -42,6 +42,7 @@ KMA_BRONZE_COLUMNS = (
     "collected_at",
     "load_date",
     "dag_run_id",
+    "page_no",
 )
 
 
@@ -55,6 +56,7 @@ def ensure_kma_bronze_schema(cursor, qualified_table: str) -> None:
     for column_name, column_type in (
         ("request_params_json", "varchar"),
         ("load_date", "varchar"),
+        ("page_no", "integer"),
     ):
         cursor.execute(
             f"ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {column_name} {column_type}"
@@ -89,7 +91,8 @@ def create_kma_bronze_table(cursor, catalog: str, schema: str) -> str:
             item_count integer,
             collected_at timestamp(6),
             load_date varchar,
-            dag_run_id varchar
+            dag_run_id varchar,
+            page_no integer
         )
         WITH (
             format = 'PARQUET',
@@ -182,6 +185,7 @@ def iter_kma_bronze_records(row_batches: list[dict], dag_run_id: str):
                 "collected_at": collected_at_utc,
                 "load_date": load_date,
                 "dag_run_id": dag_run_id,
+                "page_no": int(batch.get("page_no") or 1),
             }
 
 
@@ -285,6 +289,7 @@ def _arrow_table(rows: list[dict]):
         "http_status": pa.int32(),
         "total_count": pa.int32(),
         "item_count": pa.int32(),
+        "page_no": pa.int32(),
         "collected_at": pa.timestamp("us"),
     }
     fields = []
