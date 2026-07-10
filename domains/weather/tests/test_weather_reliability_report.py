@@ -45,7 +45,7 @@ def stub_dag_run_summary(monkeypatch):
 
 def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
-    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
+    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "weather_traffic_bronze")
     cursor = RecordingCursor(
         rows=[
             (8, 640, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
@@ -70,14 +70,14 @@ def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
     assert result["weather"]["grid_slot_count"] == 640
     assert result["weather"]["raw_object_count"] == 640
     assert result["weather"]["latest_base_time"] == "0800"
-    assert result["blast_radius"] == ["iceberg_dev.dev_masondev1024.bronze_kma_vilage_fcst"]
+    assert result["blast_radius"] == ["iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst"]
     assert "current_timestamp - INTERVAL '24' HOUR" in cursor.statements[0]
     assert "FROM by_base" in cursor.statements[0]
 
 
 def test_weather_dag_run_summary_uses_manifest_table(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
-    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
+    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "weather_traffic_bronze")
     cursor = RecordingCursor(rows=[(2, 1, 0, 160, 120)])
     config = report.report_config()
 

@@ -24,7 +24,7 @@ def test_success_manifest_event_marks_run_publishable():
     qualified_table = record_bronze_run_event(
         cursor,
         "iceberg_dev",
-        "dev_masondev1024",
+        "weather_traffic_bronze",
         source_id="kma_vilage_fcst",
         dag_id="weather_vilage_fcst_bronze",
         dag_run_id="manual__weather_success",
@@ -36,9 +36,9 @@ def test_success_manifest_event_marks_run_publishable():
         actual_raw_objects=1,
     )
 
-    assert qualified_table == "iceberg_dev.dev_masondev1024.bronze_collection_run_manifest"
+    assert qualified_table == "iceberg_dev.weather_traffic_bronze.bronze_collection_run_manifest"
     assert len(cursor.statements) == 4
-    assert "CREATE TABLE IF NOT EXISTS iceberg_dev.dev_masondev1024.bronze_collection_run_manifest" in cursor.statements[1]
+    assert "CREATE TABLE IF NOT EXISTS iceberg_dev.weather_traffic_bronze.bronze_collection_run_manifest" in cursor.statements[1]
     assert "status = 'SUCCESS'" in cursor.statements[2]
     assert "'weather_vilage_fcst_bronze'" in cursor.statements[3]
     assert "true" in cursor.statements[3]

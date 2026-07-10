@@ -22,7 +22,7 @@ def test_traffic_insert_replaces_same_retry_scope_before_append():
 
     inserted = insert_seoul_traffic_bronze_rows(
         cursor=cursor,
-        qualified_table="iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident",
+        qualified_table="iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident",
         rows=[
             {
                 "acc_id": "ACC-1",
@@ -54,14 +54,14 @@ def test_traffic_insert_replaces_same_retry_scope_before_append():
     assert len(cursor.statements) == 4
     audit_delete_sql, audit_insert_sql, delete_sql, insert_sql = cursor.statements
     assert audit_delete_sql.startswith(
-        "DELETE FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit WHERE"
+        "DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit WHERE"
     )
     assert audit_insert_sql.startswith(
-        "INSERT INTO iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit"
+        "INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit"
     )
-    assert delete_sql.startswith("DELETE FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident WHERE")
+    assert delete_sql.startswith("DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident WHERE")
     assert f"source_id = '{SOURCE_ID}'" in delete_sql
     assert "dag_run_id = 'scheduled__2026-07-01T09:15:00+09:00'" in delete_sql
     assert "start_index = 1" in delete_sql
     assert "end_index = 1000" in delete_sql
-    assert insert_sql.startswith("INSERT INTO iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident")
+    assert insert_sql.startswith("INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident")

@@ -29,12 +29,12 @@ def test_create_bronze_table_also_creates_request_audit_table():
     qualified_table = bronze.create_seoul_traffic_bronze_table(
         cursor=cursor,
         catalog="iceberg_dev",
-        schema="dev_masondev1024",
+        schema="weather_traffic_bronze",
     )
 
-    assert qualified_table == "iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident"
+    assert qualified_table == "iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident"
     assert any(
-        "CREATE TABLE IF NOT EXISTS iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit"
+        "CREATE TABLE IF NOT EXISTS iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit"
         in statement
         for statement in cursor.statements
     )
@@ -45,7 +45,7 @@ def test_zero_row_insert_writes_request_audit_without_incident_rows():
 
     inserted = bronze.insert_seoul_traffic_bronze_rows(
         cursor=cursor,
-        qualified_table="iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident",
+        qualified_table="iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident",
         rows=[],
         metadata={"result_code": "INFO-000", "result_msg": "OK", "list_total_count": 0, "row_count": 0},
         request_id="request-1",
@@ -62,13 +62,13 @@ def test_zero_row_insert_writes_request_audit_without_incident_rows():
     assert len(cursor.statements) == 3
     audit_delete_sql, audit_sql, bronze_delete_sql = cursor.statements
     assert audit_delete_sql.startswith(
-        "DELETE FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit WHERE"
+        "DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit WHERE"
     )
     assert audit_sql.startswith(
-        "INSERT INTO iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit"
+        "INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit"
     )
     assert bronze_delete_sql.startswith(
-        "DELETE FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident WHERE"
+        "DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident WHERE"
     )
     assert f"'{SOURCE_ID}'" in audit_sql
     assert "'raw/traffic/accinfo/request-1.xml'" in audit_sql
@@ -81,7 +81,7 @@ def test_reported_total_with_no_parsed_rows_fails():
     with pytest.raises(RuntimeError, match="list_total_count=3"):
         bronze.insert_seoul_traffic_bronze_rows(
             cursor=cursor,
-            qualified_table="iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident",
+            qualified_table="iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident",
             rows=[],
             metadata={"result_code": "INFO-000", "result_msg": "OK", "list_total_count": 3, "row_count": 0},
             request_id="request-1",
@@ -100,7 +100,7 @@ def test_verify_zero_rows_requires_request_audit(monkeypatch):
     monkeypatch.setattr(
         bronze,
         "trino_cursor",
-        lambda: (cursor, "iceberg_dev", "dev_masondev1024"),
+        lambda: (cursor, "iceberg_dev", "weather_traffic_bronze"),
     )
 
     row_count = bronze.verify_seoul_traffic_bronze_runtime(
@@ -111,7 +111,7 @@ def test_verify_zero_rows_requires_request_audit(monkeypatch):
 
     assert row_count == 0
     assert any(
-        "FROM iceberg_dev.dev_masondev1024.bronze_seoul_traffic_incident_request_audit" in statement
+        "FROM iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit" in statement
         for statement in cursor.statements
     )
 
@@ -121,7 +121,7 @@ def test_verify_zero_rows_with_multiple_raw_objects_uses_audit(monkeypatch):
     monkeypatch.setattr(
         bronze,
         "trino_cursor",
-        lambda: (cursor, "iceberg_dev", "dev_masondev1024"),
+        lambda: (cursor, "iceberg_dev", "weather_traffic_bronze"),
     )
 
     row_count = bronze.verify_seoul_traffic_bronze_runtime(
@@ -143,7 +143,7 @@ def test_verify_multiple_raw_objects(monkeypatch):
     monkeypatch.setattr(
         bronze,
         "trino_cursor",
-        lambda: (cursor, "iceberg_dev", "dev_masondev1024"),
+        lambda: (cursor, "iceberg_dev", "weather_traffic_bronze"),
     )
 
     row_count = bronze.verify_seoul_traffic_bronze_runtime(
