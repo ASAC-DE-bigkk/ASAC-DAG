@@ -84,15 +84,17 @@ airflow tasks clear culture_bronze -t load_bronze -d -s <ts> -e <ts> --yes
 ## bronze 적재 엔진 (#203)
 
 bronze 쓰기는 기본 **pyiceberg**(R2 Data Catalog REST 직접 커밋 — 데이터셋당 1회,
-자정런 load_bronze 26분 → 약 5분(dev 실측 303s, 2026-07-09))다. Trino 는 조회·DDL·
-silver/gold(dbt)에서 그대로 쓴다.
+03:00 정기런 load_bronze 26분 → 약 3~5분: dev 검증 303s(2026-07-09), 첫 03:00 정기런
+실측 load 단독 ~200s·run 전체 297s(2026-07-10), $snapshots 데이터셋당 1커밋 확인)다.
+Trino 는 조회·DDL·silver/gold(dbt)에서 그대로 쓴다.
 
 - **롤백**: pyiceberg 경로 장애 시 `{"engine": "trino"}` 로 재트리거(코드 변경 불필요).
   CLI 는 `--engine trino`. 로컬 CLI에서 pyiceberg 미설치 환경이면 `--engine trino`로 실행한다.
 - **추가 env**: `R2_DEV_DATA_CATALOG_URI/WAREHOUSE/TOKEN`(dev), `R2_DATA_CATALOG_*`(prod)
   — 없으면 load_bronze 가 이름을 적어 즉시 실패.
-- **일몰**: 자정런 7회 연속 성공 후 trino 쓰기 경로(`BronzeWarehouse.load`)와
+- **일몰**: 03:00 정기런 7회 연속 성공 후 trino 쓰기 경로(`BronzeWarehouse.load`)와
   `engine` 파라미터를 제거하는 후속 이슈를 등록한다.
+  — 진행: **1/7** (2026-07-10 success, load ~200s·데이터셋당 1스냅샷).
 
 ## 디버깅
 
