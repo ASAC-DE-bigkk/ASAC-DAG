@@ -1,32 +1,22 @@
-# culture SLO 마트 — 설계 (설계 초안 · 재검토 필요, silver/gold 완료 후)
+# culture SLO 마트 — 설계 (v2 확정 · 착수 게이트 대기)
 
-> **상태: 설계 초안 · 재검토 필요.** 분석(§1·§2·§6)과 아키텍처 골격(§3 C안)은 유효하나,
-> 2026-07-07 이후 통합 지점 일부가 드리프트했다(아래 **§0 드리프트**). 착수 전 §0을 반영해
-> 갱신 패스를 거친다 — "문서 그대로 구현"은 더 이상 참이 아니다. 착수 슬롯은
-> **culture silver/gold(#85·#86·#90) 완료 후**로 미룬다(데이터셋 로스터가 안정돼야 커버리지
-> 기준선을 한 번에 잡는다). run_report 는 계속 쌓이므로 지연 비용 ≈ 0.
-> 2026-07-07 설계. 계획안 근거: 신뢰성 SLO 수치화(slide 9 "가용 99.5%") + W8 데모 "SLO 대시보드".
+> **상태: 갱신 완료(2026-07-10) — 구현 가능 스펙.** 2026-07-07 초안의 드리프트 3건
+> (03:00 슬롯 충돌·pyiceberg 로더·게이트 리셋)을 본문에 반영했다(§0은 반영 기록으로 축약).
+> 착수 게이트 = **03:00 정기런 7회 연속 성공**(§7, 2026-07-10 현재 1/7) — 그 외 전제
+> (silver/gold 완료, #161 방향)는 전부 충족됨.
+> 2026-07-07 설계 · 2026-07-10 v2. 계획안 근거: 신뢰성 SLO 수치화(slide 9 "가용 99.5%") + W8 데모 "SLO 대시보드".
 
-## 0. 드리프트 — 2026-07-07 이후 변경(착수 전 반영 필수)
+## 0. 드리프트 반영 기록 (2026-07-10 완료)
 
-이 문서 작성 뒤 착수 전제 3가지가 바뀌었다. 재검토 시 아래를 먼저 반영한다:
+초안 이후 바뀐 전제 3건을 본문에 반영했다: ①`culture_bronze` 03:00 이동(#201/#221)에
+따른 SLO 스케줄 재배치 → §3(05:00 KST 채택), ②bronze 쓰기 pyiceberg 전환(#203/#243)
+→ §4(엔진·부트스트랩), ③안정 관찰 게이트 리셋 → §7(7회 연속, 진행 카운트).
 
-1. **03:00 슬롯 충돌 (#201, fix/201 머지됨)**: §3은 "자정 체인 00:00~00:40 뒤, culture_slo
-   03:00"을 전제했으나, 그 사이 **`culture_bronze` 자체가 03:00 으로 이동**했다(KOPIS 자정
-   직후 400 회피). 이제 SLO DAG 를 03:00 에 두면 본류 bronze 런과 겹친다 → **bronze→transform
-   체인 완료 후로 재배치**(더 늦은 시각 또는 transform Asset 트리거). §3 스케줄·위치 근거를 갱신.
-2. **pyiceberg 로더 (#203, PR ASAC-DAG#243 머지됨)**: §4 bronze 적재는 당시 Trino
-   `INSERT VALUES` 컨벤션을 암묵 전제했으나, bronze **쓰기 기본이 pyiceberg 로 전환**됐다
-   (`PyicebergBronzeWarehouse`, 데이터셋당 커밋 1회). 새 `load_slo_bronze` 로더는 pyiceberg
-   쓰기 경로(또는 `engine` 스위치)를 따라야 정합. 참조: `docs/design/2026-07-09-culture-pyiceberg-bronze-write.md`.
-3. **착수 트리거 ② 리셋 (#203)**: §7 의 "자정런 안정 관찰"은 원래 #187(HTTP 공통화, 머지됨)
-   게이트였으나, #203 pyiceberg 가 방금 들어가 **안정 관찰이 새로 리셋**됐다(일몰 조건 = 03:00
-   정기런 7회 연속 성공). 즉 pyiceberg 안정화 뒤가 SLO 착수의 자연 슬롯 — silver/gold 완료
-   시점과도 맞물린다.
-
-**부수 재확인**: (a) 트리거 ①(#161 Discord/리포트 공통화) 팀 방향이 그새 결정됐는지 확인.
-(b) §1 green-disguise 존재 증명 중 **run 레벨은 #185 가 이미 "상류 전멸=정직한 실패"로 교정**
-— 데이터(리포트 필드) 레벨 가치는 남으나 셀링포인트 하나가 약해졌으니 착수 시 재평가.
+**부수 재확인 결과**: (a) 트리거 ①(#161 Discord/리포트 공통화)은 **CLOSED**(PR #194 머지,
+culture Notifier 승격판) — run_report JSON 규약 유동 리스크 해소. (b) §1 green-disguise 는
+**run 레벨은 #185 로 교정 완료**(상류 전멸=정직한 실패). 남는 가치 = 데이터(리포트 필드)
+레벨 교차검증(`green_disguise_runs` 지표) + **과거 이력 소급**(#185 이전 run 들의 위장을
+마트가 사후 판정) — 셀링포인트는 "실시간 감지"에서 "감사 가능성"으로 조정.
 
 ## 1. 목적 — 무엇을 답하게 하나
 
@@ -54,22 +44,30 @@ run_report(수집 성적표, 매 run R2 박제 중)와 Airflow run 상태를 메
 ## 3. 아키텍처 — C안 (경량 신규 DAG)
 
 ```
-[culture_slo — 매일 03:00 KST]                     (자정 체인 00:00~00:40 뒤,
-  load_slo_bronze (python)                          population 04:00·maintenance 04:30 앞)
-    ① R2 _reports/ 스캔 → 미적재분만 bronze_culture_run_report 적재
-    ② Airflow 메타DB dag_run 스캔(culture 3 DAG) → bronze_culture_dag_runs
+[culture_slo — 매일 05:00 KST]                     (bronze 03:00 → transform ~03:30-04:00 →
+  load_slo_bronze (python)                          population 04:00 → 【05:00 SLO】 →
+    ① R2 _reports/ 스캔 → 미적재분만                facility_refresh 05:30 앞)
+       bronze_culture_run_report 적재
+    ② Airflow 메타DB dag_run 스캔(culture DAG 들) → bronze_culture_dag_runs
        (최근 14일 윈도우 delete+insert 멱등 — 지각 상태변경 흡수, 첫 실행은 전체 이력)
   >> dbt_slo (bash): dbt build --select tag:slo
 ```
 
-- 채택 이유(A/B 기각): 자정 본류(`culture_bronze.py`/`ingest.py`) **무수정**(PR #187 충돌
-  회피 포함), 파일=진실 원천이라 **첫 실행 = 25건 자동 백필**·재실행=복구, report 태스크와의
+- **스케줄 05:00 KST 채택 근거** (초안 03:00은 #201/#221 로 bronze 가 03:00 을 가져가며 폐기):
+  본류 체인(03:00 bronze → Asset transform ~04:00) 완료 후·facility_refresh(05:30) 앞 슬롯.
+  대안이던 "transform Asset 트리거"는 `culture_transform` 에 outlet 추가 = **본류 수정**이라
+  C안 원칙(본류 무수정)에 위배 → 기각. 05:30 facility_refresh 가 유발하는 아침 transform 런은
+  당일 SLO 에 안 잡히지만, dag_runs 14일 윈도우 재스캔이 다음날 흡수(SLO 최신성 = 전일 기준).
+- 채택 이유(A/B 기각): 자정 본류(`culture_bronze.py`/`ingest.py`) **무수정**, 파일=진실
+  원천이라 **첫 실행 = 쌓인 리포트 전량 자동 백필**·재실행=복구, report 태스크와의
   race 없음. A안(report 태스크 직접 insert)은 관측 경로가 관측 대상과 결합 + Trino 의존 추가,
   B안(transform 에 스캔 삽입)은 DAG 의미 오염 + report∥transform race.
 - 기존 DAG 수정은 한 줄: `culture_transform` 에 `--exclude tag:slo` (SLO 모델 빌드 소유권은
   culture_slo. 야간 transform 이 미존재 소스를 빌드하다 깨지는 것 방지. 타 도메인 transform 도
   dbt selection 을 커스텀하는 선례 있음 — weather/traffic transform selection 테스트 참조)
-- SLO 최신성 = 전일까지(03:00 반영). 일 단위 지표라 수용.
+- dag_run 스캔 대상 = culture DAG 4개(bronze·transform·maintenance·facility_refresh —
+  초안 3개에서 #206 facility_refresh 추가).
+- SLO 최신성 = 전일까지(05:00 반영). 일 단위 지표라 수용.
 
 ## 4. 테이블 설계
 
@@ -77,8 +75,15 @@ run_report(수집 성적표, 매 run R2 박제 중)와 Airflow run 상태를 메
 
 | 테이블 | 형태 | 그레인 |
 |---|---|---|
-| `bronze_culture_run_report` | 기존 bronze 컨벤션(`record_json` 전문 + load_date/ingest_ts/run_id/collected_at/raw_object_key) — **포맷 변화를 record_json 이 흡수**(#161 결과 대비) | 리포트 1건 = 1행 |
+| `bronze_culture_run_report` | 기존 bronze 컨벤션(`record_json` 전문 + load_date/ingest_ts/run_id/collected_at/raw_object_key) — **포맷 변화를 record_json 이 흡수** | 리포트 1건 = 1행 |
 | `bronze_culture_dag_runs` | 타입드 컬럼(dag_id, run_id, state, run_type, start_at, end_at, duration_sec, load_date) — 원천이 구조화된 내부 메타라 record_json 예외 | dag_id × run_id |
+
+**쓰기 엔진 (#203 pyiceberg 전환 반영)**: `bronze_culture_run_report` 는 본류 bronze 와
+같은 스키마 형태이므로 `culture_ingest` 의 warehouse 디스패치(`engine` 스위치, 기본 trino ·
+pyiceberg opt-in)를 **재사용**한다 — 별도 INSERT 컨벤션을 새로 만들지 않는다. 주의:
+pyiceberg 경로는 기존 테이블 전제(`catalog.load_table`)라 **첫 배포 시 trino 로 1회
+부트스트랩**(#208 릴리스노트와 동일 절차). `bronze_culture_dag_runs` 는 14일 윈도우
+delete+insert 멱등이 필요하므로 **v1 은 trino 경로 고정**(pyiceberg delete 는 v2 검토).
 
 ### silver (tag:slo, #48 표준 — 모든 `_at` KST, 공간축 면제=boxoffice 선례)
 
@@ -121,19 +126,17 @@ run_report(수집 성적표, 매 run R2 박제 중)와 Airflow run 상태를 메
    쓰는 것이 팀 정합의 종착점 — 단 `culture_bronze.py` 수정이므로 **PR #187 머지 후** +
    팀 조율. 그레인이 달라 run_report 를 대체하지 못하고 병행. 이 마트 v1 과 독립.
 
-## 7. 착수 트리거 (보류 사유)
+## 7. 착수 게이트 (2026-07-10 현황)
 
-> **갱신(2026-07-09, §0 참조)**: 아래 트리거 ②(자정런 안정)는 #203 pyiceberg 전환으로
-> 리셋됐다 — 이제 "03:00 정기런 7회 연속 성공(pyiceberg 안정)"으로 읽는다. 착수 슬롯도
-> **silver/gold(#85·#86·#90) 완료 후**로 조정(데이터셋 로스터 안정 = 커버리지 기준선 확정).
+| 게이트 | 상태 |
+|---|---|
+| ① #161(Discord/리포트 공통화) 방향 결정 | ✅ CLOSED (PR #194 머지) |
+| ② 03:00 정기런 7회 연속 성공 (pyiceberg #203 일몰 관찰) | ⏳ **1/7** (7/10 첫 성공) |
+| ③ silver/gold 로스터 안정 (#85·#86·#90) | ✅ 완료 (bronze 15/silver 12/gold 5) |
+| ④ (권장 선행) run 관측 표준 수렴 팀 논의 | 이슈 등록과 함께 제기 |
 
-지연 비용 ≈ 0 (run_report 는 계속 쌓이고 백필 공짜) vs 지금 착수 리스크 = 표준 유동기 재작업.
-아래 중 **①+②** 충족 시 착수 (계획상 W5 = 신뢰성 주간이 자연 슬롯):
-
-1. #161(Discord/리포트 공통화) 팀 방향 결정 — run_report 포맷·소비 방향 확정
-2. 자정런 안정 관찰 1~2회 (PR #187 게이트와 동일)
-3. (권장 선행) "run 관측 표준 수렴(manifest vs run_report)" 팀 논의 제기 — 미등록 상태,
-   착수 시 이슈 등록과 함께
+남은 게이트는 ② 하나 — 최속 2026-07-16 (7일 연속 시). 지연 비용 ≈ 0
+(run_report 는 계속 쌓이고 첫 실행이 전량 백필).
 
 ## 8. 산출 계획 (착수 시)
 
