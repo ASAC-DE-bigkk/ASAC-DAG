@@ -31,6 +31,7 @@ import pendulum
 from airflow import DAG
 from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import Asset
 
 # 이 파일의 디렉토리(domains/citydata)를 sys.path에 넣어 `citydata_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +41,7 @@ if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.assets import CITYDATA_BRONZE_ASSET  # noqa: E402
 
 from citydata_ingest.common.config import RunContext  # noqa: E402
 from citydata_ingest.source.citydata import DEFAULT_BRONZE_BLOCKS  # noqa: E402
@@ -186,8 +188,11 @@ with DAG(
     fetch_raw = PythonOperator(
         task_id="fetch_raw", python_callable=_fetch_raw,
         on_failure_callback=record_citydata_problem)
+    # 적재 성공 시 Asset 발행 → citydata_transform 자동 기동 (#274). 크론 오프셋 대신
+    # bronze 완료 이벤트로 변환을 묶어 "덜 끝난 bronze 를 읽는" 경합을 제거한다.
     load_bronze = PythonOperator(
         task_id="load_bronze", python_callable=_load_bronze,
+        outlets=[Asset(CITYDATA_BRONZE_ASSET)],
         on_failure_callback=record_citydata_problem)
     report = PythonOperator(
         task_id="report", python_callable=_report, trigger_rule="all_done",
