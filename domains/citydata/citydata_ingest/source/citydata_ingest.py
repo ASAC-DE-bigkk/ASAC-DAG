@@ -165,7 +165,6 @@ def load_citydata_bronze_from_raw(
         return [
             CitydataBronzeRow(
                 request_id=r["request_id"],
-                source_id=CITYDATA_SOURCE_ID,
                 requested_area_nm=r["area_nm"],
                 area_nm=parsed.area_nm,
                 area_cd=parsed.area_cd,

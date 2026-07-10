@@ -26,7 +26,6 @@ DEFAULT_CITYDATA_SCHEMA = "seoul_citydata"
 
 _COLUMNS = (
     "request_id",
-    "source_id",
     "requested_area_nm",
     "area_nm",
     "area_cd",
@@ -47,7 +46,6 @@ class CitydataBronzeRow:
     """bronze 한 행 = 장소 1곳의 블록 1개 원본 + 추적 메타데이터."""
 
     request_id: str
-    source_id: str
     requested_area_nm: str
     area_nm: str | None
     area_cd: str | None
@@ -80,7 +78,6 @@ class CitydataBronze:
             f"""
             CREATE TABLE IF NOT EXISTS {self.qualified} (
                 request_id varchar,
-                source_id varchar,
                 requested_area_nm varchar,
                 area_nm varchar,
                 area_cd varchar,
@@ -128,7 +125,6 @@ class CitydataBronze:
             buffer.append(
                 "(" + ", ".join([
                     sql_string(r.request_id),
-                    sql_string(r.source_id),
                     sql_string(r.requested_area_nm),
                     sql_string(r.area_nm),
                     sql_string(r.area_cd),
