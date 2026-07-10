@@ -43,7 +43,7 @@ def stub_dag_run_summary(monkeypatch):
 
 def test_build_traffic_report_passes_for_fresh_complete_data(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
-    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
+    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "weather_traffic_bronze")
     cursor = RecordingCursor(
         rows=[
             (1, 25, 25, 1000, 0, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc)),
@@ -64,7 +64,7 @@ def test_build_traffic_report_passes_for_fresh_complete_data(monkeypatch):
 
 def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
-    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "dev_masondev1024")
+    monkeypatch.setenv("ASK_SEOUL_SCHEMA", "weather_traffic_bronze")
     cursor = RecordingCursor(rows=[(3, 0, 1)])
     config = report.report_config()
 
