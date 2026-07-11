@@ -54,9 +54,13 @@ FAST_MODELS = " ".join([
     "silver_seoul_ppltn", "silver_citydata_transit_ppltn", "silver_citydata_sbike",
     "gold_seoul_ppltn_by_time", "gold_citydata_place_latest",
 ])
-# slow: 10분마다 새 값 + 일/시간 집계 골드.
+# slow: 10분마다 새 값 (상권·업종·대기질 silver).
 SLOW_MODELS = " ".join([
     "silver_citydata_cmrcl", "silver_citydata_cmrcl_rsb", "silver_citydata_air",
+])
+# agg: 일/시간 grain 집계 골드 — 시간당 1회면 충분(#283). 10분마다 돌리면 daily 4종이
+# 하루 576 merge 커밋을 만들고, 크로스도메인 골드는 일배치 소스(culture)를 헛조인한다.
+AGG_MODELS = " ".join([
     "gold_seoul_ppltn_daily", "gold_citydata_cmrcl_daily",
     "gold_citydata_purchasing_power_daily", "gold_citydata_ppltn_x_culture_daily",
     "gold_citydata_transit_x_incident_hourly",
@@ -76,6 +80,13 @@ def _is_slow_window(**_) -> bool:
     10의 배수 구간이면 slow 를 돌린다. 지연·지터로 가끔 5분 간격으로 돌아도 delete+insert
     멱등이라 결과는 동일(스냅샷만 한 번 더)."""
     return datetime.now(KST_TZ).minute % 10 < 5
+
+
+def _is_agg_window(**_) -> bool:
+    """agg 티어(1시간) 진입 게이트(#283). 매시 첫 bronze run(분 0~4 구간)에서만 집계
+    골드를 돌린다. slow 와 같은 벽시계 근사 — 집계는 최근 2일 재집계 merge 라 멱등이고,
+    지터로 한 시간 두 번 돌아도 결과 동일(스냅샷만 한 번 더)."""
+    return datetime.now(KST_TZ).minute < 5
 
 
 def _dbt(args: str) -> str:
@@ -143,6 +154,26 @@ with DAG(
         on_failure_callback=record_citydata_problem,
     )
 
-    # fast 선행 → slow 골드가 fast silver(ppltn 등)를 최신으로 읽는다.
+    # agg 티어 — 1시간마다(#283). 일/시간 집계 골드. gate 통과 시에만.
+    gate_agg = ShortCircuitOperator(
+        task_id="gate_agg_hourly",
+        python_callable=_is_agg_window,
+        on_failure_callback=record_citydata_problem,
+    )
+    run_agg = BashOperator(
+        task_id="dbt_run_agg",
+        bash_command=_dbt(f"run --select {AGG_MODELS}"),
+        on_failure_callback=record_citydata_problem,
+    )
+    test_agg = BashOperator(
+        task_id="dbt_test_agg",
+        bash_command=_dbt(f"test --select {AGG_MODELS} --exclude package:asac_axes"),
+        on_failure_callback=record_citydata_problem,
+    )
+
+    # fast 선행 → slow/agg 골드가 fast silver(ppltn 등)를 최신으로 읽는다.
+    # agg 는 slow 뒤 — 집계 골드(cmrcl_daily 등)가 slow silver(cmrcl)도 소비하므로,
+    # 같은 run 에서 두 게이트가 모두 열리는 정시(분 0~4)엔 slow → agg 순이 보장된다.
     deps >> seed_refs >> run_fast >> test_fast
     run_fast >> gate_slow >> run_slow >> test_slow
+    run_slow >> gate_agg >> run_agg >> test_agg
