@@ -22,6 +22,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from common.assets import TRAFFIC_BRONZE_ASSET  # noqa: E402
 
 from _shared.bronze_run_manifest import (  # noqa: E402
@@ -481,6 +482,13 @@ def build_traffic_bronze_dag(dag_id: str, schedule: str | None, description: str
         on_failure_callback=record_seoul_traffic_run_failed,
         tags=tags,
     ) as built_dag:
+        validate_runtime = PythonOperator(
+            task_id="validate_dev_runtime",
+            python_callable=validate_dev_runtime,
+            op_kwargs={"domain": "traffic"},
+            on_failure_callback=[record_traffic_problem],
+        )
+
         start_manifest = PythonOperator(
             task_id="record_seoul_traffic_run_started",
             python_callable=record_seoul_traffic_run_started,
@@ -512,7 +520,7 @@ def build_traffic_bronze_dag(dag_id: str, schedule: str | None, description: str
             outlets=[Asset(TRAFFIC_BRONZE_ASSET)],
         )
 
-        start_manifest >> land_raw >> load_bronze >> verify_bronze
+        validate_runtime >> start_manifest >> land_raw >> load_bronze >> verify_bronze
     return built_dag
 
 
@@ -527,6 +535,13 @@ def build_traffic_bronze_backfill_dag():
         on_failure_callback=record_seoul_traffic_run_failed,
         tags=["ask_seoul", "traffic", "bronze", "backfill", "r2", "iceberg"],
     ) as built_dag:
+        validate_runtime = PythonOperator(
+            task_id="validate_dev_runtime",
+            python_callable=validate_dev_runtime,
+            op_kwargs={"domain": "traffic"},
+            on_failure_callback=[record_traffic_problem],
+        )
+
         start_manifest = PythonOperator(
             task_id="record_seoul_traffic_run_started",
             python_callable=record_seoul_traffic_backfill_run_started,
@@ -555,7 +570,7 @@ def build_traffic_bronze_backfill_dag():
             outlets=[Asset(TRAFFIC_BRONZE_ASSET)],
         )
 
-        start_manifest >> land_raw >> load_bronze >> verify_bronze
+        validate_runtime >> start_manifest >> land_raw >> load_bronze >> verify_bronze
     return built_dag
 
 
