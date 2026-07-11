@@ -18,7 +18,8 @@ def test_entity_ddl_contract():
     for col in ("gu_code", "admin_dong_code", "legal_code", "updatedt", "updatedt_ts",
                 "lastmodts_ts", "entity_type", "detail_table"):
         assert col in sql, col
-    assert "primary key (entity_id)" in sql
+    assert "primary key (entity_seq)" in sql
+    assert "entity_seq bigint" in sql
     # 타입 규격화: 원천 날짜 = date(text 아님), 파싱 시각 = timestamp, 코드 = text
     assert "opened_at date" in sql and "closed_at date" in sql
     assert "updatedt_ts timestamp" in sql and "gu_code text" in sql
@@ -33,16 +34,47 @@ def test_history_date_types_standardized():
 def test_history_and_marker_ddl():
     stmts = ddl.create_core_sql()
     hist = _sql("commerce_business_entity_history", stmts)
-    assert "primary key (entity_id, collected_at, content_hash)" in hist   # 버전 grain
+    assert "primary key (entity_seq, collected_at, content_hash)" in hist   # 버전 grain
     assert "updatedt_ts" in hist and "admin_dong_code" in hist
     marker = _sql("commerce_load_run_marker", stmts)
     assert "watermark_collected_at" in marker and "model_name text primary key" in marker
 
 
+def test_entity_key_and_code_value_ddl():
+    stmts = ddl.create_core_sql()
+    key = _sql("commerce_entity_key", stmts)
+    assert "entity_seq bigserial primary key" in key
+    assert "unique (dataset, opnsfteamcode, mgtno)" in key
+    code = _sql("commerce_code_value", stmts)
+    assert "primary key (domain, value)" in code
+
+
+def test_view_construction_indexes():
+    stmts = ddl.create_index_sql()
+    names = [n for n, _ in stmts]
+    for t in ("commerce_business_entity", "commerce_business_entity_history"):
+        for suffix in ("dataset_idx", "admin_dong_idx", "status_idx", "legal_code_idx",
+                       "updatedt_idx", "lastmodts_idx", "opened_at_idx", "closed_at_idx"):
+            assert f"{t}_{suffix}" in names
+    assert "commerce_business_entity_natural_id_idx" in names
+    assert "commerce_business_entity_history_natural_id_idx" not in names  # HISTORY_COLUMNS 에 없는 컬럼
+    assert len(stmts) == 17                               # 2테이블×8 + entity 전용(natural_id)×1
+
+
+def test_detail_index_auto_classification():
+    # 날짜(ymd)·수량(cnt)만 매칭, 명칭류(uptaenm)는 정규화 대상이라 제외
+    cluster_idx = dict(ddl.create_detail_index_sql(_CLUSTER))
+    assert f"{_CLUSTER['object']}_chaircnt_idx" in cluster_idx
+    assert f"{_CLUSTER['object']}_uptaenm_idx" not in cluster_idx
+    detail_idx = dict(ddl.create_detail_index_sql(_DETAIL))
+    assert f"{_DETAIL['object']}_asgnymd_idx" in detail_idx
+    assert f"{_DETAIL['object']}_pharmtrdar_idx" not in detail_idx
+
+
 def test_detail_ddl_key_mapping_only():
     name, sql = ddl.create_detail_sql(_DETAIL)
     assert name == "commerce_pharmacy_detail"
-    assert "primary key (entity_id, collected_at, content_hash)" in sql    # 공통과 매핑 키만
+    assert "primary key (entity_seq, collected_at, content_hash)" in sql    # 공통과 매핑 키만
     assert "pharmtrdar text" in sql
     assert "business_name" not in sql                     # 공통 컬럼 재저장 금지
 
@@ -62,7 +94,8 @@ def test_generate_all_order_and_count():
     details = [_CLUSTER, _DETAIL]
     stmts = ddl.generate_all(details)
     names = [n for n, _ in stmts]
-    # core(4) + dim(3) + detail(2) + 도메인뷰(cluster 1×2) + API뷰(멤버 3×2)
-    assert len(stmts) == 4 + 3 + 2 + 2 + 6
+    # core(6: entity_key+entity+history+marker+catalog+code_value) + index(17) + dim(3)
+    # + detail(2 테이블 × (DDL 1 + 자동 detail 인덱스 1) = 4) + 도메인뷰(cluster 1×2) + API뷰(멤버 3×2)
+    assert len(stmts) == 6 + 17 + 3 + 4 + 2 + 6
     assert names.index("commerce_catalog") < names.index("commerce_pharmacy_detail")
     assert names.index("commerce_pharmacy_detail") < names.index("commerce_v_api_pharmacy")

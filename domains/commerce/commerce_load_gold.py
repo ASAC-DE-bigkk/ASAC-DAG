@@ -104,6 +104,19 @@ def commerce_load_gold():
                 dataset_map[m] = {"entity_type": etype, "detail_table": d["object"]}
         return loader.run_load(details, dataset_map)
 
+    @task
+    def build_code_values() -> dict:
+        """정규화 검토(Option 1) 채움 — detail 저카디널리티 컬럼(표본검증 완료 72쌍) 값을
+        commerce_code_value 에 집계(거버넌스/참조용, detail 스키마는 불변). load_gold 이후 실행
+        (detail 실데이터가 있어야 집계 가능)."""
+        from gold import code_values, pg
+
+        pgconn = pg.connect()
+        try:
+            return code_values.build_code_values(pgconn)
+        finally:
+            pgconn.close()
+
     @task(trigger_rule="all_done")
     def report_gold(**ctx) -> dict:
         """실행시간 + 카탈로그 + 객체별 적재행 Discord 리포트(#218). 실패해도 반드시 보고."""
@@ -119,7 +132,7 @@ def commerce_load_gold():
                    if dr and getattr(dr, "start_date", None) else None)
         return report.send_gold_report(catalog=catalog, load=load, elapsed_seconds=elapsed)
 
-    build_catalog() >> load_gold() >> report_gold()
+    build_catalog() >> load_gold() >> build_code_values() >> report_gold()
 
 
 commerce_load_gold()

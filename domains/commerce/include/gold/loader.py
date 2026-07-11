@@ -19,14 +19,11 @@ from gold import ddl, pg
 
 log = logging.getLogger(__name__)
 
-_ENTITY_EXPR = ("lower(to_hex(sha256(to_utf8(dataset || '|' || coalesce(opnsfteamcode, '') "
-                "|| '|' || coalesce(mgtno, '')))))")
 _FETCH = 2000
 
 
-# silver 컬럼 → gold history 컬럼(entity_id·버전키 뒤 순서 = ddl.HISTORY_COLUMNS[3:]). 원천 날짜는
-# raw text 로 뽑고 **Python 에서 DATE 로 규격화**(_to_date, 무효값 NULL)한다 — Trino 에서 try() 와
-# sha256(to_utf8()) 를 같은 SELECT 에 두면 옵티마이저 버그(Bind→Lambda)가 나므로 SQL try() 회피.
+# silver 컬럼 → gold history 컬럼(entity_seq·버전키 뒤 순서 = ddl.HISTORY_COLUMNS[3:]). 원천 날짜는
+# raw text 로 뽑고 **Python 에서 DATE 로 규격화**(_to_date, 무효값 NULL)한다.
 _HISTORY_SELECT = ("bplcnm, trdstategbn, dtlstategbn, apvpermymd, dcbymd, road_address, "
                    "jibun_address, gu_code, legal_code, admin_dong_code, longitude, latitude, "
                    "updatedt, updatedt_ts, lastmodts_ts, observed_date")
@@ -108,14 +105,39 @@ def _defend(pgconn, table: str, wm: datetime | None) -> None:
     pgconn.commit()
 
 
+# ── entity_seq 매핑(정수 서러게이트, normalization-plan §entity_seq) ──────────
+def resolve_entity_keys(pgconn, triples: list[tuple[str, str, str]]) -> dict[tuple[str, str, str], int]:
+    """(dataset,opnsfteamcode,mgtno) -> entity_seq. 없으면 발급(bigserial), 있으면 기존 값 반환.
+
+    ON CONFLICT DO UPDATE(무해한 자기대입)로 신규/기존 모두 한 왕복에 RETURNING 받는다
+    (DO NOTHING 은 충돌 시 행을 반환하지 않아 기존 매핑을 못 읽는다).
+    """
+    uniq = sorted(set(triples))
+    if not uniq:
+        return {}
+    with pgconn.cursor() as cur:
+        returned = pg.execute_values(cur, """
+insert into commerce_entity_key (dataset, opnsfteamcode, mgtno) values %s
+on conflict (dataset, opnsfteamcode, mgtno)
+do update set dataset = excluded.dataset
+returning entity_seq, dataset, opnsfteamcode, mgtno""", uniq, fetch=True)
+        result = {(r[1], r[2], r[3]): r[0] for r in returned}
+    pgconn.commit()
+    return result
+
+
 # ── 적재(스트리밍 배치) ───────────────────────────────────────────────────────
-def _stream(tcur, insert_sql: str, pgconn, transform=None) -> int:
+def _stream(tcur, insert_sql: str, pgconn, transform=None, batch_transform=None) -> int:
+    """batch_transform(rows)->rows 는 배치 전체 단위 가공(예: entity_seq 일괄 해석 — 왕복 최소화).
+    transform(row)->row 는 행 단위 가공(날짜 규격화 등). 순서: batch_transform → transform."""
     n = 0
     with pgconn.cursor() as cur:
         while True:
             rows = tcur.fetchmany(_FETCH)
             if not rows:
                 break
+            if batch_transform:
+                rows = batch_transform(rows)
             if transform:
                 rows = [transform(r) for r in rows]
             pg.execute_values(cur, insert_sql, rows)
@@ -128,12 +150,19 @@ def load_entity_history(tconn, qschema: str, pgconn, wm, hi) -> int:
     cols = ", ".join(ddl.HISTORY_COLUMNS)
     tcur = tconn.cursor()
     tcur.execute(f"""
-select {_ENTITY_EXPR}, collected_at, content_hash, dataset, {_HISTORY_SELECT}
+select dataset, opnsfteamcode, mgtno, collected_at, content_hash, {_HISTORY_SELECT}
 from {qschema}.silver_license_history
 where collected_at > coalesce(cast(? as timestamp), timestamp '1970-01-01') and collected_at <= ?
 """, (wm, hi))  # security: allow-sql - qschema 검증 식별자, 값은 바인딩
+
+    def _resolve(rows):
+        seq_map = resolve_entity_keys(pgconn, [(r[0], r[1] or "", r[2] or "") for r in rows])
+        # 출력 순서 = HISTORY_COLUMNS: entity_seq, collected_at, content_hash, dataset, ...(선택절)
+        return [(seq_map[(r[0], r[1] or "", r[2] or "")], r[3], r[4], r[0], *r[5:]) for r in rows]
+
     return _stream(tcur, f"insert into commerce_business_entity_history ({cols}) values %s "
-                         "on conflict (entity_id, collected_at, content_hash) do nothing", pgconn,
+                         "on conflict (entity_seq, collected_at, content_hash) do nothing", pgconn,
+                   batch_transform=_resolve,
                    transform=lambda row: tuple(_to_date(v, c) for c, v in zip(ddl.HISTORY_COLUMNS, row)))
 
 
@@ -144,20 +173,28 @@ def load_detail(tconn, qschema: str, pgconn, detail: dict, wm, hi) -> int:
     cols = ", ".join(ddl.DETAIL_KEY_COLUMNS + detail["payload"])
     tcur = tconn.cursor()
     tcur.execute(f"""
-select {_ENTITY_EXPR}, dataset, collected_at, content_hash{", " + payload_exprs if payload_exprs else ""}
+select dataset, opnsfteamcode, mgtno, collected_at,
+       content_hash{", " + payload_exprs if payload_exprs else ""}
 from {qschema}.silver_license_history
 where dataset in ({members})
   and collected_at > coalesce(cast(? as timestamp), timestamp '1970-01-01') and collected_at <= ?
 """, (wm, hi))  # security: allow-sql - 식별자는 카탈로그/레지스트리 유래, 값은 바인딩
+
+    def _resolve(rows):
+        seq_map = resolve_entity_keys(pgconn, [(r[0], r[1] or "", r[2] or "") for r in rows])
+        # 출력 순서 = DETAIL_KEY_COLUMNS: entity_seq, dataset, collected_at, content_hash, ...payload
+        return [(seq_map[(r[0], r[1] or "", r[2] or "")], r[0], r[3], r[4], *r[5:]) for r in rows]
+
     return _stream(tcur, f"insert into {detail['object']} ({cols}) values %s "
-                         "on conflict (entity_id, collected_at, content_hash) do nothing", pgconn)
+                         "on conflict (entity_seq, collected_at, content_hash) do nothing", pgconn,
+                   batch_transform=_resolve)
 
 
 def load_entity(tconn, qschema: str, pgconn, dataset_map: dict[str, dict], wm, hi) -> int:
     """entity(현재) — 이번 창에 갱신된 업소만 upsert(멱등 — 중단 방어 불필요)."""
     tcur = tconn.cursor()
     tcur.execute(f"""
-select {_ENTITY_EXPR}, c.dataset, c.opnsfteamcode, c.mgtno, c.bplcnm,
+select c.dataset, c.opnsfteamcode, c.mgtno, c.bplcnm,
        c.trdstategbn, c.dtlstategbn, c.apvpermymd, c.dcbymd, c.road_address, c.jibun_address,
        c.gu_code, c.legal_code, c.admin_dong_code, c.longitude, c.latitude,
        c.updatedt, c.updatedt_ts, c.lastmodts_ts, f.first_collected_at, c.collected_at, c.content_hash
@@ -169,15 +206,21 @@ where c.collected_at > coalesce(cast(? as timestamp), timestamp '1970-01-01') an
 """, (wm, hi))  # security: allow-sql
     cols = ", ".join(ddl.ENTITY_COLUMNS)
     update = ", ".join(f"{c} = excluded.{c}" for c in ddl.ENTITY_COLUMNS
-                       if c not in ("entity_id", "first_collected_at"))
+                       if c not in ("entity_seq", "first_collected_at"))
+
+    def _resolve(rows):
+        seq_map = resolve_entity_keys(pgconn, [(r[0], r[1] or "", r[2] or "") for r in rows])
+        # 출력 순서 = entity_seq, dataset, opnsfteamcode, mgtno, ...(select 절 나머지)
+        return [(seq_map[(r[0], r[1] or "", r[2] or "")], r[0], r[1], r[2], *r[3:]) for r in rows]
 
     def _tf(r):
-        # (entity_id, dataset, ...) → entity_type/detail_table 주입 후 ENTITY_COLUMNS 정렬 + 날짜 규격화
+        # (entity_seq, dataset, ...) → entity_type/detail_table 주입 후 ENTITY_COLUMNS 정렬 + 날짜 규격화
         m = dataset_map.get(r[1], {})
         row = (r[0], r[1], r[2], r[3], m.get("entity_type"), m.get("detail_table"), *r[4:])
         return tuple(_to_date(v, c) for c, v in zip(ddl.ENTITY_COLUMNS, row))
     return _stream(tcur, f"insert into commerce_business_entity ({cols}) values %s "
-                         f"on conflict (entity_id) do update set {update}", pgconn, transform=_tf)
+                         f"on conflict (entity_seq) do update set {update}", pgconn,
+                   batch_transform=_resolve, transform=_tf)
 
 
 def load_dims(tconn, qschema: str, pgconn, dataset_map: dict[str, dict]) -> dict[str, int]:
