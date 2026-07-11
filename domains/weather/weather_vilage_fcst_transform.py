@@ -7,9 +7,12 @@ the dbt models and keeps silver/gold retries independent from API collection.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import shlex
 import sys
+import urllib.request
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -27,9 +30,12 @@ from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 
 
+LOGGER = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/weather"
+WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
+DISCORD_RED = 15158332
 DEFAULT_PARAMS = {
     "target": Param(
         default="dev",
@@ -41,6 +47,83 @@ DEFAULT_PARAMS = {
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 # dbt transform 은 외부 소스 API 를 호출하지 않으므로 source_system 은 생략한다.
 record_weather_problem = problem_failure_callback(domain="weather")
+
+
+def discord_report_date(context) -> str:
+    logical_date = context.get("logical_date")
+    if logical_date:
+        return logical_date.astimezone(KST).strftime("%Y-%m-%d")
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+def short_text(value: object, limit: int = 130) -> str:
+    text = str(value or "N/A")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def transform_stage_name(task_id: str) -> str:
+    if "deps" in task_id:
+        return "dbt 패키지 설치"
+    if "freshness" in task_id:
+        return "소스 신선도 검사"
+    if "seed" in task_id:
+        return "시드 적재/검증"
+    if "place_mart" in task_id:
+        return "place mart run/test"
+    if "silver" in task_id:
+        return "silver run/test"
+    if "gold" in task_id:
+        return "gold run/test"
+    return "알 수 없음"
+
+
+def send_weather_discord(title: str, description: str, color: int, footer: str) -> None:
+    webhook_url = (os.environ.get(WEATHER_DISCORD_WEBHOOK_ENV) or "").strip()
+    if not webhook_url:
+        LOGGER.info("[weather notify:noop] %s (webhook url not configured)", title)
+        return
+    payload = {
+        "embeds": [{
+            "title": title,
+            "description": description[:4096],
+            "color": color,
+            "footer": {"text": footer[:2048]},
+        }]
+    }
+    request = urllib.request.Request(
+        webhook_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "ask-seoul-airflow/1.0"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(request, timeout=10).close()
+    except Exception as exc:
+        LOGGER.warning("[weather notify] Discord send failed: %s", type(exc).__name__)
+
+
+def notify_weather_transform_failure(context) -> None:
+    # 브론즈 수집 DAG 실패 알림과 같은 채널(WEATHER_DISCORD_WEBHOOK_URL) — 미설정이면 no-op.
+    ti = context.get("ti") or context.get("task_instance")
+    task_id = getattr(ti, "task_id", "N/A")
+    exc = context.get("exception")
+    run_id = context.get("run_id", "N/A")
+    target = (context.get("params") or {}).get("target", "N/A")
+    send_weather_discord(
+        f"기상청 transform 실패 - {discord_report_date(context)} (target={target})",
+        "\n".join(
+            [
+                "❌ 변환 상태: 실패",
+                f"❌ 실패 단계: {transform_stage_name(task_id)}",
+                f"❌ 실패 task: `{task_id}`",
+                f"❌ 오류 유형: `{type(exc).__name__ if exc else 'N/A'}`",
+                "",
+                f"Airflow 로그: {getattr(ti, 'log_url', 'N/A')}",
+            ]
+        ),
+        DISCORD_RED,
+        f"dag_id={context['dag'].dag_id} · run_id={short_text(run_id, 180)}",
+    )
 
 
 def transform_schedule() -> str | list[Asset] | None:
@@ -73,25 +156,25 @@ with DAG(
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=dbt_command("deps"),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_source_freshness = BashOperator(
         task_id="dbt_source_freshness",
         bash_command=dbt_command("source freshness"),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_seed_asac_axes = BashOperator(
         task_id="dbt_seed_asac_axes",
         bash_command=dbt_command("seed --select asac_axes"),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_seed_place_mapping = BashOperator(
         task_id="dbt_seed_place_mapping",
         bash_command=dbt_command("seed --select weather_place_grid_mapping"),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_test_place_mapping_seed = BashOperator(
@@ -103,13 +186,13 @@ with DAG(
             "assert_weather_place_grid_mapping_within_collected_grid_scope "
             "assert_weather_place_grid_mapping_alias_unique_except_allowed"
         ),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_run_silver = BashOperator(
         task_id="dbt_run_silver",
         bash_command=dbt_command("run --select silver_kma_vilage_fcst"),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_test_silver = BashOperator(
@@ -124,13 +207,13 @@ with DAG(
             "--exclude "
             "assert_gold_weather_counts_match_silver"
         ),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_run_gold = BashOperator(
         task_id="dbt_run_gold",
         bash_command=dbt_command("run --select gold_weather_forecast_summary"),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_test_gold = BashOperator(
@@ -141,7 +224,7 @@ with DAG(
             "assert_gold_weather_counts_match_silver "
             "assert_gold_weather_row_counts_positive"
         ),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_run_place_mart = BashOperator(
@@ -152,7 +235,7 @@ with DAG(
             "silver_weather_forecast_by_admin_dong "
             "gold_weather_forecast_by_place"
         ),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_test_place_mart = BashOperator(
@@ -172,7 +255,7 @@ with DAG(
             "assert_gold_weather_forecast_by_place_event_at_matches_forecast_at "
             "assert_gold_weather_forecast_by_place_latest_silver_record"
         ),
-        on_failure_callback=record_weather_problem,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     (
