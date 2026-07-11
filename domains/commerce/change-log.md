@@ -7,6 +7,21 @@
 
 ## 2026-07-11
 
+### 56. detail_health 레거시 제거 러북(다른 PC 자동 실행용) + CLAUDE.md 체인 연결
+
+request:
+- detail_health 정리를 다른 PC 의 Claude Code 가 CLAUDE.md→docs 를 읽고 자동 처리하도록 구성.
+- 물리 테이블 삭제는 환경마다 상태가 다르니(다른 PC 에 이미 적용됐을 수 있음) 체크항목으로.
+
+response:
+- **러너블 러북 신설**: [docs/cleanup-detail-health.md](docs/cleanup-detail-health.md) — 배경(폐기·gold
+  승계) + 사전검증(gold 커버리지) + 코드 정리(dbt/dags 파일·문서) + **§4 환경별 물리 테이블 drop
+  체크리스트**(dev `iceberg_dev.commerce` / prod `iceberg.commerce`, SHOW→DROP IF EXISTS, 부재 시 스킵)
+  + 검증/완료 처리. 위→아래 순 실행 가능하게 작성.
+- **CLAUDE.md 체인 연결**: "Pending cleanup tasks(있으면 읽고 실행)" 섹션 추가 → 다른 PC 에이전트가
+  CLAUDE.md 만 읽어도 러북 발견·실행. docs/README.md 색인 추가.
+- **실제 삭제는 미수행**(코드/물리 모두) — 러북 상태 OPEN. 물리 테이블은 환경 실측 후에만 drop.
+
 ### 55. OpenLineage → Marquez 배선(cross-domain lineage 백엔드, lineage 프로파일)
 
 request:
