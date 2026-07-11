@@ -7,6 +7,27 @@
 
 ## 2026-07-11
 
+### 55. OpenLineage → Marquez 배선(cross-domain lineage 백엔드, lineage 프로파일)
+
+request:
+- Marquez 세워서 cross-domain 통합 lineage 를 볼 수 있게 작업 진행(승인).
+
+response:
+- **Airflow 이미지**(`Dockerfile.airflow`): `astronomer-cosmos[openlineage]` +
+  `apache-airflow-providers-openlineage>=2,<3`. Cosmos dbt run 태스크가 물리 relation 기반 OL
+  이벤트를 방출.
+- **방출 배선**(`docker-compose.yml` airflow-common): `AIRFLOW__OPENLINEAGE__TRANSPORT`
+  (→ `http://marquez-api:5000`) + `AIRFLOW__OPENLINEAGE__NAMESPACE=commerce-elt`.
+- **백엔드**(`docker-compose.yml`): **`lineage` 프로파일** 서비스 3종 — `marquez-db`·`marquez-api`
+  (127.0.0.1:5000)·`marquez-web`(UI 127.0.0.1:3000) + `marquez_db_data` 볼륨. 프로파일 격리라
+  `docker compose up`(core)엔 안 뜨고, marquez 미기동 시 OL 방출은 fail-open(경고만).
+- **원리**: 도메인 간 `source()` 물리 relation 이 생산 도메인 모델 산출물과 동일(확인됨) → Marquez 가
+  물리명으로 stitch → 경계 넘는 통합 그래프. dbt 코드/구조 변경 0.
+- **기동**: `docker compose --profile lineage up -d` → `commerce_load_silver` 실행 → http://127.0.0.1:3000.
+- **검증 한계**: Marquez 이미지(0.50.0)·OL provider 버전은 canonical 고정, 도커 미기동이라 런타임
+  미검증 — 최초 기동 시 태그/마이그레이션 조정 가능(core 무영향). 상세: docs/cosmos.md §6.
+- **범위**: commerce 파일럿. 전체 6도메인 통합은 나머지 도메인도 OL 방출 시 자동 stitch.
+
 ### 54. commerce silver dbt 실행을 Cosmos(DbtTaskGroup)로 전환 + cold-start 시드 가드
 
 request:

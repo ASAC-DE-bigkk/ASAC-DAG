@@ -174,13 +174,30 @@ Cosmos 가 청크 전량 빌드를 못 하므로(§3.1), **빈 silver 최초 빌
 그래프 말단). 단, 그 `source()` 의 물리 relation(`iceberg[_dev].<schema>.<table>`)은 **생산 도메인
 모델의 산출물과 정확히 일치**한다(확인됨) — 파이프라인은 정상이고 끊기는 건 그래프 표현뿐이다.
 
-- **전체 lineage 확보 방향(권장)**: **OpenLineage → Marquez**. Cosmos 는 dbt run 태스크마다
-  OpenLineage 이벤트(입력/출력 = 물리 relation)를 방출하므로, 이를 백엔드가 물리명으로 **stitch**
-  하면 도메인 경계를 넘는 통합 lineage 가 된다(traffic 모델 출력 dataset == citydata 입력 dataset →
-  엣지 형성). 이는 dbt+Cosmos 장점을 그대로 살리며 코드/구조 변경 없이 전체 그래프를 만든다.
-- **다음 단계(별도 승인)**: Marquez 는 compose 서비스 추가(호스트 변경)라 별건 승인 대상. 커밋
-  단계로는 (1) airflow OpenLineage provider 설치, (2) `OPENLINEAGE_URL` 로 Marquez 지정, (3) 도메인
-  전반에 Cosmos(또는 `dbt-ol`) 확산 → 통합 뷰 완성. 백엔드 없으면 이벤트 방출은 무해한 no-op.
+- **전체 lineage 확보 방향(채택·배선 완료)**: **OpenLineage → Marquez**. Cosmos 는 dbt run
+  태스크마다 OpenLineage 이벤트(입력/출력 = 물리 relation)를 방출하므로, 이를 백엔드가 물리명으로
+  **stitch** 하면 도메인 경계를 넘는 통합 lineage 가 된다(traffic 모델 출력 dataset == citydata 입력
+  dataset → 엣지 형성). dbt+Cosmos 장점을 그대로 살리며 dbt 코드/구조 변경 0 으로 전체 그래프를 만든다.
+- **구성(배선 완료 — #55)**:
+  - Airflow 이미지: `astronomer-cosmos[openlineage]` + `apache-airflow-providers-openlineage`
+    (`Dockerfile.airflow`).
+  - 방출 대상: `AIRFLOW__OPENLINEAGE__TRANSPORT`(→ `http://marquez-api:5000`) +
+    `AIRFLOW__OPENLINEAGE__NAMESPACE=commerce-elt`(`docker-compose.yml` airflow-common).
+  - 백엔드: `docker-compose.yml` 의 **`lineage` 프로파일** 서비스 3종 — `marquez-db`(postgres)·
+    `marquez-api`(수집 API, 127.0.0.1:5000)·`marquez-web`(UI, **http://127.0.0.1:3000**).
+  - **격리**: 프로파일이라 `docker compose up`(core)엔 안 뜬다. marquez 미기동 시 OL 방출은
+    **fail-open**(경고 로그만, 태스크 실패 아님) → 파이프라인 안전.
+- **기동·확인**:
+  ```bash
+  docker compose --profile lineage up -d          # marquez 3종 기동(최초 flyway 마이그레이션)
+  curl -s http://127.0.0.1:5000/api/v1/namespaces  # API 헬스(namespaces 응답)
+  # 이후 commerce_load_silver 실행 → 브라우저 http://127.0.0.1:3000 에서 lineage 확인
+  ```
+- **로컬 검증 한계(주의)**: Marquez 이미지 버전(`0.50.0`)·OL provider 버전은 canonical 기준으로
+  고정했고 이 저장소에서 런타임 검증은 못 했다(도커 미기동). 최초 기동 시 이미지 버전/마이그레이션이
+  어긋나면 태그·env 를 조정한다(core 스택엔 영향 없음 — 프로파일 격리).
+- **전체 도메인 통합 뷰**: commerce 가 파일럿이다. 나머지 도메인도 Cosmos(또는 `dbt-ol`)로 올려 OL 을
+  방출하면 Marquez 가 물리명으로 자동 stitch → 6개 도메인 단일 그래프. (여기서는 commerce 만 배선.)
 - **보류**: dbt Mesh(cross-project `ref`)는 네이티브로 그래프를 잇지만 프로젝트별 public 계약·
   `dependencies.yml`·버전관리가 붙는 구조 변경이라, 현재는 손대지 않는다.
 
