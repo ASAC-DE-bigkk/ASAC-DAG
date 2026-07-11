@@ -5,6 +5,44 @@
 
 ---
 
+## 2026-07-11
+
+### 54. commerce silver dbt 실행을 Cosmos(DbtTaskGroup)로 전환 + cold-start 시드 가드
+
+request:
+- `./dbt ./dags` 의 domains/commerce CLAUDE.md 를 참조해 현행 commerce DBT(silver)에 Cosmos 적용.
+- Cosmos 설치(호스트 이미지 변경) 승인. "전체·증분 모두 Cosmos" 가 이상적이나 **OOM 위험은 감수 불가** —
+  위험 없는 최선 시나리오로 진행(최종 판단 위임).
+- Cosmos 가 기존 구조를 따라가지 못하는(대응 불가) 영역이 있으면 그 발생 이유·대처 불가 이유를
+  cosmos doc 에 정리.
+
+response:
+- **cosmos doc 신설**: [docs/cosmos.md](docs/cosmos.md) — 채택 형태(DbtTaskGroup·LOCAL·venv), **비대응
+  영역과 이유**(청크 전량 빌드/마커·pre_hook 결합/파싱시 dbt/detail_health 선택/notify 순서), cold-start
+  시드 계약, cross-domain lineage 방향(OpenLineage→Marquez)까지 단일 소스로 기재. docs/README.md 색인 추가.
+- **왜 전체 재빌드는 Cosmos 단독 불가(핵심 발견)**: `silver_license_history` 는 pre_hook
+  `delete_unmarked_silver_history_runs` + 마커 기반 증분(`silver_unmarked_publishable_predicate`).
+  Cosmos 는 파싱시 정적(모델당 1태스크)이라 `chunked_run` 의 dataset 배치(`--vars include_datasets`)를
+  못 한다. 마킹 안 된 전량 빌드 위에 Cosmos 증분을 돌리면 pre_hook(include_datasets 비어 **전역**
+  삭제)가 방금 빌드분을 지우고 **비청크 단일 run 재처리 → 예전 OOM(EXCEEDED_LOCAL_MEMORY_LIMIT) 재발**.
+- **설계(위험 없는 최선)**: 기존 `commerce_load_silver` DAG 안에 Cosmos `DbtTaskGroup`(dbt_silver) 임베드
+  — 모델당 run+test(AFTER_EACH), 프로필은 기존 profiles.yml 재사용, 실행은 별도 dbt venv(LOCAL,
+  dbt_executable_path). 기존 단일 BashOperator `dbt test` 대체. 스케줄/DAG 는 1개 유지(분리 안 함).
+- **cold-start 시드 가드(`seed_silver_if_empty`)**: `silver_license_history` 가 비었을 때만 청크
+  빌드→`dbt test`→(통과 시) DONE 마킹(기존 cold-start 순서를 한 태스크로 캡슐화). 마킹까지 끝내므로
+  downstream Cosmos 증분은 no-op(삭제 대상 없음) → OOM 원천 차단. 평상시엔 no-op → Cosmos 가 증분 담당.
+  헬퍼 `chunked_run.run_dbt_test` 추가.
+- **배선**: `[enrich×3] → seed_silver_if_empty → dbt_silver(Cosmos) → notify_masked_address_summary
+  → mark_silver_done → report_silver`. (기존엔 notify 가 run/test 사이였으나 Cosmos 가 run+test 를
+  묶으므로 그룹 뒤로 이동 — 기능 동일, 근거 docs/cosmos.md.)
+- **호스트 이미지**: `Dockerfile.airflow` airflow env 에 `astronomer-cosmos>=1.8,<2` 추가(승인). dbt 는
+  기존 venv 유지(airflow env 엔 dbt 미설치, Cosmos 만). `requirements.txt` 에 호스트 의존 명시.
+- **검증(로컬 한계)**: 로컬은 py3.9 + airflow/cosmos 미설치라 DAG 파싱/실측 불가 — **이미지 리빌드 후**
+  DAG import·dbt_silver 렌더·`dbt run/test` 확인 필요(절차 docs/cosmos.md §검증). 로컬은 security gate +
+  순수 pytest(include/ 로직)만 수행.
+
+---
+
 ## 2026-07-10
 
 ### 53. 검색·이력 공통축 인덱스 확장(entity/history 11개) + detail 자동 인덱싱(401개)

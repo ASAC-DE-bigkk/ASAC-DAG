@@ -15,3 +15,9 @@ boto3>=1.34      # STORAGE_BACKEND=r2: Cloudflare R2(S3 호환) 클라이언트 
 # bronze 적재(commerce_load_bronze) — **이미지 추가 필요**:
 trino>=0.328     # bronze: Trino 증분 적재(trino.dbapi) — 형제 라인(common_dbt_smoke)과 동일
 pyiceberg[s3fs]>=0.11.1,<0.12  # bronze: 전체 스냅샷 적재(Trino 우회, R2 Data Catalog REST + R2 S3 FileIO). stable 0.11 라인
+
+# silver dbt 오케스트레이션(commerce_load_silver) — **호스트 이미지(airflow env) 추가 필요**(#54):
+# Cosmos 는 airflow env 에만 설치하고 실제 dbt 는 기존 별도 venv(/home/airflow/dbt-venv)로 실행한다
+# (ExecutionMode.LOCAL). dbt-core/dbt-trino 는 venv 에 있으므로 airflow env 엔 넣지 않는다.
+# 배경·비대응 영역: docs/cosmos.md. 설치 지점: 루트 Dockerfile.airflow(사용자 승인 완료).
+astronomer-cosmos>=1.8,<2  # silver: DbtTaskGroup(모델당 run+test) — Airflow 3.2 지원 라인

@@ -112,12 +112,25 @@ def run_silver_chunked(*, select: str, project_dir: str, dbt_bin: str, target: s
     return {"mode": "chunked", "batches": len(batches), "datasets": len(counts), "budget": budget}
 
 
+def run_dbt_test(*, select: str, project_dir: str, dbt_bin: str, target: str) -> None:
+    """seed(cold start) 검증 — 청크 전량 빌드 직후 `dbt test`. 실패 시 예외(→ 마킹으로 진행 안 됨).
+
+    Cosmos 전환(#54) 후 cold-start 는 seed 태스크가 build→test→mark 를 캡슐화한다. 평상시 증분의
+    test 는 Cosmos(dbt_silver)가 모델별로 렌더하므로 이 헬퍼는 seed 경로 전용이다.
+    """
+    _run(_dbt(project_dir, dbt_bin, target, f"test --select {select}"), "seed test")
+
+
 def run_silver(*, select: str, project_dir: str, dbt_bin: str, target: str,
                budget: int | None = None) -> dict:
     """silver dbt run 진입점 — **전체 재빌드(silver 비었음)면 청크, 평소 증분이면 단일 실행**.
 
     증분은 unmarked run 만 처리해 소량이라 단일 dbt run 이 안전·빠름. silver_license_history 가
     비어 있으면(테이블 drop 후 최초) window 연산이 전 행을 올려 OOM 나므로 dataset 배치로 나눈다.
+
+    참고: Cosmos 전환(#54) 이후 commerce_load_silver DAG 는 증분을 Cosmos(dbt_silver)로 돌리고,
+    cold-start 청크만 run_silver_chunked 로 호출한다. 이 함수(청크/증분 자동 분기)는 수동 재빌드·
+    다른 진입점용으로 남겨 둔다.
     """
     if silver_history_rows() == 0:
         log.info("silver_license_history 비어 있음 → 전체 재빌드(청크 모드)")

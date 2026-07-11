@@ -1,27 +1,37 @@
-"""commerce_load_silver — silver 보강 + dbt 변환 오케스트레이션.
+"""commerce_load_silver — silver 보강 + dbt(Cosmos) 변환 오케스트레이션.
 
 bronze 적재(commerce_load_bronze, 04:00 KST) 이후 ① silver 사전 보강(행정동↔법정동 참조
-전량 교체 + 지번 결측 Juso 보강 캐시) ② dbt/domains/commerce 의 silver 모델 증분 반영
-③ 테스트 순으로 실행한다. dbt 는 Airflow 이미지의 별도 venv(`DBT_BIN`, 기본
-/home/airflow/dbt-venv/bin/dbt — common_dbt_smoke 와 동일 계약)로 실행한다.
+전량 교체 + 지번 결측 Juso 보강 캐시) ② cold-start 시드 가드 ③ dbt/domains/commerce 의
+silver 모델 반영(Cosmos DbtTaskGroup — 모델당 run+test) ④ 완료 마킹·리포트 순으로 실행한다.
 
-정책(재빌드·단위 제어 — dbt/domains/commerce/docs/rebuild-and-ops.md):
-- silver history 는 incremental append 로 bronze_run_id marker 를 기준으로 아직 반영되지 않은
-  publishable run 만 처리한다. DONE marker 는 dbt test 통과 후 `silver_load_run_marker` 에 기록한다.
-  marker table/target 이 없거나 `--full-refresh` 를 주면 해당 bronze 경로 전체를 백필한다.
-  (보강 테이블도 멱등 — 참조는 전량 교체, Juso 는 키 단위 delete-then-insert 캐시.)
-- 특정 데이터셋/일자/run 제외(삭제)는 dbt 프로젝트의 vars(exclude_*)로, 특정 데이터셋
-  재적재는 bronze 워터마크 파일 또는 dbt `--full-refresh` 로 제어한다.
-- gold 단계는 Step 9 구현 시 run/test 태스크 2개를 뒤에 추가한다.
+dbt 실행 계약(Cosmos):
+- Cosmos(astronomer-cosmos)는 Airflow 이미지(airflow env)에 설치하고, 실제 dbt 는 기존 별도
+  venv(`DBT_BIN`, 기본 /home/airflow/dbt-venv/bin/dbt — common_dbt_smoke 와 동일 계약)로
+  실행한다(ExecutionMode.LOCAL + dbt_executable_path → venv 경계 유지). 프로필은 기존
+  dbt/domains/commerce/profiles.yml 을 그대로 재사용한다(Cosmos 가 새로 만들지 않음).
+- Cosmos 는 **모델당 1태스크**(run → test AFTER_EACH)로 렌더한다 → 모델단위 관측성·lineage.
+  선택 모델은 SILVER_SELECT(history, current). 기존 단일 BashOperator `dbt test` 를 대체한다.
 
-  [enrich_admin_dong_ref, enrich_fill_jibun, ensure_silver_marker] ─> dbt_run_silver
-    ─> notify_masked_address_summary ─> dbt_test_silver ─> mark_silver_done
+cold-start(빈 silver) 안전 시드 — **왜 전체 재빌드를 Cosmos 단독으로 못 하는가**(요약; 상세는
+docs/cosmos.md):
+  전체 재빌드(테이블 drop 후 최초/`--full-refresh`)는 silver_license_history 의 window 연산이
+  전 행을 한 번에 올려 Trino 노드 메모리를 초과(EXCEEDED_LOCAL_MEMORY_LIMIT)한다. 이를 막으려면
+  dataset 를 행수 배치로 나눠 `--vars include_datasets` 로 순차 실행해야 하는데(chunked_run),
+  Cosmos 는 파싱시 정적 렌더(모델당 1태스크)라 런타임 행수 기반 배치 루프를 못 한다. 게다가
+  silver_license_history 는 pre_hook(delete_unmarked)+마커 기반 증분이라, 마킹되지 않은 전량
+  빌드 위에 Cosmos 증분을 돌리면 pre_hook 이 그 전량을 지우고 비청크 단일 run 으로 재처리 → OOM.
+  따라서 최초 전량 빌드만 seed_silver_if_empty 가 청크로 처리하고 **마킹까지 끝낸다** → 이후
+  Cosmos 증분은 no-op(삭제 대상 없음). 평상시(테이블 존재)엔 seed 는 no-op 이고 Cosmos 가 증분
+  run+test 를 담당한다. 절차: dbt/domains/commerce/docs/rebuild-and-ops.md §6.
+
+  [enrich_admin_dong_ref, enrich_fill_jibun, ensure_silver_marker]
+    ─> seed_silver_if_empty ─> dbt_silver(Cosmos: run+test)
+    ─> notify_masked_address_summary ─> mark_silver_done ─> report_silver
 
 보강 규약(주소·동·좌표): dbt/domains/commerce/docs/address-and-geo.md
 """
 from __future__ import annotations
 
-import shlex
 import sys
 from pathlib import Path
 
@@ -42,37 +52,52 @@ import os  # noqa: E402
 
 import pendulum  # noqa: E402
 from airflow.decorators import dag, task  # noqa: E402
-from airflow.providers.standard.operators.bash import BashOperator  # noqa: E402
+from cosmos import (  # noqa: E402
+    DbtTaskGroup,
+    ExecutionConfig,
+    ProfileConfig,
+    ProjectConfig,
+    RenderConfig,
+)
+from cosmos.constants import ExecutionMode, LoadMode, TestBehavior  # noqa: E402
 
 # dbt 실행 계약(호스트 이미지 env 우선, 없으면 기본값) — common_dbt_smoke 와 동일 형태.
 DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce")
-DBT_BIN = os.getenv("DBT_BIN", "dbt")
+DBT_BIN = os.getenv("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
 # 기본 dev(iceberg_dev/seoul-dev). prod 전환은 .env.commerce 또는 compose env 로.
 DBT_TARGET = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
-SILVER_SELECT = "silver_license_history silver_license_current"
+# 모델 선택(리스트 = Cosmos RenderConfig.select / 문자열 join = chunked seed·비교용).
+SILVER_SELECT = ["silver_license_history", "silver_license_current"]
+SILVER_SELECT_STR = " ".join(SILVER_SELECT)
 
 _DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5)}
 
-
-def _dbt_command(args: str) -> str:
-    """고정 인자만 조립(외부 입력 없음). 값은 전부 shlex.quote — 셸 주입 여지 차단.
-
-    DBT_PROJECT_DIR 도 명시 고정 — 호스트 이미지가 smoke 프로젝트용 전역값
-    (/opt/airflow/dbt/elt_smoke)을 깔아 두어 cwd 보다 우선 적용되기 때문(dbt 1.5+).
-    """
-    return (
-        "set -euo pipefail\n"
-        f"cd {shlex.quote(DBT_PROJECT_DIR)}\n"
-        f"DBT_PROJECT_DIR={shlex.quote(DBT_PROJECT_DIR)} "
-        f"DBT_PROFILES_DIR={shlex.quote(DBT_PROJECT_DIR)} "
-        f"{shlex.quote(DBT_BIN)} --no-use-colors --target {shlex.quote(DBT_TARGET)} {args}"
-    )
+# ── Cosmos 설정 ──────────────────────────────────────────────────────────────
+# 프로필은 기존 profiles.yml 재사용, 실행은 별도 dbt venv(LOCAL). commerce 프로젝트는
+# packages.yml 이 없어 `dbt deps` 불필요(install_deps=False). load_method=DBT_LS 는 DAG 파싱시
+# venv dbt 로 `dbt ls` 를 실행해 모델 그래프를 만든다(견고화 옵션은 docs/cosmos.md §manifest).
+_profile_config = ProfileConfig(
+    profile_name="commerce",
+    target_name=DBT_TARGET,
+    profiles_yml_filepath=Path(DBT_PROJECT_DIR) / "profiles.yml",
+)
+_project_config = ProjectConfig(dbt_project_path=DBT_PROJECT_DIR)
+_execution_config = ExecutionConfig(
+    execution_mode=ExecutionMode.LOCAL,
+    dbt_executable_path=DBT_BIN,
+)
+_render_config = RenderConfig(
+    select=SILVER_SELECT,
+    test_behavior=TestBehavior.AFTER_EACH,
+    load_method=LoadMode.DBT_LS,
+    dbt_executable_path=DBT_BIN,
+)
 
 
 @dag(dag_id="commerce_load_silver", schedule="0 5 * * *",
      start_date=pendulum.datetime(2024, 1, 1, tz="Asia/Seoul"), catchup=False,
      max_active_runs=1, default_args=_DEFAULT_ARGS,
-     tags=["seoul", "commerce", "silver", "dbt"], doc_md=__doc__)
+     tags=["seoul", "commerce", "silver", "dbt", "cosmos"], doc_md=__doc__)
 def commerce_load_silver():
     @task
     def enrich_admin_dong_ref() -> dict:
@@ -96,8 +121,30 @@ def commerce_load_silver():
         return silver_markers.ensure_silver_marker_table()
 
     @task
+    def seed_silver_if_empty() -> dict:
+        """Cold start(빈 silver) 전용 안전 시드 — Cosmos 가 못 하는 청크 전량 빌드만 여기서.
+
+        silver_license_history 가 비어 있을 때만: dataset 청크로 전량 빌드 → dbt test →
+        (통과 시) DONE 마킹(기존 cold-start 순서 build→test→mark 를 한 태스크에 캡슐화). **마킹까지
+        끝내야** downstream Cosmos 증분(dbt_silver)이 pre_hook(delete_unmarked, include_datasets
+        비어 전역 삭제)로 방금 빌드한 전량을 지우고 비청크 단일 run 으로 재처리(OOM)하는 걸 막는다.
+        테이블이 있으면 no-op(평상시) → 증분은 Cosmos 담당. 상세: docs/cosmos.md · rebuild-and-ops.md §6.
+        """
+        from silver import chunked_run, silver_markers
+
+        if chunked_run.silver_history_rows() > 0:
+            return {"seed": "skip", "reason": "silver_license_history not empty"}
+        built = chunked_run.run_silver_chunked(
+            select=SILVER_SELECT_STR, project_dir=DBT_PROJECT_DIR, dbt_bin=DBT_BIN, target=DBT_TARGET)
+        # 마킹 전 검증(실패 시 예외 → 마킹 안 됨 → 다음 실행이 이어감, 기존 invariant 동일).
+        chunked_run.run_dbt_test(
+            select=SILVER_SELECT_STR, project_dir=DBT_PROJECT_DIR, dbt_bin=DBT_BIN, target=DBT_TARGET)
+        marked = silver_markers.mark_silver_runs_done()
+        return {"seed": "built", "build": built, "marked": marked}
+
+    @task
     def mark_silver_done() -> dict:
-        """dbt test 통과 후 silver history run 을 DONE marker 로 기록."""
+        """dbt test 통과(dbt_silver 성공) 후 silver history run 을 DONE marker 로 기록."""
         from silver import silver_markers
 
         return silver_markers.mark_silver_runs_done()
@@ -121,26 +168,19 @@ def commerce_load_silver():
                    if dr and getattr(dr, "start_date", None) else None)
         return quality_tasks.report_silver_run(elapsed_seconds=elapsed)
 
-    @task
-    def dbt_run_silver() -> dict:
-        """silver 모델 실행 — **전체 재빌드는 dataset 배치(청크)로, 평소 증분은 단일 실행**.
-
-        전체 재빌드(테이블 drop 후 최초)를 한 번에 하면 history window 연산이 Trino 노드 메모리를
-        초과(OOM)하므로, silver 가 비었으면 dataset 배치로 나눠 순차 적재한다. 증분은 unmarked run
-        만 처리해 소량이라 단일 실행. 절차: dbt/domains/commerce/docs/rebuild-and-ops.md §6.
-        """
-        from silver import chunked_run
-
-        return chunked_run.run_silver(select=SILVER_SELECT, project_dir=DBT_PROJECT_DIR,
-                                      dbt_bin=DBT_BIN, target=DBT_TARGET)
-
-    run_silver = dbt_run_silver()
-    test_silver = BashOperator(
-        task_id="dbt_test_silver",
-        bash_command=_dbt_command(f"test --select {SILVER_SELECT}"),
+    # Cosmos: silver 모델 run+test(모델당 태스크). 증분은 여기서, 전량 빌드는 seed 가 선처리.
+    dbt_silver = DbtTaskGroup(
+        group_id="dbt_silver",
+        project_config=_project_config,
+        profile_config=_profile_config,
+        execution_config=_execution_config,
+        render_config=_render_config,
+        operator_args={"install_deps": False},
     )
-    [enrich_admin_dong_ref(), enrich_fill_jibun(), ensure_silver_marker()] >> run_silver
-    run_silver >> notify_masked_address_summary() >> test_silver >> mark_silver_done() >> report_silver()
+
+    seed = seed_silver_if_empty()
+    [enrich_admin_dong_ref(), enrich_fill_jibun(), ensure_silver_marker()] >> seed
+    seed >> dbt_silver >> notify_masked_address_summary() >> mark_silver_done() >> report_silver()
 
 
 commerce_load_silver()
