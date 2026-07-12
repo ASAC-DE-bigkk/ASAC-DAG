@@ -115,6 +115,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     dag = module.dag
 
     expected_task_order = [
+        "resolve_traffic_snapshot_run",
         "dbt_deps",
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
@@ -129,11 +130,13 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     for upstream_task_id, downstream_task_id in zip(expected_task_order, expected_task_order[1:]):
         assert dag.task_dict[upstream_task_id].downstream_task_ids == {downstream_task_id}
 
+    bash_task_ids = [task_id for task_id in expected_task_order if task_id != "resolve_traffic_snapshot_run"]
     task_commands = {
         task_id: dag.task_dict[task_id].bash_command
-        for task_id in expected_task_order
+        for task_id in bash_task_ids
     }
 
+    assert all("traffic_snapshot_dag_run_id" in command for command in task_commands.values())
     assert "deps" in task_commands["dbt_deps"]
     assert "source freshness" in task_commands["dbt_source_freshness"]
     assert (
@@ -141,10 +144,13 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         in task_commands["dbt_test_traffic_incident_availability"]
     )
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
+    assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {"dbt_deps"}
     assert (
         "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current"
         in task_commands["dbt_run_silver"]
     )
+    assert "traffic_snapshot_dag_run_id" in task_commands["dbt_run_silver"]
+    assert "traffic_snapshot_dag_run_id" in task_commands["dbt_test_silver"]
     assert "--target '{{ params.target }}'" in task_commands["dbt_deps"]
     assert "assert_silver_traffic_event_at_matches_occurred_at" in task_commands["dbt_test_silver"]
     assert (
@@ -155,13 +161,15 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     assert "assert_silver_traffic_admin_axis_coverage" in task_commands["dbt_test_silver"]
     assert "assert_silver_traffic_latest_publishable_record" in task_commands["dbt_test_silver"]
     assert "silver_seoul_traffic_incident_current" in task_commands["dbt_test_silver"]
-    assert "assert_traffic_current_latest_publishable_run" in task_commands["dbt_test_silver"]
+    assert "assert_traffic_current_pinned_publishable_run" in task_commands["dbt_test_silver"]
 
 
-def test_traffic_transform_subscribes_to_bronze_asset_by_default():
+def test_traffic_transform_defaults_to_hourly_cron_after_bronze_completion_window(monkeypatch):
+    monkeypatch.delenv("ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE", raising=False)
     module = load_transform_module()
 
-    assert module.dag.kwargs["schedule"] == [FakeAsset(module.TRAFFIC_BRONZE_ASSET)]
+    assert module.TRAFFIC_TRANSFORM_CRON_KST == "12 * * * *"
+    assert module.dag.kwargs["schedule"] == module.TRAFFIC_TRANSFORM_CRON_KST
 
 
 def test_traffic_transform_validates_dev_runtime_before_dbt():
@@ -172,7 +180,7 @@ def test_traffic_transform_validates_dev_runtime_before_dbt():
         "domain": "traffic",
         "requested_target": "{{ params.target }}",
     }
-    assert guard.downstream_task_ids == {"dbt_deps"}
+    assert guard.downstream_task_ids == {"resolve_traffic_snapshot_run"}
 
 
 def test_traffic_transform_limits_target_param_to_dev_or_prod():
