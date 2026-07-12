@@ -17,8 +17,10 @@ sparse-wide 하나에 몰아넣던 모델이다. 두 결함으로 **재설계(�
 (1) 대분류 뭉치기 → sparsity 폭증, (2) `silver_license_current`(스냅샷) 기반 → 비공통 이력 소실.
 
 그 역할은 **gold(`commerce_load_gold`)의 detail 78개(cluster 8 + single 70, 전부 history-form)** 가
-완전히 승계했다 — gold 는 `silver_license_current.record_json` 을 `json_extract_scalar` 로 뽑아 API별
-detail 테이블을 만든다(`dags/domains/commerce/include/gold/loader.py`). 따라서 detail_health 는 불필요.
+완전히 승계했다 — gold 는 detail 을 **`silver_license_history.record_json`** 에서(전 버전 →
+history-form, #80 의 이력 소실 결함까지 해소) `json_extract_scalar` 로 뽑고, entity(현재 상태)는
+`silver_license_current` 에서 승계한다(`dags/domains/commerce/include/gold/loader.py` 의
+`load_detail`/`load_entity`). 따라서 detail_health 는 불필요.
 
 현재 detail_health 는 **어떤 DAG 도 빌드하지 않는다**(`commerce_load_silver` 의 `SILVER_SELECT` 에 없음,
 git 이력 0건). gold 도 읽지 않는다. **순수 잔재**라 지우는 게 정리다.
@@ -38,8 +40,8 @@ where kind in ('detail_cluster','detail_single');
 - >0 이면 gold 가 비공통 detail 을 이미 만들고 있는 것 → 진행.
 
 > 안전성 근거: 원본(비공통 필드)은 `bronze_localdata_license.record_json` 과
-> `silver_license_current.record_json` 에 **그대로 보존**된다. detail_health 는 그 파생/폐기물일 뿐이라
-> 삭제해도 원본·이력 손실이 없다(필요 시 gold 가 record_json 에서 언제든 재생성).
+> `silver_license_history/current` 의 `record_json` 에 **그대로 보존**된다. detail_health 는 그
+> 파생/폐기물일 뿐이라 삭제해도 원본·이력 손실이 없다(필요 시 gold 가 record_json 에서 언제든 재생성).
 
 ## 3. 코드 정리 (환경 무관 — 소스에서 1회)
 

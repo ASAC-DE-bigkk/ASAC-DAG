@@ -5,6 +5,32 @@
 
 ---
 
+## 2026-07-12
+
+### 57. silver/gold 구조 1차 판정 + 리팩터 가이드(silver-gold-refactor-guide.md) 신설
+
+request:
+- 현 프로젝트 silver/gold 레이어의 구조적 정당성 1차 확인.
+- 변경해야 할 부분을 Opus 가 문서만 보고 그대로 구현할 수 있는 수정 가이드로 마련.
+
+response:
+- **판정**(코드 실측 + 전 도메인 dbt 비교 + 문서 계약 대조): **구조 자체는 정당** — 레이어 분리·
+  3계층 증분/마커/중단방어·record_json schema-on-read·gold Python→서빙 Postgres(인덱스/bigserial/뷰는
+  dbt-trino 불가) 모두 근거 확인. **Critical 0 · Major 4 · Minor 3**.
+  Major: ① gold 식별자 무검증(외부 API 필드명 → DDL/JSONPath f-string, 게이트 부재) ② silver history
+  42컬럼 3중 중복(union all 위치 기반 → 무증상 오염 위험) ③ gold lineage 사각(dbt/OL 불가시)
+  ④ gold 구현 상태 문서 모순(파이프라인 문서 5곳 "미구현" vs 실제 가동).
+- **가이드 신설**: [docs/silver-gold-refactor-guide.md](docs/silver-gold-refactor-guide.md) —
+  확정 변경 C1(식별자 3중 게이트)·C2(컬럼 목록 매크로 단일화)·C3(좌표 변환 매크로)·C4(마스킹 매크로)·
+  C5(gold exposure 등록)·C6(taxonomy seed 고아 반영)·C7(문서 정합 복구) + 검증 동반 V1(OL inlets/
+  outlets → Marquez 엣지). 각 항목 현재/변경 코드/수용 기준/검증 커맨드 명시. **§4 변경 금지 목록**
+  (마커 체계·record_json·detail 78 카탈로그·Python gold·entity_key 보존·타 도메인) 명문화.
+  §6 전 도메인 관찰(gold 이원화·행정동 축 3원화·명명/재료화/테스트 편차 — 합의용) 수록.
+- **CLAUDE.md 체인 연결**(Pending tasks) + docs/README 색인.
+- **사실 정정**: [cleanup-detail-health.md](docs/cleanup-detail-health.md) §1 이 gold detail 소스를
+  `silver_license_current` 로 잘못 기술 — 실측(`loader.load_detail`)은 **`silver_license_history`**
+  (history-form, #80 이력 소실 결함까지 해소). 러북 §1·§2 정정.
+
 ## 2026-07-11
 
 ### 56. detail_health 레거시 제거 러북(다른 PC 자동 실행용) + CLAUDE.md 체인 연결
