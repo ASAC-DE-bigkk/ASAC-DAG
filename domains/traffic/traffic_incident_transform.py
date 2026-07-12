@@ -20,13 +20,19 @@ from airflow.providers.standard.operators.python import PythonOperator
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
+if DAG_DIR not in sys.path:
+    sys.path.insert(0, DAG_DIR)
+DOMAINS_DIR = os.path.dirname(DAG_DIR)
+if DOMAINS_DIR not in sys.path:
+    sys.path.insert(0, DOMAINS_DIR)
 DAGS_ROOT_DIR = os.path.dirname(os.path.dirname(DAG_DIR))
 if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
+from _shared.bronze_run_manifest import MANIFEST_TABLE, STATUS_SUCCESS  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.assets import TRAFFIC_BRONZE_ASSET  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from traffic_ingest.common.runtime import sql_string, trino_cursor  # noqa: E402
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -35,6 +41,8 @@ DBT_PROJECT = "/opt/airflow/dbt/domains/traffic"
 # Bronze runs every five minutes. Keep the hourly transform outside that boundary
 # so a run consumes one stable, publishable Bronze snapshot.
 TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
+TRAFFIC_SOURCE_ID = "seoul_traffic_incident"
+SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
 DEFAULT_PARAMS = {
     "target": Param(
         default="dev",
@@ -61,6 +69,35 @@ def dbt_command(args: str) -> str:
         f"export DBT_PROFILES_DIR={project} DBT_PROJECT_DIR={project}\n"
         f"{shlex.quote(DBT_BIN)} {args} --target '{{{{ params.target }}}}' --no-use-colors"
     )
+
+
+def resolve_traffic_snapshot_run() -> str:
+    """Pin the newest completed Bronze run for every dbt command in this DAG run."""
+    cursor, catalog, schema = trino_cursor()
+    cursor.execute(
+        f"""
+        SELECT CAST(dag_run_id AS varchar)
+        FROM {catalog}.{schema}.{MANIFEST_TABLE}
+        WHERE source_id = {sql_string(TRAFFIC_SOURCE_ID)}
+          AND status = {sql_string(STATUS_SUCCESS)}
+          AND is_publishable
+        ORDER BY CAST(event_at AS timestamp(6)) DESC, CAST(dag_run_id AS varchar) DESC
+        LIMIT 1
+        """
+    )
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        raise RuntimeError("No publishable Seoul traffic Bronze run is available for transform.")
+    return str(row[0])
+
+
+def dbt_snapshot_command(args: str) -> str:
+    snapshot_var = (
+        "--vars "
+        "'{\"traffic_snapshot_dag_run_id\": "
+        f"\"{{{{ ti.xcom_pull(task_ids='{SNAPSHOT_TASK_ID}') }}}}\"}}'"
+    )
+    return dbt_command(f"{args} {snapshot_var}")
 
 
 with DAG(
@@ -105,9 +142,15 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     )
 
+    resolve_snapshot = PythonOperator(
+        task_id=SNAPSHOT_TASK_ID,
+        python_callable=resolve_traffic_snapshot_run,
+        on_failure_callback=record_traffic_problem,
+    )
+
     dbt_run_silver = BashOperator(
         task_id="dbt_run_silver",
-        bash_command=dbt_command(
+        bash_command=dbt_snapshot_command(
             "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current"
         ),
         on_failure_callback=record_traffic_problem,
@@ -115,11 +158,11 @@ with DAG(
 
     dbt_test_silver = BashOperator(
         task_id="dbt_test_silver",
-        bash_command=dbt_command(
+        bash_command=dbt_snapshot_command(
             "test --select "
             "silver_seoul_traffic_incident "
             "silver_seoul_traffic_incident_current "
-            "assert_traffic_current_latest_publishable_run "
+            "assert_traffic_current_pinned_publishable_run "
             "assert_silver_traffic_uses_publishable_runs "
             "assert_silver_traffic_location_contract "
             "assert_traffic_audit_covers_latest_total_count "
@@ -160,6 +203,7 @@ with DAG(
         >> dbt_source_freshness
         >> dbt_test_traffic_incident_availability
         >> dbt_seed_asac_axes
+        >> resolve_snapshot
         >> dbt_run_silver
         >> dbt_test_silver
         >> dbt_run_gold

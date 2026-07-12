@@ -119,6 +119,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
         "dbt_seed_asac_axes",
+        "resolve_traffic_snapshot_run",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",
@@ -129,9 +130,10 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     for upstream_task_id, downstream_task_id in zip(expected_task_order, expected_task_order[1:]):
         assert dag.task_dict[upstream_task_id].downstream_task_ids == {downstream_task_id}
 
+    bash_task_ids = [task_id for task_id in expected_task_order if task_id != "resolve_traffic_snapshot_run"]
     task_commands = {
         task_id: dag.task_dict[task_id].bash_command
-        for task_id in expected_task_order
+        for task_id in bash_task_ids
     }
 
     assert "deps" in task_commands["dbt_deps"]
@@ -141,10 +143,13 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         in task_commands["dbt_test_traffic_incident_availability"]
     )
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
+    assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {"dbt_run_silver"}
     assert (
         "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current"
         in task_commands["dbt_run_silver"]
     )
+    assert "traffic_snapshot_dag_run_id" in task_commands["dbt_run_silver"]
+    assert "traffic_snapshot_dag_run_id" in task_commands["dbt_test_silver"]
     assert "--target '{{ params.target }}'" in task_commands["dbt_deps"]
     assert "assert_silver_traffic_event_at_matches_occurred_at" in task_commands["dbt_test_silver"]
     assert (
@@ -155,7 +160,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     assert "assert_silver_traffic_admin_axis_coverage" in task_commands["dbt_test_silver"]
     assert "assert_silver_traffic_latest_publishable_record" in task_commands["dbt_test_silver"]
     assert "silver_seoul_traffic_incident_current" in task_commands["dbt_test_silver"]
-    assert "assert_traffic_current_latest_publishable_run" in task_commands["dbt_test_silver"]
+    assert "assert_traffic_current_pinned_publishable_run" in task_commands["dbt_test_silver"]
 
 
 def test_traffic_transform_defaults_to_hourly_cron_after_bronze_completion_window(monkeypatch):

@@ -38,7 +38,8 @@ traffic은 실시간성 있는 변수로 쓸 수 있어 dev에서는 커버리�
 `traffic_incident_transform`은 Bronze 적재 주기와 별개로 매시 12분(KST)에 실행한다.
 Bronze는 5분 주기로 계속 수집하지만, transform은 hourly batch로 최신 publishable
 snapshot 하나만 처리한다. 이 분리는 Iceberg metadata/snapshot 증가를 제한하면서,
-Bronze와 transform이 같은 5분 경계에서 최신 manifest를 서로 다르게 보는 경합을 피한다.
+transform 시작 시 `SUCCESS + is_publishable` Bronze run id를 고정해, 이후 Bronze가 완료돼도
+같은 transform의 dbt run/test가 서로 다른 manifest를 보지 않도록 한다.
 운영상 schedule override가 필요하면 `ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE`을 쓰되,
 Bronze의 5분 경계와 겹치지 않는 시각을 선택한다.
 
