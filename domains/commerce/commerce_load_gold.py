@@ -34,12 +34,40 @@ from security import install_security  # noqa: E402
 
 install_security()
 
+import os  # noqa: E402
+
 import pendulum  # noqa: E402
 from airflow.decorators import dag, task  # noqa: E402
+from airflow.sdk import Asset  # noqa: E402
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5)}
+
+# ── OpenLineage inlets/outlets (V1 — silver→gold 엣지를 Marquez 에) ─────────────
+# Cosmos(dbt) 가 방출하는 silver dataset 표기를 2026-07-12 Marquez 실측으로 확인:
+#   namespace `trino://trino:8080` · name `iceberg_dev.commerce.silver_license_history`.
+# Airflow trino/postgres provider 의 Asset 컨버터가 아래 URI 를 정확히 같은 표기로 변환한다
+# (trino://host:port/<catalog>/<schema>/<table> → ns `trino://host:port` + name `catalog.schema.table`,
+#  postgres://host:port/<db>/<schema>/<table> 동일 규칙). 표기는 env 로 dev/prod 이식
+# (bronze.warehouse._qualified 와 동일 계약). OL 은 fail-open — 컨버터/백엔드 부재 시 파이프라인 무영향.
+_TRINO_AUTH = f"{os.getenv('TRINO_HOST', 'trino')}:{os.getenv('TRINO_PORT', '8080')}"
+_CATALOG = (os.getenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+            if os.getenv("DBT_TARGET", "dev").strip().lower() == "dev"
+            else os.getenv("TRINO_ICEBERG_CATALOG", "iceberg"))
+_SCHEMA = os.getenv("COMMERCE_SCHEMA", "commerce")
+_PG_AUTH = f"{os.getenv('COMMERCE_GOLD_PG_HOST', 'serving-postgres')}:{os.getenv('COMMERCE_GOLD_PG_PORT', '5432')}"
+_PG_DB = os.getenv("COMMERCE_GOLD_PG_DB", "serving")
+_GOLD_INLETS = [
+    Asset(f"trino://{_TRINO_AUTH}/{_CATALOG}/{_SCHEMA}/silver_license_history"),
+    Asset(f"trino://{_TRINO_AUTH}/{_CATALOG}/{_SCHEMA}/silver_license_current"),
+]
+# outlets 는 대표 core 2객체만(85개 전수 나열 금지 — 카탈로그 구동으로 가변). 상세 소비 계약은
+# dbt exposures(commerce_gold_serving)와 docs/DB/gold/ 가 정본.
+_GOLD_OUTLETS = [
+    Asset(f"postgres://{_PG_AUTH}/{_PG_DB}/public/commerce_business_entity"),
+    Asset(f"postgres://{_PG_AUTH}/{_PG_DB}/public/commerce_business_entity_history"),
+]
 
 
 @dag(dag_id="commerce_load_gold", schedule="0 6 * * *",
@@ -79,7 +107,7 @@ def commerce_load_gold():
         log.info("catalog: %s", summary)
         return summary
 
-    @task
+    @task(inlets=_GOLD_INLETS, outlets=_GOLD_OUTLETS)
     def load_gold() -> dict:
         """카탈로그(DB)를 읽어 DDL ensure → marker 증분 → 중단 방어 → 적재 → DONE."""
         from gold import loader, pg

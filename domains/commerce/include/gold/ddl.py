@@ -17,6 +17,19 @@ Postgres 시퀀스로 발급한다. **이 테이블은 gold 재적재/초기화�
 """
 from __future__ import annotations
 
+from security.dbio import assert_identifier
+
+
+def _assert_detail_safe(detail: dict) -> None:
+    """detail 의 객체명·payload 컬럼명을 SQL 식별자 게이트에 통과시킨다(C1 §20 생성 경계 방어선).
+
+    payload 는 외부 API 응답 유래 필드명이 lowercase 로 채택된 값이라, 여기서 한 번 더 검증해
+    DDL/인덱스 f-string 에 인용부호·공백·`$` 등이 유입되는 경로를 차단한다(measure 유입 필터의 2차선)."""
+    assert_identifier(detail["object"], field="gold object")
+    for c in detail["payload"]:
+        assert_identifier(c, field="gold payload column")
+
+
 # ── 컬럼 계약(카탈로그 core 정의와 1:1) ──────────────────────────────────────
 ENTITY_COLUMNS: list[str] = [
     "entity_seq", "dataset", "opnsfteamcode", "mgtno", "entity_type", "detail_table",
@@ -171,6 +184,7 @@ def _detail_index_kind(col: str) -> str | None:
 
 def create_detail_index_sql(detail: dict) -> list[tuple[str, str]]:
     """detail 1테이블의 payload 컬럼 중 날짜/식별번호/수량·규모 패턴만 자동 인덱싱."""
+    _assert_detail_safe(detail)
     t = detail["object"]
     stmts = []
     for col in detail["payload"]:
@@ -210,6 +224,7 @@ create table if not exists commerce_dim_business_status (
 
 def create_detail_sql(detail: dict) -> tuple[str, str]:
     """detail 1테이블 DDL — key(entity_seq 매핑) + 비공통 payload(text)."""
+    _assert_detail_safe(detail)
     cols = ",\n  ".join(
         [f"{c} {_pgtype(c)}" for c in DETAIL_KEY_COLUMNS]
         + [f"{c} text" for c in detail["payload"]])
@@ -291,6 +306,8 @@ where h.dataset = '{short}'"""
 
 def generate_all(details: list[dict]) -> list[tuple[str, str]]:
     """전 객체 DDL(순서 보장: catalog/marker/core → 인덱스 → dim → detail(+detail 인덱스) → view)."""
+    for d in details:                    # 생성 경계 방어선(C1 §20) — SQL 조립 전에 먼저 게이트
+        _assert_detail_safe(d)
     out = create_core_sql() + create_index_sql() + create_dim_sql()
     for d in details:
         out.append(create_detail_sql(d))
