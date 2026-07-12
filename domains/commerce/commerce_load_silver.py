@@ -48,6 +48,7 @@ from security import install_security  # noqa: E402
 
 install_security()
 
+import json  # noqa: E402
 import os  # noqa: E402
 
 import pendulum  # noqa: E402
@@ -59,7 +60,7 @@ from cosmos import (  # noqa: E402
     ProjectConfig,
     RenderConfig,
 )
-from cosmos.constants import ExecutionMode, LoadMode, TestBehavior  # noqa: E402
+from cosmos.constants import ExecutionMode, InvocationMode, LoadMode, TestBehavior  # noqa: E402
 
 # dbt 실행 계약(호스트 이미지 env 우선, 없으면 기본값) — common_dbt_smoke 와 동일 형태.
 DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce")
@@ -69,6 +70,11 @@ DBT_TARGET = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
 # 모델 선택(리스트 = Cosmos RenderConfig.select / 문자열 join = chunked seed·비교용).
 SILVER_SELECT = ["silver_license_history", "silver_license_current"]
 SILVER_SELECT_STR = " ".join(SILVER_SELECT)
+# 스코프 dbt vars(운영 노브) — Cosmos 는 정적 렌더라 런타임 청크 루프가 불가하므로(위 docstring),
+# 저메모리 환경에서 dbt_silver 를 dataset 스코프로 돌릴 때 .env.commerce 에 JSON 으로 지정한다.
+# 예: COMMERCE_DBT_VARS='{"include_datasets": ["golf_course"]}' — 비우면(기본) 전체 증분.
+# 마커/pre_hook 은 include_datasets 스코프를 그대로 존중한다(silver_markers 매크로).
+_DBT_VARS: dict = json.loads(os.getenv("COMMERCE_DBT_VARS") or "{}")
 
 _DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5)}
 
@@ -84,12 +90,17 @@ _profile_config = ProfileConfig(
 _project_config = ProjectConfig(dbt_project_path=DBT_PROJECT_DIR)
 _execution_config = ExecutionConfig(
     execution_mode=ExecutionMode.LOCAL,
+    # cosmos>=1.15 는 Airflow env 에 dbt-core 가 보이면(openlineage extra 의존) DBT_RUNNER
+    # (in-process)를 기본으로 잡는다 — 이 DAG 의 계약은 별도 dbt venv(DBT_BIN) 실행이므로
+    # SUBPROCESS 를 명시해 venv 경계를 고정한다(위 docstring "dbt 실행 계약" 그대로).
+    invocation_mode=InvocationMode.SUBPROCESS,
     dbt_executable_path=DBT_BIN,
 )
 _render_config = RenderConfig(
     select=SILVER_SELECT,
     test_behavior=TestBehavior.AFTER_EACH,
     load_method=LoadMode.DBT_LS,
+    invocation_mode=InvocationMode.SUBPROCESS,   # 렌더(dbt ls)도 venv dbt — ExecutionConfig 와 동일 사유
     dbt_executable_path=DBT_BIN,
 )
 
@@ -175,7 +186,7 @@ def commerce_load_silver():
         profile_config=_profile_config,
         execution_config=_execution_config,
         render_config=_render_config,
-        operator_args={"install_deps": False},
+        operator_args={"install_deps": False, **({"vars": _DBT_VARS} if _DBT_VARS else {})},
     )
 
     seed = seed_silver_if_empty()
