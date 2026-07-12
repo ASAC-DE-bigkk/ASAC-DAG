@@ -158,10 +158,12 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     assert "assert_traffic_current_latest_publishable_run" in task_commands["dbt_test_silver"]
 
 
-def test_traffic_transform_subscribes_to_bronze_asset_by_default():
+def test_traffic_transform_defaults_to_hourly_cron_after_bronze_completion_window(monkeypatch):
+    monkeypatch.delenv("ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE", raising=False)
     module = load_transform_module()
 
-    assert module.dag.kwargs["schedule"] == [FakeAsset(module.TRAFFIC_BRONZE_ASSET)]
+    assert module.TRAFFIC_TRANSFORM_CRON_KST == "12 * * * *"
+    assert module.dag.kwargs["schedule"] == module.TRAFFIC_TRANSFORM_CRON_KST
 
 
 def test_traffic_transform_validates_dev_runtime_before_dbt():

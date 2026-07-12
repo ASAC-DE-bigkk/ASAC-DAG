@@ -17,7 +17,6 @@ from airflow import DAG
 from airflow.models.param import Param
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk import Asset
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +32,9 @@ from common.runtime_guard import validate_dev_runtime  # noqa: E402
 KST = ZoneInfo("Asia/Seoul")
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/traffic"
+# Bronze runs every five minutes. Keep the hourly transform outside that boundary
+# so a run consumes one stable, publishable Bronze snapshot.
+TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
 DEFAULT_PARAMS = {
     "target": Param(
         default="dev",
@@ -45,10 +47,10 @@ DEFAULT_PARAMS = {
 record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
-def transform_schedule() -> str | list[Asset] | None:
+def transform_schedule() -> str | None:
     if "ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE" in os.environ:
         return os.environ["ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE"] or None
-    return [Asset(TRAFFIC_BRONZE_ASSET)]
+    return TRAFFIC_TRANSFORM_CRON_KST
 
 
 def dbt_command(args: str) -> str:

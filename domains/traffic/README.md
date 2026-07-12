@@ -33,6 +33,15 @@ traffic은 실시간성 있는 변수로 쓸 수 있어 dev에서는 커버리�
 5분 스케줄을 둔다. 단, prod에서는 명시적으로 `ASK_SEOUL_TRAFFIC_DAG_SCHEDULE`을
 넣지 않으면 자동 스케줄을 만들지 않는다.
 
+## Transform schedule
+
+`traffic_incident_transform`은 Bronze 적재 주기와 별개로 매시 12분(KST)에 실행한다.
+Bronze는 5분 주기로 계속 수집하지만, transform은 hourly batch로 최신 publishable
+snapshot 하나만 처리한다. 이 분리는 Iceberg metadata/snapshot 증가를 제한하면서,
+Bronze와 transform이 같은 5분 경계에서 최신 manifest를 서로 다르게 보는 경합을 피한다.
+운영상 schedule override가 필요하면 `ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE`을 쓰되,
+Bronze의 5분 경계와 겹치지 않는 시각을 선택한다.
+
 기본 첫 호출 범위는 `SEOUL_ACC_INFO_START_INDEX=1`, `SEOUL_ACC_INFO_END_INDEX=1000`이다.
 첫 응답의 `list_total_count`가 1000을 초과하면 같은 page size로 뒤 range를 이어서 호출한다.
 전체 parsed row 수가 `list_total_count`보다 작으면 partial 수집으로 보고 DAG를 실패시킨다.
