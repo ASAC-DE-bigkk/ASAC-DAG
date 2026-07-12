@@ -18,7 +18,7 @@ v2 환경 13)을 raw → bronze → silver → gold 로 흘린다. 진입점: [.
 | **raw** | [raw/](raw/README.md) | 수집(`commerce_collect_raw`) | R2 NDJSON + 마커 + 롤링 diff. 필드 커버리지·호출량·정렬·상태추적·증분 |
 | **bronze** | [bronze/](bronze/README.md) | 적재(`commerce_load_bronze`) | Iceberg `bronze_localdata_license`(record_json 통짜) + 발행 manifest. 엔진분기·워터마크·유지보수 |
 | **silver** | [silver/](silver/README.md) | 정규화·보강(`commerce_load_silver`) | dbt history/current/detail. **v1/v2 통합**·중복제거·주소/좌표 보강 |
-| **gold** | [gold/](gold/README.md) | 서빙 집계 | ⚠️ **미구현**(계획) |
+| **gold** | [gold/](gold/README.md) | 서빙 마트(`commerce_load_gold`) | ✅ **구현·가동 중** — 카탈로그 구동 Python→서빙 Postgres(entity/history·detail·dim·view). 명세: [DB/gold/](../../../../../dbt/domains/commerce/docs/DB/gold/) |
 
 ## 참고 (역사적 설계 기록)
 

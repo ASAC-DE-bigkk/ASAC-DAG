@@ -7,6 +7,147 @@
 
 ## 2026-07-12
 
+### 59. gold 적재 OOM 해결 — cold-start 청크 적재(dataset 배치 + detail content_hash 버킷) + 객체별 재개
+
+request:
+- gold 전량 재적재가 이 머신(VM 7.75GB)에서 Trino OOM(exit 137)으로 완주 불가 → silver 처럼 **OOM 을
+  피하면서 가장 정확하고 빠르게** 적재되도록 적용. 정상 완료될 때까지 진행하고, **어떤 조치를 했고 어떻게
+  실패했는지 change-log 에 기록**할 것.
+
+response — **진단**:
+- exit 137 = **cgroup/OS OOM-kill**(Trino 자체 `EXCEEDED_LOCAL_MEMORY_LIMIT` 아님). Trino 힙이
+  컨테이너 메모리 상한 없이 `MaxRAMPercentage=80`(≈6.2GB)까지 자라는데, VM 7.75GB 를 컨테이너 10개
+  (airflow×4·postgres×2·trino·marquez×3)가 나눠 써 **전체 메모리 초과** → OS 가 최대 프로세스(Trino)를 kill.
+- cold-start(마커 없음)는 `run_load` 가 전 객체를 **한 창(wm=None→전량)**에 적재 → entity_history 2.89M +
+  entity(현재 2.89M + `min(collected_at) group by grain` 집계) 를 한 번에 → 피크 초과.
+
+response — **조치·시도**(위 실패 → 아래 개선, 순서대로):
+1. **[시도1] dataset 배치 청크**(`loader._load_chunked`): entity_history·entity 를 dataset 그룹
+   (행수 greedy-pack, budget=`COMMERCE_GOLD_BATCH_ROWS` 기본 50만)으로 스코프 적재. **핵심 정확성**:
+   grain=(dataset,opnsfteamcode,mgtno) 이라 `first_collected_at=min(collected_at)` 를 dataset 스코프로
+   좁혀도 전역 정확(각 grain 의 전 이력이 한 배치에). 결과: **entity 단계는 완주**(entity_history
+   2,895,880=silver 정합, entity 2,891,436 — no OOM). 그러나 **detail 단계에서 OOM 재발**.
+   → 실패 원인: `commerce_food_sanitation_business_detail`(21멤버·payload 20열·**1,122,965행**,
+   행×열 추출비용 22.4M — 2위의 4배)를 **한 쿼리로** record_json 20개 `json_extract_scalar` 하며
+   피크 초과. mail_order_sale(934K)도 budget 초과.
+2. **[시도2 = 최종] detail content_hash 서브청크 + 객체별 재개**:
+   - `load_detail(part=(bucket,k))`: `mod(from_base(substr(content_hash,1,8),16),k)=bucket` 로 행을 k
+     버킷 **균등·배타·완전 분할**(실측 분포 편차 <1%). `_load_detail_chunked` 가 detail 행수>budget 이면
+     `k=ceil(rows/budget)` 버킷으로 쪼개 각 쿼리 ≲budget(food_sanitation 3버킷·mail_order_sale 2버킷).
+   - **객체별 마커 재개**: 각 객체(entity_history·entity·detail)가 끝나는 즉시 `write_markers_done` 로
+     마커 기록 → 재실행 시 `hi 까지 DONE` 객체는 건너뜀(detail 중 OOM 나도 50분짜리 entity 단계 재실행
+     안 함). `run_load` 분기도 "core/detail 중 마커 없는 객체가 하나라도 있으면 청크(=재개)"로 변경.
+   - 부수: 시도1 이 완주시킨 entity_history(정합 실측: gold=silver 정확 일치)의 마커를 **선주입**해 25분
+     재적재 생략(entity 는 안전하게 재적재 — inner-join 특성상 1,233 grain 차이는 로더 고유 동작).
+   - **결과**: entity 재적재 완주 + detail 19개 완료(마커 21)했으나 **food_sanitation 에서 또 OOM**.
+     → 실패 원인 재규명: content_hash 버킷(374K)도 OOM. 실측으로 진짜 원인 특정 — 단일 dataset 추출
+     (general_restaurant 536K×21열)은 **Trino 피크 15%로 여유**인데, `dataset in (21멤버)`는 21개
+     dataset 파일을 **동시 스캔**하며 각 split 이 record_json 을 버퍼 → 피크 폭증. 즉 문제는 행수/버킷이
+     아니라 **다중 dataset 스캔 팬아웃**이었다(비파티션 테이블이라 dataset 프루닝 불가).
+3. **[시도3] detail 을 멤버(dataset)별 1쿼리로**(`_load_detail_chunked` 멤버 루프): cluster 도 멤버마다
+   `dataset='m'` 단일 스캔으로 나눠 동시 스캔 폭을 1 dataset 으로 축소. 그래도 food_sanitation OOM 재발
+   (budget 50만 → general_restaurant 26.8만행 버킷이 너무 큼).
+- **근본원인 규명(실측 프로빙, 이 단계가 핵심)**: 이전까지 "행수/버킷/팬아웃"으로 추정했으나 실측으로
+  정확히 특정:
+  - `count(*)` 프로빙(피크 15%)은 **오판** — Trino 옵티마이저가 count 에선 `json_extract_scalar` 를
+    프루닝해 record_json 을 안 읽는다. 실제 `select`(추출 컬럼 반환)로 측정해야 한다.
+  - 실측(general_restaurant, collected_at≤hi): 순수 컬럼 스캔 53.6만행=피크 **30%**, **21개
+    `json_extract_scalar` 추출** 53.6만행=**61~71%**(사망 경계), 13.4만행=**40%**, 8.9만행=**36%**.
+    task_concurrency 16→1 은 71→61%로 미미(주 원인 아님). parse-once 도 71%로 무효.
+  - 즉 **근본원인 = Trino 가 detail 추출에서 record_json 을 행마다 JSON 문서로 materialize → 피크
+    메모리가 쿼리 행수에 비례**. scan+project 라 **spill 대상 연산자가 없어**(spill 무의미) 힙이
+    커지다가, 컨테이너 메모리 상한 없이 VM 7.75GB 를 컨테이너 10개가 공유하는 상황에서 Trino 가용
+    헤드룸(~60%)을 넘기면 **OS OOM-kill(exit 137)**. entity 단계가 멀쩡했던 건 record_json 을 안
+    읽고 평문 컬럼만 스캔하기 때문.
+4. **[시도4] detail 쿼리 행수를 정적 바운드(budget 10만)**: 개별 쿼리는 ~36% 였으나 **연속 쿼리에서
+   메모리가 누적**(26→50→65%)해 결국 OS OOM. 개별 바운드만으론 부족 — **Trino heap 자체가 상한 없이
+   커지는 게 CRASH 의 진짜 원인**임이 드러남(json 추출 임시 garbage 가 GC 보다 빨리 쌓이고,
+   MaxRAMPercentage=80%(6.2GB) 힙이 VM 여유를 넘겨 libjvmkill/OS 가 컨테이너 kill).
+5. **[시도5 = 최종 아키텍처] 2계층 방어 + 하드웨어 적응(사용자 지시 반영)**:
+   - **① Trino heap cap** `MaxRAMPercentage 80→52`(≈4GB, [trino/jvm.config](../../../../trino/jvm.config)):
+     힙이 VM 여유(others 2.5GB + OS)를 절대 못 넘게 → GC 강제 회수 → **OS OOM-kill 원천 차단**(넘치면
+     Trino 자체 clean 에러로 degrade, 컨테이너 사망 아님).
+   - **② 파일시스템=스왑(spill)** `spill-enabled=true`([trino/config.properties](../../../../trino/config.properties)):
+     집계/조인/정렬/윈도우(entity first_collected_at 집계 등)는 디스크로 spill. ※ scan+project(detail 추출)은
+     spill 대상이 아니라 아래 ③ 이 담당(2계층 방어).
+   - **③ 동적 배치 사이징(하드웨어 마진 적응)** `loader._dynamic_detail_rows`: detail 쿼리 직전 Trino
+     `/v1/status` 로 **가용 heap 실시간 조회** → 배치 행수 = `free×0.35 / (payload_cols×1200B)`. 머신
+     스펙·현재 여유가 크면 배치도 커지고(빠름) 작으면 줄어(안전) — **고정 매직넘버 폐기**. 실측(이 박스
+     4GB 캡): 21컬럼 detail→42K행, 6컬럼→148K행 자동. 조회 실패 시 env `COMMERCE_GOLD_BATCH_ROWS`(이 박스 6만) 폴백.
+   - **④ 적응형 pacing/commit**: `_pace()` 가 detail 쿼리 사이 free heap 이 낮으면 GC 회복 대기.
+     `_stream` 은 `COMMERCE_GOLD_COMMIT_ROWS`(기본 5만)마다 커밋해 Postgres txn/WAL 바운드.
+   - detail 은 멤버(dataset)별 + content_hash 버킷(시도3)으로 동시 스캔 팬아웃 회피. 객체별 마커 재개
+     (시도2)도 유지(운영 중단 복구용).
+- **검증(사용자 지시 — 재개 아닌 처음부터)**: gold 전 테이블·마커 **완전 초기화**(entity_key 만 보존) 후
+  **from-scratch 단일 실행**으로 OOM 없이 완주해야 진짜 성공(부분/재개 성공은 계승된 불완전 성공으로 간주 안 함).
+- **이식성**: 동적 사이징·pacing·commit 은 **번들 코드**(loader)라 어느 환경에서도 동작. heap cap·spill 은
+  Trino config([trino/](../../../../trino/))로 리포지토리에 넣음 — compose 가 마운트해야 영속(현재는
+  컨테이너 복사 적용: restart 존속, recreate 시 재적용 필요 → 후속 compose 마운트 권고).
+- **결과(from-scratch 완전 성공, 2026-07-12)**: gold 완전 초기화 후 **단일 실행으로 OOM 없이 완주**.
+  entity_history **2,895,880**(=silver history 정확 일치)·entity 2,891,436·detail 78테이블 총 2,895,880행
+  (food_sanitation 1,122,965·mail_order_sale 933,983 — 이전 OOM 주범 포함 전량)·dim 152/452/93·view 320·
+  **DONE 마커 83**(전 객체)·총 8,683,939행. **Trino 2시간 내내 healthy, peak 컨테이너 RSS 65%**지만 OS
+  OOM-kill 0(heap cap 이 JVM 힙을 4GB 로 묶고 나머지는 회수 가능한 page cache). 동적 사이징 실동작 확인:
+  general_restaurant×11·mail_order_sale×16 등 payload 컬럼수 기반 버킷 자동 분할. **부분/재개 아닌
+  from-scratch 완주 = 완전 성공.**
+
+### 58. silver-gold-refactor-guide 실행 — C1~C7 + V1(OL 엣지) 구현 + 공유 R2 복구 계약 정립
+
+request:
+- [docs/silver-gold-refactor-guide.md](docs/silver-gold-refactor-guide.md) 확정 변경 C1~C7 을 위→아래
+  순서로 구현하고 각 수용 기준 통과. V1(OL 엣지)은 런타임 검증 동반.
+- (후속 지시) V1 의 OOM 은 **나눠서(청크)/증분 수집으로 해결**할 것. 이 로컬 외 **다른 로컬 환경이
+  R2 를 공유**하므로 R2 변경이 상대 환경에 문제로 인식되지 않게 **복구 플로우까지 확인·정립**할 것.
+
+response:
+- **C1 gold 식별자 3중 게이트(§20 injection guard)**: `include/gold/measure.py`(유입 — 비식별자 필드
+  필터 + `log_event` 품질 이벤트), `include/gold/ddl.py`(생성 — `_assert_detail_safe` 를 `generate_all`/
+  `create_detail_sql`/`create_detail_index_sql` 진입에), `include/gold/loader.py`(소비 — `load_detail`
+  진입에서 object/payload/members `assert_identifier`, DB 재로드 우회 차단). `tests/test_gold_ddl.py` 에
+  주입 케이스 추가. **검증**: pytest 339 통과 · `python -m security` PASS(차단 0).
+- **C2 silver history 컬럼 단일화**: `dbt/…/macros/silver_columns.sql`(`silver_history_column_list`) 신설,
+  history 모델의 projected_new/prior_tail/최종 select 3중 목록을 매크로로 치환(위치 정합 순서 유지).
+- **C3 좌표 변환 매크로**: `dbt/…/macros/geo_transform.sql`(`tm5174_to_wgs84_ctes`) 신설, 인라인 측지
+  CTE 10개(geo_mu…geo) + 주석블록 이관. 모델은 `{{ tm5174_to_wgs84_ctes('dong') }}` 한 줄.
+- **C4 마스킹 매크로**: `dbt/…/macros/masking.sql`(`null_if_masked_address`) 신설, current 4곳 + history
+  dong_token 5중 중복 치환(regexp 백슬래시 원문 보존 확인).
+- **C2·3·4 검증**: 컨테이너 `dbt compile` 전/후 **공백 제거 후 바이트 동일**(history·current 양쪽).
+  scoped 증분 `dbt run`(resort_complex·yacht_marina·golf_course) 성공. `dbt test`: geo landmark(서울시청)
+  · grain unique(history/current) · no_adjacent_duplicates · not_null · masked 컬럼 전부 PASS.
+- **C5 gold exposure**: `dbt/…/models/exposures.yml`(`commerce_gold_serving`, culture 형식 준용) 신설.
+  `dbt parse` 오류 없음, `dbt ls --resource-type exposure` 에 표시. Cosmos 렌더 무영향(silver DAG 미수정).
+- **C6 cleanup 러북 보강**: `docs/cleanup-detail-health.md` §3 에 고아 seed(`commerce_dataset_taxonomy`)
+  삭제 + 문서 정리 대상 2항목 추가. 소비자 detail_health 뿐임 재확인(grep).
+- **C7 문서 정합 복구**: 파이프라인 5문서(data-model·pipeline/README·gold/README·silver-gold-load-plan·
+  beginner-guide)의 "gold 미구현" 진술을 실제(카탈로그 구동 Python→서빙 Postgres, 가동 중)로 정정 +
+  정본 포인터. 드리프트 4건(views.md dbt seed→Python · partitioning-indexing-plan 인덱스 6→17+401 정본
+  포인터 · tables.md dim_dataset seed 미사용 · timestamps-and-nulls DCBYMD 해소) 정정. 링크 전수 resolve.
+- **V1 완료(청크 실행으로 OOM 우회 — 사용자 지시)**: Marquez 기동(`--profile lineage`) → Airflow
+  이미지 rebuild(f6c55cc 의 cosmos+OL provider 실체화) → cosmos 1.15 기본 InvocationMode 변경 대응
+  (`commerce_load_silver.py` Execution/RenderConfig 에 **SUBPROCESS 명시** — dbt venv 경계 계약 유지) →
+  silver 를 **dataset 청크로 스코프**해(신규 운영 노브 `COMMERCE_DBT_VARS`, `.env.commerce` JSON →
+  Cosmos operator_args vars) 1회 성공 → **OL 표기 실측**: namespace `trino://trino:8080` · name
+  `iceberg_dev.commerce.silver_license_history`(가이드 §3 예상과 일치). `commerce_load_gold.py`
+  `load_gold` 에 **Asset inlets/outlets** 부여(env 구동 — `_qualified` 와 동일 dev/prod 계약; trino/postgres
+  provider 컨버터가 동일 표기로 변환함을 사전 검증). **Marquez 그래프 실측 확인**: bronze→Cosmos silver
+  job→`silver_license_history/current`→`load_gold`→`serving.public.commerce_business_entity(+_history)`
+  전 체인 가시화(inEdges/outEdges 등록). 부수 해결: 스케줄러 프로세스의 importlib 메타데이터 캐시가
+  세션 중 pip 설치된 trino provider 를 못 봐 inlets 만 탈락하던 문제 — **스케줄러 재시작으로 해소**(원인
+  기록). ⚠ 잔여: ① trino provider 는 러닝 컨테이너 임시 설치 — **영속화하려면 Dockerfile.airflow 에
+  `apache-airflow-providers-trino` 1줄 필요**(호스트 파일 — 승인 대기; 없으면 컨테이너 재생성 시 inlets
+  변환만 소실, fail-open 무해). ② 이 박스는 gold **전량** 재적재(마커 빈 상태 cold start)가 Trino
+  OOM(VM 7.75G, 힙 80% 설정)으로 완주 불가 — 3회 실측. 로컬 serving DB 는 부분적재+마커 미기록
+  상태로 남았고 **다음 성공 실행이 `_defend` 로 자동 정리**(복구 계약 §7.2, R2 무관).
+- **공유 R2 검증·복구 계약 정립(사용자 지시)**: Iceberg 카탈로그·웨어하우스=R2 Data Catalog(REST) —
+  bronze/silver/**마커** 전부 환경 간 공유임을 확인. 이 세션의 공유 상태 영향 실측 = **net-zero**
+  (무마킹 부분행 0건, history 스냅샷 no-op delete 1개·행수 불변, current 4행 동일값 재계산,
+  ref_admin_dong 일일 전량교체는 설계 동작). 문서화: **rebuild-and-ops.md §7**(공유 경계 표 ·
+  레이어별 복구 계약(실측 근거+무마킹 검사 쿼리) · 멀티 환경 5수칙 — 동시 실행 금지 / standby paused
+  유지 + 검증 실행 change-log 기록 / 저메모리 청크 / 전량교체 무해 / 스냅샷 위생). 이 박스의 DAG
+  paused 원상 복원(silver·gold), 임시 env 제거, 컨테이너 전 복원 완료.
+- **환경 이슈(코드 무관, 기록)**: 이 박스 `.env.commerce` 에 `JUSO_CONFM_KEY` 부재 →
+  `enrich_fill_jibun` 실패(이번 검증에선 해당 run 한정 우회). 정상 운영 환경에는 키가 있어야 한다.
+
 ### 57. silver/gold 구조 1차 판정 + 리팩터 가이드(silver-gold-refactor-guide.md) 신설
 
 request:

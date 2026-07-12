@@ -2,7 +2,8 @@
 
 > ⚠️ **역사적 적재 계획(2026-07-07).** 현행 살아있는 문서는 [silver/](silver/README.md) ·
 > [gold/](gold/README.md) · [data-model.md](data-model.md) 다. 이 문서 이후 반영된 것: silver
-> current/detail **증분화**(#81)·**분야별 detail** 모델(#80)·**v1/v2 통합(lf 매크로)**. gold 는 여전히 미구현.
+> current/detail **증분화**(#81)·**분야별 detail** 모델(#80)·**v1/v2 통합(lf 매크로)**. **gold 는 이후
+> 구현·가동 중** — 카탈로그 구동 Python→서빙 Postgres(`commerce_load_gold`). 명세: [DB/gold/](../../../../../dbt/domains/commerce/docs/DB/gold/).
 
 작성일: 2026-07-07
 

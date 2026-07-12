@@ -7,7 +7,11 @@
 
 ## 0. 상태 · 실행 규칙
 
-- 상태: **OPEN(미구현)**. 완료 시 `DONE(YYYY-MM-DD, 커밋 …)` 으로 바꾸고 §7 을 채운다.
+- 상태: **DONE(2026-07-12) — C1~C7 + V1 전항 구현·검증 완료**(§7 · [change-log #58](../change-log.md)).
+  V1 은 silver **청크 실행**(신규 노브 `COMMERCE_DBT_VARS`)으로 OOM 을 우회해 OL 표기를 실측하고
+  Marquez 에서 silver→gold 엣지 등록까지 확인했다. 잔여 2건(§7 비고): trino provider Dockerfile 영속화
+  (승인 대기) · 이 박스의 gold 전량 재적재 완주 불가(메모리 — 복구 계약으로 무해).
+  커밋은 논리 단위로 진행(한국어 conventional), push/PR 은 사용자 승인 후.
 - 대상 레포: dbt(ASAC-DBT, `dbt/domains/commerce/`) + dags(ASAC-DAG, `dags/domains/commerce/`).
   **타 도메인(`dbt/domains/{citydata,culture,traffic,weather,transit}`)은 수정 금지**(번들 경계 —
   CLAUDE.md Working Scope).
@@ -327,7 +331,28 @@ docker compose run --rm airflow-scheduler airflow dags list-import-errors
 
 ## 7. 완료 처리
 
-- [ ] 각 항목 수용 기준 통과 기록(명령·결과 요약)
-- [ ] `change-log.md` 항목 추가(구조 변경 이력 규칙)
-- [ ] 이 문서 §0 상태 `DONE` + CLAUDE.md Pending 목록에서 상태 갱신
-- [ ] V1 미완이면 사유와 함께 명시
+- [x] **각 항목 수용 기준 통과 기록**(2026-07-12, 로컬 py3.9 + 컨테이너 `elt-infra`):
+  - C1: `pytest dags/domains/commerce/tests` **339 passed**(주입 케이스 `test_identifier_gate_rejects_injection`
+    포함) · `python -m security` **PASS(차단 0)**.
+  - C2·C3·C4: `dbt compile` 전/후 **공백 제거 후 바이트 동일**(silver_license_history·current 양쪽). scoped
+    증분 `dbt run`(resort_complex·yacht_marina·golf_course) **성공**(current INSERT 4). `dbt test` — geo
+    landmark(서울시청) + grain unique(history/current) + no_adjacent_duplicates + not_null + masked = **전부 PASS**.
+    (full `dbt run` 은 Trino OOM — 아래 V1 사유와 동일 환경 제약. compile 바이트동일이 의미 불변을 보장.)
+  - C5: `dbt parse` 오류 없음 · `dbt ls --resource-type exposure` = `exposure:commerce.commerce_gold_serving`.
+  - C6: 러북 §3 두 항목 반영 + seed 고아 재확인(grep: 소비자 detail_health·schema.yml 뿐).
+  - C7: `grep "미구현"`(pipeline·beginner-guide) gold-미구현 잔존 **0** · views.md "dbt seed" 메커니즘 제거 ·
+    partitioning-indexing-plan 최신 포인터 존재 · 추가/수정 링크 전수 resolve OK.
+  - 전역: `dbt parse` OK · `commerce_load_gold` DAG import OK(gold/bronze/raw/watchdog 정상). ※
+    `commerce_load_silver` 는 이미지에 `cosmos` 미설치(f6c55cc 진행중 인프라)라 import 실패 — **본 작업과 무관**(파일 미수정).
+- [x] **`change-log.md` 항목 추가** — #58(구조 변경 이력 규칙).
+- [x] **§0 상태 갱신** (C1~C7 DONE · V1 DEFERRED) + CLAUDE.md Pending 목록 상태 갱신.
+- [x] **V1 완료(2026-07-12, 청크 실행으로 OOM 우회)**: Marquez 기동 → 이미지 rebuild(cosmos+OL) →
+  silver 를 dataset 청크(`COMMERCE_DBT_VARS` 신규 노브)로 1회 성공 실행 → **실측**: namespace
+  `trino://trino:8080` · name `iceberg_dev.commerce.silver_license_history`(§3 예상과 일치) →
+  `commerce_load_gold.load_gold` 에 Asset inlets/outlets(env 구동) 부여 → **Marquez 그래프에서
+  silver_license_history/current → load_gold → serving.public.commerce_business_entity(+_history)
+  엣지 등록 확인**(inEdges/outEdges 실측). 부수 수정: cosmos 1.15 InvocationMode SUBPROCESS 명시
+  (silver DAG — dbt venv 계약 유지). **비고**: ① trino provider 는 컨테이너 임시 설치 —
+  Dockerfile.airflow 1줄 영속화는 호스트 파일이라 승인 대기(부재 시 inlets 변환만 소실, fail-open).
+  ② 이 박스는 gold 전량 재적재(cold start) 완주 불가(Trino OOM×3) — 로컬 serving DB 는 부분적재
+  상태로 남았고 다음 성공 실행이 자동 정리(공유 R2 복구 계약: dbt docs rebuild-and-ops.md §7).

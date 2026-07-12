@@ -55,6 +55,14 @@ where kind in ('detail_cluster','detail_single');
       `dataset-columns.md` 의 detail_health 언급, `silver-noncommon-catalogs.md §8` 3번(마이그레이션 완료로 표기)
 - [ ] **참조 잔존 확인**: `grep -rn detail_health dbt/domains/commerce dags/domains/commerce | grep -v logs/`
       결과가 이 러북/이력 외엔 없어야 함
+- [ ] **고아 seed 삭제**: `dbt/domains/commerce/seeds/commerce_dataset_taxonomy.csv` +
+      `models/schema.yml` 의 `seeds:` 섹션(commerce_dataset_taxonomy 블록) 삭제 — 소비자가
+      detail_health 뿐이었음(gold dim_dataset 는 dags 레지스트리에서 직접 파생, seed 미사용).
+      삭제 전 재확인: `grep -rn commerce_dataset_taxonomy dbt dags | grep -v logs/` 가
+      detail_health·schema.yml 외 무결과인지.
+- [ ] **문서 정리 추가 대상**: `dags/domains/commerce/docs/pipeline/data-model.md`(L27·L173·L176),
+      `docs/pipeline/silver/README.md`(L19·L22), `docs/pipeline/raw/api-field-coverage.md`(L67),
+      `docs/architecture/storage.md`(L34) 의 detail_health 언급 갱신.
 
 ## 4. 물리 테이블 삭제 — **환경별 체크리스트(반드시 실측)**
 
