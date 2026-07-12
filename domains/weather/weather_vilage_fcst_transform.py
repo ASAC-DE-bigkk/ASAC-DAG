@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from airflow import DAG
 from airflow.models.param import Param
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
@@ -28,6 +29,7 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
+from common.runtime_guard import validate_dev_runtime  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
@@ -40,8 +42,8 @@ DEFAULT_PARAMS = {
     "target": Param(
         default="dev",
         type="string",
-        enum=["dev", "prod"],
-        description="dbt target profile name.",
+        enum=["dev"],
+        description="dbt target profile name (dev only until production rollout).",
     )
 }
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
@@ -153,6 +155,13 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["ask_seoul", "weather", "transform", "silver", "gold", "dbt"],
 ) as dag:
+    validate_runtime = PythonOperator(
+        task_id="validate_dev_runtime",
+        python_callable=validate_dev_runtime,
+        op_kwargs={"domain": "weather", "requested_target": "{{ params.target }}"},
+        on_failure_callback=record_weather_problem,
+    )
+
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=dbt_command("deps"),
@@ -259,7 +268,8 @@ with DAG(
     )
 
     (
-        dbt_deps
+        validate_runtime
+        >> dbt_deps
         >> dbt_source_freshness
         >> dbt_seed_asac_axes
         >> dbt_seed_place_mapping
