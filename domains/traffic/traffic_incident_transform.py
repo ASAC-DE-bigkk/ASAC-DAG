@@ -120,25 +120,25 @@ with DAG(
 
     dbt_deps = BashOperator(
         task_id="dbt_deps",
-        bash_command=dbt_command("deps"),
+        bash_command=dbt_snapshot_command("deps"),
         on_failure_callback=record_traffic_problem,
     )
 
     dbt_source_freshness = BashOperator(
         task_id="dbt_source_freshness",
-        bash_command=dbt_command("source freshness"),
+        bash_command=dbt_snapshot_command("source freshness"),
         on_failure_callback=record_traffic_problem,
     )
 
     dbt_test_traffic_incident_availability = BashOperator(
         task_id="dbt_test_traffic_incident_availability",
-        bash_command=dbt_command("test --select assert_traffic_incident_row_availability"),
+        bash_command=dbt_snapshot_command("test --select assert_traffic_incident_row_availability"),
         on_failure_callback=record_traffic_problem,
     )
 
     dbt_seed_asac_axes = BashOperator(
         task_id="dbt_seed_asac_axes",
-        bash_command=dbt_command("seed --select asac_axes"),
+        bash_command=dbt_snapshot_command("seed --select asac_axes"),
         on_failure_callback=record_traffic_problem,
     )
 
@@ -182,13 +182,13 @@ with DAG(
 
     dbt_run_gold = BashOperator(
         task_id="dbt_run_gold",
-        bash_command=dbt_command("run --select gold_traffic_incident_summary"),
+        bash_command=dbt_snapshot_command("run --select gold_traffic_incident_summary"),
         on_failure_callback=record_traffic_problem,
     )
 
     dbt_test_gold = BashOperator(
         task_id="dbt_test_gold",
-        bash_command=dbt_command(
+        bash_command=dbt_snapshot_command(
             "test --select "
             "gold_traffic_incident_summary "
             "assert_gold_traffic_counts_match_silver "
@@ -199,11 +199,11 @@ with DAG(
 
     (
         validate_runtime
+        >> resolve_snapshot
         >> dbt_deps
         >> dbt_source_freshness
         >> dbt_test_traffic_incident_availability
         >> dbt_seed_asac_axes
-        >> resolve_snapshot
         >> dbt_run_silver
         >> dbt_test_silver
         >> dbt_run_gold

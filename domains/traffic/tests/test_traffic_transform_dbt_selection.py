@@ -115,11 +115,11 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     dag = module.dag
 
     expected_task_order = [
+        "resolve_traffic_snapshot_run",
         "dbt_deps",
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
         "dbt_seed_asac_axes",
-        "resolve_traffic_snapshot_run",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",
@@ -136,6 +136,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         for task_id in bash_task_ids
     }
 
+    assert all("traffic_snapshot_dag_run_id" in command for command in task_commands.values())
     assert "deps" in task_commands["dbt_deps"]
     assert "source freshness" in task_commands["dbt_source_freshness"]
     assert (
@@ -143,7 +144,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         in task_commands["dbt_test_traffic_incident_availability"]
     )
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
-    assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {"dbt_run_silver"}
+    assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {"dbt_deps"}
     assert (
         "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current"
         in task_commands["dbt_run_silver"]
@@ -179,7 +180,7 @@ def test_traffic_transform_validates_dev_runtime_before_dbt():
         "domain": "traffic",
         "requested_target": "{{ params.target }}",
     }
-    assert guard.downstream_task_ids == {"dbt_deps"}
+    assert guard.downstream_task_ids == {"resolve_traffic_snapshot_run"}
 
 
 def test_traffic_transform_limits_target_param_to_dev_or_prod():
