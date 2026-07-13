@@ -68,6 +68,8 @@ def transform_stage_name(task_id: str) -> str:
         return "dbt 패키지 설치"
     if "freshness" in task_id:
         return "소스 신선도 검사"
+    if "common_admin_dong_dimension" in task_id:
+        return "공용 행정동 차원 실행/검증"
     if "seed" in task_id:
         return "시드 적재/검증"
     if "place_mart" in task_id:
@@ -180,6 +182,18 @@ with DAG(
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
+    dbt_run_common_admin_dong_dimension = BashOperator(
+        task_id="dbt_run_common_admin_dong_dimension",
+        bash_command=dbt_command("run --select asac_axes.dim_admin_dong"),
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    )
+
+    dbt_test_common_admin_dong_dimension = BashOperator(
+        task_id="dbt_test_common_admin_dong_dimension",
+        bash_command=dbt_command("test --select asac_axes.dim_admin_dong"),
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    )
+
     dbt_seed_place_mapping = BashOperator(
         task_id="dbt_seed_place_mapping",
         bash_command=dbt_command("seed --select weather_place_grid_mapping"),
@@ -272,6 +286,8 @@ with DAG(
         >> dbt_deps
         >> dbt_source_freshness
         >> dbt_seed_asac_axes
+        >> dbt_run_common_admin_dong_dimension
+        >> dbt_test_common_admin_dong_dimension
         >> dbt_seed_place_mapping
         >> dbt_test_place_mapping_seed
         >> dbt_run_silver
