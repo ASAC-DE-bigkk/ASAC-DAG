@@ -243,6 +243,78 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     assert "assert_silver_traffic_latest_publishable_record" in task_commands["dbt_test_silver"]
     assert "silver_seoul_traffic_incident_current" in task_commands["dbt_test_silver"]
     assert "assert_traffic_current_pinned_publishable_run" in task_commands["dbt_test_silver"]
+    assert "gold_traffic_incident_current_by_admin_dong_hourly" in task_commands["dbt_run_gold"]
+    assert "gold_traffic_incident_current_by_admin_dong_hourly" in task_commands["dbt_test_gold"]
+    assert dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["fresh_parse"] is True
+
+
+def test_silver_excludes_eager_gold_contracts_until_gold_rebuild():
+    module = load_transform_module()
+    silver_test_args = module.dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["dbt_args"]
+
+    assert (
+        "--exclude "
+        "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles "
+        "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles"
+        in silver_test_args
+    )
+
+
+def test_gold_phase_selects_all_canonical_hourly_contracts():
+    module = load_transform_module()
+    gold_test_args = module.dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["dbt_args"]
+    expected_test_names = (
+        "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact",
+        "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_grain_unique",
+        "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness",
+        "assert_gold_traffic_current_by_admin_dong_hourly_product_row_id_reproducible",
+        "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_zero_requires_complete",
+    )
+
+    assert [test_name for test_name in expected_test_names if test_name not in gold_test_args] == []
+
+
+def test_gold_contract_test_fresh_parses_in_same_task_artifact(monkeypatch):
+    module = load_transform_module()
+    commands = []
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=2,
+        xcom_pull=lambda task_ids: "snapshot-a",
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **_kwargs: (
+            commands.append(command)
+            or types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+
+    result = module.run_dbt_phase(
+        dbt_args="test --select gold_traffic_incident_current_by_admin_dong_hourly",
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        silver_persisted=True,
+        fresh_parse=True,
+        ti=ti,
+        run_id="manual__a",
+        params={"target": "dev"},
+    )
+
+    assert [command[1] for command in commands] == ["parse", "test"]
+    assert "--no-partial-parse" in commands[0]
+    assert commands[0][commands[0].index("--target-path") + 1] == commands[1][
+        commands[1].index("--target-path") + 1
+    ]
+    assert commands[0][commands[0].index("--vars") + 1] == commands[1][
+        commands[1].index("--vars") + 1
+    ]
+    assert result["artifact_path"].endswith(
+        "traffic-transform/manual__a/dbt_test_gold/try2/run_results.json"
+    )
 
 
 def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
