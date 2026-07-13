@@ -250,10 +250,10 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_deps",
         "fail_transform_if_upstream_failed",
     }
-    assert (
-        "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current"
-        in task_commands["dbt_run_silver"]
-    )
+    assert dbt_option_tokens(task_commands["dbt_run_silver"], "--select") == {
+        "silver_seoul_traffic_incident",
+        "silver_seoul_traffic_incident_current",
+    }
     assert dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["snapshot_task_id"] == "resolve_traffic_snapshot_run"
     assert dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["fresh_parse"] is True
     assert dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["snapshot_task_id"] == "resolve_traffic_snapshot_run"
@@ -267,9 +267,25 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     assert "assert_silver_traffic_latest_publishable_record" in task_commands["dbt_test_silver"]
     assert "silver_seoul_traffic_incident_current" in task_commands["dbt_test_silver"]
     assert "assert_traffic_current_pinned_publishable_run" in task_commands["dbt_test_silver"]
+    assert dbt_option_tokens(task_commands["dbt_test_silver"], "--select") == {
+        "silver_seoul_traffic_incident",
+        "silver_seoul_traffic_incident_current",
+        "assert_traffic_current_pinned_publishable_run",
+        "assert_silver_traffic_uses_publishable_runs",
+        "assert_silver_traffic_location_contract",
+        "assert_traffic_audit_covers_latest_total_count",
+        "assert_silver_seoul_traffic_incident_grain_unique",
+        "assert_silver_traffic_event_at_matches_occurred_at",
+        "assert_silver_traffic_wgs84_required_when_source_coordinate_available",
+        "assert_silver_traffic_admin_axis_consistent",
+        "assert_silver_traffic_admin_axis_coverage",
+        "assert_silver_traffic_latest_publishable_record",
+    }
     canonical_gold_model = "gold_traffic_incident_current_by_admin_dong_hourly"
-    assert canonical_gold_model in dbt_option_tokens(task_commands["dbt_run_gold"], "--select")
-    assert canonical_gold_model in dbt_option_tokens(task_commands["dbt_test_gold"], "--select")
+    assert dbt_option_tokens(task_commands["dbt_run_gold"], "--select") == {
+        "gold_traffic_incident_summary",
+        canonical_gold_model,
+    }
     assert dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["fresh_parse"] is True
 
 
@@ -278,11 +294,11 @@ def test_silver_excludes_eager_gold_contracts_until_gold_rebuild():
     silver_test_args = module.dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["dbt_args"]
     excluded_tokens = dbt_option_tokens(silver_test_args, "--exclude")
 
-    assert {
+    assert excluded_tokens == {
         "assert_gold_traffic_counts_match_silver",
         "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles",
         "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles",
-    } <= excluded_tokens
+    }
 
 
 def test_common_admin_dimension_excludes_eager_gold_contracts_until_gold_rebuild():
@@ -292,20 +308,24 @@ def test_common_admin_dimension_excludes_eager_gold_contracts_until_gold_rebuild
     ].kwargs["op_kwargs"]["dbt_args"]
     excluded_tokens = dbt_option_tokens(common_admin_test_args, "--exclude")
 
-    assert {
+    assert excluded_tokens == {
         "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles",
         "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact",
         "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles",
         "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness",
         "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles",
-    } <= excluded_tokens
+    }
 
 
-def test_gold_phase_selects_all_canonical_hourly_contracts():
+def test_gold_phase_selects_exact_canonical_hourly_contracts():
     module = load_transform_module()
     gold_test_args = module.dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["dbt_args"]
     selected_tokens = dbt_option_tokens(gold_test_args, "--select")
-    expected_test_names = {
+    expected_selected_tokens = {
+        "gold_traffic_incident_summary",
+        "gold_traffic_incident_current_by_admin_dong_hourly",
+        "assert_gold_traffic_counts_match_silver",
+        "assert_gold_traffic_row_counts_positive",
         "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles",
         "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact",
         "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles",
@@ -316,7 +336,7 @@ def test_gold_phase_selects_all_canonical_hourly_contracts():
         "assert_gold_traffic_current_by_admin_dong_hourly_zero_requires_complete",
     }
 
-    assert expected_test_names <= selected_tokens
+    assert selected_tokens == expected_selected_tokens
 
 
 def test_gold_contract_test_fresh_parses_in_same_task_artifact(monkeypatch):
