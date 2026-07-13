@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import urllib.error
@@ -29,6 +30,7 @@ WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "TRAFFIC_DISCORD_WEBHOOK_URL")
 SCHEDULE_ENV = "ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 DISCORD_GREEN = 3066993
+DISCORD_YELLOW = 16776960
 DISCORD_RED = 15158332
 AIRFLOW_FAILURE_REASON_FALLBACK = "원인 미확인"
 AIRFLOW_FAILURE_REASON_MAX_LENGTH = 240
@@ -40,7 +42,8 @@ class TrafficReportConfig:
     catalog: str
     schema: str
     lookback_hours: int
-    freshness_minutes: int
+    freshness_warn_minutes: int
+    freshness_error_minutes: int
 
 
 def is_dev_target(env: Mapping[str, str] = os.environ) -> bool:
@@ -56,15 +59,15 @@ def discord_webhook_url(env: Mapping[str, str] = os.environ) -> str | None:
 
 
 def report_dag_schedule(env: Mapping[str, str] = os.environ) -> str | None:
+    if not is_dev_target(env):
+        return None
     if SCHEDULE_ENV in env:
         return env[SCHEDULE_ENV] or None
     if GLOBAL_SCHEDULE_ENV in env:
         return env[GLOBAL_SCHEDULE_ENV] or None
-    if not is_dev_target(env):
-        return None
     if not discord_webhook_url(env):
         return None
-    return "0 9 * * *"
+    return "*/15 * * * *"
 
 
 def sql_identifier(value: str) -> str:
@@ -88,7 +91,12 @@ def report_config(env: Mapping[str, str] = os.environ) -> TrafficReportConfig:
         catalog=sql_identifier(trino_catalog(env)),
         schema=sql_identifier(ask_seoul_schema(env)),
         lookback_hours=int(env.get("ASK_SEOUL_REPORT_LOOKBACK_HOURS", "24")),
-        freshness_minutes=int(env.get("ASK_SEOUL_REPORT_TRAFFIC_FRESHNESS_MINUTES", "15")),
+        freshness_warn_minutes=int(
+            env.get("ASK_SEOUL_REPORT_TRAFFIC_FRESHNESS_WARN_MINUTES", "15")
+        ),
+        freshness_error_minutes=int(
+            env.get("ASK_SEOUL_REPORT_TRAFFIC_FRESHNESS_ERROR_MINUTES", "30")
+        ),
     )
 
 
@@ -139,8 +147,28 @@ def _age_minutes(collected_at: Any, detected_at: datetime) -> int | None:
     return int((detected_at.astimezone(collected_at.tzinfo) - collected_at).total_seconds() // 60)
 
 
+def freshness_status(age_minutes: int | None, warn_minutes: int, error_minutes: int) -> str:
+    if age_minutes is None or age_minutes > error_minutes:
+        return "FAIL"
+    if age_minutes > warn_minutes:
+        return "WARN"
+    return "PASS"
+
+
+def _traffic_cutoffs(config: TrafficReportConfig, detected_at: datetime) -> tuple[datetime, str]:
+    cutoff = detected_at.astimezone(timezone.utc) - timedelta(hours=config.lookback_hours)
+    load_date_days = max(1, math.ceil(config.lookback_hours / 24) + 1)
+    load_date_floor = (
+        detected_at.astimezone(KST).date() - timedelta(days=load_date_days)
+    ).isoformat()
+    return cutoff, load_date_floor
+
+
 def collect_traffic_summary(cursor, config: TrafficReportConfig, detected_at: datetime) -> dict[str, Any]:
     audit_table = _qualified(config, TRAFFIC_AUDIT_TABLE)
+    cutoff, load_date_floor = _traffic_cutoffs(config, detected_at)
+    # Traffic Bronze/audit are not physically partitioned today. This bounds report semantics
+    # but is not asserted to reduce physical input bytes; the benchmark determines that.
     row = _fetch_one(
         cursor,
         f"""
@@ -153,7 +181,8 @@ def collect_traffic_summary(cursor, config: TrafficReportConfig, detected_at: da
             max(collected_at) AS last_collected_at
         FROM {audit_table}
         WHERE source_id = 'seoul_traffic_incident'
-          AND collected_at >= current_timestamp - INTERVAL '{config.lookback_hours}' HOUR
+          AND load_date >= {_sql_string(load_date_floor)}
+          AND collected_at >= {_sql_timestamp_utc(cutoff)}
         """,
     )
     if not row:
@@ -163,6 +192,13 @@ def collect_traffic_summary(cursor, config: TrafficReportConfig, detected_at: da
             "table": _qualified(config, TRAFFIC_TABLE),
             "audit_table": audit_table,
             "request_count": 0,
+            "freshness_minutes": None,
+            "freshness_status": "FAIL",
+            "freshness_warn_minutes": config.freshness_warn_minutes,
+            "freshness_error_minutes": config.freshness_error_minutes,
+            "freshness_slo_minutes": config.freshness_error_minutes,
+            "coverage_ok": False,
+            "freshness_ok": False,
         }
 
     request_count, parsed_row_count, list_total_count, max_end_index, zero_row_success_count, last_collected_at = row
@@ -172,12 +208,17 @@ def collect_traffic_summary(cursor, config: TrafficReportConfig, detected_at: da
     max_end_index = int(max_end_index or 0)
     zero_row_success_count = int(zero_row_success_count or 0)
     freshness_minutes = _age_minutes(last_collected_at, detected_at)
-    freshness_ok = freshness_minutes is not None and freshness_minutes <= config.freshness_minutes
+    freshness = freshness_status(
+        freshness_minutes,
+        config.freshness_warn_minutes,
+        config.freshness_error_minutes,
+    )
+    freshness_ok = freshness == "PASS"
     coverage_ok = request_count > 0 and (
         list_total_count == 0 or parsed_row_count >= list_total_count or max_end_index >= list_total_count
     )
     return {
-        "status": "PASS" if coverage_ok and freshness_ok else "FAIL",
+        "status": "FAIL" if not coverage_ok or freshness == "FAIL" else freshness,
         "table": _qualified(config, TRAFFIC_TABLE),
         "audit_table": audit_table,
         "request_count": request_count,
@@ -187,7 +228,10 @@ def collect_traffic_summary(cursor, config: TrafficReportConfig, detected_at: da
         "zero_row_success_count": zero_row_success_count,
         "last_collected_at": str(last_collected_at),
         "freshness_minutes": freshness_minutes,
-        "freshness_slo_minutes": config.freshness_minutes,
+        "freshness_status": freshness,
+        "freshness_warn_minutes": config.freshness_warn_minutes,
+        "freshness_error_minutes": config.freshness_error_minutes,
+        "freshness_slo_minutes": config.freshness_error_minutes,
         "coverage_ok": coverage_ok,
         "freshness_ok": freshness_ok,
     }
@@ -208,7 +252,9 @@ def collect_dag_run_summary(
         WITH latest AS (
             SELECT
                 dag_run_id,
-                max_by(status, event_at) AS latest_status
+                max_by(status, event_at) AS latest_status,
+                max_by(is_publishable, event_at) AS latest_is_publishable,
+                max(event_at) AS latest_event_at
             FROM {manifest_table}
             WHERE dag_id = {_sql_string(dag_id)}
               AND event_at >= {_sql_timestamp_utc(cutoff)}
@@ -217,13 +263,30 @@ def collect_dag_run_summary(
         SELECT
             coalesce(sum(CASE WHEN latest_status = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS success,
             coalesce(sum(CASE WHEN latest_status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed,
-            coalesce(sum(CASE WHEN latest_status = 'STARTED' THEN 1 ELSE 0 END), 0) AS running
+            coalesce(sum(CASE WHEN latest_status = 'STARTED' THEN 1 ELSE 0 END), 0) AS running,
+            max(CASE WHEN latest_status = 'SUCCESS' THEN latest_event_at END) AS last_success_at,
+            max(
+                CASE WHEN latest_status = 'SUCCESS' AND latest_is_publishable THEN latest_event_at END
+            ) AS last_publishable_at
         FROM latest
         """,
     )
-    summary = {"dag_id": dag_id, "success": 0, "failed": 0, "running": 0}
+    summary = {
+        "dag_id": dag_id,
+        "success": 0,
+        "failed": 0,
+        "running": 0,
+        "last_success_at": None,
+        "last_publishable_at": None,
+    }
     if row:
-        summary.update(success=int(row[0] or 0), failed=int(row[1] or 0), running=int(row[2] or 0))
+        summary.update(
+            success=int(row[0] or 0),
+            failed=int(row[1] or 0),
+            running=int(row[2] or 0),
+            last_success_at=str(row[3]) if row[3] is not None else None,
+            last_publishable_at=str(row[4]) if row[4] is not None else None,
+        )
     return summary
 
 
@@ -501,11 +564,19 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
             "error_type": type(exc).__name__,
         }
 
-    traffic_ok = traffic.get("status") == "PASS"
     manifest_query_ok = not dag_runs.get("reason")
     airflow_query_ok = not airflow_runs.get("reason")
     airflow_failures_ok = int(airflow_runs.get("failed") or 0) == 0
-    status = "PASS" if traffic_ok and manifest_query_ok and airflow_query_ok and airflow_failures_ok else "FAIL"
+    publishability_ok = bool(dag_runs.get("last_publishable_at"))
+    dag_runs["publishability_ok"] = publishability_ok
+    late_publishability = {
+        "status": "NOT_EVALUATED",
+        "reason": "bounded late-repair contract is owned by ASAC-DBT #117",
+    }
+    if not manifest_query_ok or not airflow_query_ok or not airflow_failures_ok or not publishability_ok:
+        status = "FAIL"
+    else:
+        status = str(traffic.get("status") or "FAIL")
 
     return {
         "report_name": "traffic_bronze_reliability",
@@ -517,6 +588,8 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
         "traffic": traffic,
         "dag_runs": dag_runs,
         "airflow_runs": airflow_runs,
+        "publishability_ok": publishability_ok,
+        "late_publishability": late_publishability,
         "blast_radius": [
             _qualified(config, TRAFFIC_TABLE),
             _qualified(config, TRAFFIC_AUDIT_TABLE),
@@ -536,6 +609,14 @@ def _format_minutes(value: int | None) -> str:
 
 def _icon(value: bool) -> str:
     return "✅" if value else "❌"
+
+
+def _status_icon(status: str) -> str:
+    return {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}.get(status, "❌")
+
+
+def _status_label(status: str) -> str:
+    return {"PASS": "성공", "WARN": "경고", "FAIL": "실패"}.get(status, "실패")
 
 
 def _airflow_failure_time(value: Any) -> str:
@@ -583,9 +664,11 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
     airflow_runs = report.get("airflow_runs") or {}
     detected_date = str(report["detected_at"])[:10]
     target = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
-    status_ok = report["status"] == "PASS"
+    report_status = str(report["status"])
     coverage_ok = bool(traffic.get("coverage_ok"))
-    freshness_ok = bool(traffic.get("freshness_ok"))
+    freshness = str(traffic.get("freshness_status", "FAIL"))
+    freshness_ok = freshness == "PASS"
+    publishability_ok = bool(report.get("publishability_ok"))
     dag_ok = not bool(report["dag_runs"].get("reason"))
     airflow_query_ok = not bool(airflow_runs.get("reason"))
     airflow_failures_ok = int(airflow_runs.get("failed") or 0) == 0
@@ -596,13 +679,17 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
     expected_text = str(expected) if expected is not None else "unknown"
     lines = [
         f"서울시 돌발정보 Bronze 신뢰성 리포트 - {detected_date} (target={target})",
-        f"{_icon(status_ok)} 리포트 상태: {'성공' if status_ok else '실패'}",
-        f"{_icon(freshness_ok)} Freshness: {_format_minutes(traffic.get('freshness_minutes'))} / SLO {traffic.get('freshness_slo_minutes', 'n/a')}m",
+        f"{_status_icon(report_status)} 리포트 상태: {_status_label(report_status)}",
+        (
+            f"{_status_icon(freshness)} Freshness: {_format_minutes(traffic.get('freshness_minutes'))} "
+            f"/ WARN {traffic.get('freshness_warn_minutes', 'n/a')}m "
+            f"/ FAIL {traffic.get('freshness_error_minutes', traffic.get('freshness_slo_minutes', 'n/a'))}m"
+        ),
         f"{_icon(traffic.get('request_count', 0) > 0)} API 호출건수: {traffic.get('request_count', 0)}회",
         f"{_icon(traffic.get('parsed_row_count', 0) > 0)} 파싱 행수: {int(traffic.get('parsed_row_count', 0)):,}행",
         f"{_icon(traffic.get('list_total_count', 0) >= 0)} 최신 응답 전체 건수: {traffic.get('list_total_count', 0)}건",
         f"{_icon(coverage_ok)} requested_end: {traffic.get('max_end_index', 0)}",
-        f"{_icon(traffic.get('zero_row_success_count', 0) == 0)} zero-row 정상 응답: {traffic.get('zero_row_success_count', 0)}건",
+        f"{_icon(traffic.get('zero_row_success_count', 0) >= 0)} zero-row 정상 응답: {traffic.get('zero_row_success_count', 0)}건",
         f"{_icon(traffic.get('reason', '-') == '-')} reason: {traffic.get('reason', '-')}",
         "",
         f"DAG runs / last {report['lookback_hours']}h:",
@@ -611,7 +698,15 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
             f"success={report['dag_runs'].get('success', 0)} "
             f"failed={report['dag_runs'].get('failed', 0)} "
             f"running={report['dag_runs'].get('running', 0)} "
+            f"last_success={report['dag_runs'].get('last_success_at', 'N/A')} "
+            f"last_publishable={report['dag_runs'].get('last_publishable_at', 'N/A')} "
             f"reason={report['dag_runs'].get('reason', '-')}"
+        ),
+        f"{_icon(publishability_ok)} publishability={_format_bool(publishability_ok)}",
+        (
+            "late_publishability="
+            f"{report.get('late_publishability', {}).get('status', 'NOT_EVALUATED')} "
+            f"({report.get('late_publishability', {}).get('reason', 'unknown')})"
         ),
         f"{_icon(scheduled_ok)} 스케줄 수집 상태: {success}/{expected_text} 성공, {failed} 실패",
     ]
@@ -634,6 +729,7 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
         "Checks:",
         f"{_icon(coverage_ok)} traffic_coverage={_format_bool(coverage_ok)}",
         f"{_icon(freshness_ok)} traffic_freshness={_format_bool(freshness_ok)}",
+        f"{_icon(publishability_ok)} traffic_publishability={_format_bool(publishability_ok)}",
         f"{_icon(dag_ok)} dag_run_summary={_format_bool(dag_ok)}",
         f"{_icon(scheduled_ok)} airflow_scheduled_runs={_format_bool(scheduled_ok)}",
         "",
@@ -651,7 +747,12 @@ def _discord_payload(message: str) -> bytes:
     lines = message.splitlines()
     title = lines[0].strip("*") if lines else "Traffic Bronze reliability report"
     description = "\n".join(lines[1:]).strip() or title
-    color = DISCORD_RED if "FAIL" in title or "리포트 상태: 실패" in message else DISCORD_GREEN
+    if "FAIL" in title or "리포트 상태: 실패" in message:
+        color = DISCORD_RED
+    elif "리포트 상태: 경고" in message:
+        color = DISCORD_YELLOW
+    else:
+        color = DISCORD_GREEN
     payload = {
         "embeds": [{
             "title": title[:256],

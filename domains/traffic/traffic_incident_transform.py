@@ -20,6 +20,7 @@ from airflow.exceptions import AirflowException
 from airflow.models.param import Param
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk.exceptions import AirflowFailException
+from airflow.utils.trigger_rule import TriggerRule
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +37,7 @@ from _shared.bronze_run_manifest import MANIFEST_TABLE, STATUS_SUCCESS  # noqa: 
 from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa: E402
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
+from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from traffic_ingest.common.runtime import sql_string, trino_cursor  # noqa: E402
 from traffic_dbt_failure import (  # noqa: E402
@@ -51,6 +53,8 @@ from traffic_dbt_failure import (  # noqa: E402
 KST = ZoneInfo("Asia/Seoul")
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/traffic"
+RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, "target", "run_results.json")
+DOMAIN = "traffic"
 # Bronze runs every five minutes. Keep the hourly transform outside that boundary
 # so a run consumes one stable, publishable Bronze snapshot.
 TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
@@ -222,6 +226,40 @@ def dbt_task(task_id: str, dbt_args: str, *, silver_persisted: bool = False) -> 
     )
 
 
+def _terminal_run_results_path(**context) -> str:
+    """Use Traffic's per-task dbt target path, including a failed terminal run."""
+    ti = context.get("ti") or context.get("task_instance")
+    if ti is None:
+        return RUN_RESULTS_PATH
+    try:
+        terminal_result = ti.xcom_pull(task_ids="dbt_test_gold")
+    except Exception:  # noqa: BLE001 - metrics task must retain the safe fallback
+        terminal_result = None
+    if isinstance(terminal_result, dict) and terminal_result.get("artifact_path"):
+        return str(terminal_result["artifact_path"])
+    try:
+        terminal_failure = ti.xcom_pull(
+            task_ids="dbt_test_gold", key=DBT_FAILURE_XCOM_KEY
+        )
+    except Exception:  # noqa: BLE001 - metrics task must retain the safe fallback
+        terminal_failure = None
+    if isinstance(terminal_failure, dict) and terminal_failure.get("dbt_artifact_path"):
+        return str(terminal_failure["dbt_artifact_path"])
+    return RUN_RESULTS_PATH
+
+
+def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> dict:
+    """Persist Traffic dbt metrics while preserving terminal dbt failure semantics."""
+    resolved_path = run_results_path or _terminal_run_results_path(**context)
+    if not os.path.exists(resolved_path):
+        print(f"run_results.json 없음 — 메트릭 적재 skip: {resolved_path}")
+        return {"rows": 0, "skipped": True}
+    target = (context.get("params") or {}).get("target")
+    records = dump_dbt_run_results(resolved_path, domain=DOMAIN, target=target)
+    print(f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})")
+    return {"rows": len(records), "skipped": False}
+
+
 with DAG(
     dag_id="traffic_incident_transform",
     description="Transform traffic bronze -> silver/gold via dbt.",
@@ -311,6 +349,13 @@ with DAG(
         silver_persisted=True,
     )
 
+    publish_dbt_metrics = PythonOperator(
+        task_id="publish_dbt_run_metrics",
+        python_callable=publish_dbt_run_metrics,
+        trigger_rule=TriggerRule.ALL_DONE,
+        on_failure_callback=record_traffic_problem,
+    )
+
     (
         validate_runtime
         >> resolve_snapshot
@@ -324,4 +369,5 @@ with DAG(
         >> dbt_test_silver
         >> dbt_run_gold
         >> dbt_test_gold
+        >> publish_dbt_metrics
     )

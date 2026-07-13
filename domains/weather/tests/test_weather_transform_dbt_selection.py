@@ -3,6 +3,34 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
+
+_AIRFLOW_MODULE_NAMES = (
+    "airflow",
+    "airflow.models",
+    "airflow.models.param",
+    "airflow.providers",
+    "airflow.providers.standard",
+    "airflow.providers.standard.operators",
+    "airflow.providers.standard.operators.bash",
+    "airflow.providers.standard.operators.python",
+    "airflow.sdk",
+    "airflow.utils",
+    "airflow.utils.trigger_rule",
+)
+
+
+@pytest.fixture(autouse=True)
+def restore_airflow_modules_after_transform_import():
+    originals = {name: sys.modules.get(name) for name in _AIRFLOW_MODULE_NAMES}
+    yield
+    for name, module in originals.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
 
 class FakeDAG:
     _stack = []
@@ -67,6 +95,10 @@ class FakeAsset:
         return isinstance(other, FakeAsset) and self.uri == other.uri
 
 
+class FakeTriggerRule:
+    ALL_DONE = "all_done"
+
+
 def install_airflow_fakes():
     airflow = types.ModuleType("airflow")
     airflow.DAG = FakeDAG
@@ -84,6 +116,9 @@ def install_airflow_fakes():
     airflow_python.PythonOperator = FakePythonOperator
     airflow_sdk = types.ModuleType("airflow.sdk")
     airflow_sdk.Asset = FakeAsset
+    airflow_utils = types.ModuleType("airflow.utils")
+    airflow_trigger_rule = types.ModuleType("airflow.utils.trigger_rule")
+    airflow_trigger_rule.TriggerRule = FakeTriggerRule
 
     sys.modules.update(
         {
@@ -96,6 +131,8 @@ def install_airflow_fakes():
             "airflow.providers.standard.operators.bash": airflow_bash,
             "airflow.providers.standard.operators.python": airflow_python,
             "airflow.sdk": airflow_sdk,
+            "airflow.utils": airflow_utils,
+            "airflow.utils.trigger_rule": airflow_trigger_rule,
         }
     )
 
@@ -240,3 +277,32 @@ def test_weather_transform_limits_target_param_to_dev_or_prod():
 
     assert target_param.value == "dev"
     assert target_param.schema["enum"] == ["dev"]
+
+
+def test_weather_transform_publishes_dbt_run_metrics_after_terminal_test():
+    module = load_transform_module()
+
+    task = module.dag.task_dict["publish_dbt_run_metrics"]
+
+    assert task.kwargs["trigger_rule"] == "all_done"
+    assert module.dag.task_dict["dbt_test_place_mart"].downstream_task_ids == {
+        "publish_dbt_run_metrics"
+    }
+
+
+def test_weather_publish_dbt_run_metrics_forwards_domain_and_target(tmp_path, monkeypatch):
+    module = load_transform_module()
+    run_results = tmp_path / "run_results.json"
+    run_results.write_text("{}", encoding="utf-8")
+    captured = {}
+
+    def fake_dump(path, *, domain, target):
+        captured.update(path=path, domain=domain, target=target)
+        return [{}, {}]
+
+    monkeypatch.setattr(module, "dump_dbt_run_results", fake_dump)
+
+    assert module.publish_dbt_run_metrics(
+        run_results_path=str(run_results), params={"target": "dev"}
+    ) == {"rows": 2, "skipped": False}
+    assert captured == {"path": str(run_results), "domain": "weather", "target": "dev"}

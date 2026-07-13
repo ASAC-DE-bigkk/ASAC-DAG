@@ -39,6 +39,8 @@ def stub_dag_run_summary(monkeypatch):
             "running": 0,
             "expected_raw_objects": 160,
             "actual_raw_objects": 160,
+            "last_success_at": "2026-07-02 08:20:00+00:00",
+            "last_publishable_at": "2026-07-02 08:20:00+00:00",
         },
     )
 
@@ -65,20 +67,40 @@ def test_build_weather_report_passes_for_fresh_complete_data(monkeypatch):
         "running": 0,
         "expected_raw_objects": 160,
         "actual_raw_objects": 160,
+        "last_success_at": "2026-07-02 08:20:00+00:00",
+        "last_publishable_at": "2026-07-02 08:20:00+00:00",
+        "publishability_ok": True,
     }
     assert result["weather"]["base_time_count"] == 8
     assert result["weather"]["grid_slot_count"] == 640
     assert result["weather"]["raw_object_count"] == 640
     assert result["weather"]["latest_base_time"] == "0800"
     assert result["blast_radius"] == ["iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst"]
-    assert "current_timestamp - INTERVAL '24' HOUR" in cursor.statements[0]
+    assert "load_date >= '2026-06-30'" in cursor.statements[0]
+    assert "collected_at >= TIMESTAMP '2026-07-01 09:00:00.000000'" in cursor.statements[0]
     assert "FROM by_base" in cursor.statements[0]
+    assert result["weather"]["freshness_status"] == "PASS"
+    assert result["publishability_ok"] is True
+    assert result["late_publishability"] == {
+        "status": "NOT_EVALUATED",
+        "reason": "bounded late-repair contract is owned by ASAC-DBT #165",
+    }
 
 
 def test_weather_dag_run_summary_uses_manifest_table(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv("ASK_SEOUL_SCHEMA", "weather_traffic_bronze")
-    cursor = RecordingCursor(rows=[(2, 1, 0, 160, 120)])
+    cursor = RecordingCursor(rows=[
+        (
+            2,
+            1,
+            0,
+            160,
+            120,
+            datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
+        )
+    ])
     config = report.report_config()
 
     result = ORIGINAL_COLLECT_DAG_RUN_SUMMARY(
@@ -95,6 +117,8 @@ def test_weather_dag_run_summary_uses_manifest_table(monkeypatch):
         "running": 0,
         "expected_raw_objects": 160,
         "actual_raw_objects": 120,
+        "last_success_at": "2026-07-04 08:00:00+00:00",
+        "last_publishable_at": "2026-07-04 08:00:00+00:00",
     }
     assert "bronze_collection_run_manifest" in cursor.statements[0]
     assert "dag_id = 'weather_vilage_fcst_bronze'" in cursor.statements[0]
@@ -156,6 +180,51 @@ def test_weather_report_fails_when_24h_base_time_coverage_is_incomplete(monkeypa
     assert result["weather"]["expected_base_time_count"] == 8
 
 
+def test_weather_report_warns_after_four_hours_but_before_six(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(rows=[
+        (8, 640, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 4, 30, tzinfo=timezone.utc)),
+    ])
+
+    result = report.build_weather_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "WARN"
+    assert result["weather"]["freshness_status"] == "WARN"
+
+
+def test_weather_report_fails_after_six_hours(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(rows=[
+        (8, 640, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 2, 59, tzinfo=timezone.utc)),
+    ])
+
+    result = report.build_weather_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["weather"]["freshness_status"] == "FAIL"
+
+
+def test_weather_summary_uses_load_date_and_collected_at_bounds(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(rows=[
+        (8, 640, 640, 512000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
+    ])
+
+    report.build_weather_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert "load_date >= '2026-06-30'" in cursor.statements[0]
+    assert "collected_at >= TIMESTAMP '2026-07-01 09:00:00.000000'" in cursor.statements[0]
+
+
 def test_weather_report_schedule_requires_dev_target_and_webhook(monkeypatch):
     monkeypatch.delenv("ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE", raising=False)
     monkeypatch.delenv("ASK_SEOUL_REPORT_DAG_SCHEDULE", raising=False)
@@ -165,9 +234,10 @@ def test_weather_report_schedule_requires_dev_target_and_webhook(monkeypatch):
     assert report.report_dag_schedule() is None
 
     monkeypatch.setenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
-    assert report.report_dag_schedule() == "0 9 * * *"
+    assert report.report_dag_schedule() == "0 * * * *"
 
     monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    monkeypatch.setenv("ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE", "*/5 * * * *")
     assert report.report_dag_schedule() is None
 
 
@@ -223,6 +293,8 @@ def test_weather_send_discord_posts_payload(monkeypatch):
     assert payload["embeds"][0]["color"] == report.DISCORD_GREEN
     failure_payload = json.loads(report._discord_payload("title\n❌ 리포트 상태: 실패").decode("utf-8"))
     assert failure_payload["embeds"][0]["color"] == report.DISCORD_RED
+    warning_payload = json.loads(report._discord_payload("title\n⚠️ 리포트 상태: 경고").decode("utf-8"))
+    assert warning_payload["embeds"][0]["color"] == report.DISCORD_YELLOW
     assert request.get_method() == "POST"
     assert request.headers["User-agent"] == "ask-seoul-weather-report/1.0"
     assert timeout == 10

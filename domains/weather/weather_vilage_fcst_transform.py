@@ -21,6 +21,7 @@ from airflow.models.param import Param
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
+from airflow.utils.trigger_rule import TriggerRule
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
 DAGS_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,6 +30,7 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
+from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 
 
@@ -36,6 +38,8 @@ LOGGER = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/weather"
+RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, "target", "run_results.json")
+DOMAIN = "weather"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
 DISCORD_RED = 15158332
 DEFAULT_PARAMS = {
@@ -144,6 +148,17 @@ def dbt_command(args: str) -> str:
         f"export DBT_PROFILES_DIR={project} DBT_PROJECT_DIR={project}\n"
         f"{shlex.quote(DBT_BIN)} {args} --target '{{{{ params.target }}}}' --no-use-colors"
     )
+
+
+def publish_dbt_run_metrics(run_results_path: str = RUN_RESULTS_PATH, **context) -> dict:
+    """Persist model/test run metrics without changing the dbt contract gate."""
+    if not os.path.exists(run_results_path):
+        print(f"run_results.json 없음 — 메트릭 적재 skip: {run_results_path}")
+        return {"rows": 0, "skipped": True}
+    target = (context.get("params") or {}).get("target")
+    records = dump_dbt_run_results(run_results_path, domain=DOMAIN, target=target)
+    print(f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})")
+    return {"rows": len(records), "skipped": False}
 
 
 with DAG(
@@ -281,6 +296,13 @@ with DAG(
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
+    publish_dbt_metrics = PythonOperator(
+        task_id="publish_dbt_run_metrics",
+        python_callable=publish_dbt_run_metrics,
+        trigger_rule=TriggerRule.ALL_DONE,
+        on_failure_callback=record_weather_problem,
+    )
+
     (
         validate_runtime
         >> dbt_deps
@@ -296,4 +318,5 @@ with DAG(
         >> dbt_test_gold
         >> dbt_run_place_mart
         >> dbt_test_place_mart
+        >> publish_dbt_metrics
     )
