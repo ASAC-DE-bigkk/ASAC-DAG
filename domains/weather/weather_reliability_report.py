@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import sys
 from datetime import datetime, timedelta
@@ -30,36 +32,83 @@ from weather_ingest.reliability_report import (  # noqa: E402
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 # 리포트 DAG 은 외부 소스 API 를 호출하지 않으므로 source_system 은 생략한다.
 record_weather_problem = problem_failure_callback(domain="weather")
-STATUS_VARIABLE = "ask_seoul.weather.bronze_reliability.status"
+DELIVERY_FINGERPRINT_VARIABLE = "ask_seoul.weather.bronze_reliability.delivery_fingerprint"
 
 
-def should_notify_status_change(status: str, *, get=Variable.get, set=Variable.set) -> bool:
-    """Notify on a state transition; fail open if Airflow Variables are unavailable."""
+def notification_fingerprint(report: dict) -> str:
+    """Hash status and stable failure identity, excluding observation timestamps."""
+    weather = report.get("weather") or {}
+    dag_runs = report.get("dag_runs") or {}
+    identity = {"status": str(report.get("status") or "FAIL")}
+    if weather.get("status") != "PASS":
+        identity["weather"] = {
+            "status": weather.get("status"),
+            "reason": weather.get("reason"),
+            "coverage_ok": weather.get("coverage_ok"),
+            "freshness_status": weather.get("freshness_status"),
+        }
+    if dag_runs.get("reason") or not bool(report.get("publishability_ok")):
+        identity["manifest"] = {
+            "reason": dag_runs.get("reason"),
+            "dag_run_id": dag_runs.get("latest_dag_run_id"),
+            "status": dag_runs.get("latest_status"),
+            "is_publishable": dag_runs.get("latest_is_publishable"),
+        }
+    payload = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def should_notify_fingerprint(fingerprint: str, *, get=Variable.get) -> bool:
+    """Compare with the last delivered fingerprint; Variable reads fail open."""
     try:
-        previous = get(STATUS_VARIABLE, "UNKNOWN")
-        if previous == status:
-            return False
-        set(STATUS_VARIABLE, status)
-        return True
+        return get(DELIVERY_FINGERPRINT_VARIABLE, "UNKNOWN") != fingerprint
     except Exception:  # state tracking must never suppress an alert
         return True
+
+
+def record_delivered_fingerprint(fingerprint: str, *, set=Variable.set) -> bool:
+    """Persist only a confirmed delivery; Variable writes fail open."""
+    try:
+        set(DELIVERY_FINGERPRINT_VARIABLE, fingerprint)
+        return True
+    except Exception:
+        return False
 
 
 @track(layer="bronze", domain="weather")
 def collect_and_notify(**context) -> dict:
     report = build_weather_reliability_report()
-    status_changed = should_notify_status_change(report["status"])
-    report["discord_sent"] = (
-        send_discord_message(format_weather_discord_message(report)) if status_changed else False
-    )
-    report["notification_reason"] = "status_changed" if status_changed else "status_unchanged"
+    fingerprint = notification_fingerprint(report)
+    should_notify = should_notify_fingerprint(fingerprint)
+    discord_sent = False
+    state_recorded = False
+    if should_notify:
+        message = format_weather_discord_message(report)
+        try:
+            discord_sent = send_discord_message(message) is True
+        except Exception:
+            discord_sent = False
+        if discord_sent:
+            state_recorded = record_delivered_fingerprint(fingerprint)
+    if not should_notify:
+        notification_reason = "fingerprint_unchanged"
+    elif not discord_sent:
+        notification_reason = "delivery_failed"
+    elif state_recorded:
+        notification_reason = "delivery_succeeded"
+    else:
+        notification_reason = "delivery_succeeded_state_unavailable"
+    report["discord_sent"] = discord_sent
+    report["notification_fingerprint"] = fingerprint
+    report["notification_state_recorded"] = state_recorded
+    report["notification_reason"] = notification_reason
     report["dag_run_id"] = context.get("run_id")
     return report
 
 
 with DAG(
     dag_id="weather_bronze_reliability_report",
-    description="Daily weather Bronze freshness, coverage, and Discord reliability report.",
+    description="Scheduled weather Bronze freshness, coverage, and Discord reliability report.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=report_dag_schedule(),
     catchup=False,

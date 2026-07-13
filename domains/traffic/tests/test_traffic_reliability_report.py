@@ -41,6 +41,10 @@ def stub_dag_run_summary(monkeypatch):
             "running": 1,
             "last_success_at": "2026-07-02 08:55:00+00:00",
             "last_publishable_at": "2026-07-02 08:55:00+00:00",
+            "latest_dag_run_id": "scheduled__2026-07-02T08:55:00+00:00",
+            "latest_status": "SUCCESS",
+            "latest_is_publishable": True,
+            "latest_event_at": "2026-07-02 08:55:00+00:00",
         },
     )
     monkeypatch.setattr(
@@ -78,6 +82,10 @@ def test_build_traffic_report_passes_for_fresh_complete_data(monkeypatch):
         "running": 1,
         "last_success_at": "2026-07-02 08:55:00+00:00",
         "last_publishable_at": "2026-07-02 08:55:00+00:00",
+        "latest_dag_run_id": "scheduled__2026-07-02T08:55:00+00:00",
+        "latest_status": "SUCCESS",
+        "latest_is_publishable": True,
+        "latest_event_at": "2026-07-02 08:55:00+00:00",
         "publishability_ok": True,
     }
     assert result["traffic"]["parsed_row_count"] == 25
@@ -102,6 +110,10 @@ def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
             1,
             datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
             datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
+            "scheduled__2026-07-04T08:00:00+00:00",
+            "SUCCESS",
+            True,
+            datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
         )
     ])
     config = report.report_config()
@@ -120,9 +132,65 @@ def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
         "running": 1,
         "last_success_at": "2026-07-04 08:00:00+00:00",
         "last_publishable_at": "2026-07-04 08:00:00+00:00",
+        "latest_dag_run_id": "scheduled__2026-07-04T08:00:00+00:00",
+        "latest_status": "SUCCESS",
+        "latest_is_publishable": True,
+        "latest_event_at": "2026-07-04 08:00:00+00:00",
     }
-    assert "bronze_collection_run_manifest" in cursor.statements[0]
-    assert "dag_id = 'traffic_incident_bronze'" in cursor.statements[0]
+    statement = cursor.statements[0]
+    assert "bronze_collection_run_manifest" in statement
+    assert "dag_id = 'traffic_incident_bronze'" in statement
+    assert "max_by(dag_run_id, ROW(latest_event_at, dag_run_id)) AS latest_dag_run_id" in statement
+    assert "max_by(latest_status, ROW(latest_event_at, dag_run_id)) AS latest_status" in statement
+    assert (
+        "max_by(latest_is_publishable, ROW(latest_event_at, dag_run_id)) "
+        "AS latest_is_publishable"
+    ) in statement
+
+
+@pytest.mark.parametrize(
+    ("latest_status", "latest_is_publishable"),
+    [("FAILED", False), ("SUCCESS", False)],
+)
+def test_traffic_report_does_not_borrow_older_publishable_run(
+    monkeypatch,
+    latest_status,
+    latest_is_publishable,
+):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setattr(
+        report,
+        "collect_dag_run_summary",
+        lambda *_args: {
+            "dag_id": "traffic_incident_bronze",
+            "success": 1,
+            "failed": int(latest_status == "FAILED"),
+            "running": 0,
+            "last_success_at": "2026-07-04 08:45:00+00:00",
+            "last_publishable_at": "2026-07-04 08:45:00+00:00",
+            "latest_dag_run_id": "scheduled__2026-07-04T08:55:00+00:00",
+            "latest_status": latest_status,
+            "latest_is_publishable": latest_is_publishable,
+            "latest_event_at": "2026-07-04 08:59:00+00:00",
+        },
+    )
+    cursor = RecordingCursor(
+        rows=[
+            (1, 25, 25, 1000, 0, datetime(2026, 7, 4, 8, 59, tzinfo=timezone.utc)),
+        ]
+    )
+
+    result = report.build_traffic_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["publishability_ok"] is False
+    assert result["status"] == "FAIL"
+    assert result["dag_runs"]["latest_dag_run_id"] == "scheduled__2026-07-04T08:55:00+00:00"
+    assert result["dag_runs"]["latest_status"] == latest_status
+    assert result["dag_runs"]["latest_is_publishable"] is latest_is_publishable
+    assert result["dag_runs"]["latest_event_at"] == "2026-07-04 08:59:00+00:00"
 
 
 def test_traffic_report_fails_when_total_exceeds_requested_range(monkeypatch):

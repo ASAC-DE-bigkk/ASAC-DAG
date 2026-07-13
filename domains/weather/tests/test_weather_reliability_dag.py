@@ -1,6 +1,7 @@
 """Weather watchdog DAG import tests without a live Airflow installation."""
 from __future__ import annotations
 
+import copy
 import importlib.util
 from pathlib import Path
 import sys
@@ -110,30 +111,183 @@ def load_module():
     return module
 
 
-def test_weather_notifies_only_when_status_changes():
+def _weather_failure_report(run_id="scheduled__weather-a"):
+    return {
+        "status": "FAIL",
+        "detected_at": "2026-07-14T09:00:00+09:00",
+        "weather": {
+            "status": "FAIL",
+            "reason": "no_weather_rows",
+            "coverage_ok": False,
+            "freshness_status": "FAIL",
+            "freshness_minutes": 400,
+            "last_collected_at": "2026-07-14 00:00:00+00:00",
+        },
+        "dag_runs": {
+            "latest_dag_run_id": run_id,
+            "latest_status": "FAILED",
+            "latest_is_publishable": False,
+            "latest_event_at": "2026-07-14 00:05:00+00:00",
+        },
+        "publishability_ok": False,
+    }
+
+
+def test_weather_fingerprint_ignores_timestamps_and_distinguishes_failure_identity():
     module = load_module()
-    state = {"value": "PASS"}
+    first = _weather_failure_report()
+    timestamp_only_change = copy.deepcopy(first)
+    timestamp_only_change["detected_at"] = "2026-07-14T10:00:00+09:00"
+    timestamp_only_change["weather"]["freshness_minutes"] = 460
+    timestamp_only_change["weather"]["last_collected_at"] = "2026-07-14 00:10:00+00:00"
+    timestamp_only_change["dag_runs"]["latest_event_at"] = "2026-07-14 00:15:00+00:00"
+    different_failure = _weather_failure_report("scheduled__weather-b")
 
-    changed = module.should_notify_status_change(
-        "WARN",
-        get=lambda *_args, **_kwargs: state["value"],
-        set=lambda _key, value: state.update(value=value),
-    )
+    first_fingerprint = module.notification_fingerprint(first)
 
-    assert changed is True
-    assert state["value"] == "WARN"
-    assert module.should_notify_status_change(
-        "WARN",
-        get=lambda *_args, **_kwargs: state["value"],
-        set=lambda _key, value: state.update(value=value),
+    assert module.notification_fingerprint(timestamp_only_change) == first_fingerprint
+    assert module.notification_fingerprint(different_failure) != first_fingerprint
+    assert module.should_notify_fingerprint(
+        first_fingerprint,
+        get=lambda *_args, **_kwargs: first_fingerprint,
+    ) is False
+    assert module.should_notify_fingerprint(
+        module.notification_fingerprint(different_failure),
+        get=lambda *_args, **_kwargs: first_fingerprint,
+    ) is True
+
+
+def test_weather_variable_tracking_is_fail_open():
+    module = load_module()
+
+    assert module.should_notify_fingerprint(
+        "fingerprint",
+        get=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("state unavailable")),
+    ) is True
+    assert module.record_delivered_fingerprint(
+        "fingerprint",
+        set=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("state unavailable")),
     ) is False
 
 
-def test_weather_notifies_fail_open_when_variable_access_fails():
+def test_weather_records_fingerprint_only_after_successful_send(monkeypatch):
     module = load_module()
+    source_report = _weather_failure_report()
+    expected_fingerprint = module.notification_fingerprint(source_report)
+    events = []
+    monkeypatch.setattr(module, "build_weather_reliability_report", lambda: copy.deepcopy(source_report))
+    monkeypatch.setattr(module, "format_weather_discord_message", lambda _report: "message")
+    monkeypatch.setattr(
+        module,
+        "should_notify_fingerprint",
+        lambda fingerprint: events.append(("decision", fingerprint)) or True,
+    )
+    monkeypatch.setattr(
+        module,
+        "send_discord_message",
+        lambda message: events.append(("send", message)) or True,
+    )
+    monkeypatch.setattr(
+        module,
+        "record_delivered_fingerprint",
+        lambda fingerprint: events.append(("record", fingerprint)) or True,
+    )
 
-    assert module.should_notify_status_change(
-        "FAIL",
-        get=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("state unavailable")),
-        set=lambda *_args, **_kwargs: None,
-    ) is True
+    result = module.collect_and_notify(run_id="report-run")
+
+    assert events == [
+        ("decision", expected_fingerprint),
+        ("send", "message"),
+        ("record", expected_fingerprint),
+    ]
+    assert result["discord_sent"] is True
+    assert result["notification_state_recorded"] is True
+
+
+def test_weather_failed_send_is_retried_without_recording_state(monkeypatch):
+    module = load_module()
+    source_report = _weather_failure_report()
+    state = {"value": "UNKNOWN"}
+    attempts = []
+    records = []
+    monkeypatch.setattr(module, "build_weather_reliability_report", lambda: copy.deepcopy(source_report))
+    monkeypatch.setattr(module, "format_weather_discord_message", lambda _report: "message")
+    monkeypatch.setattr(
+        module,
+        "should_notify_fingerprint",
+        lambda fingerprint: state["value"] != fingerprint,
+    )
+    monkeypatch.setattr(
+        module,
+        "send_discord_message",
+        lambda _message: attempts.append("send") or False,
+    )
+    monkeypatch.setattr(
+        module,
+        "record_delivered_fingerprint",
+        lambda fingerprint: records.append(fingerprint) or state.update(value=fingerprint) or True,
+    )
+
+    first = module.collect_and_notify(run_id="report-run-1")
+    second = module.collect_and_notify(run_id="report-run-2")
+
+    assert first["discord_sent"] is False
+    assert second["discord_sent"] is False
+    assert attempts == ["send", "send"]
+    assert records == []
+    assert state["value"] == "UNKNOWN"
+
+
+def test_weather_sender_exception_leaves_state_retryable(monkeypatch):
+    module = load_module()
+    source_report = _weather_failure_report()
+    state = {"value": "UNKNOWN"}
+    outcomes = [RuntimeError("network unavailable"), True]
+    attempts = []
+    monkeypatch.setattr(module, "build_weather_reliability_report", lambda: copy.deepcopy(source_report))
+    monkeypatch.setattr(module, "format_weather_discord_message", lambda _report: "message")
+    monkeypatch.setattr(
+        module,
+        "should_notify_fingerprint",
+        lambda fingerprint: state["value"] != fingerprint,
+    )
+
+    def send(_message):
+        attempts.append("send")
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(module, "send_discord_message", send)
+    monkeypatch.setattr(
+        module,
+        "record_delivered_fingerprint",
+        lambda fingerprint: state.update(value=fingerprint) or True,
+    )
+
+    first = module.collect_and_notify(run_id="report-run-1")
+    second = module.collect_and_notify(run_id="report-run-2")
+
+    assert first["discord_sent"] is False
+    assert second["discord_sent"] is True
+    assert attempts == ["send", "send"]
+    assert state["value"] == module.notification_fingerprint(source_report)
+
+
+def test_weather_formatter_error_remains_task_failure(monkeypatch):
+    module = load_module()
+    monkeypatch.setattr(
+        module,
+        "build_weather_reliability_report",
+        lambda: _weather_failure_report(),
+    )
+    monkeypatch.setattr(module, "should_notify_fingerprint", lambda _fingerprint: True)
+    monkeypatch.setattr(
+        module,
+        "format_weather_discord_message",
+        lambda _report: (_ for _ in ()).throw(ValueError("invalid report shape")),
+    )
+
+    with pytest.raises(ValueError, match="invalid report shape"):
+        module.collect_and_notify(run_id="report-run")
