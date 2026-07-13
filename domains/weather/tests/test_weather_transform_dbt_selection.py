@@ -3,6 +3,34 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
+
+_AIRFLOW_MODULE_NAMES = (
+    "airflow",
+    "airflow.models",
+    "airflow.models.param",
+    "airflow.providers",
+    "airflow.providers.standard",
+    "airflow.providers.standard.operators",
+    "airflow.providers.standard.operators.bash",
+    "airflow.providers.standard.operators.python",
+    "airflow.sdk",
+    "airflow.utils",
+    "airflow.utils.trigger_rule",
+)
+
+
+@pytest.fixture(autouse=True)
+def restore_airflow_modules_after_transform_import():
+    originals = {name: sys.modules.get(name) for name in _AIRFLOW_MODULE_NAMES}
+    yield
+    for name, module in originals.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
 
 class FakeDAG:
     _stack = []
