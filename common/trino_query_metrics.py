@@ -1,3 +1,4 @@
+# shared-domains: weather,traffic
 """Read-only Trino query telemetry for cost-proxy benchmarks.
 
 ``system.runtime.queries`` varies across Trino releases and retains only a

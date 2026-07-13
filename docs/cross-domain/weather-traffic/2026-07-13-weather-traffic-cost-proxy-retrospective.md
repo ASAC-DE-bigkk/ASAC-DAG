@@ -1,3 +1,4 @@
+<!-- shared-domains: weather,traffic -->
 # Weather·Traffic 비용 대리 지표 Gate B 회고
 
 - 상태: 실제 측정 완료, 통합 전

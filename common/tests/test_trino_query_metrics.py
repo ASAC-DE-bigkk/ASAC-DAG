@@ -1,3 +1,4 @@
+# shared-domains: weather,traffic
 """Trino 비용 대리 지표 수집 단위 테스트.
 
 실제 Trino/네트워크 없이 System connector의 컬럼 차이와 cursor.stats 폴백을
