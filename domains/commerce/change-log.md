@@ -7,33 +7,29 @@
 
 ## 2026-07-13
 
-### 63. content_hash 좌표 제외 — 무변경 재수집의 '변경' 오판(재적재) 차단
+### 63. content_hash 입력 계약 확정 — raw 원본 전체(원천 좌표 포함) · 파생컬럼 구조적 배제
 
 request:
 - content_hash 에 사전 협의되지 않은 파생컬럼(행정동/법정동/위도·경도) 값이 들어가면 빼고
-  비교할 것 — 원천·브론즈에 없는 파생값은 해시 입력 금지. silver·gold 공통 적용.
-  완료 후 커밋·푸시·이슈 생성.
+  비교할 것 — silver·gold 공통. **단, 브론즈에 원래 있던 원천 좌표 컬럼은 예외(해시 유지) —
+  제외 대상은 임의추가/파생 컬럼만**(2026-07-13 사용자 확정 문답). 완료 후 커밋·푸시·이슈.
 
 response:
 - **사실 확인**: content_hash 는 bronze 에서 계산(`warehouse.project_records` — raw 레코드
-  canonical JSON sha256)되어 silver/gold 로 **승계**된다. 파생컬럼(행정동/법정동/위경도)은 raw 에
-  없어 해시에 직접 들어가지 않음. 실측 중복(#62 진단, 동일 원천버전 44건)의 실체는 **원천 좌표
-  필드(v1 X/Y·v2 XCRD/YCRD)** — LOCALDATA 가 UPDATEDT 갱신 없이 좌표만 채우는 배치가 있어
-  '내용 무변경'이 변경으로 오판돼 silver/gold 에 신규 이력으로 재적재됐다(위경도는 X/Y 의 silver
-  파생이라 사용자 관측과 동일 현상).
-- **조치**: `content_hash_input()` 신설 — 해시 입력 = **raw 원본 필드 − 좌표**(_HASH_EXCLUDED_FIELDS
-  = X/Y/XCRD/YCRD). record_json 은 좌표 포함 원본 그대로 보존(§2.2 불변 — 해시는 비교 전용).
-  silver(인접 dedup lag 비교)·gold(PK (entity_seq, collected_at, content_hash)·창 필터)는 이 해시를
-  승계하므로 한 곳 수정으로 **전 층 공통 적용**. 수집측 diff(_diff_target 비교)는 원천 변경 감지
-  용도라 유지 — 좌표 변경은 bronze 에 기록되되 silver 인접 dedup 이 하류 전파를 차단.
-- **문서 정합**: dbt sources.yml content_hash 설명 + silver_license_history.sql 인접 dedup 주석에
-  좌표 제외 계약 명시(dbt 레포 동반 커밋).
-- **검증**: 신규 테스트 2건(좌표만 변경=동일 해시·v1/v2 별칭 커버, record_json 원본 보존) 포함
-  commerce pytest 354 전건 통과, `python -m security` PASS, dbt parse/compile(컨테이너) 정상.
-- **마이그레이션(이슈 #319 추적)**: 기존 저장분은 구 해시(좌표 포함)라 신·구 혼재 상태 — 완전 정합은
-  **bronze 재적재(raw 전량, 새 해시) → silver 전량 재빌드 → gold 재적재** 순. 재빌드 과정의 인접
-  dedup(새 해시)이 기존 중복 132건(#62)도 자동 정리한다. 재빌드 전까지는 재유입 시 인접 dedup 이
-  구/신 해시 불일치로 못 거를 수 있음(신규 유입 자체는 정상 동작).
+  canonical JSON sha256)되어 silver/gold 로 **승계**된다. **파생컬럼(행정동/법정동/위경도)은
+  해시에 원래 들어가지 않는다** — 해시 입력이 raw 레코드뿐이고 파생은 silver 에서 계산되므로
+  구조적으로 유입 불가. #62 실측의 동일 원천버전 44건은 **원천 좌표 필드(v1 X/Y·v2 XCRD/YCRD)**
+  가 UPDATEDT 무갱신으로 채워진 것 — 위경도(X/Y 의 silver 파생) 변화로 관측됐던 현상의 실체.
+- **계약 확정(해시 공식 불변 + 명문화)**: 해시 입력 = **raw 원본 레코드 전체**. 원천 좌표는
+  브론즈 원래 컬럼이라 **포함 유지**(좌표 채움도 원천 변경 = 정당한 버전 이력 — 44건은 중복이
+  아니라 좌표 채움 버전으로 재해석). 임의추가/파생컬럼의 해시 유입 금지는 "입력이 raw 뿐"인
+  구조로 보장하고 warehouse.py·dbt sources.yml·silver_license_history.sql 주석에 계약을 명문화.
+  (중간에 좌표를 해시에서 제외하는 구현을 넣었다가 사용자 확인으로 **원복** — 원천 컬럼이므로.)
+- **검증**: 계약 고정 테스트 2건(원천 좌표 변경=해시 상이(v1/v2 별칭 포함)·record_json 원본
+  보존) 포함 commerce pytest 전건 통과, `python -m security` PASS, dbt parse/compile 정상.
+- **마이그레이션 불필요**: 해시 공식이 기존과 동일하게 확정돼 신·구 혼재 없음 — #319(전량
+  재빌드)는 사유 소멸로 종결. 기존 132건도 원천 유래(좌표 채움 버전 44 + 같은 배치 원천
+  표기차 88)라 정리 대상 아님.
 
 ### 62. 기적재 재적재 차단(마커 내구성·핸드셰이크) + 적재 0건 리포트 가시성
 
