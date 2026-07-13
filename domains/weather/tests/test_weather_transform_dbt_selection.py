@@ -118,6 +118,8 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
         "dbt_deps",
         "dbt_source_freshness",
         "dbt_seed_asac_axes",
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
         "dbt_seed_place_mapping",
         "dbt_test_place_mapping_seed",
         "dbt_run_silver",
@@ -140,6 +142,22 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
     assert "deps" in task_commands["dbt_deps"]
     assert "source freshness" in task_commands["dbt_source_freshness"]
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
+    assert (
+        "run --select asac_axes.dim_admin_dong"
+        in task_commands["dbt_run_common_admin_dong_dimension"]
+    )
+    assert (
+        "test --select asac_axes.dim_admin_dong"
+        in task_commands["dbt_test_common_admin_dong_dimension"]
+    )
+    for task_id in (
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
+    ):
+        assert dag.task_dict[task_id].kwargs["on_failure_callback"] == [
+            module.notify_weather_transform_failure,
+            module.record_weather_problem,
+        ]
     assert "seed --select weather_place_grid_mapping" in task_commands["dbt_seed_place_mapping"]
     assert "--target '{{ params.target }}'" in task_commands["dbt_deps"]
     assert "weather_place_grid_mapping" in task_commands["dbt_test_place_mapping_seed"]
@@ -192,6 +210,16 @@ def test_weather_transform_subscribes_to_bronze_asset_by_default():
     module = load_transform_module()
 
     assert module.dag.kwargs["schedule"] == [FakeAsset(module.WEATHER_BRONZE_ASSET)]
+
+
+def test_weather_transform_names_common_admin_dong_failure_stage():
+    module = load_transform_module()
+
+    for task_id in (
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
+    ):
+        assert module.transform_stage_name(task_id) == "공용 행정동 차원 실행/검증"
 
 
 def test_weather_transform_validates_dev_runtime_before_dbt():

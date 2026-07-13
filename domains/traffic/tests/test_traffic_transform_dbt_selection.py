@@ -162,6 +162,8 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
         "dbt_seed_asac_axes",
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",
@@ -185,6 +187,23 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         in task_commands["dbt_test_traffic_incident_availability"]
     )
     assert "seed --select asac_axes" in task_commands["dbt_seed_asac_axes"]
+    assert (
+        task_commands["dbt_run_common_admin_dong_dimension"]
+        == "run --select asac_axes.dim_admin_dong"
+    )
+    assert (
+        task_commands["dbt_test_common_admin_dong_dimension"]
+        == "test --select asac_axes.dim_admin_dong"
+    )
+    for task_id in (
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
+    ):
+        assert (
+            dag.task_dict[task_id].kwargs["op_kwargs"]["snapshot_task_id"]
+            == "resolve_traffic_snapshot_run"
+        )
+        assert dag.task_dict[task_id].kwargs["op_kwargs"]["silver_persisted"] is False
     assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {"dbt_deps"}
     assert (
         "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current"
@@ -212,6 +231,8 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
         "dbt_seed_asac_axes",
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",
