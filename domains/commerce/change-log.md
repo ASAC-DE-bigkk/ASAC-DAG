@@ -7,6 +7,29 @@
 
 ## 2026-07-13
 
+### 61. 크로스도메인 리니지 공유 전략 확정 + "Python 때문에 Marquez 불가" 트러블슈팅 체계화
+
+request:
+- 타 환경에서 "현재 Python 버전으로 Marquez 실행 불가" 보고 — 되게 수정하고, 버전 변경(상·하향)이
+  다른 프로젝트에 영향 없게 검증·수정. 목표는 **도메인 폴더가 달라도 리니지 공유**(vs dbt 폴더 통합).
+
+response:
+- **전략 확정 — 폴더 통합·Marquez 상향 둘 다 불필요**: OL/Marquez 는 물리 테이블명으로 stitch
+  (실증: 방출자가 다른 Cosmos silver ↔ Airflow Asset gold 가 물리명만으로 자동 연결). 필요한 것은
+  **도메인별 OL 방출 배선**뿐 — ① Cosmos 전환(commerce 방식) 또는 ② **`dbt-ol` 래퍼**(경량,
+  BashOperator 명령만 교체). 절차·명령: [docs/cosmos.md](docs/cosmos.md) §6.
+- **"Python 때문에 Marquez 불가" 실체 규명**: Marquez 3종은 Java/Node 컨테이너(호스트 Python 무관).
+  오인 원인 2가지를 체계화 — ① 구 pip `docker-compose`(v1·Python) 파싱 실패 → **Compose v2 필수**
+  ② Airflow 이미지 `PYTHON_VERSION` 지원 밖 — **3.2.2 베이스 태그는 3.10~3.13 만 존재**(3.9=404,
+  레지스트리 실측). canonical=3.11.
+- **수정**: Dockerfile.airflow 에 ① **fail-fast 가드**(지원 밖 Python 이면 명확한 메시지로 즉시 실패)
+  ② dbt venv 에 `openlineage-dbt`(dbt-ol 1.51) 동봉 — 타 도메인이 호스트 Python 없이 이미지 안에서
+  방출(pip check 충돌 0, dbt-trino 무결 실측). cosmos.md §6 트러블슈팅 + **버전 변경 검증 절차**
+  (태그 확인→rebuild→전 도메인 import 0→pytest/security→OL 방출 스모크) 명문화.
+- **타 프로젝트 무영향 검증**: rebuild 후 **전 도메인 45개 DAG import 오류 0**(citydata·culture·
+  traffic·weather·transit·commerce·common), dbt venv `pip check` clean. 하향(≤3.9)은 태그 부재로
+  불가 — 가드가 차단.
+
 ### 60. silver seed 재설계 — bronze→silver from-scratch 검증에서 드러난 결함 3건 수정 + 지속가능 구조
 
 request:
