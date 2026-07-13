@@ -28,7 +28,7 @@ from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 
-from _shared.bronze_run_manifest import (  # noqa: E402
+from weather.bronze_run_manifest import (  # noqa: E402
     STATUS_FAILED,
     STATUS_STARTED,
     STATUS_SUCCESS,

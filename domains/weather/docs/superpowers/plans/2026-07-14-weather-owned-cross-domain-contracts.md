@@ -188,19 +188,25 @@ Expected: the path does not exist and no files are returned.
 - Consumes: all changed Weather·Traffic modules
 - Produces: verification evidence for issue #331 and the PR body
 
-- [ ] **Step 1: Run all relevant tests**
+- [ ] **Step 1: Run all functional tests before commit**
 
-Because this is an explicitly approved cross-domain branch, neutralize only the base-diff input of the unchanged Weather-only harness:
+The unchanged Weather-only harness intentionally rejects the uncommitted Traffic paths in this cross-domain branch, so exclude only that test before commit:
 
 ```powershell
-$env:WEATHER_DOMAIN_BASE_REF='HEAD'
-python -m pytest domains/weather/tests domains/traffic/tests -q
-Remove-Item Env:WEATHER_DOMAIN_BASE_REF
+python -m pytest domains/weather/tests domains/traffic/tests --ignore=domains/weather/tests/test_weather_domain_boundary.py -q
 ```
 
 Expected: all tests pass; the Windows Airflow platform warning and existing Airflow atexit warning may remain.
 
-- [ ] **Step 2: Compile changed Python modules**
+- [ ] **Step 2: Verify the Weather-only guard is unchanged**
+
+```powershell
+git diff --exit-code origin/dev -- domains/weather/tests/test_weather_domain_boundary.py
+```
+
+Expected: no diff and exit code 0.
+
+- [ ] **Step 3: Compile changed Python modules**
 
 ```powershell
 python -m py_compile domains/weather/bronze_run_manifest.py domains/weather/weather_iceberg_maintenance.py domains/weather/weather_ingest/iceberg_maintenance.py domains/weather/weather_vilage_fcst_bronze.py domains/traffic/traffic_incident_bronze.py domains/traffic/traffic_incident_transform.py
@@ -208,7 +214,7 @@ python -m py_compile domains/weather/bronze_run_manifest.py domains/weather/weat
 
 Expected: exit code 0.
 
-- [ ] **Step 3: Verify import paths and allowed changed paths**
+- [ ] **Step 4: Verify import paths and allowed changed paths**
 
 ```powershell
 rg -n "_shared" domains/weather domains/traffic
@@ -218,12 +224,24 @@ git diff --check origin/dev...HEAD
 
 Expected: no runtime `_shared` references; changed paths are limited to Weather, Traffic, and `_shared` deletion; diff check exits 0.
 
-- [ ] **Step 4: Commit implementation**
+- [ ] **Step 5: Commit implementation**
 
 ```powershell
 git add domains/weather domains/traffic domains/_shared
 git commit -m "refactor(weather): own cross-domain runtime contracts (#331)"
 ```
+
+- [ ] **Step 6: Run the complete clean-tree test set**
+
+After the cross-domain changes are committed, point the unchanged Weather-only harness at the current clean commit:
+
+```powershell
+$env:WEATHER_DOMAIN_BASE_REF='HEAD'
+python -m pytest domains/weather/tests domains/traffic/tests -q
+Remove-Item Env:WEATHER_DOMAIN_BASE_REF
+```
+
+Expected: all tests, including `test_weather_domain_boundary.py`, pass.
 
 ### Task 6: Publish the cross-domain PR
 

@@ -1,4 +1,4 @@
-"""Shared Iceberg maintenance helpers for periodic metadata cleanup."""
+"""Weather-owned Iceberg maintenance helpers for periodic metadata cleanup."""
 
 from __future__ import annotations
 

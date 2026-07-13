@@ -54,8 +54,11 @@ def install_airflow_fakes():
 
 def load_maintenance_module():
     install_airflow_fakes()
-    module_path = Path(__file__).resolve().parents[1] / "iceberg_maintenance_dag.py"
-    spec = importlib.util.spec_from_file_location("iceberg_maintenance_dag_under_test", module_path)
+    module_path = Path(__file__).resolve().parents[1] / "weather_iceberg_maintenance.py"
+    spec = importlib.util.spec_from_file_location(
+        "weather_iceberg_maintenance_under_test",
+        module_path,
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

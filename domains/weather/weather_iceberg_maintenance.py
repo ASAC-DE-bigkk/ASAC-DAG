@@ -14,7 +14,7 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-from maintenance import run_maintenance, _normalize_tables
+from weather_ingest.iceberg_maintenance import run_maintenance, _normalize_tables
 
 KST = "Asia/Seoul"
 
