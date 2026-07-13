@@ -39,6 +39,8 @@ def stub_dag_run_summary(monkeypatch):
             "success": 3,
             "failed": 0,
             "running": 1,
+            "last_success_at": "2026-07-02 08:55:00+00:00",
+            "last_publishable_at": "2026-07-02 08:55:00+00:00",
         },
     )
     monkeypatch.setattr(
@@ -69,16 +71,39 @@ def test_build_traffic_report_passes_for_fresh_complete_data(monkeypatch):
     )
 
     assert result["status"] == "PASS"
-    assert result["dag_runs"] == {"dag_id": "traffic_incident_bronze", "success": 3, "failed": 0, "running": 1}
+    assert result["dag_runs"] == {
+        "dag_id": "traffic_incident_bronze",
+        "success": 3,
+        "failed": 0,
+        "running": 1,
+        "last_success_at": "2026-07-02 08:55:00+00:00",
+        "last_publishable_at": "2026-07-02 08:55:00+00:00",
+        "publishability_ok": True,
+    }
     assert result["traffic"]["parsed_row_count"] == 25
     assert "bronze_seoul_traffic_incident_request_audit" in result["blast_radius"][1]
-    assert "current_timestamp - INTERVAL '24' HOUR" in cursor.statements[0]
+    assert "load_date >= '2026-06-30'" in cursor.statements[0]
+    assert "collected_at >= TIMESTAMP '2026-07-01 09:00:00.000000'" in cursor.statements[0]
+    assert result["traffic"]["freshness_status"] == "PASS"
+    assert result["publishability_ok"] is True
+    assert result["late_publishability"] == {
+        "status": "NOT_EVALUATED",
+        "reason": "bounded late-repair contract is owned by ASAC-DBT #117",
+    }
 
 
 def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv("ASK_SEOUL_SCHEMA", "weather_traffic_bronze")
-    cursor = RecordingCursor(rows=[(3, 0, 1)])
+    cursor = RecordingCursor(rows=[
+        (
+            3,
+            0,
+            1,
+            datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
+        )
+    ])
     config = report.report_config()
 
     result = ORIGINAL_COLLECT_DAG_RUN_SUMMARY(
@@ -88,7 +113,14 @@ def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
         datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc),
     )
 
-    assert result == {"dag_id": "traffic_incident_bronze", "success": 3, "failed": 0, "running": 1}
+    assert result == {
+        "dag_id": "traffic_incident_bronze",
+        "success": 3,
+        "failed": 0,
+        "running": 1,
+        "last_success_at": "2026-07-04 08:00:00+00:00",
+        "last_publishable_at": "2026-07-04 08:00:00+00:00",
+    }
     assert "bronze_collection_run_manifest" in cursor.statements[0]
     assert "dag_id = 'traffic_incident_bronze'" in cursor.statements[0]
 
@@ -110,6 +142,52 @@ def test_traffic_report_fails_when_total_exceeds_requested_range(monkeypatch):
     assert result["traffic"]["coverage_ok"] is False
 
 
+def test_traffic_report_warns_after_fifteen_minutes(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(rows=[
+        (1, 0, 0, 0, 1, datetime(2026, 7, 2, 8, 44, tzinfo=timezone.utc)),
+    ])
+
+    result = report.build_traffic_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "WARN"
+    assert result["traffic"]["freshness_status"] == "WARN"
+    assert result["traffic"]["zero_row_success_count"] == 1
+    assert result["traffic"]["coverage_ok"] is True
+
+
+def test_traffic_report_fails_after_thirty_minutes(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(rows=[
+        (1, 0, 0, 0, 1, datetime(2026, 7, 2, 8, 29, tzinfo=timezone.utc)),
+    ])
+
+    result = report.build_traffic_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["traffic"]["freshness_status"] == "FAIL"
+
+
+def test_traffic_report_has_logical_load_date_bound_without_claiming_partition_pruning(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(rows=[
+        (1, 25, 25, 1000, 0, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc)),
+    ])
+
+    report.build_traffic_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert "load_date >= '2026-06-30'" in cursor.statements[0]
+
+
 def test_traffic_report_schedule_requires_dev_target_and_webhook(monkeypatch):
     monkeypatch.delenv("ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE", raising=False)
     monkeypatch.delenv("ASK_SEOUL_REPORT_DAG_SCHEDULE", raising=False)
@@ -119,9 +197,10 @@ def test_traffic_report_schedule_requires_dev_target_and_webhook(monkeypatch):
     assert report.report_dag_schedule() is None
 
     monkeypatch.setenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
-    assert report.report_dag_schedule() == "0 9 * * *"
+    assert report.report_dag_schedule() == "*/15 * * * *"
 
     monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    monkeypatch.setenv("ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE", "*/5 * * * *")
     assert report.report_dag_schedule() is None
 
 
@@ -243,6 +322,8 @@ def test_traffic_send_discord_posts_payload(monkeypatch):
     assert payload["embeds"][0]["color"] == report.DISCORD_GREEN
     failure_payload = json.loads(report._discord_payload("title\n❌ 리포트 상태: 실패").decode("utf-8"))
     assert failure_payload["embeds"][0]["color"] == report.DISCORD_RED
+    warning_payload = json.loads(report._discord_payload("title\n⚠️ 리포트 상태: 경고").decode("utf-8"))
+    assert warning_payload["embeds"][0]["color"] == report.DISCORD_YELLOW
     assert request.get_method() == "POST"
     assert request.headers["User-agent"] == "ask-seoul-traffic-report/1.0"
     assert timeout == 10

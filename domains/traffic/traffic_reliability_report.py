@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import Variable
 
 
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,6 +16,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.runmetrics import track  # noqa: E402
 
 from traffic_ingest.reliability_report import (  # noqa: E402
     KST,
@@ -27,15 +29,30 @@ from traffic_ingest.reliability_report import (  # noqa: E402
 
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 record_traffic_problem = problem_failure_callback(domain="traffic")
+STATUS_VARIABLE = "ask_seoul.traffic.bronze_reliability.status"
 
 
+def should_notify_status_change(status: str, *, get=Variable.get, set=Variable.set) -> bool:
+    """Notify only state transitions; lack of Variable state must fail open."""
+    try:
+        previous = get(STATUS_VARIABLE, "UNKNOWN")
+        if previous == status:
+            return False
+        set(STATUS_VARIABLE, status)
+        return True
+    except Exception:  # state tracking must never suppress an alert
+        return True
+
+
+@track(layer="bronze", domain="traffic")
 def collect_and_notify(**context) -> dict:
     report = build_traffic_reliability_report()
-    message = format_traffic_discord_message(report)
-    sent = send_discord_message(message)
-    print(message)
-    report["discord_sent"] = sent
-    report["dag_run_id"] = context["run_id"]
+    status_changed = should_notify_status_change(report["status"])
+    report["discord_sent"] = (
+        send_discord_message(format_traffic_discord_message(report)) if status_changed else False
+    )
+    report["notification_reason"] = "status_changed" if status_changed else "status_unchanged"
+    report["dag_run_id"] = context.get("run_id")
     return report
 
 

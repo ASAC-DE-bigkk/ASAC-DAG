@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import urllib.error
@@ -24,6 +25,7 @@ WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "WEATHER_DISCORD_WEBHOOK_URL")
 SCHEDULE_ENV = "ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 DISCORD_GREEN = 3066993
+DISCORD_YELLOW = 16776960
 DISCORD_RED = 15158332
 KMA_BASE_INTERVAL_HOURS = 3
 
@@ -34,7 +36,8 @@ class WeatherReportConfig:
     schema: str
     lookback_hours: int
     expected_kma_grids: int
-    freshness_minutes: int
+    freshness_warn_minutes: int
+    freshness_error_minutes: int
 
 
 def is_dev_target(env: Mapping[str, str] = os.environ) -> bool:
@@ -50,15 +53,15 @@ def discord_webhook_url(env: Mapping[str, str] = os.environ) -> str | None:
 
 
 def report_dag_schedule(env: Mapping[str, str] = os.environ) -> str | None:
+    if not is_dev_target(env):
+        return None
     if SCHEDULE_ENV in env:
         return env[SCHEDULE_ENV] or None
     if GLOBAL_SCHEDULE_ENV in env:
         return env[GLOBAL_SCHEDULE_ENV] or None
-    if not is_dev_target(env):
-        return None
     if not discord_webhook_url(env):
         return None
-    return "0 9 * * *"
+    return "0 * * * *"
 
 
 def sql_identifier(value: str) -> str:
@@ -83,7 +86,12 @@ def report_config(env: Mapping[str, str] = os.environ) -> WeatherReportConfig:
         schema=sql_identifier(ask_seoul_schema(env)),
         lookback_hours=int(env.get("ASK_SEOUL_REPORT_LOOKBACK_HOURS", "24")),
         expected_kma_grids=int(env.get("ASK_SEOUL_REPORT_EXPECTED_KMA_GRIDS", "80")),
-        freshness_minutes=int(env.get("ASK_SEOUL_REPORT_WEATHER_FRESHNESS_MINUTES", "240")),
+        freshness_warn_minutes=int(
+            env.get("ASK_SEOUL_REPORT_WEATHER_FRESHNESS_WARN_MINUTES", "240")
+        ),
+        freshness_error_minutes=int(
+            env.get("ASK_SEOUL_REPORT_WEATHER_FRESHNESS_ERROR_MINUTES", "360")
+        ),
     )
 
 
@@ -134,8 +142,26 @@ def _age_minutes(collected_at: Any, detected_at: datetime) -> int | None:
     return int((detected_at.astimezone(collected_at.tzinfo) - collected_at).total_seconds() // 60)
 
 
+def freshness_status(age_minutes: int | None, warn_minutes: int, error_minutes: int) -> str:
+    if age_minutes is None or age_minutes > error_minutes:
+        return "FAIL"
+    if age_minutes > warn_minutes:
+        return "WARN"
+    return "PASS"
+
+
+def _weather_cutoffs(config: WeatherReportConfig, detected_at: datetime) -> tuple[datetime, str]:
+    cutoff = detected_at.astimezone(timezone.utc) - timedelta(hours=config.lookback_hours)
+    partition_days = max(1, math.ceil(config.lookback_hours / 24) + 1)
+    load_date_floor = (
+        detected_at.astimezone(KST).date() - timedelta(days=partition_days)
+    ).isoformat()
+    return cutoff, load_date_floor
+
+
 def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: datetime) -> dict[str, Any]:
     table = _qualified(config, WEATHER_TABLE)
+    cutoff, load_date_floor = _weather_cutoffs(config, detected_at)
     expected_base_time_count = max(1, config.lookback_hours // KMA_BASE_INTERVAL_HOURS)
     expected_grid_slot_count = config.expected_kma_grids * expected_base_time_count
     expected_raw_object_count = expected_grid_slot_count
@@ -152,7 +178,8 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
                 max(collected_at) AS last_collected_at
             FROM {table}
             WHERE source_id = 'kma_vilage_fcst'
-              AND collected_at >= current_timestamp - INTERVAL '{config.lookback_hours}' HOUR
+              AND load_date >= {_sql_string(load_date_floor)}
+              AND collected_at >= {_sql_timestamp_utc(cutoff)}
             GROUP BY base_date, base_time
         )
         SELECT
@@ -183,6 +210,13 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
             "raw_object_count": 0,
             "expected_raw_object_count": expected_raw_object_count,
             "additional_raw_page_count": 0,
+            "freshness_minutes": None,
+            "freshness_status": "FAIL",
+            "freshness_warn_minutes": config.freshness_warn_minutes,
+            "freshness_error_minutes": config.freshness_error_minutes,
+            "freshness_slo_minutes": config.freshness_error_minutes,
+            "freshness_ok": False,
+            "coverage_ok": False,
         }
 
     (
@@ -210,9 +244,15 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
         and grid_slot_count >= expected_grid_slot_count
         and raw_pages_ok
     )
-    freshness_ok = freshness_minutes is not None and freshness_minutes <= config.freshness_minutes
+    freshness = freshness_status(
+        freshness_minutes,
+        config.freshness_warn_minutes,
+        config.freshness_error_minutes,
+    )
+    freshness_ok = freshness == "PASS"
+    status = "FAIL" if not coverage_ok or freshness == "FAIL" else freshness
     return {
-        "status": "PASS" if coverage_ok and freshness_ok else "FAIL",
+        "status": status,
         "table": table,
         "base_date": latest_base_date,
         "base_time": latest_base_time,
@@ -234,7 +274,10 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
         "row_count": int(row_count),
         "last_collected_at": str(last_collected_at),
         "freshness_minutes": freshness_minutes,
-        "freshness_slo_minutes": config.freshness_minutes,
+        "freshness_status": freshness,
+        "freshness_warn_minutes": config.freshness_warn_minutes,
+        "freshness_error_minutes": config.freshness_error_minutes,
+        "freshness_slo_minutes": config.freshness_error_minutes,
         "coverage_ok": coverage_ok,
         "freshness_ok": freshness_ok,
     }
@@ -256,6 +299,8 @@ def collect_dag_run_summary(
             SELECT
                 dag_run_id,
                 max_by(status, event_at) AS latest_status,
+                max_by(is_publishable, event_at) AS latest_is_publishable,
+                max(event_at) AS latest_event_at,
                 max_by(expected_raw_objects, event_at) AS expected_raw_objects,
                 max_by(actual_raw_objects, event_at) AS actual_raw_objects
             FROM {manifest_table}
@@ -268,7 +313,11 @@ def collect_dag_run_summary(
             coalesce(sum(CASE WHEN latest_status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed,
             coalesce(sum(CASE WHEN latest_status = 'STARTED' THEN 1 ELSE 0 END), 0) AS running,
             coalesce(sum(expected_raw_objects), 0) AS expected_raw_objects,
-            coalesce(sum(actual_raw_objects), 0) AS actual_raw_objects
+            coalesce(sum(actual_raw_objects), 0) AS actual_raw_objects,
+            max(CASE WHEN latest_status = 'SUCCESS' THEN latest_event_at END) AS last_success_at,
+            max(
+                CASE WHEN latest_status = 'SUCCESS' AND latest_is_publishable THEN latest_event_at END
+            ) AS last_publishable_at
         FROM latest
         """,
     )
@@ -279,6 +328,8 @@ def collect_dag_run_summary(
         "running": 0,
         "expected_raw_objects": 0,
         "actual_raw_objects": 0,
+        "last_success_at": None,
+        "last_publishable_at": None,
     }
     if row:
         summary.update(
@@ -287,6 +338,8 @@ def collect_dag_run_summary(
             running=int(row[2] or 0),
             expected_raw_objects=int(row[3] or 0),
             actual_raw_objects=int(row[4] or 0),
+            last_success_at=str(row[5]) if row[5] is not None else None,
+            last_publishable_at=str(row[6]) if row[6] is not None else None,
         )
     return summary
 
@@ -315,7 +368,16 @@ def build_weather_reliability_report(cursor=None, detected_at: datetime | None =
             "reason": "dag_run_query_failed",
             "error": str(exc),
         }
-    status = weather["status"] if not dag_runs.get("reason") else "FAIL"
+    publishability_ok = bool(dag_runs.get("last_publishable_at"))
+    dag_runs["publishability_ok"] = publishability_ok
+    late_publishability = {
+        "status": "NOT_EVALUATED",
+        "reason": "bounded late-repair contract is owned by ASAC-DBT #165",
+    }
+    if dag_runs.get("reason") or not publishability_ok:
+        status = "FAIL"
+    else:
+        status = weather["status"]
 
     return {
         "report_name": "weather_bronze_reliability",
@@ -326,6 +388,8 @@ def build_weather_reliability_report(cursor=None, detected_at: datetime | None =
         "status": status,
         "weather": weather,
         "dag_runs": dag_runs,
+        "publishability_ok": publishability_ok,
+        "late_publishability": late_publishability,
         "blast_radius": [_qualified(config, WEATHER_TABLE)],
     }
 
@@ -344,18 +408,32 @@ def _icon(value: bool) -> str:
     return "✅" if value else "❌"
 
 
+def _status_icon(status: str) -> str:
+    return {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}.get(status, "❌")
+
+
+def _status_label(status: str) -> str:
+    return {"PASS": "성공", "WARN": "경고", "FAIL": "실패"}.get(status, "실패")
+
+
 def format_weather_discord_message(report: dict[str, Any]) -> str:
     weather = report["weather"]
     detected_date = str(report["detected_at"])[:10]
     target = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
-    status_ok = report["status"] == "PASS"
+    report_status = str(report["status"])
     coverage_ok = bool(weather.get("coverage_ok"))
-    freshness_ok = bool(weather.get("freshness_ok"))
+    freshness = str(weather.get("freshness_status", "FAIL"))
+    freshness_ok = freshness == "PASS"
+    publishability_ok = bool(report.get("publishability_ok"))
     dag_ok = not bool(report["dag_runs"].get("reason"))
     lines = [
         f"기상청 단기예보 Bronze 신뢰성 리포트 - {detected_date} (target={target})",
-        f"{_icon(status_ok)} 리포트 상태: {'성공' if status_ok else '실패'}",
-        f"{_icon(freshness_ok)} Freshness: {_format_minutes(weather.get('freshness_minutes'))} / SLO {weather.get('freshness_slo_minutes', 'n/a')}m",
+        f"{_status_icon(report_status)} 리포트 상태: {_status_label(report_status)}",
+        (
+            f"{_status_icon(freshness)} Freshness: {_format_minutes(weather.get('freshness_minutes'))} "
+            f"/ WARN {weather.get('freshness_warn_minutes', 'n/a')}m "
+            f"/ FAIL {weather.get('freshness_error_minutes', weather.get('freshness_slo_minutes', 'n/a'))}m"
+        ),
         f"{_icon(coverage_ok)} 발표시각 커버리지: {weather.get('base_time_count', 0)}/{weather.get('expected_base_time_count', 0)}회",
         f"{_icon(coverage_ok)} 서울 격자 커버리지: {weather.get('complete_base_time_count', 0)}/{weather.get('expected_base_time_count', 0)}회 complete ({weather.get('expected_grid_count', 0)}개 grid 기준)",
         f"{_icon(coverage_ok)} Bronze grid slots(커버리지): {weather.get('grid_slot_count', 0)}/{weather.get('expected_grid_slot_count', 0)}개",
@@ -372,12 +450,24 @@ def format_weather_discord_message(report: dict[str, Any]) -> str:
             f"failed={report['dag_runs'].get('failed', 0)} "
             f"running={report['dag_runs'].get('running', 0)} "
             f"raw_pages={report['dag_runs'].get('actual_raw_objects', 0)}/{report['dag_runs'].get('expected_raw_objects', 0)} "
+            f"last_success={report['dag_runs'].get('last_success_at', 'N/A')} "
+            f"last_publishable={report['dag_runs'].get('last_publishable_at', 'N/A')} "
             f"reason={report['dag_runs'].get('reason', '-')}"
+        ),
+        (
+            f"{_icon(publishability_ok)} publishability="
+            f"{_format_bool(publishability_ok)}"
+        ),
+        (
+            "late_publishability="
+            f"{report.get('late_publishability', {}).get('status', 'NOT_EVALUATED')} "
+            f"({report.get('late_publishability', {}).get('reason', 'unknown')})"
         ),
         "",
         "Checks:",
         f"{_icon(coverage_ok)} weather_coverage={_format_bool(coverage_ok)}",
         f"{_icon(freshness_ok)} weather_freshness={_format_bool(freshness_ok)}",
+        f"{_icon(publishability_ok)} weather_publishability={_format_bool(publishability_ok)}",
         f"{_icon(dag_ok)} dag_run_summary={_format_bool(dag_ok)}",
         "",
         "Blast radius:",
@@ -394,7 +484,12 @@ def _discord_payload(message: str) -> bytes:
     lines = message.splitlines()
     title = lines[0].strip("*") if lines else "Weather Bronze reliability report"
     description = "\n".join(lines[1:]).strip() or title
-    color = DISCORD_RED if "FAIL" in title or "리포트 상태: 실패" in message else DISCORD_GREEN
+    if "FAIL" in title or "리포트 상태: 실패" in message:
+        color = DISCORD_RED
+    elif "리포트 상태: 경고" in message:
+        color = DISCORD_YELLOW
+    else:
+        color = DISCORD_GREEN
     payload = {
         "embeds": [{
             "title": title[:256],

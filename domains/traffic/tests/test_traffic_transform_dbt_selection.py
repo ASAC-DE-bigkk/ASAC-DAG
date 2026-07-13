@@ -18,6 +18,8 @@ _AIRFLOW_MODULE_NAMES = (
     "airflow.providers.standard.operators.python",
     "airflow.sdk",
     "airflow.sdk.exceptions",
+    "airflow.utils",
+    "airflow.utils.trigger_rule",
 )
 
 
@@ -103,6 +105,10 @@ class FakeAirflowFailException(Exception):
     pass
 
 
+class FakeTriggerRule:
+    ALL_DONE = "all_done"
+
+
 def install_airflow_fakes():
     airflow = types.ModuleType("airflow")
     airflow.DAG = FakeDAG
@@ -124,6 +130,9 @@ def install_airflow_fakes():
     airflow_sdk.Asset = FakeAsset
     airflow_sdk_exceptions = types.ModuleType("airflow.sdk.exceptions")
     airflow_sdk_exceptions.AirflowFailException = FakeAirflowFailException
+    airflow_utils = types.ModuleType("airflow.utils")
+    airflow_trigger_rule = types.ModuleType("airflow.utils.trigger_rule")
+    airflow_trigger_rule.TriggerRule = FakeTriggerRule
 
     sys.modules.update(
         {
@@ -138,6 +147,8 @@ def install_airflow_fakes():
             "airflow.providers.standard.operators.python": airflow_python,
             "airflow.sdk": airflow_sdk,
             "airflow.sdk.exceptions": airflow_sdk_exceptions,
+            "airflow.utils": airflow_utils,
+            "airflow.utils.trigger_rule": airflow_trigger_rule,
         }
     )
 
@@ -528,3 +539,44 @@ def test_traffic_transform_limits_target_param_to_dev_or_prod():
 
     assert target_param.value == "dev"
     assert target_param.schema["enum"] == ["dev"]
+
+
+def test_traffic_transform_publishes_dbt_run_metrics_after_terminal_test():
+    module = load_transform_module()
+
+    task = module.dag.task_dict["publish_dbt_run_metrics"]
+
+    assert task.kwargs["trigger_rule"] == "all_done"
+    assert module.dag.task_dict["dbt_test_gold"].downstream_task_ids == {
+        "publish_dbt_run_metrics"
+    }
+
+
+def test_traffic_metrics_use_terminal_dbt_artifact_path():
+    module = load_transform_module()
+    terminal_path = "/tmp/traffic-terminal/run_results.json"
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids, key=None: (
+            {"artifact_path": terminal_path} if task_ids == "dbt_test_gold" and key is None else None
+        )
+    )
+
+    assert module._terminal_run_results_path(ti=ti) == terminal_path
+
+
+def test_traffic_publish_dbt_run_metrics_forwards_domain_and_target(tmp_path, monkeypatch):
+    module = load_transform_module()
+    run_results = tmp_path / "run_results.json"
+    run_results.write_text("{}", encoding="utf-8")
+    captured = {}
+
+    def fake_dump(path, *, domain, target):
+        captured.update(path=path, domain=domain, target=target)
+        return [{}]
+
+    monkeypatch.setattr(module, "dump_dbt_run_results", fake_dump)
+
+    assert module.publish_dbt_run_metrics(
+        run_results_path=str(run_results), params={"target": "dev"}
+    ) == {"rows": 1, "skipped": False}
+    assert captured == {"path": str(run_results), "domain": "traffic", "target": "dev"}
