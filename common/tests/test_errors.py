@@ -9,8 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from common.errors import types as error_types  # noqa: E402
@@ -54,6 +52,21 @@ def test_to_dict_has_standard_and_extension_members():
 def test_to_dict_omits_none_members():
     doc = _make_problem(status=None, request=None, docs_url=None).to_dict()
     assert "status" not in doc and "request" not in doc and "docs_url" not in doc
+
+
+def test_to_dict_includes_problem_extension_members():
+    problem = _make_problem()
+    problem.extensions = {
+        "traffic_snapshot_dag_run_id": "snapshot-a",
+        "dbt_failed_row_count": 3,
+        "silver_persisted": True,
+    }
+
+    document = problem.to_dict()
+
+    assert document["traffic_snapshot_dag_run_id"] == "snapshot-a"
+    assert document["dbt_failed_row_count"] == 3
+    assert document["silver_persisted"] is True
 
 
 def test_from_exception_builds_instance_urn_and_detail():

@@ -38,6 +38,7 @@ class Problem:
     try_number: int | None = None
     source_system: str | None = None
     request: dict[str, Any] | None = None
+    extensions: dict[str, Any] | None = None
     occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     docs_url: str | None = None
     schema_version: str = SCHEMA_VERSION
@@ -55,6 +56,9 @@ class Problem:
                      "run_id", "try_number", "source_system", "request", "docs_url"):
             value = getattr(self, name)
             if value is not None:
+                out[name] = value
+        for name, value in (self.extensions or {}).items():
+            if name not in out:
                 out[name] = value
         out["occurred_at"] = self.occurred_at.astimezone(timezone.utc).isoformat()
         out["schema_version"] = self.schema_version
