@@ -39,11 +39,12 @@ from common.assets import CITYDATA_BRONZE_ASSET  # noqa: E402
 KST = "Asia/Seoul"
 KST_TZ = ZoneInfo(KST)
 
-record_citydata_problem = problem_failure_callback(
-    domain="citydata", source_system="seoul_citydata")
-
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/citydata"
+
+# dbt 실패 시 run_results.json 을 파싱해 "어떤 모델/테스트가 왜" 를 알림에 넣는다(#304).
+record_citydata_problem = problem_failure_callback(
+    domain="citydata", source_system="seoul_citydata", dbt_project_dir=DBT_PROJECT)
 
 DEFAULT_PARAMS = {"target": "dev"}
 
