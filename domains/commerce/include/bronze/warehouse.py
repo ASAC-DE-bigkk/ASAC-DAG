@@ -126,8 +126,23 @@ def ensure_schema_and_tables() -> None:
 
 
 # ── 증분 파일 → 레코드 → 컬럼 투영 ───────────────────────────────────────────
+# 비교(content_hash) 입력에서 제외할 원천 필드 — 좌표(v1 X/Y · v2 XCRD/YCRD).
+# LOCALDATA 는 UPDATEDT 갱신 없이 좌표만 채우는 원천 배치가 있어(실측: 07-09↔07-11 동일
+# 원천버전 44건 — change-log #63) 좌표를 해시에 넣으면 '내용 무변경'이 변경으로 오판돼
+# silver/gold 에 신규 이력으로 재적재된다. **해시 입력 = raw 원본 필드 − 좌표**(사용자 확정).
+# 파생컬럼(행정동/법정동/위경도)은 raw 에 없어 원래 해시와 무관 — silver 파생·보강값이 해시에
+# 유입되지 않는 계약은 이 함수가 raw(rec)만 받는 것으로 보장한다. record_json 은 원본 그대로
+# 보존(§2.2 — 해시는 비교 목적, 원본 불변. 좌표 최신값은 record_json/silver 파생으로 유지).
+_HASH_EXCLUDED_FIELDS = frozenset({"X", "Y", "XCRD", "YCRD"})
+
+
 def _canonical_json(rec: dict) -> str:
     return json.dumps(rec, ensure_ascii=False, sort_keys=True)
+
+
+def content_hash_input(rec: dict) -> str:
+    """비교용 content_hash 의 캐노니컬 입력 — raw 원본에서 좌표 필드만 제외."""
+    return _canonical_json({k: v for k, v in rec.items() if k not in _HASH_EXCLUDED_FIELDS})
 
 
 def iter_increment_rows(storage: Storage, increment_key: str,
@@ -177,14 +192,15 @@ def project_records(records: Iterable[dict], *, dataset: str, observed_date: str
                     load_date: str, bronze_run_id: str, dag_run_id: str,
                     raw_object_key: str, increment_mode: str, schema_version: str,
                     collected_dt: datetime) -> Iterator[dict]:
-    """레코드 → 컬럼 dict(_COLUMNS). record_json=원본 통짜, content_hash=canonical sha256."""
+    """레코드 → 컬럼 dict(_COLUMNS). record_json=원본 통짜, content_hash=canonical sha256
+    (좌표 제외 — _HASH_EXCLUDED_FIELDS, 비교 전용 해시 계약)."""
     for seq, rec in enumerate(records):
         yield {
             "dataset": dataset,
             "mgtno": canonical_get(rec, "MGTNO") or rec.get("mgtno"),      # v2=MNG_NO 대응
             "updatedt": canonical_get(rec, "UPDATEDT") or rec.get("updatedt"),  # v2=DATA_UPDT_YMD
             "record_json": json.dumps(rec, ensure_ascii=False),
-            "content_hash": sha256_hex(_canonical_json(rec).encode("utf-8")),
+            "content_hash": sha256_hex(content_hash_input(rec).encode("utf-8")),
             "observed_date": observed_date,
             "load_date": load_date,
             "bronze_run_id": bronze_run_id,

@@ -118,6 +118,32 @@ def test_project_records_lineage():
     assert len(row["content_hash"]) == 64
 
 
+def test_content_hash_excludes_coordinates():
+    # 좌표(v1 X/Y·v2 XCRD/YCRD)만 바뀐 레코드는 동일 content — 재적재 오판 차단(change-log #63).
+    base = {"MGTNO": "A", "UPDATEDT": "20260101000000", "BPLCNM": "가", "X": None, "Y": None}
+    coords = {**base, "X": "192371.111", "Y": "451234.222"}
+    v2 = {"MNG_NO": "A", "DATA_UPDT_YMD": "20260101", "XCRD": "1.0", "YCRD": "2.0"}
+    v2_moved = {**v2, "XCRD": "9.9", "YCRD": "8.8"}
+    assert wh.content_hash_input(base) == wh.content_hash_input(coords)
+    assert wh.content_hash_input(v2) == wh.content_hash_input(v2_moved)
+    # 원천 내용(UPDATEDT/상호 등) 변경은 여전히 다른 해시 — 변경 감지 유지.
+    assert wh.content_hash_input(base) != wh.content_hash_input({**base, "UPDATEDT": "20260202000000"})
+    assert wh.content_hash_input(base) != wh.content_hash_input({**base, "BPLCNM": "나"})
+
+
+def test_record_json_preserves_coordinates_while_hash_ignores_them():
+    # record_json 은 원본(좌표 포함) 그대로 — 해시만 비교 목적(§2.2 원본 보존 불변).
+    import json as _json
+    recs = [{"MGTNO": "A", "UPDATEDT": "20260101000000", "X": "192371.1", "Y": "451234.2"},
+            {"MGTNO": "A", "UPDATEDT": "20260101000000", "X": None, "Y": None}]
+    rows = list(wh.project_records(
+        recs, dataset="bakery", observed_date="2026-07-03", load_date="2026-07-03",
+        bronze_run_id="B", dag_run_id="D", raw_object_key="rk", increment_mode="changed",
+        schema_version="v1", collected_dt=datetime(2026, 7, 3, 5, 30, 25)))
+    assert _json.loads(rows[0]["record_json"])["X"] == "192371.1"      # 원본 보존
+    assert rows[0]["content_hash"] == rows[1]["content_hash"]           # 비교는 좌표 무시
+
+
 # ── Trino 적재(멱등·바인딩) ─────────────────────────────────────────────────
 def test_load_unit_trino_delete_then_insert_bound(trino_env, monkeypatch):
     st = _FakeStorage()
