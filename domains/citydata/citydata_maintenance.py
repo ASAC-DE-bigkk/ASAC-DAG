@@ -18,6 +18,7 @@
   target           "dev" | "prod"  (기본 dev)
   retention        스냅샷/고아 보존 기간 (기본 3d; 카탈로그 min-retention 이상이어야 함)
   cleanup_hours    metadata/버려진 디렉터리 보존 시간 (기본 6h; 진행 중 커밋 보호)
+  drain_seconds    transform pause 후 진행 중 run 배수 대기 (기본 300s)
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ from citydata_ingest.source.maintenance import (  # noqa: E402
 
 KST = "Asia/Seoul"
 
-DEFAULT_PARAMS = {"target": "dev", "retention": "3d", "cleanup_hours": 6}
+DEFAULT_PARAMS = {"target": "dev", "retention": "3d", "cleanup_hours": 6, "drain_seconds": 300}
 
 # maintenance 의 optimize 가 silver/gold 데이터파일을 재작성하는 동안 transform 의
 # delete+insert 가 같은 행을 지우면 Iceberg 커밋 충돌 → 중복 발생. 그래서 maintenance
@@ -51,35 +52,33 @@ DEFAULT_PARAMS = {"target": "dev", "retention": "3d", "cleanup_hours": 6}
 TRANSFORM_DAG = "citydata_transform"
 
 
-def _set_transform_paused(paused: bool) -> None:
-    from airflow.models import DagModel
-    from airflow.utils.session import create_session
-    with create_session() as s:
-        dm = s.query(DagModel).filter(DagModel.dag_id == TRANSFORM_DAG).first()
-        if dm is not None:
-            dm.is_paused = paused
+def _dags_cli(action: str) -> None:
+    """``airflow dags <action> <TRANSFORM_DAG>`` 를 subprocess 로 실행한다.
+
+    Airflow 3.0 은 태스크에서 ORM 직접 접근(create_session)을 금지한다(#303) — DagModel
+    을 직접 갱신하던 방식이 RuntimeError 로 죽었다. pause/unpause 는 CLI 로 위임한다.
+    """
+    import subprocess
+    subprocess.run(["airflow", "dags", action, TRANSFORM_DAG], check=True)
 
 
-def _pause_transform(**_) -> None:
-    """transform 을 pause + 진행 중 run 이 끝날 때까지 대기(최대 ~15분)."""
+def _pause_transform(**context) -> None:
+    """transform 을 pause + 진행 중 run 이 배수되도록 drain_seconds 만큼 대기.
+
+    pause 로 새 run(스케줄·Asset 트리거 모두) 은 막히고, 이미 running 인 run(≈1~4분)은
+    이어진다. ``list-runs`` CLI 가 이 버전에서 불안정해 러닝 폴링 대신 유한 sleep 으로
+    in-flight 를 배수한다(주간 1회라 고정 대기 비용은 무시할 수준).
+    """
     import time
-    from airflow.models import DagRun
-    from airflow.utils.session import create_session
-    _set_transform_paused(True)
-    print(f"[maintenance] {TRANSFORM_DAG} paused — 진행 중 run 대기")
-    for _ in range(60):  # 60 x 15s = 15분 상한
-        with create_session() as s:
-            running = s.query(DagRun).filter(
-                DagRun.dag_id == TRANSFORM_DAG, DagRun.state == "running").count()
-        if running == 0:
-            print("[maintenance] transform idle 확인 — 유지보수 진행")
-            return
-        time.sleep(15)
-    print("[maintenance] ⚠ transform run 이 15분 내 안 끝남 — 그래도 진행")
+    drain = int(context["params"].get("drain_seconds", 300))
+    _dags_cli("pause")
+    print(f"[maintenance] {TRANSFORM_DAG} paused — 진행 중 run 배수 대기 {drain}s")
+    time.sleep(drain)
+    print("[maintenance] 배수 대기 완료 — 유지보수 진행")
 
 
 def _resume_transform(**_) -> None:
-    _set_transform_paused(False)
+    _dags_cli("unpause")
     print(f"[maintenance] {TRANSFORM_DAG} resumed")
 
 
