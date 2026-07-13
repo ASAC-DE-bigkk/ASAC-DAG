@@ -182,6 +182,7 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
             "expected_grid_slot_count": expected_grid_slot_count,
             "raw_object_count": 0,
             "expected_raw_object_count": expected_raw_object_count,
+            "additional_raw_page_count": 0,
         }
 
     (
@@ -200,6 +201,7 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
     complete_base_time_count = int(complete_base_time_count or 0)
     grid_slot_count = int(grid_slot_count or 0)
     raw_object_count = int(raw_object_count or 0)
+    additional_raw_page_count = max(0, raw_object_count - grid_slot_count)
     freshness_minutes = _age_minutes(last_collected_at, detected_at)
     raw_pages_ok = raw_object_count >= grid_slot_count and raw_object_count > 0
     coverage_ok = (
@@ -227,6 +229,7 @@ def collect_weather_summary(cursor, config: WeatherReportConfig, detected_at: da
         "expected_grid_slot_count": expected_grid_slot_count,
         "raw_object_count": raw_object_count,
         "expected_raw_object_count": expected_raw_object_count,
+        "additional_raw_page_count": additional_raw_page_count,
         "raw_pages_ok": raw_pages_ok,
         "row_count": int(row_count),
         "last_collected_at": str(last_collected_at),
@@ -355,8 +358,9 @@ def format_weather_discord_message(report: dict[str, Any]) -> str:
         f"{_icon(freshness_ok)} Freshness: {_format_minutes(weather.get('freshness_minutes'))} / SLO {weather.get('freshness_slo_minutes', 'n/a')}m",
         f"{_icon(coverage_ok)} 발표시각 커버리지: {weather.get('base_time_count', 0)}/{weather.get('expected_base_time_count', 0)}회",
         f"{_icon(coverage_ok)} 서울 격자 커버리지: {weather.get('complete_base_time_count', 0)}/{weather.get('expected_base_time_count', 0)}회 complete ({weather.get('expected_grid_count', 0)}개 grid 기준)",
-        f"{_icon(coverage_ok)} Bronze grid slots: {weather.get('grid_slot_count', 0)}/{weather.get('expected_grid_slot_count', 0)}개",
-        f"{_icon(weather.get('raw_pages_ok', False))} Bronze raw pages: {weather.get('raw_object_count', 0)}개",
+        f"{_icon(coverage_ok)} Bronze grid slots(커버리지): {weather.get('grid_slot_count', 0)}/{weather.get('expected_grid_slot_count', 0)}개",
+        f"{_icon(weather.get('raw_pages_ok', False))} Bronze raw API pages(실제 응답): {weather.get('raw_object_count', 0)}개",
+        f"{_icon(weather.get('raw_pages_ok', False))} 추가 pagination pages(page 2+): {weather.get('additional_raw_page_count', 0)}개",
         f"{_icon(weather.get('row_count', 0) > 0)} Bronze 적재: {int(weather.get('row_count', 0)):,}행",
         f"{_icon(bool(weather.get('latest_base_date')))} 최신 예보 발표시각: {weather.get('latest_base_date', 'N/A')} {weather.get('latest_base_time', '')}",
         f"{_icon(weather.get('reason', '-') == '-')} reason: {weather.get('reason', '-')}",

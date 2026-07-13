@@ -117,6 +117,26 @@ def test_weather_report_fails_when_grid_coverage_is_incomplete(monkeypatch):
     assert result["weather"]["coverage_ok"] is False
 
 
+def test_weather_report_exposes_pagination_page_breakdown(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(
+        rows=[
+            (8, 640, 800, 640000, 80, 80, 8, "20260702", "0800", datetime(2026, 7, 2, 8, 20, tzinfo=timezone.utc)),
+        ]
+    )
+
+    result = report.build_weather_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+    )
+    message = report.format_weather_discord_message(result)
+
+    assert result["weather"]["additional_raw_page_count"] == 160
+    assert "Bronze grid slots(커버리지): 640/640개" in message
+    assert "Bronze raw API pages(실제 응답): 800개" in message
+    assert "추가 pagination pages(page 2+): 160개" in message
+
+
 def test_weather_report_fails_when_24h_base_time_coverage_is_incomplete(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     cursor = RecordingCursor(
@@ -171,8 +191,9 @@ def test_weather_message_does_not_include_webhook(monkeypatch):
     assert "✅ 리포트 상태: 성공" in message
     assert "success=2 failed=1 running=0" in message
     assert "API 호출건수" not in message
-    assert "Bronze grid slots: 640/640개" in message
-    assert "Bronze raw pages: 640개" in message
+    assert "Bronze grid slots(커버리지): 640/640개" in message
+    assert "Bronze raw API pages(실제 응답): 640개" in message
+    assert "추가 pagination pages(page 2+): 0개" in message
     assert "Bronze" in message
 
 
