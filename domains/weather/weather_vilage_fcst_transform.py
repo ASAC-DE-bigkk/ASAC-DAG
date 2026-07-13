@@ -21,6 +21,7 @@ from airflow.models.param import Param
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
+from airflow.sdk.exceptions import AirflowFailException
 from airflow.utils.trigger_rule import TriggerRule
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
@@ -159,6 +160,11 @@ def publish_dbt_run_metrics(run_results_path: str = RUN_RESULTS_PATH, **context)
     records = dump_dbt_run_results(run_results_path, domain=DOMAIN, target=target)
     print(f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})")
     return {"rows": len(records), "skipped": False}
+
+
+def fail_transform_if_upstream_failed() -> None:
+    """Leave a failed DAG leaf whenever a transform task fails."""
+    raise AirflowFailException("weather transform upstream task failed")
 
 
 with DAG(
@@ -303,6 +309,13 @@ with DAG(
         on_failure_callback=record_weather_problem,
     )
 
+    propagate_transform_failure = PythonOperator(
+        task_id="fail_transform_if_upstream_failed",
+        python_callable=fail_transform_if_upstream_failed,
+        trigger_rule=TriggerRule.ONE_FAILED,
+        retries=0,
+    )
+
     (
         validate_runtime
         >> dbt_deps
@@ -320,3 +333,21 @@ with DAG(
         >> dbt_test_place_mart
         >> publish_dbt_metrics
     )
+
+    for transform_task in (
+        validate_runtime,
+        dbt_deps,
+        dbt_source_freshness,
+        dbt_seed_asac_axes,
+        dbt_run_common_admin_dong_dimension,
+        dbt_test_common_admin_dong_dimension,
+        dbt_seed_place_mapping,
+        dbt_test_place_mapping_seed,
+        dbt_run_silver,
+        dbt_test_silver,
+        dbt_run_gold,
+        dbt_test_gold,
+        dbt_run_place_mart,
+        dbt_test_place_mart,
+    ):
+        transform_task >> propagate_transform_failure

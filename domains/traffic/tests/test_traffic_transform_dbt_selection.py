@@ -63,10 +63,12 @@ class FakeBashOperator:
         self.bash_command = bash_command
         self.kwargs = kwargs
         self.downstream_task_ids = set()
+        self.upstream_task_ids = set()
         FakeDAG._stack[-1].add_task(self)
 
     def __rshift__(self, other):
         self.downstream_task_ids.add(other.task_id)
+        other.upstream_task_ids.add(self.task_id)
         return other
 
 
@@ -76,10 +78,12 @@ class FakePythonOperator:
         self.python_callable = python_callable
         self.kwargs = kwargs
         self.downstream_task_ids = set()
+        self.upstream_task_ids = set()
         FakeDAG._stack[-1].add_task(self)
 
     def __rshift__(self, other):
         self.downstream_task_ids.add(other.task_id)
+        other.upstream_task_ids.add(self.task_id)
         return other
 
 
@@ -107,6 +111,7 @@ class FakeAirflowFailException(Exception):
 
 class FakeTriggerRule:
     ALL_DONE = "all_done"
+    ONE_FAILED = "one_failed"
 
 
 def install_airflow_fakes():
@@ -183,7 +188,10 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
 
     assert set(expected_task_order) <= set(dag.task_ids)
     for upstream_task_id, downstream_task_id in zip(expected_task_order, expected_task_order[1:]):
-        assert dag.task_dict[upstream_task_id].downstream_task_ids == {downstream_task_id}
+        assert dag.task_dict[upstream_task_id].downstream_task_ids == {
+            downstream_task_id,
+            "fail_transform_if_upstream_failed",
+        }
 
     dbt_task_ids = [task_id for task_id in expected_task_order if task_id != "resolve_traffic_snapshot_run"]
     task_commands = {
@@ -215,7 +223,10 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
             == "resolve_traffic_snapshot_run"
         )
         assert dag.task_dict[task_id].kwargs["op_kwargs"]["silver_persisted"] is False
-    assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {"dbt_deps"}
+    assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {
+        "dbt_deps",
+        "fail_transform_if_upstream_failed",
+    }
     assert (
         "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current"
         in task_commands["dbt_run_silver"]
@@ -529,7 +540,10 @@ def test_traffic_transform_validates_dev_runtime_before_dbt():
         "domain": "traffic",
         "requested_target": "{{ params.target }}",
     }
-    assert guard.downstream_task_ids == {"resolve_traffic_snapshot_run"}
+    assert guard.downstream_task_ids == {
+        "resolve_traffic_snapshot_run",
+        "fail_transform_if_upstream_failed",
+    }
 
 
 def test_traffic_transform_limits_target_param_to_dev_or_prod():
@@ -548,11 +562,48 @@ def test_traffic_transform_publishes_dbt_run_metrics_after_terminal_test():
 
     assert task.kwargs["trigger_rule"] == "all_done"
     assert module.dag.task_dict["dbt_test_gold"].downstream_task_ids == {
-        "publish_dbt_run_metrics"
+        "publish_dbt_run_metrics",
+        "fail_transform_if_upstream_failed",
     }
 
 
-def test_traffic_metrics_use_terminal_dbt_artifact_path():
+def test_traffic_transform_has_independent_failure_propagating_leaf():
+    module = load_transform_module()
+    dag = module.dag
+    transform_task_ids = {
+        "validate_dev_runtime",
+        "resolve_traffic_snapshot_run",
+        "dbt_deps",
+        "dbt_source_freshness",
+        "dbt_test_traffic_incident_availability",
+        "dbt_seed_asac_axes",
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
+        "dbt_run_silver",
+        "dbt_test_silver",
+        "dbt_run_gold",
+        "dbt_test_gold",
+    }
+
+    metrics = dag.task_dict["publish_dbt_run_metrics"]
+    watcher = dag.task_dict["fail_transform_if_upstream_failed"]
+
+    assert metrics.kwargs["trigger_rule"] == FakeTriggerRule.ALL_DONE
+    assert watcher.kwargs["trigger_rule"] == FakeTriggerRule.ONE_FAILED
+    assert watcher.kwargs["retries"] == 0
+    assert metrics.downstream_task_ids == set()
+    assert watcher.downstream_task_ids == set()
+    assert watcher.upstream_task_ids == transform_task_ids
+
+
+def test_traffic_failure_propagation_callable_always_fails():
+    module = load_transform_module()
+
+    with pytest.raises(FakeAirflowFailException, match="traffic transform upstream task failed"):
+        module.fail_transform_if_upstream_failed()
+
+
+def test_traffic_metrics_use_latest_current_run_dbt_artifact_path():
     module = load_transform_module()
     terminal_path = "/tmp/traffic-terminal/run_results.json"
     ti = types.SimpleNamespace(
@@ -561,7 +612,85 @@ def test_traffic_metrics_use_terminal_dbt_artifact_path():
         )
     )
 
-    assert module._terminal_run_results_path(ti=ti) == terminal_path
+    assert module._current_run_results_path(ti=ti) == terminal_path
+
+
+def test_traffic_metrics_use_earlier_success_artifact_when_later_phases_have_none():
+    module = load_transform_module()
+    earlier_path = "/tmp/traffic-silver/run_results.json"
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids, key=None: (
+            {"artifact_path": earlier_path}
+            if task_ids == "dbt_run_silver" and key is None
+            else None
+        )
+    )
+
+    assert module._current_run_results_path(ti=ti) == earlier_path
+
+
+def test_traffic_metrics_use_earlier_failure_artifact():
+    module = load_transform_module()
+    failure_path = "/tmp/traffic-freshness-failure/run_results.json"
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids, key=None: (
+            {"dbt_artifact_path": failure_path}
+            if task_ids == "dbt_source_freshness" and key == module.DBT_FAILURE_XCOM_KEY
+            else None
+        )
+    )
+
+    assert module._current_run_results_path(ti=ti) == failure_path
+
+
+def test_traffic_metrics_prefer_most_advanced_current_run_artifact():
+    module = load_transform_module()
+    artifacts = {
+        ("dbt_deps", None): {"artifact_path": "/tmp/deps/run_results.json"},
+        ("dbt_run_silver", module.DBT_FAILURE_XCOM_KEY): {
+            "dbt_artifact_path": "/tmp/silver-failure/run_results.json"
+        },
+        ("dbt_run_gold", None): {"artifact_path": "/tmp/gold/run_results.json"},
+    }
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids, key=None: artifacts.get((task_ids, key))
+    )
+
+    assert module._current_run_results_path(ti=ti) == "/tmp/gold/run_results.json"
+
+
+def test_traffic_metrics_resolver_never_falls_back_to_shared_target(tmp_path, monkeypatch):
+    module = load_transform_module()
+    stale_shared_result = tmp_path / "target" / "run_results.json"
+    stale_shared_result.parent.mkdir()
+    stale_shared_result.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(module, "RUN_RESULTS_PATH", str(stale_shared_result))
+    ti = types.SimpleNamespace(xcom_pull=lambda **_kwargs: None)
+
+    assert module._current_run_results_path(ti=ti) is None
+
+
+def test_traffic_metrics_skip_stale_shared_target_without_current_run_artifact(
+    tmp_path, monkeypatch
+):
+    module = load_transform_module()
+    stale_shared_result = tmp_path / "target" / "run_results.json"
+    stale_shared_result.parent.mkdir()
+    stale_shared_result.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(module, "RUN_RESULTS_PATH", str(stale_shared_result))
+    published_paths = []
+    monkeypatch.setattr(
+        module,
+        "dump_dbt_run_results",
+        lambda path, **_kwargs: published_paths.append(path) or [{}],
+    )
+    ti = types.SimpleNamespace(xcom_pull=lambda **_kwargs: None)
+
+    assert module.publish_dbt_run_metrics(ti=ti, params={"target": "dev"}) == {
+        "rows": 0,
+        "skipped": True,
+    }
+    assert published_paths == []
 
 
 def test_traffic_publish_dbt_run_metrics_forwards_domain_and_target(tmp_path, monkeypatch):
