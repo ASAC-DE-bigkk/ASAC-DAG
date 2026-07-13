@@ -42,6 +42,16 @@ This file governs the **commerce** category bundle at `dags/domains/commerce/`.
 - 커밋 자체는 승인 없이 논리 단위로 진행한다(한국어 conventional 메시지). 즉 **커밋 = 상시, push/PR = 승인 후.**
 
 
+### Pending cleanup tasks (있으면 읽고 실행)
+
+작업 지시를 받으면, 아래 **미완(OPEN) 러북**이 있는지 먼저 확인하고 해당하면 그 문서만 읽고 실행한다
+(각 러북은 환경별 체크리스트 포함 — 특히 물리 테이블 삭제는 환경마다 상태가 달라 실측 후 결정). 완료하면
+러북의 상태를 `DONE` 으로 바꾸고 `change-log.md` 에 남긴다.
+
+- **[docs/cleanup-detail-health.md](docs/cleanup-detail-health.md)** — `silver_license_detail_health`
+  레거시(폐기·gold 승계) 제거. 코드 정리(dbt/dags) + **환경별 물리 테이블 drop 체크리스트**. 상태: OPEN.
+
+
 ## 0. Primary Operating Rule
 
 

@@ -22,6 +22,8 @@ commerce 카테고리 문서 모음. 코드·설정·테스트·문서·규약(C
 - **데이터 모델(레이어 계보·테이블·139→152 공통화)**: [pipeline/data-model.md](pipeline/data-model.md)
 - **파이프라인 계약(컬럼·마커·카탈로그)**: [pipeline/common_info.md](pipeline/common_info.md)
 - **폴더 구성 규약(heritage)**: [architecture/project_setting.md](architecture/project_setting.md)
+- **silver dbt 오케스트레이션(Cosmos)·비대응 영역·lineage 방향**: [cosmos.md](cosmos.md)
+- **[작업 러북] detail_health 레거시 제거(OPEN, 물리테이블 env별 체크)**: [cleanup-detail-health.md](cleanup-detail-health.md)
 - **보안 종합검증(단일 포인트)**: [security/security.md](security/security.md) · `python -m security`
 - **변경 이력(대단위 변경 기록)**: [../change-log.md](../change-log.md)
 
