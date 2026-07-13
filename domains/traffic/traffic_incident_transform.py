@@ -33,7 +33,7 @@ DAGS_ROOT_DIR = os.path.dirname(os.path.dirname(DAG_DIR))
 if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
-from _shared.bronze_run_manifest import MANIFEST_TABLE, STATUS_SUCCESS  # noqa: E402
+from weather.bronze_run_manifest import MANIFEST_TABLE, STATUS_SUCCESS  # noqa: E402
 from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa: E402
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402

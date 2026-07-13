@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from _shared.bronze_run_manifest import failure_reason_from_context  # noqa: E402
+from weather.bronze_run_manifest import failure_reason_from_context  # noqa: E402
 
 
 def test_failure_reason_does_not_store_exception_message():

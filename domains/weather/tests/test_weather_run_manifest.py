@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from _shared.bronze_run_manifest import (  # noqa: E402
+from weather.bronze_run_manifest import (  # noqa: E402
     STATUS_SUCCESS,
     record_bronze_run_event,
 )
