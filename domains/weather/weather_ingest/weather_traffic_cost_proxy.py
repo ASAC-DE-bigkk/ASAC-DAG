@@ -1,4 +1,3 @@
-# shared-domains: weather,traffic
 """Read-only Weather/Traffic Trino cost-proxy benchmark.
 
 The benchmark deliberately measures Trino/Iceberg/Airflow-adjacent proxy
@@ -20,12 +19,16 @@ import sys
 from typing import Any, Iterable, Mapping
 
 
-DAGS_ROOT = Path(__file__).resolve().parents[2]
-for import_path in (DAGS_ROOT, DAGS_ROOT / "domains" / "weather", DAGS_ROOT / "domains" / "traffic"):
+DAGS_ROOT = Path(__file__).resolve().parents[3]
+for import_path in (
+    DAGS_ROOT,
+    DAGS_ROOT / "domains" / "weather",
+    DAGS_ROOT / "domains" / "traffic",
+):
     if str(import_path) not in sys.path:
         sys.path.insert(0, str(import_path))
 
-from common.trino_query_metrics import (  # noqa: E402
+from weather_ingest.trino_query_metrics import (  # noqa: E402
     TelemetryCursor,
     collect_iceberg_fingerprint,
     sql_string,

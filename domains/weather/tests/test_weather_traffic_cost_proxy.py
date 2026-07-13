@@ -1,13 +1,15 @@
-# shared-domains: weather,traffic
 """Pure-function tests for the Weather/Traffic cost-proxy benchmark CLI."""
 from __future__ import annotations
 
 import importlib.util
 import json
 from pathlib import Path
+import sys
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "benchmarks" / "weather_traffic_cost_proxy.py"
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "domains" / "weather"))
+SCRIPT_PATH = ROOT / "domains" / "weather" / "weather_ingest" / "weather_traffic_cost_proxy.py"
 SPEC = importlib.util.spec_from_file_location("cost_proxy_benchmark", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 benchmark = importlib.util.module_from_spec(SPEC)

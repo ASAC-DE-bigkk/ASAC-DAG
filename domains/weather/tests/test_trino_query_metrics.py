@@ -1,4 +1,3 @@
-# shared-domains: weather,traffic
 """Trino 비용 대리 지표 수집 단위 테스트.
 
 실제 Trino/네트워크 없이 System connector의 컬럼 차이와 cursor.stats 폴백을
@@ -8,9 +7,10 @@ from pathlib import Path
 import sys
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "domains" / "weather"))
 
-from common.trino_query_metrics import (  # noqa: E402
+from weather_ingest.trino_query_metrics import (  # noqa: E402
     TelemetryCursor,
     collect_iceberg_fingerprint,
     collect_query_metrics,
