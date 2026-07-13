@@ -350,6 +350,7 @@ with DAG(
     dbt_run_silver = dbt_task(
         "dbt_run_silver",
         "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current",
+        fresh_parse=True,
     )
 
     dbt_test_silver = dbt_task(
