@@ -230,6 +230,39 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
     assert "test --select" in dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["dbt_args"]
 
 
+def test_dbt_deps_omits_target_path_but_model_phases_keep_isolated_artifacts(monkeypatch):
+    module = load_transform_module()
+    commands = []
+    ti = types.SimpleNamespace(
+        task_id="dbt_run_silver",
+        try_number=1,
+        xcom_pull=lambda task_ids: "snapshot-a" if task_ids == module.SNAPSHOT_TASK_ID else None,
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **_kwargs: (commands.append(command) or types.SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        )),
+    )
+
+    for dbt_args in ("deps", "run --select silver_seoul_traffic_incident"):
+        module.run_dbt_phase(
+            dbt_args=dbt_args,
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=False,
+            ti=ti,
+            run_id="manual__a",
+            params={"target": "dev"},
+        )
+
+    deps_command, run_command = commands
+    assert "--target-path" not in deps_command
+    assert "--target-path" in run_command
+    assert deps_command[deps_command.index("--vars") + 1] == '{"traffic_snapshot_dag_run_id": "snapshot-a"}'
+    assert run_command[run_command.index("--vars") + 1] == '{"traffic_snapshot_dag_run_id": "snapshot-a"}'
+
+
 def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(monkeypatch):
     module = load_transform_module()
     pushed = {}

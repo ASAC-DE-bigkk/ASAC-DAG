@@ -124,8 +124,9 @@ def run_dbt_phase(*, dbt_args: str, snapshot_task_id: str,
         "--target", target,
         "--no-use-colors",
         "--vars", f'{{"traffic_snapshot_dag_run_id": "{snapshot_run_id}"}}',
-        "--target-path", str(Path(artifact_path).parent),
     ]
+    if shlex.split(dbt_args)[0] != "deps":
+        command.extend(["--target-path", str(Path(artifact_path).parent)])
     env = os.environ.copy()
     env["DBT_PROFILES_DIR"] = DBT_PROJECT
     env["DBT_PROJECT_DIR"] = DBT_PROJECT
