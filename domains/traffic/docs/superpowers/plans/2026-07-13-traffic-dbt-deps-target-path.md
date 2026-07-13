@@ -57,7 +57,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add domains/traffic/traffic_incident_transform.py domains/traffic/tests/test_traffic_transform_dbt_selection.py docs/superpowers
+git add domains/traffic/traffic_incident_transform.py domains/traffic/tests/test_traffic_transform_dbt_selection.py domains/traffic/docs/superpowers
 git commit -m "fix(traffic): omit target path from dbt deps"
 ```
 
