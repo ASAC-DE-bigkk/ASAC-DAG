@@ -124,7 +124,8 @@ def _artifact_path(*, run_id: str | None, task_id: str | None, try_number: int |
 
 
 def run_dbt_phase(*, dbt_args: str, snapshot_task_id: str,
-                  silver_persisted: bool, **context) -> dict[str, str]:
+                  silver_persisted: bool, fresh_parse: bool = False,
+                  **context) -> dict[str, str]:
     """Run one pinned dbt phase and let Airflow retry infrastructure failures only."""
     ti = context["ti"]
     snapshot_run_id = ti.xcom_pull(task_ids=snapshot_task_id)
@@ -134,24 +135,33 @@ def run_dbt_phase(*, dbt_args: str, snapshot_task_id: str,
     artifact_path = _artifact_path(run_id=run_id, task_id=task_id, try_number=try_number)
     params = context.get("params") or {}
     target = params.get("target", "dev")
-    command = [
-        DBT_BIN,
-        *shlex.split(dbt_args),
-        "--target", target,
-        "--no-use-colors",
-        "--vars", f'{{"traffic_snapshot_dag_run_id": "{snapshot_run_id}"}}',
-    ]
-    if shlex.split(dbt_args)[0] != "deps":
-        command.extend(["--target-path", str(Path(artifact_path).parent)])
+    def build_command(current_args: str) -> list[str]:
+        command = [
+            DBT_BIN,
+            *shlex.split(current_args),
+            "--target", target,
+            "--no-use-colors",
+            "--vars", f'{{"traffic_snapshot_dag_run_id": "{snapshot_run_id}"}}',
+        ]
+        if shlex.split(current_args)[0] != "deps":
+            command.extend(["--target-path", str(Path(artifact_path).parent)])
+        return command
+
     env = os.environ.copy()
     env["DBT_PROFILES_DIR"] = DBT_PROJECT
     env["DBT_PROJECT_DIR"] = DBT_PROJECT
-    completed = subprocess.run(command, cwd=DBT_PROJECT, env=env, check=False,
-                               capture_output=True, text=True)
-    if completed.stdout:
-        print(completed.stdout, end="")
-    if completed.stderr:
-        print(completed.stderr, end="", file=sys.stderr)
+    phase_args = ["parse --no-partial-parse", dbt_args] if fresh_parse else [dbt_args]
+    for current_args in phase_args:
+        completed = subprocess.run(
+            build_command(current_args), cwd=DBT_PROJECT, env=env, check=False,
+            capture_output=True, text=True,
+        )
+        if completed.stdout:
+            print(completed.stdout, end="")
+        if completed.stderr:
+            print(completed.stderr, end="", file=sys.stderr)
+        if completed.returncode != 0:
+            break
     if completed.returncode == 0:
         return {"status": "success", "artifact_path": artifact_path}
 
@@ -223,7 +233,8 @@ def record_traffic_dbt_problem(context) -> None:
         pass
 
 
-def dbt_task(task_id: str, dbt_args: str, *, silver_persisted: bool = False) -> PythonOperator:
+def dbt_task(task_id: str, dbt_args: str, *, silver_persisted: bool = False,
+             fresh_parse: bool = False) -> PythonOperator:
     return PythonOperator(
         task_id=task_id,
         python_callable=run_dbt_phase,
@@ -231,6 +242,7 @@ def dbt_task(task_id: str, dbt_args: str, *, silver_persisted: bool = False) -> 
             "dbt_args": dbt_args,
             "snapshot_task_id": SNAPSHOT_TASK_ID,
             "silver_persisted": silver_persisted,
+            "fresh_parse": fresh_parse,
         },
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
@@ -349,13 +361,18 @@ with DAG(
             # gold-silver 교차 카운트 테스트는 silver 모델명 셀렉터가 참조 테스트로
             # 끌어오지만, 이 단계에서는 gold가 직전 사이클 상태라 silver 가 갱신된
             # 사이클마다 구조적으로 FAIL 한다. gold 재빌드 후 dbt_test_gold 에서만 돌린다.
-            "--exclude assert_gold_traffic_counts_match_silver"
+            "--exclude assert_gold_traffic_counts_match_silver "
+            "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles"
         ),
         silver_persisted=True,
     )
 
     dbt_run_gold = dbt_task(
-        "dbt_run_gold", "run --select gold_traffic_incident_summary", silver_persisted=True
+        "dbt_run_gold",
+        "run --select gold_traffic_incident_summary "
+        "gold_traffic_incident_current_by_admin_dong_hourly",
+        silver_persisted=True,
     )
 
     dbt_test_gold = dbt_task(
@@ -363,10 +380,20 @@ with DAG(
         (
             "test --select "
             "gold_traffic_incident_summary "
+            "gold_traffic_incident_current_by_admin_dong_hourly "
             "assert_gold_traffic_counts_match_silver "
-            "assert_gold_traffic_row_counts_positive"
+            "assert_gold_traffic_row_counts_positive "
+            "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact "
+            "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_grain_unique "
+            "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness "
+            "assert_gold_traffic_current_by_admin_dong_hourly_product_row_id_reproducible "
+            "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_zero_requires_complete"
         ),
         silver_persisted=True,
+        fresh_parse=True,
     )
 
     publish_dbt_metrics = PythonOperator(
