@@ -156,6 +156,7 @@ def finalize(plan: dict, load_results: list[dict], maint_results: list[dict] | N
         log.warning("pending 폐기(3일 경과, complete 없음): %s", plan["pending_expired"])
 
     # DAG 단위 완료 리포트 → Discord(common.discord, #218). API(short)·category(한글) 단위.
+    # 적재 0건이어도 요약 리포트는 보낸다(실행 이력 가시성 — 세부 없이 0건 요약만).
     try:
         from commerce_core import run_report   # 지연 임포트
 
@@ -165,12 +166,14 @@ def finalize(plan: dict, load_results: list[dict], maint_results: list[dict] | N
                "task": "load_one"} for r in results]
         rr += [{"short": sh, "status": "failed", "error": "적재 실패(다음 실행 재시도)",
                 "task": "load_one"} for (sh, _run) in failed]
-        if rr:
-            extra = [run_report.maintenance_section(maint_results)] if maint_results else None
-            metrics["report"] = run_report.send_run_report(
-                dag_id="commerce_load_bronze", run_id=metrics["finalized_at"],
-                observed_date=datetime.now(KST).strftime("%Y-%m-%d"),
-                stage="bronze_load", results=rr, extra_sections=extra)
+        extra = [run_report.maintenance_section(maint_results)] if maint_results else []
+        if not rr:
+            extra.append("**적재 대상 없음(0건)** — 워터마크 이후 신규 증분 run 없음"
+                         "(전부 기적재·변경 없음)")
+        metrics["report"] = run_report.send_run_report(
+            dag_id="commerce_load_bronze", run_id=metrics["finalized_at"],
+            observed_date=datetime.now(KST).strftime("%Y-%m-%d"),
+            stage="bronze_load", results=rr, extra_sections=extra or None)
     except Exception as exc:  # noqa: BLE001
         log.warning("run report 스킵(무시): %s", type(exc).__name__)
     return metrics

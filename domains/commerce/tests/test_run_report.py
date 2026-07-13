@@ -141,3 +141,22 @@ def test_paginate_keeps_code_fence_balanced():
     assert len(pages) > 1
     for p in pages:
         assert p.count("```") % 2 == 0                          # 각 페이지 코드펜스 균형
+
+
+def test_empty_results_zero_summary():
+    # 적재 대상 0건(재실행 등) — 세부 없이 '신규 0건 · 0종' 요약 임베드가 성립(0건 리포트 계약).
+    rep = _build([], stage="bronze_load")
+    d = rep["description"]
+    assert rep["counts"]["total"] == 0 and rep["counts"]["new"] == 0
+    assert rep["color"] == run_report.COLOR_OK                  # 0건은 정상(초록)
+    assert "0종" in rep["title"] and "신규 0건" in d
+    assert "❌ 실패" not in d and "⛔ 미수집" not in d           # 세부 섹션 없음(요약만)
+
+
+def test_send_empty_results_with_extra_section():
+    # bronze finalize 0건 경로 — extra_sections(적재 대상 없음)와 함께 전송돼도 counts 반환.
+    counts = run_report.send_run_report(
+        dag_id="commerce_load_bronze", run_id="r0", observed_date="2026-07-13",
+        stage="bronze_load", results=[],
+        extra_sections=["**적재 대상 없음(0건)** — 워터마크 이후 신규 증분 run 없음"])
+    assert counts["total"] == 0 and counts["new"] == 0

@@ -43,12 +43,16 @@ def send_gold_report(*, catalog: dict | None, load: dict | None,
     nonzero = sorted(((k, v) for k, v in loaded.items() if v > 0), key=lambda x: -x[1])
     n_zero = sum(1 for v in loaded.values() if v == 0)
     drift = bool(catalog.get("drift"))
+    skipped = load.get("skipped")
 
     head = (f"**카탈로그** v`{str(catalog.get('version', '?'))[:8]}` · "
             f"cluster {catalog.get('clusters', '?')}·single {catalog.get('singles', '?')}"
             f" · 실측 {catalog.get('datasets', '?')}종"
             + (" · ⚠️ **드리프트(신규 API/필드)**" if drift else "")
             + f"\n**적재** {_num(total_rows)}행 / {len(loaded)}객체 · hi=`{load.get('hi', '?')}`")
+    if skipped:
+        head += ("\n**⏭ 적재 0건 — 신규 없음(기적재만)**: silver 워터마크가 gold 마커 이하 → "
+                 "적재·검증 생략(마커 기반 조기 스킵, 정상)")
     if elapsed_seconds is not None:
         head += f" · ⏱ {_fmt_elapsed(elapsed_seconds)}"
 

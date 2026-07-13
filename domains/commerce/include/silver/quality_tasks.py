@@ -101,12 +101,17 @@ def notify_masked_address_dong_skip_summary() -> dict:
     return summary
 
 
-def report_silver_run(elapsed_seconds: float | None = None) -> dict:
+def report_silver_run(elapsed_seconds: float | None = None,
+                      marked: dict | None = None) -> dict:
     """silver current 를 데이터셋(API)별로 집계해 DAG 완료 리포트 전송(#218, stage=silver).
 
     silver 는 dbt 로 전 데이터셋을 한 번에 변환하므로(태스크 단위 API 구분 없음) 변환 결과인
     `silver_license_current` 를 **데이터셋(=short=API)별 현재 행수**로 집계해 리포트 내부를 API
     단위로 채운다. dbt run/test 실패 등으로 조회가 불가하면 DAG 단위 실패로 리포트한다(best-effort).
+
+    marked: mark_silver_done XCom(inserted/inserted_no_rows) — 이번 실행이 **새로 처리한 run**
+    규모를 리포트에 표기한다. 0이면 "신규 없음(기적재만·변경 없음)" — '현재 행수'만으로는
+    신규 0건 여부가 드러나지 않는 문제의 보완(0건 가시성).
     """
     from datetime import datetime, timedelta, timezone
 
@@ -131,9 +136,18 @@ def report_silver_run(elapsed_seconds: float | None = None) -> dict:
         log.warning("silver 리포트 집계 실패(%s) — 실패 리포트로 대체", type(exc).__name__)
         results = [{"short": "silver", "status": "failed", "task": "dbt_run_silver·dbt_test_silver",
                     "error": "silver current 집계 실패(dbt run/test 결과 확인)"}]
+    extra = None
+    if marked is not None:
+        n_new = int(marked.get("inserted") or 0)
+        n_zero = int(marked.get("inserted_no_rows") or 0)
+        if n_new <= 0 and n_zero <= 0:
+            extra = ["**이번 실행 신규 처리 run 0건** — 기적재만(변경 없음), 재적재 없음"]
+        else:
+            extra = [f"**이번 실행 신규 처리 run 마킹** {max(n_new, 0)}건"
+                     + (f" · 0행(dedup) run {n_zero}건" if n_zero > 0 else "")]
     counts = run_report.send_run_report(
         dag_id="commerce_load_silver", run_id=observed, observed_date=observed,
         stage="silver", results=results, count_label="현재", show_total=False,
-        elapsed_seconds=elapsed_seconds)
+        elapsed_seconds=elapsed_seconds, extra_sections=extra)
     log.info("silver run report: %s", counts)
     return counts

@@ -4,6 +4,11 @@
 durable completion marker by themselves. A run is considered complete only after
 `dbt test` succeeds; this module records that state in
 `silver_load_run_marker`.
+
+내구성(2026-07-13 실측 사고 대응): 마커 테이블은 웨어하우스 소속이라 drop/재생성 시 DONE 이
+통째로 유실돼 기적재 run 이 신규처럼 재선별·재적재된다(물리 세대 8개 실측). 그래서 마커 변경
+직후마다 R2 파일 스냅샷(`commerce_core.silver_state`)을 동기화하고, 테이블 생성 시 그 스냅샷에서
+복원한다. gold 는 같은 레이어의 `_watermark.json` 으로 "신규 없음"을 판정해 조기 스킵한다.
 """
 from __future__ import annotations
 
@@ -16,6 +21,7 @@ log = logging.getLogger(__name__)
 
 MARKER_TABLE = "silver_load_run_marker"
 HISTORY_TABLE = "silver_license_history"
+_RESTORE_BATCH = 200   # 스냅샷 복원 INSERT VALUES 배치 크기(Trino 파라미터 한도 여유)
 
 
 def _utcnow_ts() -> str:
@@ -32,13 +38,62 @@ def _table_exists(cur, catalog: str, schema: str, table: str) -> bool:
     return int(cur.fetchall()[0][0]) > 0
 
 
+def _read_done_pairs(cur, qmarker: str) -> set[tuple[str, str]]:
+    """마커 테이블의 DONE (dataset, bronze_run_id) 집합."""
+    cur.execute(  # security: allow-sql - qmarker 는 _qualified() 검증 식별자
+        f"""
+        SELECT cast(dataset as varchar), cast(bronze_run_id as varchar)
+        FROM {qmarker} WHERE status = 'DONE'
+        """)
+    return {(r[0], r[1]) for r in cur.fetchall()}
+
+
+def _restore_from_snapshot(cur, qmarker: str) -> int:
+    """R2 스냅샷에 있는데 테이블에 없는 DONE 을 복원 — 테이블 유실/재생성 사고 시
+    기적재 run 이 신규처럼 재선별·재적재되는 것을 차단(2026-07-13 실측 사고 재발 방지).
+
+    스냅샷은 dbt test 통과 후에만 기록되고 언마크 시에도 즉시 동기화되므로(테이블과 한 몸)
+    복원해도 과대 마킹이 되지 않는다. 스냅샷 부재/읽기 실패는 복원 생략(경고만)."""
+    try:
+        from commerce_core import silver_state
+        from commerce_core.settings import get_settings
+        from commerce_core.storage import get_storage
+
+        snap = silver_state.read_marker_snapshot(get_storage(), get_settings().storage_prefix)
+    except Exception as exc:  # noqa: BLE001 — 스냅샷 접근 실패가 마커 준비를 못 막게
+        log.warning("silver marker R2 스냅샷 읽기 실패(복원 생략): %s", type(exc).__name__)
+        return 0
+    if not snap:
+        return 0
+    have = _read_done_pairs(cur, qmarker)
+    missing = sorted(set(snap) - have)
+    ts = _utcnow_ts()
+    for i in range(0, len(missing), _RESTORE_BATCH):
+        batch = missing[i:i + _RESTORE_BATCH]
+        values = ", ".join(
+            "(?, ?, 'DONE', CAST(? AS timestamp(6)), 'restore_r2_snapshot')" for _ in batch)
+        params: list[str] = []
+        for ds, run in batch:
+            params += [ds, run, ts]
+        cur.execute(  # security: allow-sql - 값은 전부 바인딩, 식별자는 검증 완료
+            f"INSERT INTO {qmarker} (dataset, bronze_run_id, status, marked_at, marker_source) "
+            f"VALUES {values}", params)
+        cur.fetchall()
+    if missing:
+        log.warning("silver marker 테이블 유실 감지 — R2 스냅샷에서 %d건 복원(재적재 차단)",
+                    len(missing))
+    return len(missing)
+
+
 def ensure_silver_marker_table() -> dict:
     """Create marker table and bootstrap DONE markers from existing history.
 
     Bootstrap is needed when deploying this marker after `silver_license_history`
     already exists. Without it, the first incremental run would treat all old
     publishable bronze runs as unmarked.
-    """
+
+    순서: ① CREATE ② R2 스냅샷 복원(정확한 처리 이력 — 유실 사고 방어) ③ 패리티 부트스트랩
+    (스냅샷이 못 커버하는 배포 이전 이력용, NOT EXISTS 가드로 중복 없음)."""
     catalog, schema, qschema = _qualified()
     qmarker = f"{qschema}.{MARKER_TABLE}"
     qhistory = f"{qschema}.{HISTORY_TABLE}"
@@ -56,6 +111,8 @@ def ensure_silver_marker_table() -> dict:
             ) WITH (format = 'PARQUET')
             """)
         cur.fetchall()
+
+        restored = _restore_from_snapshot(cur, qmarker)
 
         bootstrapped = 0
         if _table_exists(cur, catalog, schema, HISTORY_TABLE):
@@ -107,8 +164,48 @@ def ensure_silver_marker_table() -> dict:
     finally:
         conn.close()
 
-    log.info("silver marker 준비 완료: table=%s bootstrapped=%s", qmarker, bootstrapped)
-    return {"marker_table": qmarker, "bootstrapped": bootstrapped}
+    log.info("silver marker 준비 완료: table=%s restored=%s bootstrapped=%s",
+             qmarker, restored, bootstrapped)
+    return {"marker_table": qmarker, "restored": restored, "bootstrapped": bootstrapped}
+
+
+def sync_state_files() -> dict:
+    """마커 테이블 → R2 스냅샷(`_markers.json`) + gold 핸드셰이크(`_watermark.json`) 동기화.
+
+    마커 테이블 변경(mark/unmark) 직후 호출한다 — 테이블과 파일은 한 몸. 실패는 경고만
+    (fail-open): 파일이 뒤처지면 gold 가 조기 스킵을 안 하고 기존 경로로 전진할 뿐이라 안전.
+    """
+    try:
+        from commerce_core import silver_state
+        from commerce_core.settings import get_settings
+        from commerce_core.storage import get_storage
+
+        catalog, schema, qschema = _qualified()
+        qmarker = f"{qschema}.{MARKER_TABLE}"
+        qhistory = f"{qschema}.{HISTORY_TABLE}"
+        conn = _connect(catalog, schema)
+        try:
+            cur = conn.cursor()
+            markers = sorted(_read_done_pairs(cur, qmarker))
+            max_ca = None
+            if _table_exists(cur, catalog, schema, HISTORY_TABLE):
+                cur.execute(  # security: allow-sql - 검증 식별자 상수 쿼리
+                    f"SELECT max(collected_at) FROM {qhistory}")
+                v = cur.fetchone()[0]
+                max_ca = v.isoformat() if v is not None else None
+        finally:
+            conn.close()
+        storage = get_storage()
+        prefix = get_settings().storage_prefix
+        silver_state.write_marker_snapshot(storage, prefix, markers)
+        silver_state.write_watermark(storage, prefix, max_collected_at=max_ca,
+                                     marker_rows=len(markers))
+        log.info("silver 상태 파일 동기화: markers=%d max_collected_at=%s", len(markers), max_ca)
+        return {"snapshot_rows": len(markers), "max_collected_at": max_ca}
+    except Exception as exc:  # noqa: BLE001 — 상태 파일 동기화 실패가 파이프라인을 못 막게
+        log.warning("silver 상태 파일 동기화 실패(무시 — gold 는 스킵 없이 전진): %s",
+                    type(exc).__name__)
+        return {"snapshot_rows": -1, "max_collected_at": None}
 
 
 def mark_silver_runs_done(*, processed_cutoff_run_id: str | None = None) -> dict:
@@ -192,4 +289,7 @@ def mark_silver_runs_done(*, processed_cutoff_run_id: str | None = None) -> dict
         conn.close()
 
     log.info("silver DONE marker 기록 완료: inserted=%s, no_rows=%s", inserted, inserted_no_rows)
-    return {"marker_table": qmarker, "inserted": inserted, "inserted_no_rows": inserted_no_rows}
+    # 테이블과 R2 스냅샷은 한 몸 — 마킹 직후 동기화(gold 핸드셰이크 워터마크 포함, fail-open).
+    synced = sync_state_files()
+    return {"marker_table": qmarker, "inserted": inserted, "inserted_no_rows": inserted_no_rows,
+            "state_files": synced}

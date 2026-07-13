@@ -118,6 +118,33 @@ def test_project_records_lineage():
     assert len(row["content_hash"]) == 64
 
 
+def test_content_hash_includes_source_coordinates():
+    # 계약(#63, 사용자 확정): 해시 입력 = raw 원본 전체 — **원천 좌표(X/Y·XCRD/YCRD)는 포함**.
+    # 좌표 채움(UPDATEDT 무갱신)도 원천 변경 = 정당한 버전. 제외 대상은 임의추가/파생컬럼뿐인데
+    # (행정동/법정동/위경도) 그것들은 silver 파생이라 입력(raw)에 구조적으로 존재하지 않는다.
+    base = {"MGTNO": "A", "UPDATEDT": "20260101000000", "BPLCNM": "가", "X": None, "Y": None}
+    coords = {**base, "X": "192371.111", "Y": "451234.222"}
+    v2 = {"MNG_NO": "A", "DATA_UPDT_YMD": "20260101", "XCRD": "1.0", "YCRD": "2.0"}
+    v2_moved = {**v2, "XCRD": "9.9", "YCRD": "8.8"}
+    assert wh._canonical_json(base) != wh._canonical_json(coords)          # 원천 좌표 변경 = 내용 변경
+    assert wh._canonical_json(v2) != wh._canonical_json(v2_moved)          # v2 별칭 동일 계약
+    assert wh._canonical_json(base) != wh._canonical_json({**base, "UPDATEDT": "20260202000000"})
+
+
+def test_content_hash_differs_when_only_coordinates_change():
+    # project_records 경유로도 동일 — 좌표만 다른 두 레코드는 서로 다른 버전(해시 상이),
+    # record_json 은 원본 그대로 보존(§2.2).
+    import json as _json
+    recs = [{"MGTNO": "A", "UPDATEDT": "20260101000000", "X": "192371.1", "Y": "451234.2"},
+            {"MGTNO": "A", "UPDATEDT": "20260101000000", "X": None, "Y": None}]
+    rows = list(wh.project_records(
+        recs, dataset="bakery", observed_date="2026-07-03", load_date="2026-07-03",
+        bronze_run_id="B", dag_run_id="D", raw_object_key="rk", increment_mode="changed",
+        schema_version="v1", collected_dt=datetime(2026, 7, 3, 5, 30, 25)))
+    assert _json.loads(rows[0]["record_json"])["X"] == "192371.1"          # 원본 보존
+    assert rows[0]["content_hash"] != rows[1]["content_hash"]              # 좌표 변경 = 버전
+
+
 # ── Trino 적재(멱등·바인딩) ─────────────────────────────────────────────────
 def test_load_unit_trino_delete_then_insert_bound(trino_env, monkeypatch):
     st = _FakeStorage()

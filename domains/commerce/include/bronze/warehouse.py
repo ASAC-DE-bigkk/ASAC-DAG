@@ -126,6 +126,12 @@ def ensure_schema_and_tables() -> None:
 
 
 # ── 증분 파일 → 레코드 → 컬럼 투영 ───────────────────────────────────────────
+# content_hash 입력 계약(사용자 확정 2026-07-13 — change-log #63): **raw 원본 레코드 전체**.
+# - 원천 좌표 컬럼(v1 X/Y·v2 XCRD/YCRD)은 브론즈에 원래 있던 원천 필드 → 해시에 **포함**.
+#   LOCALDATA 가 UPDATEDT 갱신 없이 좌표만 채워도 그것은 원천 변경 = 정당한 버전 이력으로
+#   기록된다(실측 07-09↔07-11 44건은 중복이 아니라 좌표 채움 버전).
+# - **임의 추가/파생 컬럼**(행정동/법정동/위도·경도 등 silver 보강·파생값)은 해시 입력 금지 —
+#   이 함수가 raw(rec)만 받는 구조로 보장한다(파생은 silver 에서 계산·컬럼 보존만, 해시 불변).
 def _canonical_json(rec: dict) -> str:
     return json.dumps(rec, ensure_ascii=False, sort_keys=True)
 
@@ -177,7 +183,8 @@ def project_records(records: Iterable[dict], *, dataset: str, observed_date: str
                     load_date: str, bronze_run_id: str, dag_run_id: str,
                     raw_object_key: str, increment_mode: str, schema_version: str,
                     collected_dt: datetime) -> Iterator[dict]:
-    """레코드 → 컬럼 dict(_COLUMNS). record_json=원본 통짜, content_hash=canonical sha256."""
+    """레코드 → 컬럼 dict(_COLUMNS). record_json=원본 통짜, content_hash=canonical sha256
+    (입력 = raw 원본 전체 — 원천 좌표 포함, 파생컬럼은 구조적으로 유입 불가. #63)."""
     for seq, rec in enumerate(records):
         yield {
             "dataset": dataset,
