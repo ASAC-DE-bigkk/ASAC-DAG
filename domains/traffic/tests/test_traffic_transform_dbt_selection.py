@@ -227,7 +227,15 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     )
     assert (
         task_commands["dbt_test_common_admin_dong_dimension"]
-        == "test --select asac_axes.dim_admin_dong"
+        == (
+            "test --select asac_axes.dim_admin_dong "
+            "--exclude "
+            "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact "
+            "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness "
+            "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles"
+        )
     )
     for task_id in (
         "dbt_run_common_admin_dong_dimension",
@@ -272,6 +280,22 @@ def test_silver_excludes_eager_gold_contracts_until_gold_rebuild():
     assert {
         "assert_gold_traffic_counts_match_silver",
         "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles",
+    } <= excluded_tokens
+
+
+def test_common_admin_dimension_excludes_eager_gold_contracts_until_gold_rebuild():
+    module = load_transform_module()
+    common_admin_test_args = module.dag.task_dict[
+        "dbt_test_common_admin_dong_dimension"
+    ].kwargs["op_kwargs"]["dbt_args"]
+    excluded_tokens = dbt_option_tokens(common_admin_test_args, "--exclude")
+
+    assert {
+        "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact",
+        "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness",
         "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles",
     } <= excluded_tokens
 
