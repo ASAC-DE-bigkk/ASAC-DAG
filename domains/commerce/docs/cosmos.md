@@ -196,8 +196,33 @@ Cosmos 가 청크 전량 빌드를 못 하므로(§3.1), **빈 silver 최초 빌
 - **로컬 검증 한계(주의)**: Marquez 이미지 버전(`0.50.0`)·OL provider 버전은 canonical 기준으로
   고정했고 이 저장소에서 런타임 검증은 못 했다(도커 미기동). 최초 기동 시 이미지 버전/마이그레이션이
   어긋나면 태그·env 를 조정한다(core 스택엔 영향 없음 — 프로파일 격리).
-- **전체 도메인 통합 뷰**: commerce 가 파일럿이다. 나머지 도메인도 Cosmos(또는 `dbt-ol`)로 올려 OL 을
-  방출하면 Marquez 가 물리명으로 자동 stitch → 6개 도메인 단일 그래프. (여기서는 commerce 만 배선.)
+  → 2026-07-12/13 실검증 완료: silver(Cosmos)→gold(Asset inlets/outlets) 엣지 Marquez 그래프 확인.
+- **트러블슈팅 — "Python 버전 때문에 Marquez 가 안 된다"(오인 주의)**: Marquez 3종은 **Java/Node
+  컨테이너**라 호스트·이미지 Python 과 무관하다. 이렇게 보이는 실제 원인 2가지와 해법:
+  1. **구 `docker-compose`(v1 — Python 기반, pip 설치)**: `profiles`/신문법 파싱 실패가 Python
+     스택트레이스로 나타난다. **Docker Compose v2(Go) 필요** — `docker compose version` 확인,
+     v1(`docker-compose` 1.x)이면 제거하고 하이픈 없는 `docker compose …` 를 쓴다.
+  2. **Airflow 이미지 build-arg `PYTHON_VERSION` 이 지원 밖**: Airflow 3.2.2 베이스 태그는
+     **3.10~3.13 만 존재**(3.9 는 404 → FROM 단계 정체불명 실패). canonical=**3.11**.
+     Dockerfile 에 fail-fast 가드가 있어 범위 밖이면 명확한 메시지로 즉시 실패한다.
+  - **Python 버전 변경(상향·하향) 시 전-프로젝트 영향 검증 절차**: 이미지는 전 도메인 공유 —
+    ① 대상 태그 존재 확인(`apache/airflow:3.2.2-pythonX.Y`) ② rebuild 후
+    `airflow dags list-import-errors` **전 도메인 0건** ③ commerce `pytest`/`python -m security`
+    ④ Marquez 기동 + DAG 1회 실행으로 OL 방출 확인. **하향(≤3.9)은 태그 부재로 불가.**
+- **전체 도메인 통합 뷰(리니지 공유 전략 — 2026-07-13 확정)**: commerce 가 파일럿이다.
+  **dbt 프로젝트 폴더 통합은 불필요** — OL/Marquez 는 **물리 테이블명**(namespace `trino://trino:8080`
+  + `catalog.schema.table`)으로 stitch 하므로 프로젝트 구조와 무관하다(실증: commerce 에서 방출자가
+  다른 Cosmos(silver)와 Airflow Asset(gold)이 물리명만으로 자동 연결됨). 타 도메인이 `source()` 로
+  읽는 크로스도메인 테이블도 같은 물리명 → 자동 엣지. Marquez 버전 상향도 전제조건 아님(0.50 충분).
+  **필요한 것 = 각 도메인의 OL 방출 배선** 두 가지 경로:
+  1. **Cosmos 전환**(commerce 방식) — 모델당 태스크·테스트 렌더까지 원하면.
+  2. **`dbt-ol` 래퍼**(경량, BashOperator 유지) — 이미지 dbt venv(py3.11)에 `openlineage-dbt` 동봉
+     (Dockerfile). 기존 `dbt run …` 명령을 `dbt-ol run …` 으로 바꾸고 env 만 주면 끝:
+     ```bash
+     OPENLINEAGE_URL=http://marquez-api:5000 OPENLINEAGE_NAMESPACE=<domain>-elt \
+       /home/airflow/dbt-venv/bin/dbt-ol run --project-dir … --profiles-dir … --target dev
+     ```
+     ⚠ 호스트 파이썬으로 dbt-ol 을 돌리지 말 것(버전 편차) — **이미지 venv 사용이 정본**.
 - **보류**: dbt Mesh(cross-project `ref`)는 네이티브로 그래프를 잇지만 프로젝트별 public 계약·
   `dependencies.yml`·버전관리가 붙는 구조 변경이라, 현재는 손대지 않는다.
 

@@ -50,6 +50,12 @@ This file governs the **commerce** category bundle at `dags/domains/commerce/`.
 
 - **[docs/cleanup-detail-health.md](docs/cleanup-detail-health.md)** — `silver_license_detail_health`
   레거시(폐기·gold 승계) 제거. 코드 정리(dbt/dags) + **환경별 물리 테이블 drop 체크리스트**. 상태: OPEN.
+- **[docs/silver-gold-refactor-guide.md](docs/silver-gold-refactor-guide.md)** — silver/gold 구조 1차
+  판정(2026-07-12, Critical 0 · Major 4 · Minor 3) + 확정 변경 **C1~C7**(식별자 게이트·컬럼 단일화·
+  매크로 추출·exposures·문서 정합)과 검증 동반 **V1**(OL 엣지) 구현 지시. §4 변경 금지 목록 준수.
+  상태: **DONE(2026-07-12 — C1~C7+V1 전항 완료**, silver→gold 엣지 Marquez 실측 확인; 잔여 비고
+  2건은 가이드 §7 · change-log #58**)**. 공유 R2 멀티 환경 운영/복구 계약은
+  dbt `docs/rebuild-and-ops.md` **§7** 이 정본(2026-07-12 실측 검증).
 
 
 ## 0. Primary Operating Rule

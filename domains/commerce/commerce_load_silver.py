@@ -48,6 +48,7 @@ from security import install_security  # noqa: E402
 
 install_security()
 
+import json  # noqa: E402
 import os  # noqa: E402
 
 import pendulum  # noqa: E402
@@ -59,7 +60,7 @@ from cosmos import (  # noqa: E402
     ProjectConfig,
     RenderConfig,
 )
-from cosmos.constants import ExecutionMode, LoadMode, TestBehavior  # noqa: E402
+from cosmos.constants import ExecutionMode, InvocationMode, LoadMode, TestBehavior  # noqa: E402
 
 # dbt 실행 계약(호스트 이미지 env 우선, 없으면 기본값) — common_dbt_smoke 와 동일 형태.
 DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce")
@@ -69,6 +70,11 @@ DBT_TARGET = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
 # 모델 선택(리스트 = Cosmos RenderConfig.select / 문자열 join = chunked seed·비교용).
 SILVER_SELECT = ["silver_license_history", "silver_license_current"]
 SILVER_SELECT_STR = " ".join(SILVER_SELECT)
+# 스코프 dbt vars(운영 노브) — Cosmos 는 정적 렌더라 런타임 청크 루프가 불가하므로(위 docstring),
+# 저메모리 환경에서 dbt_silver 를 dataset 스코프로 돌릴 때 .env.commerce 에 JSON 으로 지정한다.
+# 예: COMMERCE_DBT_VARS='{"include_datasets": ["golf_course"]}' — 비우면(기본) 전체 증분.
+# 마커/pre_hook 은 include_datasets 스코프를 그대로 존중한다(silver_markers 매크로).
+_DBT_VARS: dict = json.loads(os.getenv("COMMERCE_DBT_VARS") or "{}")
 
 _DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5)}
 
@@ -84,12 +90,17 @@ _profile_config = ProfileConfig(
 _project_config = ProjectConfig(dbt_project_path=DBT_PROJECT_DIR)
 _execution_config = ExecutionConfig(
     execution_mode=ExecutionMode.LOCAL,
+    # cosmos>=1.15 는 Airflow env 에 dbt-core 가 보이면(openlineage extra 의존) DBT_RUNNER
+    # (in-process)를 기본으로 잡는다 — 이 DAG 의 계약은 별도 dbt venv(DBT_BIN) 실행이므로
+    # SUBPROCESS 를 명시해 venv 경계를 고정한다(위 docstring "dbt 실행 계약" 그대로).
+    invocation_mode=InvocationMode.SUBPROCESS,
     dbt_executable_path=DBT_BIN,
 )
 _render_config = RenderConfig(
     select=SILVER_SELECT,
     test_behavior=TestBehavior.AFTER_EACH,
     load_method=LoadMode.DBT_LS,
+    invocation_mode=InvocationMode.SUBPROCESS,   # 렌더(dbt ls)도 venv dbt — ExecutionConfig 와 동일 사유
     dbt_executable_path=DBT_BIN,
 )
 
@@ -122,32 +133,49 @@ def commerce_load_silver():
 
     @task
     def seed_silver_if_empty() -> dict:
-        """Cold start(빈 silver) 전용 안전 시드 — Cosmos 가 못 하는 청크 전량 빌드만 여기서.
+        """Cold start/재개 안전 시드 — Cosmos 가 못 하는 청크 전량 빌드·복구만 여기서.
 
-        silver_license_history 가 비어 있을 때만: dataset 청크로 전량 빌드 → dbt test →
-        (통과 시) DONE 마킹(기존 cold-start 순서 build→test→mark 를 한 태스크에 캡슐화). **마킹까지
-        끝내야** downstream Cosmos 증분(dbt_silver)이 pre_hook(delete_unmarked, include_datasets
-        비어 전역 삭제)로 방금 빌드한 전량을 지우고 비청크 단일 run 으로 재처리(OOM)하는 걸 막는다.
-        테이블이 있으면 no-op(평상시) → 증분은 Cosmos 담당. 상세: docs/cosmos.md · rebuild-and-ops.md §6.
+        판정은 **마커 커버리지**(chunked_run.seed_state — DONE 없는 publishable run + current 정합)로
+        한다. "행수>0 → skip" 프록시는 부분 빌드 후 재시도에서 잘못 skip 하고 Cosmos 에 무스코프
+        증분(=전량, OOM 클래스)을 넘기는 결함이 실측됐다(change-log #59). 미완이면 해당 dataset 만
+        정리·재빌드(재개) → dbt test → DONE 마킹. **마킹까지 끝내야** downstream Cosmos 증분이
+        pre_hook 전역 삭제로 전량 재처리(OOM)하는 걸 막는다. 상세: docs/cosmos.md · rebuild-and-ops.md §6.
         """
+        from datetime import datetime, timedelta, timezone
+
         from silver import chunked_run, silver_markers
 
-        if chunked_run.silver_history_rows() > 0:
-            return {"seed": "skip", "reason": "silver_license_history not empty"}
+        # cutoff = 빌드 시작 시각(KST, bronze_run_id 포맷) — 이 이전의 publishable run 은 이번 빌드가
+        # 전부 처리하므로, dedup 으로 행이 0이어도 DONE 마킹 대상(영구 미완 오판 방지 — change-log #60).
+        cutoff = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d_%H%M%S")
+        state = chunked_run.seed_state()
+        if state["complete"]:
+            return {"seed": "skip", "reason": "marker coverage complete + current 정합"}
         built = chunked_run.run_silver_chunked(
-            select=SILVER_SELECT_STR, project_dir=DBT_PROJECT_DIR, dbt_bin=DBT_BIN, target=DBT_TARGET)
+            select=SILVER_SELECT_STR, project_dir=DBT_PROJECT_DIR, dbt_bin=DBT_BIN,
+            target=DBT_TARGET, state=state)
         # 마킹 전 검증(실패 시 예외 → 마킹 안 됨 → 다음 실행이 이어감, 기존 invariant 동일).
         chunked_run.run_dbt_test(
             select=SILVER_SELECT_STR, project_dir=DBT_PROJECT_DIR, dbt_bin=DBT_BIN, target=DBT_TARGET)
-        marked = silver_markers.mark_silver_runs_done()
-        return {"seed": "built", "build": built, "marked": marked}
+        marked = silver_markers.mark_silver_runs_done(processed_cutoff_run_id=cutoff)
+        return {"seed": "built", "build": built, "marked": marked,
+                "resumed_hist": len(state.get("history_incomplete", [])),
+                "cold_start": state.get("cold_start", False)}
 
     @task
-    def mark_silver_done() -> dict:
-        """dbt test 통과(dbt_silver 성공) 후 silver history run 을 DONE marker 로 기록."""
+    def mark_silver_done(**ctx) -> dict:
+        """dbt test 통과(dbt_silver 성공) 후 silver history run 을 DONE marker 로 기록.
+
+        cutoff(=이 DAG run 시작 시각, KST)을 함께 넘겨 **dedup 으로 행이 0인 run** 도 처리완료로
+        마킹한다(영구 미완 오판 방지). 빌드 중 도착한 run(≥cutoff)은 다음 증분이 처리."""
+        from datetime import timedelta
+
         from silver import silver_markers
 
-        return silver_markers.mark_silver_runs_done()
+        dr = ctx.get("dag_run")
+        start = getattr(dr, "start_date", None) if dr else None
+        cutoff = ((start + timedelta(hours=9)).strftime("%Y-%m-%d_%H%M%S") if start else None)
+        return silver_markers.mark_silver_runs_done(processed_cutoff_run_id=cutoff)
 
     @task
     def notify_masked_address_summary() -> dict:
@@ -175,7 +203,7 @@ def commerce_load_silver():
         profile_config=_profile_config,
         execution_config=_execution_config,
         render_config=_render_config,
-        operator_args={"install_deps": False},
+        operator_args={"install_deps": False, **({"vars": _DBT_VARS} if _DBT_VARS else {})},
     )
 
     seed = seed_silver_if_empty()

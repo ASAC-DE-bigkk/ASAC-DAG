@@ -1,4 +1,6 @@
 """gold DDL/뷰 생성 — 컬럼 계약(위치코드·updatedt)·멱등·매핑 키."""
+import pytest
+
 from gold import ddl
 
 _DETAIL = {"object": "commerce_pharmacy_detail", "kind": "detail_single",
@@ -88,6 +90,30 @@ def test_views_expose_codes_and_updatedt():
     api = ddl.view_api_sql("pharmacy", _DETAIL)
     assert "where e.dataset = 'pharmacy'" in api[0][1]
     assert "where h.dataset = 'pharmacy'" in api[1][1]
+
+
+def test_identifier_gate_rejects_injection():
+    # C1(§20): 외부 API 유래 payload/object 명이 무검증으로 DDL/JSONPath f-string 에 유입되면
+    # SQL 주입. 악성 이름은 create_detail_sql/generate_all 진입에서 ValueError 로 막혀야 한다.
+    evil_payload = {"object": "commerce_evil_detail", "kind": "detail_single",
+                    "members": ["evil"], "payload": ["x'); drop table t; --"]}
+    with pytest.raises(ValueError):
+        ddl.create_detail_sql(evil_payload)
+    with pytest.raises(ValueError):
+        ddl.generate_all([evil_payload])
+    with pytest.raises(ValueError):
+        ddl.create_detail_index_sql(evil_payload)
+
+    evil_object = {"object": "commerce_x; drop table y", "kind": "detail_single",
+                   "members": ["x"], "payload": ["okcol"]}
+    with pytest.raises(ValueError):
+        ddl.create_detail_sql(evil_object)
+    with pytest.raises(ValueError):
+        ddl.generate_all([evil_object])
+
+    # 정상(LOCALDATA 관행 [A-Z0-9_]) 이름은 통과 — 게이트가 정상 카탈로그를 막지 않는다.
+    ddl.create_detail_sql(_DETAIL)
+    ddl.generate_all([_CLUSTER, _DETAIL])
 
 
 def test_generate_all_order_and_count():

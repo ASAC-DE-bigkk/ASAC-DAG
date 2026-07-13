@@ -27,7 +27,7 @@
    │           silver_license_detail_health (보건 대분류 업종별 상세)
    │              ← 보강: bronze_ref_admin_dong · bronze_address_enrichment(Juso) · silver_load_run_marker
    ▼
-[gold]   (미구현) — silver current 를 읽는 얇은 집계 예정. 자세히: gold/README.md
+[gold]   서빙 Postgres 마트 — 카탈로그 구동(Python) 증분 적재. commerce_load_gold(06:00 KST). 자세히: gold/README.md
 ```
 
 용어 주의: 이 프로젝트에서 **raw = R2 의 NDJSON 랜딩**(수집), **bronze = Iceberg 웨어하우스 원본층**(적재)
@@ -164,7 +164,7 @@ silver 가 "발행 가능한 run"만 읽도록 하는 게이트. grain **`(sourc
 
 ### 4.4 silver 모델 (dbt, Trino)
 
-정의: [`dbt/domains/commerce/models/silver/`](../../../../../dbt/domains/commerce/models/silver/). **gold 는 미구현.**
+정의: [`dbt/domains/commerce/models/silver/`](../../../../../dbt/domains/commerce/models/silver/). **gold 는 서빙 Postgres 마트로 구현·가동 중**(카탈로그 구동 Python, `commerce_load_gold` — dbt 모델 아님. 명세: [DB/gold/](../../../../../dbt/domains/commerce/docs/DB/gold/)).
 
 | 모델 | materialization | grain | 설명 |
 |---|---|---|---|
@@ -175,9 +175,12 @@ silver 가 "발행 가능한 run"만 읽도록 하는 게이트. grain **`(sourc
 > 주의: 스케줄 실행(`commerce_load_silver`)은 `silver_license_history silver_license_current` **2개만**
 > 빌드한다. `silver_license_detail_health` 는 전체 `dbt run`/`--full-refresh` 로만 갱신된다.
 
-### 4.5 gold — 미구현
+### 4.5 gold — 서빙 Postgres 마트 (구현·가동 중)
 
-`models/gold/` 없음. 계획(현재 상태 집계)만 존재 — [gold/README.md](gold/README.md).
+gold 는 dbt 모델(`models/gold/`)이 아니라 **카탈로그 구동 Python**(`commerce_load_gold` DAG)로 silver 를
+읽어 서빙 Postgres 에 증분 적재한다(entity/history·detail 78·dim 3·view 320). 서빙 DB 의 인덱스/bigserial/뷰
+계약이 dbt-trino 로 표현 불가해 Python 이다. 규칙: [include/gold/](../../include/gold/) · 명세:
+[DB/gold/](../../../../../dbt/domains/commerce/docs/DB/gold/) · 개요: [gold/README.md](gold/README.md).
 
 ---
 
@@ -190,7 +193,7 @@ silver 가 "발행 가능한 run"만 읽도록 하는 게이트. grain **`(sourc
 | silver(파싱) | **v1/v2 병합 canonical 컬럼**(lf), 빈문자→null, timestamp 파싱, KST 변환 | `parsed`/`keyed` CTE |
 | silver(중복제거) | 인접중복 제거(전 버전 보존), 버전정렬키 `updatedt_sort`/`lastmodts_sort` | `ordered`/`deduped` CTE |
 | silver(보강) | 자치구 `gu`/`gu_code`, 법정·행정동 명/코드, 지번 Juso 보강, **좌표 EPSG:5174→WGS84 변환** | `enrich_tasks` + history 보강 CTE |
-| gold | (예정) 자치구×업종×영업상태 집계 | 미구현 |
+| gold | 카탈로그 구동 서빙 Postgres 마트(entity/history·detail·dim·view) | 구현·가동 중 |
 
 **불변식**: `silver_license_history` 는 append-only(전 버전 보존) — 값이 바뀌어도 이전 값은 남는다.
 `record_json` 은 silver current/detail 까지 실려 다녀 **비공통(업종별) 필드는 유실 없이 보존**된다.
