@@ -16,6 +16,7 @@ _AIRFLOW_MODULE_NAMES = (
     "airflow.providers.standard.operators.bash",
     "airflow.providers.standard.operators.python",
     "airflow.sdk",
+    "airflow.sdk.exceptions",
     "airflow.utils",
     "airflow.utils.trigger_rule",
 )
@@ -61,10 +62,12 @@ class FakeBashOperator:
         self.bash_command = bash_command
         self.kwargs = kwargs
         self.downstream_task_ids = set()
+        self.upstream_task_ids = set()
         FakeDAG._stack[-1].add_task(self)
 
     def __rshift__(self, other):
         self.downstream_task_ids.add(other.task_id)
+        other.upstream_task_ids.add(self.task_id)
         return other
 
 
@@ -74,10 +77,12 @@ class FakePythonOperator:
         self.python_callable = python_callable
         self.kwargs = kwargs
         self.downstream_task_ids = set()
+        self.upstream_task_ids = set()
         FakeDAG._stack[-1].add_task(self)
 
     def __rshift__(self, other):
         self.downstream_task_ids.add(other.task_id)
+        other.upstream_task_ids.add(self.task_id)
         return other
 
 
@@ -95,8 +100,13 @@ class FakeAsset:
         return isinstance(other, FakeAsset) and self.uri == other.uri
 
 
+class FakeAirflowFailException(Exception):
+    pass
+
+
 class FakeTriggerRule:
     ALL_DONE = "all_done"
+    ONE_FAILED = "one_failed"
 
 
 def install_airflow_fakes():
@@ -116,6 +126,8 @@ def install_airflow_fakes():
     airflow_python.PythonOperator = FakePythonOperator
     airflow_sdk = types.ModuleType("airflow.sdk")
     airflow_sdk.Asset = FakeAsset
+    airflow_sdk_exceptions = types.ModuleType("airflow.sdk.exceptions")
+    airflow_sdk_exceptions.AirflowFailException = FakeAirflowFailException
     airflow_utils = types.ModuleType("airflow.utils")
     airflow_trigger_rule = types.ModuleType("airflow.utils.trigger_rule")
     airflow_trigger_rule.TriggerRule = FakeTriggerRule
@@ -131,6 +143,7 @@ def install_airflow_fakes():
             "airflow.providers.standard.operators.bash": airflow_bash,
             "airflow.providers.standard.operators.python": airflow_python,
             "airflow.sdk": airflow_sdk,
+            "airflow.sdk.exceptions": airflow_sdk_exceptions,
             "airflow.utils": airflow_utils,
             "airflow.utils.trigger_rule": airflow_trigger_rule,
         }
@@ -169,7 +182,10 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
 
     assert set(expected_task_order) <= set(dag.task_ids)
     for upstream_task_id, downstream_task_id in zip(expected_task_order, expected_task_order[1:]):
-        assert dag.task_dict[upstream_task_id].downstream_task_ids == {downstream_task_id}
+        assert dag.task_dict[upstream_task_id].downstream_task_ids == {
+            downstream_task_id,
+            "fail_transform_if_upstream_failed",
+        }
 
     task_commands = {
         task_id: dag.task_dict[task_id].bash_command
@@ -267,7 +283,10 @@ def test_weather_transform_validates_dev_runtime_before_dbt():
         "domain": "weather",
         "requested_target": "{{ params.target }}",
     }
-    assert guard.downstream_task_ids == {"dbt_deps"}
+    assert guard.downstream_task_ids == {
+        "dbt_deps",
+        "fail_transform_if_upstream_failed",
+    }
 
 
 def test_weather_transform_limits_target_param_to_dev_or_prod():
@@ -286,8 +305,47 @@ def test_weather_transform_publishes_dbt_run_metrics_after_terminal_test():
 
     assert task.kwargs["trigger_rule"] == "all_done"
     assert module.dag.task_dict["dbt_test_place_mart"].downstream_task_ids == {
-        "publish_dbt_run_metrics"
+        "publish_dbt_run_metrics",
+        "fail_transform_if_upstream_failed",
     }
+
+
+def test_weather_transform_has_independent_failure_propagating_leaf():
+    module = load_transform_module()
+    dag = module.dag
+    transform_task_ids = {
+        "validate_dev_runtime",
+        "dbt_deps",
+        "dbt_source_freshness",
+        "dbt_seed_asac_axes",
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
+        "dbt_seed_place_mapping",
+        "dbt_test_place_mapping_seed",
+        "dbt_run_silver",
+        "dbt_test_silver",
+        "dbt_run_gold",
+        "dbt_test_gold",
+        "dbt_run_place_mart",
+        "dbt_test_place_mart",
+    }
+
+    metrics = dag.task_dict["publish_dbt_run_metrics"]
+    watcher = dag.task_dict["fail_transform_if_upstream_failed"]
+
+    assert metrics.kwargs["trigger_rule"] == FakeTriggerRule.ALL_DONE
+    assert watcher.kwargs["trigger_rule"] == FakeTriggerRule.ONE_FAILED
+    assert watcher.kwargs["retries"] == 0
+    assert metrics.downstream_task_ids == set()
+    assert watcher.downstream_task_ids == set()
+    assert watcher.upstream_task_ids == transform_task_ids
+
+
+def test_weather_failure_propagation_callable_always_fails():
+    module = load_transform_module()
+
+    with pytest.raises(FakeAirflowFailException, match="weather transform upstream task failed"):
+        module.fail_transform_if_upstream_failed()
 
 
 def test_weather_publish_dbt_run_metrics_forwards_domain_and_target(tmp_path, monkeypatch):

@@ -61,6 +61,18 @@ TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
 TRAFFIC_SOURCE_ID = "seoul_traffic_incident"
 SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
 DBT_FAILURE_XCOM_KEY = "traffic_dbt_failure"
+DBT_PHASE_TASK_IDS = (
+    "dbt_deps",
+    "dbt_source_freshness",
+    "dbt_test_traffic_incident_availability",
+    "dbt_seed_asac_axes",
+    "dbt_run_common_admin_dong_dimension",
+    "dbt_test_common_admin_dong_dimension",
+    "dbt_run_silver",
+    "dbt_test_silver",
+    "dbt_run_gold",
+    "dbt_test_gold",
+)
 DBT_RETRY_DELAY = timedelta(minutes=2)
 DEFAULT_PARAMS = {
     "target": Param(
@@ -226,38 +238,46 @@ def dbt_task(task_id: str, dbt_args: str, *, silver_persisted: bool = False) -> 
     )
 
 
-def _terminal_run_results_path(**context) -> str:
-    """Use Traffic's per-task dbt target path, including a failed terminal run."""
+def _current_run_results_path(**context) -> str | None:
+    """Return the latest isolated dbt artifact recorded by this DAG run."""
     ti = context.get("ti") or context.get("task_instance")
     if ti is None:
-        return RUN_RESULTS_PATH
-    try:
-        terminal_result = ti.xcom_pull(task_ids="dbt_test_gold")
-    except Exception:  # noqa: BLE001 - metrics task must retain the safe fallback
-        terminal_result = None
-    if isinstance(terminal_result, dict) and terminal_result.get("artifact_path"):
-        return str(terminal_result["artifact_path"])
-    try:
-        terminal_failure = ti.xcom_pull(
-            task_ids="dbt_test_gold", key=DBT_FAILURE_XCOM_KEY
-        )
-    except Exception:  # noqa: BLE001 - metrics task must retain the safe fallback
-        terminal_failure = None
-    if isinstance(terminal_failure, dict) and terminal_failure.get("dbt_artifact_path"):
-        return str(terminal_failure["dbt_artifact_path"])
-    return RUN_RESULTS_PATH
+        return None
+    for task_id in reversed(DBT_PHASE_TASK_IDS):
+        try:
+            result = ti.xcom_pull(task_ids=task_id)
+        except Exception:  # noqa: BLE001 - continue to earlier current-run phases
+            result = None
+        if isinstance(result, dict) and result.get("artifact_path"):
+            return str(result["artifact_path"])
+        try:
+            failure = ti.xcom_pull(task_ids=task_id, key=DBT_FAILURE_XCOM_KEY)
+        except Exception:  # noqa: BLE001 - continue to earlier current-run phases
+            failure = None
+        if isinstance(failure, dict) and failure.get("dbt_artifact_path"):
+            return str(failure["dbt_artifact_path"])
+    return None
 
 
 def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> dict:
     """Persist Traffic dbt metrics while preserving terminal dbt failure semantics."""
-    resolved_path = run_results_path or _terminal_run_results_path(**context)
-    if not os.path.exists(resolved_path):
+    resolved_path = (
+        run_results_path
+        if run_results_path is not None
+        else _current_run_results_path(**context)
+    )
+    if not resolved_path or not os.path.exists(resolved_path):
         print(f"run_results.json 없음 — 메트릭 적재 skip: {resolved_path}")
         return {"rows": 0, "skipped": True}
     target = (context.get("params") or {}).get("target")
     records = dump_dbt_run_results(resolved_path, domain=DOMAIN, target=target)
     print(f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})")
     return {"rows": len(records), "skipped": False}
+
+
+def fail_transform_if_upstream_failed() -> None:
+    """Leave a failed DAG leaf whenever a transform task fails."""
+    raise AirflowFailException("traffic transform upstream task failed")
 
 
 with DAG(
@@ -356,6 +376,13 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     )
 
+    propagate_transform_failure = PythonOperator(
+        task_id="fail_transform_if_upstream_failed",
+        python_callable=fail_transform_if_upstream_failed,
+        trigger_rule=TriggerRule.ONE_FAILED,
+        retries=0,
+    )
+
     (
         validate_runtime
         >> resolve_snapshot
@@ -371,3 +398,19 @@ with DAG(
         >> dbt_test_gold
         >> publish_dbt_metrics
     )
+
+    for transform_task in (
+        validate_runtime,
+        resolve_snapshot,
+        dbt_deps,
+        dbt_source_freshness,
+        dbt_test_traffic_incident_availability,
+        dbt_seed_asac_axes,
+        dbt_run_common_admin_dong_dimension,
+        dbt_test_common_admin_dong_dimension,
+        dbt_run_silver,
+        dbt_test_silver,
+        dbt_run_gold,
+        dbt_test_gold,
+    ):
+        transform_task >> propagate_transform_failure
