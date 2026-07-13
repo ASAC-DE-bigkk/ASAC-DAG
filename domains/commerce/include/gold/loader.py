@@ -12,13 +12,11 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from datetime import datetime
 
 from bronze.warehouse import _connect, _qualified
 from commerce_core import registry
 from gold import ddl, pg
-from security import http_get
 from security.dbio import assert_identifier
 
 log = logging.getLogger(__name__)
@@ -26,47 +24,29 @@ log = logging.getLogger(__name__)
 _FETCH = 2000
 _COMMIT_EVERY = int(os.getenv("COMMERCE_GOLD_COMMIT_ROWS", "50000"))  # 적응형 커밋 간격(WAL/txn 바운드)
 
-# ── 동적 배치 사이징(하드웨어 마진 적응) ──────────────────────────────────────
+# ── 동적 배치 사이징(하드웨어 마진 적응) — 정책 공용화: commerce_core.trino_mem ─
 # detail 의 json 추출은 record_json 을 행마다 JSON 문서로 materialize → Trino heap 을 rows×payload_cols
-# 에 비례해 쓴다(scan+project 라 spill 불가). 고정 배치는 특정 머신에서만 안전하므로, **가용 heap 을
-# 실시간(/v1/status) 조회해 배치 크기를 동적 산정**한다: 머신 스펙·현재 마진이 크면 배치도 커지고(빠름)
-# 작아지면 줄어(안전) 어느 환경·어느 시점의 여유에서도 OOM 을 피한다. 조회 실패 시 정적 budget 폴백.
+# 에 비례해 쓴다(scan+project 라 spill 불가). 가용 heap 을 실시간(/v1/status) 조회해 배치 크기를 동적
+# 산정하고(하드웨어 적응), 쿼리 사이 heap 회복을 기다린다(pace). silver(chunked_run)와 동일 정책 모듈.
 _DETAIL_BYTES_PER_ROWCOL = int(os.getenv("COMMERCE_GOLD_ROWCOL_BYTES", "1200"))  # 행·컬럼당 추출 heap(실측 ~1030)
 _DETAIL_HEAP_MARGIN = float(os.getenv("COMMERCE_GOLD_HEAP_MARGIN", "0.35"))      # 쿼리당 free heap 사용 비율
 _DETAIL_MIN_ROWS = int(os.getenv("COMMERCE_GOLD_MIN_ROWS", "20000"))
-_LOW_HEAP_FRAC = 0.25             # free/total 이 이 미만이면 GC 회복 대기(적응형 pacing)
-
-
-def _trino_heap() -> tuple[int, int]:
-    """(free_bytes, total_bytes) — Trino coordinator heap(REST /v1/status). 실패 시 (0,0)→정적 폴백."""
-    host = os.getenv("TRINO_HOST", "trino")
-    port = os.getenv("TRINO_PORT", "8080")
-    try:
-        s = http_get(f"http://{host}:{port}/v1/status", timeout=5).json()
-        total = int(s.get("heapAvailable") or 0)   # heapAvailable = 총 heap 크기(가변 — 캡·머신 반영)
-        used = int(s.get("heapUsed") or 0)
-        return max(0, total - used), total
-    except Exception as exc:                       # 내부 엔드포인트 조회 실패는 치명 아님 — 폴백
-        log.warning("Trino heap 조회 실패(%s) — 정적 budget 폴백", type(exc).__name__)
-        return 0, 0
 
 
 def _pace() -> None:
-    """detail 쿼리 사이 적응형 pacing — free heap 이 낮으면 GC 가 회복할 시간을 준다(스파이크 완충)."""
-    free, total = _trino_heap()
-    if total > 0 and free < total * _LOW_HEAP_FRAC:
-        log.info("heap 여유 낮음(free=%.1fGB/%.1fGB) — GC 대기", free / 1e9, total / 1e9)
-        time.sleep(5)
+    """detail 쿼리 사이 적응형 pacing — 백투백 garbage 누적 OOM 차단(공용 정책)."""
+    from commerce_core import trino_mem
+
+    trino_mem.pace("gold detail")
 
 
 def _dynamic_detail_rows(payload_cols: int, ceil_rows: int) -> int:
     """가용 heap 마진 기반 안전 detail 쿼리 행수(하드웨어·현재 마진 적응). 조회 실패 시 ceil_rows(정적)."""
-    free, total = _trino_heap()
-    if total <= 0:
-        return ceil_rows
-    per_row = _DETAIL_BYTES_PER_ROWCOL * max(1, payload_cols)
-    rows = int(free * _DETAIL_HEAP_MARGIN / per_row)
-    return max(_DETAIL_MIN_ROWS, min(rows, ceil_rows))
+    from commerce_core import trino_mem
+
+    return trino_mem.dynamic_rows(_DETAIL_BYTES_PER_ROWCOL * max(1, payload_cols),
+                                  margin=_DETAIL_HEAP_MARGIN,
+                                  ceil_rows=ceil_rows, floor_rows=_DETAIL_MIN_ROWS)
 
 
 def _ds_pred(datasets: list[str] | None, col: str = "dataset") -> str | None:

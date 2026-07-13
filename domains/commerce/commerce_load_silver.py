@@ -133,32 +133,49 @@ def commerce_load_silver():
 
     @task
     def seed_silver_if_empty() -> dict:
-        """Cold start(빈 silver) 전용 안전 시드 — Cosmos 가 못 하는 청크 전량 빌드만 여기서.
+        """Cold start/재개 안전 시드 — Cosmos 가 못 하는 청크 전량 빌드·복구만 여기서.
 
-        silver_license_history 가 비어 있을 때만: dataset 청크로 전량 빌드 → dbt test →
-        (통과 시) DONE 마킹(기존 cold-start 순서 build→test→mark 를 한 태스크에 캡슐화). **마킹까지
-        끝내야** downstream Cosmos 증분(dbt_silver)이 pre_hook(delete_unmarked, include_datasets
-        비어 전역 삭제)로 방금 빌드한 전량을 지우고 비청크 단일 run 으로 재처리(OOM)하는 걸 막는다.
-        테이블이 있으면 no-op(평상시) → 증분은 Cosmos 담당. 상세: docs/cosmos.md · rebuild-and-ops.md §6.
+        판정은 **마커 커버리지**(chunked_run.seed_state — DONE 없는 publishable run + current 정합)로
+        한다. "행수>0 → skip" 프록시는 부분 빌드 후 재시도에서 잘못 skip 하고 Cosmos 에 무스코프
+        증분(=전량, OOM 클래스)을 넘기는 결함이 실측됐다(change-log #59). 미완이면 해당 dataset 만
+        정리·재빌드(재개) → dbt test → DONE 마킹. **마킹까지 끝내야** downstream Cosmos 증분이
+        pre_hook 전역 삭제로 전량 재처리(OOM)하는 걸 막는다. 상세: docs/cosmos.md · rebuild-and-ops.md §6.
         """
+        from datetime import datetime, timedelta, timezone
+
         from silver import chunked_run, silver_markers
 
-        if chunked_run.silver_history_rows() > 0:
-            return {"seed": "skip", "reason": "silver_license_history not empty"}
+        # cutoff = 빌드 시작 시각(KST, bronze_run_id 포맷) — 이 이전의 publishable run 은 이번 빌드가
+        # 전부 처리하므로, dedup 으로 행이 0이어도 DONE 마킹 대상(영구 미완 오판 방지 — change-log #60).
+        cutoff = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d_%H%M%S")
+        state = chunked_run.seed_state()
+        if state["complete"]:
+            return {"seed": "skip", "reason": "marker coverage complete + current 정합"}
         built = chunked_run.run_silver_chunked(
-            select=SILVER_SELECT_STR, project_dir=DBT_PROJECT_DIR, dbt_bin=DBT_BIN, target=DBT_TARGET)
+            select=SILVER_SELECT_STR, project_dir=DBT_PROJECT_DIR, dbt_bin=DBT_BIN,
+            target=DBT_TARGET, state=state)
         # 마킹 전 검증(실패 시 예외 → 마킹 안 됨 → 다음 실행이 이어감, 기존 invariant 동일).
         chunked_run.run_dbt_test(
             select=SILVER_SELECT_STR, project_dir=DBT_PROJECT_DIR, dbt_bin=DBT_BIN, target=DBT_TARGET)
-        marked = silver_markers.mark_silver_runs_done()
-        return {"seed": "built", "build": built, "marked": marked}
+        marked = silver_markers.mark_silver_runs_done(processed_cutoff_run_id=cutoff)
+        return {"seed": "built", "build": built, "marked": marked,
+                "resumed_hist": len(state.get("history_incomplete", [])),
+                "cold_start": state.get("cold_start", False)}
 
     @task
-    def mark_silver_done() -> dict:
-        """dbt test 통과(dbt_silver 성공) 후 silver history run 을 DONE marker 로 기록."""
+    def mark_silver_done(**ctx) -> dict:
+        """dbt test 통과(dbt_silver 성공) 후 silver history run 을 DONE marker 로 기록.
+
+        cutoff(=이 DAG run 시작 시각, KST)을 함께 넘겨 **dedup 으로 행이 0인 run** 도 처리완료로
+        마킹한다(영구 미완 오판 방지). 빌드 중 도착한 run(≥cutoff)은 다음 증분이 처리."""
+        from datetime import timedelta
+
         from silver import silver_markers
 
-        return silver_markers.mark_silver_runs_done()
+        dr = ctx.get("dag_run")
+        start = getattr(dr, "start_date", None) if dr else None
+        cutoff = ((start + timedelta(hours=9)).strftime("%Y-%m-%d_%H%M%S") if start else None)
+        return silver_markers.mark_silver_runs_done(processed_cutoff_run_id=cutoff)
 
     @task
     def notify_masked_address_summary() -> dict:

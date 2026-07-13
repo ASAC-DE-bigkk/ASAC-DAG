@@ -5,6 +5,89 @@
 
 ---
 
+## 2026-07-13
+
+### 60. silver seed 재설계 — bronze→silver from-scratch 검증에서 드러난 결함 3건 수정 + 지속가능 구조
+
+request:
+- (사용자) bronze 로부터 silver/gold 를 **처음부터 적재**하는 기준으로 검증하라(R2 의 commerce 파생
+  데이터는 삭제 가능, bronze 제외). 더 효율적·지속가능한 적재 구조를 한 번 더 전략화하라.
+  OOM 은 근본원인부터, 성공할 때까지 반복, 과정을 change-log 에 기록.
+
+response — **from-scratch 검증이 드러낸 결함(각각 수정)**:
+1. **`.env.commerce` R2_REGION 손상(#59 작업의 부작용)**: V1 때 임시 env 를 append 할 때 파일 끝 개행이
+   없어 `R2_REGION=auto# [임시…]` 로 오염 → boto3 InvalidRegionError → `enrich_admin_dong_ref`(R2 raw
+   읽기) 실패. **gold-only 실행은 boto3 를 안 타서 못 잡던 버그** — from-scratch(bronze 읽기)라서 발견.
+   `auto` 복구 + 전 라인 오염 스캔(무결).
+2. **silver 전량 빌드 OOM(대형 단일 dataset)**: mail_order_sale 934K 가 **단일 스냅샷 run**이라
+   include_datasets(dataset 단위)로도, bronze_run_id 로도 못 쪼갬. heap/spill/tc 튜닝(52→64%, tc1)과
+   grain-key 버킷(키가 record_json 안 → 전량 파싱 필요)까지 전부 OOM 실측. **근본해법 = 싼 비-json
+   컬럼 버킷**: history 는 `content_bucket`(content_hash — 동일 레코드=같은 버킷, adjacent-dedup 보존,
+   A→B→A 비연속 재등장 실측 0건), current 는 `key_bucket`(grain 키 컬럼 — 키의 전 버전=같은 버킷,
+   latest-1-row 정확). 버킷당 record_json 읽기가 1/K 로 바운드(실측: 133K 버킷 = 피크 41%, 이전 69% OOM).
+   dbt: `macros/key_bucket.sql` 신설, history/current 모델에 var-gated 필터(기본 컴파일 SQL 불변),
+   pre_hook 는 버킷 중 삭제 스킵(버킷은 disjoint).
+3. **seed "행수>0 → skip" 결함(설계 버그, 실측 재현)**: 부분 빌드(93K) 후 재시도가 잘못 skip → Cosmos 에
+   **무스코프 증분(=전량 2.9M, OOM 클래스)** 을 넘김. 수정 — 판정을 **마커 커버리지**로:
+   `chunked_run.seed_state()` = DONE 없는 publishable run 의 dataset(history 미완) + current 행수≠history
+   distinct grain 수(current 미완). 미완 dataset 만 부분행 선삭제 후 재빌드(재개). Cosmos 는 seed 가
+   마킹까지 끝낸 뒤에만 의미 있는 증분을 본다.
+
+response — **지속가능 구조(전략 반영)**:
+- **공용 메모리 정책 모듈 `commerce_core/trino_mem.py`**: heap 실시간 프로브(/v1/status) ·
+  동적 배치 사이징(`dynamic_rows` — 가용 heap 마진 기반, 하드웨어 적응) · **pace()**(쿼리 사이 heap
+  회복 대기 — 백투백 garbage 누적 OOM 차단, 실측 46→61% 누적 사망 대응). silver(chunked_run)와
+  gold(loader)가 **같은 정책**을 씀(튜닝 지점 단일화, 매직넘버 제거 — env 는 상한/폴백).
+  실증: 동적 산정이 128K 를 냄 = 실측 안전값(133K)과 일치.
+- 백투백 누적 완화 GC 튜닝: `trino/jvm.config` IHOP=30 + G1PeriodicGCInterval=15s(+MaxRAM 55%,
+  task.concurrency=2 — spill 유지). compose 마운트로 영속.
+- 운영 원칙: **증분이 기본**(전 레이어 소량·안전), from-scratch 는 복구 경로(마커 기반 재개로 어느
+  지점에서 죽어도 미완분만 이어감). 결정트리: 증분 → dataset 배치 → 비-json 버킷 → (그래도 부족하면)
+  노드 증설.
+
+**하드웨어 적응 동작(직관 요약)** — "왜 이 박스에선 느리고, 큰 머신에선 빠른가":
+
+| 요소 | 저사양 박스(VM 7.75GB, heap ~4.6GB) | 고사양 예(32GB, heap ~17GB) |
+|---|---|---|
+| 배치 크기(`free×margin/행당비용`) | silver ~10만행 · gold 21컬럼 detail ~4.2만행 | silver 50~80만(상한) · detail 25만+ — **자동 확대** |
+| 버킷 분할 | mail_order_sale ×9 등 잘게 | 대부분 **버킷 자체가 안 생김**(k=1) → dbt 호출 수 급감 |
+| pace(GC 회복 대기) | 버킷 사이 수~수십 초 대기 | free 비율 상시 높음 → **즉시 통과(0초)** |
+| OS 스왑 | ~1GB 흡수하며 감속(kill 방지) | 미사용 |
+| 체감 총시간(from-scratch) | silver ~2h · gold ~1.5-2h | **silver 15-25분 · gold 20-30분** 수준 |
+
+느림의 주범 = 작은 배치 × dbt 프로세스 기동 오버헤드(회당 10-20초) × pace 대기 — 전부 하드웨어
+마진에서 **자동 파생**된 것이라 큰 머신에선 소멸한다. 즉 "느리게라도 완주"가 저사양의 설계 목표고,
+같은 코드가 고사양에선 빠르게 돈다. **아직 정적인 것 2개(알아둘 것)**:
+① [trino/config.properties](../../../../trino/config.properties) `task.concurrency=2` — 이 공유 VM 용
+보수 설정(리포지토리 파일). 고사양 노드는 기본(16)이 유리 → compose env 오버라이드로 분리 여지.
+② 머신 로컬 `.env.commerce` 의 `COMMERCE_GOLD_BATCH_ROWS`(이 박스 6만) — gitignore 라 다른 머신엔
+없음 → 거기선 코드 기본 상한(50만)+동적 산정이 지배.
+
+- **버그 5·6(재개 경로에서 추가 발견·수정)**:
+  - **버그5 — 삭제·언마크 분리 소실**: 재개가 dataset 행은 지우고 마커를 남기면, 모델의 증분 술어가
+    'DONE run' 을 재처리하지 않아 지운 행이 **영구 소실**(실측: 10 run). 수정 — `_unmark_datasets`
+    를 행 삭제와 **한 몸**으로(재빌드 대상 dataset 마커 동반 삭제, test 통과 후 재마킹).
+  - **버그6 — 0행 run 영구 미완**: 인접중복 dedup 으로 **행이 하나도 안 남는 run**(diff 전량 재유입)은
+    history 존재 기반 마킹이 영원히 못 찍어 seed_state 가 영구 미완 판정 → 매 run 재빌드 낭비.
+    수정 — `mark_silver_runs_done(processed_cutoff_run_id=…)`: **cutoff(빌드 시작, KST) 이전의
+    publishable run 전부**를 'processed_no_rows' 로 마킹(run_id 가 시각 인코딩 → 문자열 비교
+    race-safe; 빌드 중 도착 run 은 다음 증분이 처리).
+- **결과(from-scratch 전 체인 완주, 2026-07-13)**: R2 의 silver 파생 3테이블 DROP + gold 전 테이블
+  truncate(entity_key 보존) 후 bronze 로부터 재구축 —
+  - **silver**: seed_state **complete=True**(마커 커버리지+current 정합), history **2,897,113**
+    (구 2,895,880 + 신규 run 유입 − dedup), current **2,892,669 = distinct grain 수와 정확 일치**
+    (구 목표값과도 정확 일치). mail_order_sale 934,371 전량(bronze 와 일치). 완전 누락 run 0
+    (전량-dedup run 2건은 'later' run 으로 정당성 검증 + cutoff 마킹).
+  - **gold**: 빈 상태에서 **단일 run 완주** — entity_history 2,897,113(=silver 정확 일치) ·
+    entity 2,892,669(=current 정확 일치) · **detail 78테이블 총 2,897,113(=history 정확 일치,
+    전 버전이 정확히 1 detail 에 안착)** · dim 152/452/93 · view 320 · 마커 83/83.
+  - **Trino 무사망**: 전 과정(silver 2h + gold 2h) 연속 healthy, OS OOM-kill **0회**(peak RSS 63-67%,
+    스왑 ~1GB 흡수). 저사양 박스에서 "느리게라도 완주" 목표 달성 — 동일 코드가 고사양에선 위 표대로
+    자동 가속.
+  - silver 는 버그 수정 반복 과정에서 재개(pass) 를 거쳐 완성됐고(각 pass 는 마커 기반 재개 경로의
+    실전 검증이기도 함), gold 는 최종 코드로 빈 상태 단일 실행 완주. 신규 환경은 수정 완료된 코드로
+    cold-start 1회에 동일 결과에 도달한다(전 버그 수정 반영).
+
 ## 2026-07-12
 
 ### 59. gold 적재 OOM 해결 — cold-start 청크 적재(dataset 배치 + detail content_hash 버킷) + 객체별 재개
