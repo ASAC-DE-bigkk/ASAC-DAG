@@ -17,6 +17,7 @@ import concurrent.futures
 import gzip
 import hashlib
 import json
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -47,6 +48,10 @@ class CitydataIngestOptions:
     # 5분 주기 통합 수집을 위한 병렬도(I/O 바운드 — fetch+R2업로드). 121장소 실측:
     # 순차 ~4분 → 12워커 ~5초(rate limit 무). Seoul API 보호 위해 상한은 둔다.
     max_workers: int = 12
+    # 영역별 재시도 — API 가 간헐적으로 빈 응답(연결 거부/일시 스로틀링)을 뱉으면 그 영역만
+    # 백오프 후 재요청한다(#309). 실패분만 재시도하므로 5분 예산에 영향 미미. 정상 응답 +
+    # 오류코드(source not ok)는 재시도해도 같아 제외한다.
+    max_retries: int = 2
 
 
 def _build_sink(target: str, env_file: str | None, dry_run: bool, local_dir: str) -> Sink:
@@ -100,31 +105,39 @@ def fetch_and_land_citydata(
             "raw_bytes": 0,
             "gz_bytes": 0,
         }
-        try:
-            fetched = client.fetch_area(area_nm)
-            entry["http_status"] = fetched.status
-            entry["result_code"] = fetched.parsed.result_code
-            entry["block_count"] = len(fetched.parsed.blocks)
-            entry["raw_bytes"] = len(fetched.raw_body)
+        # 예외(빈 응답/네트워크)면 백오프 후 재시도(#309). 정상 응답+오류코드(source not ok)
+        # 는 재시도해도 같아 즉시 확정. 성공/최종 실패 모두 entry 를 반환한다.
+        attempts = 1 + max(0, opts.max_retries)
+        for attempt in range(attempts):
+            try:
+                fetched = client.fetch_area(area_nm)
+                entry["http_status"] = fetched.status
+                entry["result_code"] = fetched.parsed.result_code
+                entry["block_count"] = len(fetched.parsed.blocks)
+                entry["raw_bytes"] = len(fetched.raw_body)
 
-            # 수집 즉시 gzip -- 박제 자체가 압축본(.json.gz). 읽을 때 gunzip.
-            gz = gzip.compress(fetched.raw_body)
-            entry["gz_bytes"] = len(gz)
-            key = raw_object_key(
-                source_config.LANDING_ROOT, CITYDATA_SOURCE_ID, ctx, request_id, ext="json.gz"
-            )
-            sink.put(key, gz, "application/gzip")
-            entry["raw_object_key"] = key
-
-            if not fetched.ok:
-                entry["error"] = (
-                    f"source not ok (code={fetched.parsed.result_code}, "
-                    f"blocks={entry['block_count']})"
+                # 수집 즉시 gzip -- 박제 자체가 압축본(.json.gz). 읽을 때 gunzip.
+                gz = gzip.compress(fetched.raw_body)
+                entry["gz_bytes"] = len(gz)
+                key = raw_object_key(
+                    source_config.LANDING_ROOT, CITYDATA_SOURCE_ID, ctx, request_id, ext="json.gz"
                 )
+                sink.put(key, gz, "application/gzip")
+                entry["raw_object_key"] = key
+
+                if not fetched.ok:
+                    entry["error"] = (
+                        f"source not ok (code={fetched.parsed.result_code}, "
+                        f"blocks={entry['block_count']})"
+                    )
+                    return entry
+                entry["ok"] = True
+                entry["error"] = ""
                 return entry
-            entry["ok"] = True
-        except Exception as exc:  # noqa: BLE001 -- 장소별 격리, 배치는 계속
-            entry["error"] = client.redact(f"{type(exc).__name__}: {exc}")
+            except Exception as exc:  # noqa: BLE001 -- 장소별 격리, 배치는 계속
+                entry["error"] = client.redact(f"{type(exc).__name__}: {exc}")
+                if attempt + 1 < attempts:
+                    time.sleep(0.5 + attempt)  # 0.5s → 1.5s 백오프
         return entry
 
     # I/O 바운드(fetch+R2업로드) 병렬 — 5분 주기 안에 121장소를 넣기 위함. 결과 순서 보존.

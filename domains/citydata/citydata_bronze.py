@@ -69,6 +69,21 @@ DEFAULT_PARAMS = {
 }
 
 
+def _humanize_fetch_error(error: str | None, result_code: str | None) -> str:
+    """수집 실패 사유를 사람이 읽는 한국어로 (#309). 원문이 ``JSONDecodeError: char 0``
+    처럼 난해해 알림에서 바로 이해되게 매핑한다. 매칭 안 되면 원문/오류코드 유지."""
+    e = (error or "").lower()
+    if "jsondecode" in e or "expecting value" in e or "char 0" in e:
+        return "빈 응답 (API 스로틀링·일시장애 의심)"
+    if "timeout" in e or "timed out" in e:
+        return "요청 시간초과"
+    if "connection" in e or "refused" in e or "reset" in e or "urlerror" in e:
+        return "연결 실패 (API 거부/리셋)"
+    if "source not ok" in e:
+        return f"원천 오류코드 {result_code or '?'}"
+    return error or (f"원천 오류코드 {result_code}" if result_code else "실패")
+
+
 def _maybe_alert_partial(report: dict, params: dict) -> None:
     """부분 실패(성공은 있으나 일부 영역 실패) 시 **run당 1건** Discord 알림.
 
@@ -85,7 +100,7 @@ def _maybe_alert_partial(report: dict, params: dict) -> None:
         f"성공 {cov.get('landed')}/{cov.get('expected')} ({cov.get('coverage_pct')}%), 실패 {len(failed)}곳",
     ]
     for f in failed[:15]:
-        reason = f.get("error") or f.get("result_code") or "실패"
+        reason = _humanize_fetch_error(f.get("error"), f.get("result_code"))
         lines.append(f" • {f.get('area_nm')} — {reason}")
     if len(failed) > 15:
         lines.append(f" … 외 {len(failed) - 15}곳")
