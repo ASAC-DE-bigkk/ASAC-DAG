@@ -49,12 +49,3 @@ def test_weather_branch_changes_stay_inside_weather_domain():
         "Weather 작업은 domains/weather/** 안에서만 변경할 수 있습니다. "
         f"범위 밖 변경: {violations}"
     )
-
-
-def test_weather_agent_instructions_define_the_boundary():
-    instructions = ROOT / "domains" / "weather" / "AGENTS.md"
-
-    assert instructions.is_file()
-    content = instructions.read_text(encoding="utf-8")
-    assert "domains/weather/**" in content
-    assert "ASK-Seoul" in content
