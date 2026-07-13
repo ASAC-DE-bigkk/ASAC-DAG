@@ -80,16 +80,38 @@ def silver_history_rows() -> int:
             pass
 
 
+def classify_unmarked(unmarked: set[tuple[str, str]], built: set[tuple[str, str]],
+                      done_datasets: set[str]) -> tuple[list[str], list[str]]:
+    """미마킹 publishable run 을 (재빌드 대상 dataset, Cosmos 증분 몫 dataset)으로 분류.
+
+    '신규 run 도착'과 '빌드 미완'을 구분한다 — 구분 없이 미마킹 존재만으로 재빌드하면
+    bronze 가 새 run 을 만드는 날마다 해당 dataset 의 **기적재 이력 전체를 delete+재빌드**
+    (기적재분 재적재)하고 Cosmos 증분은 사문화된다(2026-07-13 진단).
+
+    - 재빌드(seed 몫): 미마킹인데 history 에 이미 행이 있는 run 존재(빌드 후 마킹 전 중단),
+      또는 dataset 에 DONE 마커가 하나도 없음(cold-start/언마크 후 중단 — 전 run 재처리 필요).
+    - Cosmos 몫: 그 외(과거 빌드는 완료 = DONE 존재, 미마킹 run 은 전부 미빌드 신규) —
+      dbt 증분 술어가 그 run 만 처리한다(기적재 run 은 마커가 차단).
+    """
+    unmarked_ds = {ds for ds, _run in unmarked}
+    rebuild = ({ds for ds, run in unmarked if (ds, run) in built}
+               | {ds for ds in unmarked_ds if ds not in done_datasets})
+    return sorted(rebuild), sorted(unmarked_ds - rebuild)
+
+
 def seed_state() -> dict:
     """seed 완료/재개 판정의 정본 — 마커 커버리지 + current 정합(행수>0 프록시 금지).
 
     "rows>0 → skip" 은 부분 빌드 후 재시도에서 잘못 skip 하고 Cosmos 에 무스코프 증분(=전량,
     OOM 클래스)을 넘기는 결함이 실측됐다(change-log #59). 올바른 신호:
-    - history_incomplete: DONE 마커 없는 publishable run 이 있는 dataset (그 dataset 의 history 는
-      미완 — 부분 행이 있어도 지우고 다시 빌드해야 함).
+    - history_incomplete: **빌드 미완** dataset — 미마킹 publishable run 이 history 에 행을
+      남겼거나(마킹 전 중단) DONE 마커가 전무한 경우만. 단순 '신규 run 도착'(기존 DONE 존재 +
+      미마킹 run 미빌드)은 Cosmos 증분 몫(cosmos_pending)으로 분리 — 재빌드하지 않는다
+      (분류 규칙: classify_unmarked).
     - current_incomplete: current 행수 != history distinct grain 수인 dataset (history 는 완성됐지만
       current 단계 전에 중단된 경우 — current 만 재계산).
-    complete = 둘 다 빈 목록. 마커/테이블 부재는 cold-start(전체 미완)로 간주한다."""
+    complete = 둘 다 빈 목록(cosmos_pending 은 dbt 가 처리하므로 seed 완료에 영향 없음).
+    마커/테이블 부재는 cold-start(전체 미완)로 간주한다."""
     from bronze.warehouse import _connect, _qualified
 
     catalog, schema, qschema = _qualified()
@@ -98,7 +120,7 @@ def seed_state() -> dict:
         cur = conn.cursor()
         try:
             cur.execute(f"""
-select distinct cast(b.dataset as varchar)
+select distinct cast(b.dataset as varchar), cast(b.bronze_run_id as varchar)
 from {qschema}.bronze_localdata_license b
 inner join {qschema}.bronze_collection_run_manifest m
     on cast(b.dataset as varchar) = cast(m.dataset as varchar)
@@ -110,10 +132,29 @@ where not exists (
       and cast(k.dataset as varchar) = cast(b.dataset as varchar)
       and cast(k.bronze_run_id as varchar) = cast(b.bronze_run_id as varchar))
 """)  # security: allow-sql - qschema 검증 식별자, 상수 쿼리
-            history_incomplete = sorted(r[0] for r in cur.fetchall())
+            unmarked = {(r[0], r[1]) for r in cur.fetchall()}
         except Exception:                 # marker/bronze 부재 → cold-start
             return {"complete": False, "cold_start": True,
-                    "history_incomplete": [], "current_incomplete": []}
+                    "history_incomplete": [], "current_incomplete": [], "cosmos_pending": []}
+        built: set[tuple[str, str]] = set()
+        try:
+            cur.execute(f"""
+select distinct cast(dataset as varchar), cast(bronze_run_id as varchar)
+from {qschema}.silver_license_history where bronze_run_id is not null
+""")  # security: allow-sql
+            built = {(r[0], r[1]) for r in cur.fetchall()}
+        except Exception:                 # history 부재 → 아래 cold-start 분기가 처리
+            built = set()
+        done_datasets: set[str] = set()
+        try:
+            cur.execute(f"""
+select distinct cast(dataset as varchar)
+from {qschema}.silver_load_run_marker where status = 'DONE'
+""")  # security: allow-sql
+            done_datasets = {r[0] for r in cur.fetchall()}
+        except Exception:
+            done_datasets = set()
+        history_incomplete, cosmos_pending = classify_unmarked(unmarked, built, done_datasets)
         current_incomplete: list[str] = []
         try:
             cur.execute(f"""
@@ -131,11 +172,13 @@ where coalesce(h.grains, -1) <> coalesce(c.rows, -2)
             current_incomplete = ["__missing_current__"]
         if silver_history_rows() == 0:
             return {"complete": False, "cold_start": True,
-                    "history_incomplete": history_incomplete, "current_incomplete": []}
+                    "history_incomplete": history_incomplete, "current_incomplete": [],
+                    "cosmos_pending": cosmos_pending}
         complete = not history_incomplete and not current_incomplete
         return {"complete": complete, "cold_start": False,
                 "history_incomplete": history_incomplete,
-                "current_incomplete": current_incomplete}
+                "current_incomplete": current_incomplete,
+                "cosmos_pending": cosmos_pending}
     finally:
         try:
             conn.close()
@@ -195,6 +238,10 @@ def _unmark_datasets(datasets: list[str]) -> None:
             conn.close()
         except Exception:
             pass
+    # 테이블과 R2 스냅샷은 한 몸 — 언마크 직후 동기화(복원이 지운 마커를 되살리지 않게, fail-open).
+    from silver import silver_markers
+
+    silver_markers.sync_state_files()
 
 
 def _run(cmd: str, label: str) -> None:

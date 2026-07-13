@@ -7,6 +7,46 @@
 
 ## 2026-07-13
 
+### 62. 기적재 재적재 차단(마커 내구성·핸드셰이크) + 적재 0건 리포트 가시성
+
+request:
+- ① 적재 0건이어도 **요약 리포트**는 남길 것(세부 없이 요약 이력만). ② silver/gold 재실행 시
+  기적재분이 신규 이력처럼 재적재되는 현상 — 마커 확인·조치: bronze 파일 마커가 없으면 silver
+  확인용 마커 생성, silver 적재 성공분은 gold 가 마커로 사용, **R2 파일 외 별도 DB 적재 금지**,
+  기적재(마커 보유)만 있으면 적재도 불필요한 검증도 하지 않음, 0건이면 0건임을 알림 표기.
+
+response:
+- **진단(8면 병렬 조사 + DB/R2 실측)**: bronze 파일 마커는 정상 실재(`_markers/<short>.completed`
+  152/152 + `_watermark.json` + manifest — 생성 불필요). 재적재의 실측 원인 2개 —
+  ① `silver_load_run_marker`(Iceberg) **물리 세대 8개**: drop/재생성 반복으로 07-13 이전 DONE 전량
+  유실 → 기적재 run 재선별. ② seed_state 가 '신규 run 도착'을 '빌드 미완'으로 오판 → 신규 run 이
+  있는 날마다 해당 dataset 의 **기적재 이력 전체 delete+재빌드**(Cosmos 증분 사문화).
+  부수 실측: silver/serving 에 동일 원천버전 중복 132건(교차 run 44 — content_hash 에 지오코딩
+  파생값(위경도) 포함이 원인, §비고).
+- **① 마커 내구성 — R2 파일 스냅샷 이중화**(신규 `commerce_core/silver_state.py`,
+  레이어 `commerce_silver_state/` — bronze `commerce_bronze_state` 와 대칭, RDB 아님):
+  `_markers.json`(DONE (dataset, bronze_run_id) 전량)·`_watermark.json`(history max(collected_at)).
+  `mark_silver_runs_done`/`_unmark_datasets` 직후 동기화(테이블과 한 몸, fail-open),
+  `ensure_silver_marker_table` 이 테이블 생성 시 스냅샷에서 **복원**(marker_source=
+  'restore_r2_snapshot') — 테이블 유실 사고 재발 시에도 기적재 재적재 차단.
+- **② gold 핸드셰이크 — 조기 스킵**(gold/loader.py `no_new_silver`): silver R2 워터마크 이하로
+  전 객체 gold 마커가 전진해 있으면(기적재만) **Trino 접속·DDL·적재·검증 전부 생략**,
+  리포트에 "⏭ 적재 0건 — 신규 없음(기적재만)" 표기(gold/report.py). 파일 부재/판정 실패는
+  fail-open(기존 경로). 실측: 시딩 후 판정 False(실제 신규 존재) — 정확 동작 확인.
+- **③ seed 오판 수정**(chunked_run.py `classify_unmarked`): 미마킹 run 을 '빌드 미완'(history 에
+  행 있음/DONE 전무 → seed 재빌드)과 '신규 도착'(기존 DONE 존재+미빌드 → **cosmos_pending**,
+  재빌드 금지)으로 분류. 기적재 이력 매일 재빌드 중단.
+- **④ 0건 리포트**: bronze finalize 의 `if rr:` 가드 제거 — 0건이어도 "적재 대상 없음(0건)" 요약
+  전송(세부 없음, 유지보수 섹션 유실도 해소). silver 리포트에 "이번 신규 처리 run 마킹 N건
+  (0=기적재만·변경 없음)" 표기(mark_silver_done XCom). gold 는 스킵 시에도 기존 all_done 리포트에
+  0건 사유 표기.
+- **검증**: commerce pytest 326+188 전건 통과(신규 test_silver_state.py 12건 + 0건 리포트 계약 2건),
+  `python -m security` PASS(차단 0), 컨테이너 전 도메인 DAG import 오류 0, 실환경 스냅샷 시딩
+  (524건)·gold 판정 실측. dbt 모델/매크로 무변경(마커·증분 체계 유지 — refactor-guide §4 존중).
+- **비고(승인 대기)**: content_hash 에 지오코딩 파생값(위경도)·전화번호 표기 등 비결정 요소가
+  포함돼 원천 무변경 재수집이 '변경'으로 오판됨(실측 132건 중복의 근본 원인) — 해시 입력에서 파생
+  컬럼 제외는 grain 계약 변경이라 별도 승인 후 진행.
+
 ### 61. 크로스도메인 리니지 공유 전략 확정 + "Python 때문에 Marquez 불가" 트러블슈팅 체계화
 
 request:

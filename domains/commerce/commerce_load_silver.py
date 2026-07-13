@@ -135,8 +135,11 @@ def commerce_load_silver():
     def seed_silver_if_empty() -> dict:
         """Cold start/재개 안전 시드 — Cosmos 가 못 하는 청크 전량 빌드·복구만 여기서.
 
-        판정은 **마커 커버리지**(chunked_run.seed_state — DONE 없는 publishable run + current 정합)로
-        한다. "행수>0 → skip" 프록시는 부분 빌드 후 재시도에서 잘못 skip 하고 Cosmos 에 무스코프
+        판정은 **마커 커버리지**(chunked_run.seed_state)로 하되, '빌드 미완'(미마킹 run 이 history
+        에 행을 남김/DONE 전무)과 '신규 run 도착'(기존 DONE 존재 + 미빌드)을 구분한다 — 신규 run 은
+        **Cosmos 증분 몫**(cosmos_pending)이라 seed 가 재빌드하지 않는다(구분 없이 재빌드하면 신규
+        run 이 있는 날마다 기적재 이력 전체를 delete+재빌드 — 기적재분 재적재, 2026-07-13 진단).
+        "행수>0 → skip" 프록시는 부분 빌드 후 재시도에서 잘못 skip 하고 Cosmos 에 무스코프
         증분(=전량, OOM 클래스)을 넘기는 결함이 실측됐다(change-log #59). 미완이면 해당 dataset 만
         정리·재빌드(재개) → dbt test → DONE 마킹. **마킹까지 끝내야** downstream Cosmos 증분이
         pre_hook 전역 삭제로 전량 재처리(OOM)하는 걸 막는다. 상세: docs/cosmos.md · rebuild-and-ops.md §6.
@@ -150,7 +153,8 @@ def commerce_load_silver():
         cutoff = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d_%H%M%S")
         state = chunked_run.seed_state()
         if state["complete"]:
-            return {"seed": "skip", "reason": "marker coverage complete + current 정합"}
+            return {"seed": "skip", "reason": "marker coverage complete + current 정합",
+                    "cosmos_pending": state.get("cosmos_pending", [])}
         built = chunked_run.run_silver_chunked(
             select=SILVER_SELECT_STR, project_dir=DBT_PROJECT_DIR, dbt_bin=DBT_BIN,
             target=DBT_TARGET, state=state)
@@ -186,7 +190,8 @@ def commerce_load_silver():
 
     @task(trigger_rule="all_done")
     def report_silver(**ctx) -> dict:
-        """DAG 완료 리포트(#218) — silver current 데이터셋(API)별 현재 행수 + 실행시간. 실패해도 보고."""
+        """DAG 완료 리포트(#218) — silver current 데이터셋(API)별 현재 행수 + 실행시간 +
+        이번 신규 처리 run 마킹 건수(0=기적재만·변경 없음). 실패해도 보고."""
         from datetime import datetime, timezone
 
         from silver import quality_tasks
@@ -194,7 +199,12 @@ def commerce_load_silver():
         dr = ctx.get("dag_run")
         elapsed = ((datetime.now(timezone.utc) - dr.start_date).total_seconds()
                    if dr and getattr(dr, "start_date", None) else None)
-        return quality_tasks.report_silver_run(elapsed_seconds=elapsed)
+        marked = None
+        try:                              # 마킹 실패/스킵 시에도 리포트는 전송(best-effort)
+            marked = ctx["ti"].xcom_pull(task_ids="mark_silver_done")
+        except Exception:  # noqa: BLE001
+            marked = None
+        return quality_tasks.report_silver_run(elapsed_seconds=elapsed, marked=marked)
 
     # Cosmos: silver 모델 run+test(모델당 태스크). 증분은 여기서, 전량 빌드는 seed 가 선처리.
     dbt_silver = DbtTaskGroup(

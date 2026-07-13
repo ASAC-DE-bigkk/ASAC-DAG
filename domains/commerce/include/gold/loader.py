@@ -457,14 +457,60 @@ def _load_chunked(tconn, qschema: str, pgconn, details: list[dict],
             "resumed_objects": resumed}
 
 
+def _read_silver_watermark() -> datetime | None:
+    """silver 가 기록한 R2 핸드셰이크 워터마크(commerce_core.silver_state `_watermark.json`).
+
+    silver 는 dbt test 통과·DONE 마킹 직후 history max(collected_at)를 이 파일에 남긴다.
+    부재/파싱 실패 → None(fail-open — 조기 스킵 없이 기존 경로 전진)."""
+    try:
+        from commerce_core import silver_state
+        from commerce_core.settings import get_settings
+        from commerce_core.storage import get_storage
+
+        doc = silver_state.read_watermark(get_storage(), get_settings().storage_prefix)
+        raw = (doc or {}).get("max_collected_at")
+        return datetime.fromisoformat(raw) if raw else None
+    except Exception as exc:  # noqa: BLE001 — 상태 파일 문제로 gold 를 막지 않는다
+        log.warning("silver R2 워터마크 읽기 실패(무시 — 스킵 없이 전진): %s", type(exc).__name__)
+        return None
+
+
+def no_new_silver(markers: dict, expected: list[str], silver_hi: datetime | None) -> bool:
+    """조기 스킵 판정 — 전 객체가 마커를 보유하고 그 워터마크가 silver 워터마크 이상이면 True.
+
+    True = silver 에 gold 가 아직 안 옮긴 신규 버전이 없음(기적재분만 존재) → 적재/검증 불필요.
+    마커 하나라도 없거나(신규 객체·cold-start) silver_hi 미상이면 False(기존 경로)."""
+    if silver_hi is None or not expected:
+        return False
+    try:
+        return all(markers.get(o) is not None and markers[o] >= silver_hi for o in expected)
+    except TypeError:                     # naive/aware 불일치 등 비교 불가 → 스킵 안 함
+        return False
+
+
 def run_load(details: list[dict], dataset_map: dict[str, dict]) -> dict:
-    """적재 본체 — DDL ensure → (cold-start=청크 / 증분=단일) → marker DONE.
+    """적재 본체 — 조기 스킵 판정 → DDL ensure → (cold-start=청크 / 증분=단일) → marker DONE.
+
+    조기 스킵(신규 없음): silver 가 기록한 R2 워터마크(`commerce_silver_state/_watermark.json`)
+    이하로 전 객체 마커가 이미 전진해 있으면 — 기적재분만 있는 상태 — Trino 접속·DDL·적재·검증을
+    전부 생략한다(기적재 데이터만 있으면 추가 적재도 불필요한 검증도 하지 않음 — 사용자 계약).
+    파일 부재/판정 실패 시 기존 경로로 전진(fail-open). 리포트에는 skipped 로 0건 표기.
 
     마커가 비면(첫 적재 또는 리셋) 전량이라 dataset 배치로 청크(OOM 회피, `_load_chunked`).
     마커가 있으면 증분 창(unmarked 신규분)이 소량이라 단일 경로가 안전·빠르다."""
-    tconn, qschema = _trino()
     pgconn = pg.connect()
+    tconn = None
     try:
+        markers = read_markers(pgconn)
+        expected = (["commerce_business_entity_history", "commerce_business_entity"]
+                    + [d["object"] for d in details])
+        silver_hi = _read_silver_watermark()
+        if no_new_silver(markers, expected, silver_hi):
+            log.info("gold 조기 스킵 — silver R2 워터마크(%s) 이하로 전 객체 기적재(마커 보유): "
+                     "Trino 접속·DDL·적재·검증 생략", silver_hi)
+            return {"loaded": {}, "hi": str(silver_hi), "skipped": "no_new_silver"}
+
+        tconn, qschema = _trino()
         ensure_objects(pgconn, details)
 
         tcur = tconn.cursor()
@@ -475,12 +521,9 @@ def run_load(details: list[dict], dataset_map: dict[str, dict]) -> dict:
             log.info("silver 비어 있음 — 적재 없음")
             return {"loaded": {}, "hi": None}
 
-        markers = read_markers(pgconn)
         # cold-start(마커 전무) 또는 재개(일부 core/detail 객체가 아직 미적재=마커 없음)면 청크 경로.
         # 청크는 바운드+객체별 재개가 가능해 전량/부분완료 어느 쪽이든 안전. 전 객체가 마커를 가진
         # 평상시 증분(소량 델타)만 아래 단일 경로로 간다.
-        expected = (["commerce_business_entity_history", "commerce_business_entity"]
-                    + [d["object"] for d in details])
         if any(markers.get(o) is None for o in expected):
             return _load_chunked(tconn, qschema, pgconn, details, dataset_map, hi)
 
@@ -508,6 +551,7 @@ def run_load(details: list[dict], dataset_map: dict[str, dict]) -> dict:
         return {"loaded": loaded, "hi": str(hi)}
     finally:
         try:
-            tconn.close()
+            if tconn is not None:
+                tconn.close()
         finally:
             pgconn.close()
