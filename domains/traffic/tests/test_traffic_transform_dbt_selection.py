@@ -255,6 +255,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         in task_commands["dbt_run_silver"]
     )
     assert dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["snapshot_task_id"] == "resolve_traffic_snapshot_run"
+    assert dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["fresh_parse"] is True
     assert dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["snapshot_task_id"] == "resolve_traffic_snapshot_run"
     assert "assert_silver_traffic_event_at_matches_occurred_at" in task_commands["dbt_test_silver"]
     assert (
