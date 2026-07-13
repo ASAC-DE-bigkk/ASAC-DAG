@@ -47,6 +47,32 @@ Bronze의 5분 경계와 겹치지 않는 시각을 선택한다.
 첫 응답의 `list_total_count`가 1000을 초과하면 같은 page size로 뒤 range를 이어서 호출한다.
 전체 parsed row 수가 `list_total_count`보다 작으면 partial 수집으로 보고 DAG를 실패시킨다.
 
+## Snapshot recovery
+
+`traffic_snapshot_recovery` is a manual, dev-only DAG for validating a specific
+historical Traffic Bronze snapshot after a transform recovery. Trigger it with
+the Airflow run configuration below; `snapshot_dag_run_id` must identify a
+`SUCCESS + is_publishable` row in the Bronze run manifest.
+
+```json
+{
+  "target": "dev",
+  "snapshot_dag_run_id": "scheduled__2026-07-13T14:12:00+00:00"
+}
+```
+
+The DAG runs only the recovery relations in this order:
+
+1. `recovery_silver_seoul_traffic_incident`
+2. `recovery_traffic_snapshot_metadata` and its recovery Silver contract
+3. `recovery_gold_traffic_incident_summary` and its recovery Gold contract
+
+It never writes canonical Silver or Gold relations. Each dbt run/test phase has
+a run/task/try-scoped `run_results.json` artifact under
+`target/traffic-snapshot-recovery`; `dbt deps` contributes its task status but
+does not create that artifact. Completion or classified dbt failures write a
+recovery record and notify the operator with the selected `snapshot_dag_run_id`.
+
 ## 운영 리포트와 Discord 알림
 
 `traffic_bronze_reliability_report`는 request audit table을 read-only로 조회해 최근 수집 freshness,
