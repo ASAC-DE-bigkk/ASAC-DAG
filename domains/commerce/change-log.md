@@ -7,6 +7,24 @@
 
 ## 2026-07-13
 
+### 64. commerce_load_gold_refresh — 마커 무관 강제 전량 재적재 DAG(트리거 전용)
+
+request:
+- 현재 gold 파일을 바탕으로, 다른 사람도 신규 데이터를 DB 에 받아올 수 있는 전용 DAG 추가.
+  마커와 무관하게 DB 에 새로 적재, 스케줄 아님 **트리거로만** 실행. 커밋·PR.
+
+response:
+- **신규 DAG `commerce_load_gold_refresh.py`** — `schedule=None`(트리거 전용, catchup 없음).
+  build_catalog → load_gold_full → build_code_values → report_gold. 정기 `commerce_load_gold`
+  (06:00·마커 증분·조기 스킵)와 병존하는 온디맨드 부트스트랩/강제 새로고침용.
+- **loader 확장(`run_load`/`_load_chunked` 에 `force_full` 플래그, 기본 False)**: force_full=True 면
+  조기 스킵(no_new_silver)·마커 창을 모두 건너뛰고 청크 경로로 전 객체 삭제→재적재(OOM 바운드).
+  완료 후 마커는 최신 hi 로 전진(정기 DAG 와 상태 일관). **`commerce_entity_key` 는 보존**(같은
+  업소=같은 entity_seq, refactor-guide §4). **별도 DB 신규 테이블 생성 없음**(기존 gold 객체 재적재).
+- 기본값(force_full=False) 경로는 무변경 — 정기 DAG 동작·조기 스킵 회귀 없음(테스트로 고정).
+- **검증**: 신규 test_gold_loader.py 3건(force_full 이 조기 스킵 우회·청크에 전파, 기본은 스킵 유지)
+  포함 commerce pytest 357 전건 통과, `python -m security` PASS, 컨테이너 DAG parse import_errors 0.
+
 ### 63. content_hash 입력 계약 확정 — raw 원본 전체(원천 좌표 포함) · 파생컬럼 구조적 배제
 
 request:
