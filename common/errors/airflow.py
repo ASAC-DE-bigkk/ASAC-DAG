@@ -39,14 +39,51 @@ def _notify_optout(domain: str) -> bool:
     return domain in {d.strip() for d in raw.split(",") if d.strip()}
 
 
-def _problem_embed(problem: Problem) -> tuple[str, str, str]:
+def _dbt_failure_summary(dbt_project_dir: str) -> str | None:
+    """dbt ``run_results.json`` 에서 실패 노드(모델/테스트)와 사유를 사람이 읽는 요약으로.
+
+    dbt 태스크(run/test)가 실패하면 ``<project>/target/run_results.json`` 에 노드별
+    status·message 가 남는다. 이를 파싱해 "어떤 모델/테스트가 왜" 깨졌는지 알림에 넣는다
+    (예: ``테스트 unique_grain_gold_seoul_ppltn_daily — 중복 121건``).
+
+    best-effort — 파일 부재/파싱 실패/실패노드 없음이면 None(기존 메시지 유지). 한 프로젝트의
+    run/test 가 같은 파일을 덮으므로 다른 티어의 직전 결과가 섞일 수 있다(요약은 참고용).
+    """
+    import json
+    path = os.path.join(dbt_project_dir, "target", "run_results.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            results = json.load(fh).get("results", [])
+    except Exception:
+        return None
+    label_by_kind = {"model": "모델", "test": "테스트", "seed": "seed", "snapshot": "snapshot"}
+    bad: list[str] = []
+    for r in results:
+        status = str(r.get("status", "")).lower()
+        if status not in ("error", "fail", "runtime error"):
+            continue
+        parts = str(r.get("unique_id", "?")).split(".")
+        kind = label_by_kind.get(parts[0], parts[0] if parts else "?")
+        name = parts[-1] if parts else "?"
+        msg = " ".join(str(r.get("message") or "").split())
+        bad.append(f"• {kind} `{name}` — {msg[:140]}" if msg else f"• {kind} `{name}`")
+    if not bad:
+        return None
+    extra = f"\n… 외 {len(bad) - 5}건" if len(bad) > 5 else ""
+    return "**실패 노드**:\n" + "\n".join(bad[:5]) + extra
+
+
+def _problem_embed(problem: Problem, dbt_summary: str | None = None) -> tuple[str, str, str]:
     """Problem → (title, description, footer). 내용은 요약만 — 상세는 R2 문서가 원본."""
     title = f"❌ {problem.domain or '?'} · {problem.dag_id or '?'} 실패"
     lines = [
         f"**task**: `{problem.task_id or '?'}` (try {problem.try_number if problem.try_number is not None else '?'})",
         f"**유형**: {problem.title}",
     ]
-    if problem.detail:
+    if dbt_summary:
+        # dbt 실패면 "무엇이 왜" 를 앞에 — Bash exit 1 같은 뭉뚱그린 detail 보다 유용.
+        lines.append(dbt_summary)
+    elif problem.detail:
         lines.append(f"**상세**: {problem.detail[:500]}")
     lines.append("같은 run 의 추가 실패는 반복 전송하지 않습니다 — 상세는 R2 errors/ 참고.")
     occurred = problem.occurred_at.astimezone(_KST).strftime("%Y-%m-%d %H:%M:%S KST")
@@ -99,7 +136,12 @@ def problem_from_airflow_context(context: dict[str, Any], *, domain: str,
 
 
 def problem_failure_callback(domain: str, *, source_system: str | None = None,
-                             sink: R2ErrorSink | None = None) -> Callable[[dict[str, Any]], None]:
+                             sink: R2ErrorSink | None = None,
+                             dbt_project_dir: str | None = None,
+                             ) -> Callable[[dict[str, Any]], None]:
+    """실패 콜백 팩토리. ``dbt_project_dir`` 를 주면 dbt 태스크 실패 시 그 프로젝트의
+    ``target/run_results.json`` 을 파싱해 실패 모델/테스트·사유를 알림에 붙인다(#304).
+    dbt 를 안 쓰는 도메인/태스크는 이 인자를 생략(기존 동작 불변)."""
     error_sink = sink or R2ErrorSink()
 
     def record_problem(context: dict[str, Any]) -> None:
@@ -120,7 +162,8 @@ def problem_failure_callback(domain: str, *, source_system: str | None = None,
                 LOGGER.info("[discord] 같은 run 의 실패 알림 이미 전송 — 스킵 (%s)",
                             problem.dag_id)
                 return
-            title, description, footer = _problem_embed(problem)
+            dbt_summary = _dbt_failure_summary(dbt_project_dir) if dbt_project_dir else None
+            title, description, footer = _problem_embed(problem, dbt_summary)
             send_embed(title, description, color=COLOR_FAIL, footer=footer, domain=domain)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to send discord error notice: %s", type(exc).__name__)
