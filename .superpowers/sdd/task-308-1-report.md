@@ -29,3 +29,17 @@ Implemented `collect_airflow_scheduled_run_summary(dag_id, detected_at, lookback
 - Existing Trino summary SQL and output fields were not changed.
 - Task 2's overall FAIL gate and Discord failure formatting are intentionally out of scope.
 
+## Review fix: fail closed when redaction fails
+
+The review identified that `_normalize_airflow_problem_reason` returned the original
+reason after `common.security.redact()` failed. The exception path now returns
+`원인 미확인` immediately, so an unredacted R2 detail cannot reach the report.
+
+### TDD evidence
+
+- RED: `python -m pytest domains/traffic/tests/test_traffic_reliability_report.py::test_normalize_airflow_problem_reason_fails_closed_when_redaction_fails -q`
+  — **1 failed**, showing the original `TrinoConnectionError: credential=should-not-appear` was returned.
+- GREEN: `python -m pytest domains/traffic/tests/test_traffic_reliability_report.py::test_normalize_airflow_problem_reason_fails_closed_when_redaction_fails -q`
+  — **1 passed**.
+- Focused regression: `python -m pytest domains/traffic/tests/test_traffic_reliability_report.py -q`
+  — **12 passed**, 1 expected Windows Airflow warning.

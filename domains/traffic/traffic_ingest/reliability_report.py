@@ -292,7 +292,8 @@ def _normalize_airflow_problem_reason(document: Mapping[str, Any]) -> str:
         refresh_env_secrets()
         reason = str(redact(reason))
     except Exception:  # pragma: no cover - a defensive fallback around redaction
-        pass
+        # A redaction failure must never return the original R2 detail.
+        return AIRFLOW_FAILURE_REASON_FALLBACK
     reason = re.split(r"[\r\n]", reason, maxsplit=1)[0].strip()
     if not reason:
         return AIRFLOW_FAILURE_REASON_FALLBACK

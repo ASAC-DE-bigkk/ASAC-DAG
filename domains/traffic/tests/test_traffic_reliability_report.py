@@ -352,6 +352,27 @@ def test_lookup_airflow_problem_reason_normalizes_redacted_document(monkeypatch)
     assert "secret=do-not-show" not in reason
 
 
+def test_normalize_airflow_problem_reason_fails_closed_when_redaction_fails(monkeypatch):
+    import common.security as security
+
+    def fail_redaction(_value):
+        raise RuntimeError("credential=redaction-secret")
+
+    monkeypatch.setattr(security, "refresh_env_secrets", lambda: 0)
+    monkeypatch.setattr(security, "redact", fail_redaction)
+
+    reason = report._normalize_airflow_problem_reason(
+        {
+            "title": "TrinoConnectionError",
+            "detail": "credential=should-not-appear",
+        }
+    )
+
+    assert reason == report.AIRFLOW_FAILURE_REASON_FALLBACK
+    assert "should-not-appear" not in reason
+    assert len(reason) <= report.AIRFLOW_FAILURE_REASON_MAX_LENGTH
+
+
 def test_lookup_airflow_problem_reason_falls_back_without_exposing_r2_error(monkeypatch, caplog):
     monkeypatch.setattr(
         report,
