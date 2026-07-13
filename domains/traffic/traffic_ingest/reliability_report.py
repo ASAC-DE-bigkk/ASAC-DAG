@@ -18,6 +18,10 @@ KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger(__name__)
 
 TRAFFIC_BRONZE_DAG_ID = "traffic_incident_bronze"
+# ``traffic_incident_bronze`` runs on a five-minute cron in the dev smoke flow.
+# The interval is added to the first-to-last failed slot so the reported window
+# includes the final slot's collection period.
+TRAFFIC_SCHEDULE_INTERVAL_MINUTES = 5
 TRAFFIC_TABLE = "bronze_seoul_traffic_incident"
 TRAFFIC_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
 MANIFEST_TABLE = "bronze_collection_run_manifest"
@@ -541,7 +545,18 @@ def _airflow_failure_time(value: Any) -> str:
     return timestamp.astimezone(KST).strftime("%H:%M KST")
 
 
-def _airflow_failure_window(failures: list[Mapping[str, Any]]) -> str | None:
+def _airflow_failure_window(
+    failures: list[Mapping[str, Any]],
+    schedule_interval_minutes: int = TRAFFIC_SCHEDULE_INTERVAL_MINUTES,
+) -> str | None:
+    """Format a KST failure window, including the final scheduled slot.
+
+    Traffic Bronze's five-minute schedule means failures at 11:30 and 11:50
+    cover 25 minutes (20 minutes between timestamps plus the final 5-minute
+    slot). Keeping the interval as an argument makes the calculation testable
+    and allows a future schedule contract to override it without changing the
+    timestamp logic.
+    """
     timestamps = [
         timestamp.astimezone(KST)
         for failure in failures
@@ -555,7 +570,12 @@ def _airflow_failure_window(failures: list[Mapping[str, Any]]) -> str | None:
         window = f"{first:%Y-%m-%d %H:%M}~{last:%H:%M} KST"
     else:
         window = f"{first:%Y-%m-%d %H:%M}~{last:%Y-%m-%d %H:%M} KST"
-    return window
+    try:
+        interval_minutes = max(0, int(schedule_interval_minutes))
+    except (TypeError, ValueError):
+        interval_minutes = TRAFFIC_SCHEDULE_INTERVAL_MINUTES
+    elapsed_minutes = max(0, int((last - first).total_seconds() // 60))
+    return f"{window} ({elapsed_minutes + interval_minutes}분)"
 
 
 def format_traffic_discord_message(report: dict[str, Any]) -> str:

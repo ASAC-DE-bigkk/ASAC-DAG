@@ -53,6 +53,9 @@ Bronze의 5분 경계와 겹치지 않는 시각을 선택한다.
 request 수, parsed row 수, `list_total_count` 대비 coverage, 정상 zero-row 응답 수를 Discord에 보고한다.
 실제 전송은 `ASK_SEOUL_DISCORD_WEBHOOK_URL` 또는 `TRAFFIC_DISCORD_WEBHOOK_URL`이 있을 때만 활성화된다.
 
+scheduled run이 실패하면 `실패 수집 공백`에 첫 실패 슬롯부터 마지막 실패 슬롯까지의 KST 범위를 표시한다.
+범위의 분 단위 길이는 두 시각의 차이에 마지막 슬롯을 포함하는 Bronze 5분 스케줄 간격을 더해 계산한다.
+
 기본 스케줄은 dev target에서 webhook env가 있을 때 `0 9 * * *`다. `ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE`
 또는 공통 `ASK_SEOUL_REPORT_DAG_SCHEDULE`로 override할 수 있고, 빈 문자열이면 schedule을 끈다.
 webhook 미설정이나 Discord 전송 실패는 no-op/best-effort로 처리하며, 수집/검증 판정을 덮어쓰지 않는다.
