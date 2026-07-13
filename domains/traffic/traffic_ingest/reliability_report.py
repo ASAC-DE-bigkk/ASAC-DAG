@@ -18,6 +18,10 @@ KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger(__name__)
 
 TRAFFIC_BRONZE_DAG_ID = "traffic_incident_bronze"
+# ``traffic_incident_bronze`` runs on a five-minute cron in the dev smoke flow.
+# The interval is added to the first-to-last failed slot so the reported window
+# includes the final slot's collection period.
+TRAFFIC_SCHEDULE_INTERVAL_MINUTES = 5
 TRAFFIC_TABLE = "bronze_seoul_traffic_incident"
 TRAFFIC_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
 MANIFEST_TABLE = "bronze_collection_run_manifest"
@@ -26,6 +30,9 @@ SCHEDULE_ENV = "ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 DISCORD_GREEN = 3066993
 DISCORD_RED = 15158332
+AIRFLOW_FAILURE_REASON_FALLBACK = "원인 미확인"
+AIRFLOW_FAILURE_REASON_MAX_LENGTH = 240
+PROBLEM_DOCUMENT_PREFIX = "errors"
 
 
 @dataclass(frozen=True)
@@ -220,6 +227,236 @@ def collect_dag_run_summary(
     return summary
 
 
+def _airflow_state_name(value: Any) -> str:
+    """Return an Airflow enum/string state in a stable lower-case form."""
+    enum_value = getattr(value, "value", value)
+    return str(enum_value or "").lower()
+
+
+def _is_scheduled_airflow_run(dag_run: Any) -> bool:
+    run_type = getattr(dag_run, "run_type", None)
+    # A class-level SQLAlchemy attribute can appear on lightweight test doubles;
+    # in that case the query already applied the scheduled filter.
+    if run_type is not None and (isinstance(run_type, str) or hasattr(run_type, "value")):
+        return _airflow_state_name(run_type) in {"scheduled", "dagruntype.scheduled"}
+    run_id = str(getattr(dag_run, "run_id", ""))
+    return run_id.startswith("scheduled__")
+
+
+def _as_utc_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _problem_key_segment(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9._=-]", "-", str(value or "unknown"))
+
+
+def _build_airflow_problem_storage():
+    """Build the configured R2 storage lazily so report tests need no credentials."""
+    from common.storage import build_storage, r2_env
+
+    return build_storage(
+        "r2",
+        bucket=r2_env("R2_BUCKET_NAME"),
+        endpoint=r2_env("R2_ENDPOINT"),
+        key=r2_env("R2_ACCESS_KEY_ID"),
+        secret=r2_env("R2_SECRET_ACCESS_KEY"),
+        region="auto",
+    )
+
+
+def _normalize_airflow_problem_reason(document: Mapping[str, Any]) -> str:
+    """Extract a one-line, redacted reason from an R2 Problem document."""
+    title = str(document.get("title") or "").strip()
+    detail = str(document.get("detail") or "").strip()
+    if title and detail:
+        reason = detail if detail.startswith(title) else f"{title}: {detail}"
+    else:
+        reason = title or detail
+    reason = re.split(r"[\r\n]", reason, maxsplit=1)[0].strip()
+    if not reason:
+        return AIRFLOW_FAILURE_REASON_FALLBACK
+
+    # Problem documents are redacted at write time; redact again before displaying
+    # to keep this reporting boundary safe when older documents are inspected.
+    try:
+        from common.security import redact, refresh_env_secrets
+
+        refresh_env_secrets()
+        reason = str(redact(reason))
+    except Exception:  # pragma: no cover - a defensive fallback around redaction
+        # A redaction failure must never return the original R2 detail.
+        return AIRFLOW_FAILURE_REASON_FALLBACK
+    reason = re.split(r"[\r\n]", reason, maxsplit=1)[0].strip()
+    if not reason:
+        return AIRFLOW_FAILURE_REASON_FALLBACK
+    return reason[:AIRFLOW_FAILURE_REASON_MAX_LENGTH]
+
+
+def _lookup_airflow_problem_reason(
+    *,
+    dag_id: str,
+    run_id: str,
+    task_id: str,
+    logical_date: Any,
+) -> str:
+    """Find a failed task's existing redacted R2 Problem reason.
+
+    The lookup is intentionally best-effort. The Airflow metadata result remains
+    useful when R2 is unavailable, and callers receive the explicit fallback.
+    """
+    utc_date = _as_utc_datetime(logical_date)
+    if utc_date is None:
+        return AIRFLOW_FAILURE_REASON_FALLBACK
+
+    try:
+        storage = _build_airflow_problem_storage()
+        safe_run_id = _problem_key_segment(run_id)
+        # A failure near UTC midnight can be written on the adjacent observed date.
+        dates = (
+            utc_date.date(),
+            (utc_date - timedelta(days=1)).date(),
+            (utc_date + timedelta(days=1)).date(),
+        )
+        for observed_date in dates:
+            prefix = (
+                f"{PROBLEM_DOCUMENT_PREFIX}/observed_date={observed_date.isoformat()}"
+                f"/domain=traffic/dag_id={_problem_key_segment(dag_id)}/"
+            )
+            for key in storage.list_keys(prefix):
+                filename = str(key).rsplit("/", 1)[-1]
+                if not filename.startswith(f"{safe_run_id}__"):
+                    continue
+                try:
+                    document = storage.read_json(key)
+                except AttributeError:
+                    document = json.loads(storage.read_bytes(key).decode("utf-8"))
+                if not isinstance(document, Mapping):
+                    continue
+                if document.get("run_id") != run_id or document.get("task_id") != task_id:
+                    continue
+                return _normalize_airflow_problem_reason(document)
+    except Exception as exc:
+        # Never include the exception text: it may contain a credential or URL.
+        LOGGER.warning("Unable to resolve Airflow failure reason from R2: error_type=%s", type(exc).__name__)
+    return AIRFLOW_FAILURE_REASON_FALLBACK
+
+
+def collect_airflow_scheduled_run_summary(
+    dag_id: str,
+    detected_at: datetime,
+    lookback_hours: int,
+) -> dict[str, Any]:
+    """Summarize scheduled Airflow runs and their first failed task.
+
+    This reads Airflow's metadata DB directly because a failed run may never have
+    reached the Trino manifest/audit tables. Manual and backfill runs are excluded
+    by ``DagRunType.SCHEDULED``.
+    """
+    from airflow.models.dagrun import DagRun
+    from airflow.utils.session import create_session
+
+    try:
+        from airflow.utils.types import DagRunType
+
+        scheduled_type = DagRunType.SCHEDULED
+    except (ImportError, AttributeError):  # Airflow 2 compatibility
+        scheduled_type = "scheduled"
+
+    detected_at_utc = _as_utc_datetime(detected_at) or datetime.now(timezone.utc)
+    cutoff = detected_at_utc - timedelta(hours=int(lookback_hours))
+    query_end = detected_at_utc
+    failures: list[dict[str, Any]] = []
+    success = failed = running = 0
+
+    with create_session() as session:
+        query = session.query(DagRun).filter(DagRun.dag_id == dag_id)
+        run_type_column = getattr(DagRun, "run_type", None)
+        if run_type_column is not None:
+            query = query.filter(run_type_column == scheduled_type)
+        # Airflow 3 exposes ``logical_date`` as a property while the ORM column
+        # remains ``execution_date``. Lightweight test doubles may expose only
+        # logical_date, so prefer the real column and fall back when unavailable.
+        logical_date_column = getattr(DagRun, "execution_date", None)
+        if logical_date_column is None:
+            logical_date_column = getattr(DagRun, "logical_date", None)
+        query = query.filter(logical_date_column >= cutoff, logical_date_column <= query_end)
+        if logical_date_column is not None:
+            query = query.order_by(logical_date_column)
+        runs = [
+            dag_run
+            for dag_run in query.all()
+            if _is_scheduled_airflow_run(dag_run)
+            and (
+                (logical_date := _as_utc_datetime(getattr(dag_run, "logical_date", None))) is not None
+                and cutoff <= logical_date <= query_end
+            )
+        ]
+
+        for dag_run in runs:
+            state = _airflow_state_name(getattr(dag_run, "state", None))
+            if state == "success":
+                success += 1
+                continue
+            if state == "running":
+                running += 1
+                continue
+            if state != "failed":
+                continue
+
+            failed += 1
+            task_instances = list(dag_run.get_task_instances(session=session) or [])
+            failed_tasks = [
+                task_instance
+                for task_instance in task_instances
+                if _airflow_state_name(getattr(task_instance, "state", None)) == "failed"
+            ]
+            def _task_start_key(task_instance: Any) -> datetime:
+                return _as_utc_datetime(getattr(task_instance, "start_date", None)) or datetime.max.replace(
+                    tzinfo=timezone.utc
+                )
+
+            failed_task = min(
+                failed_tasks,
+                key=_task_start_key,
+            ) if failed_tasks else None
+            task_id = str(getattr(failed_task, "task_id", None) or "unknown")
+            run_id = str(getattr(dag_run, "run_id", None) or "unknown")
+            logical_date = getattr(dag_run, "logical_date", None)
+            failures.append(
+                {
+                    "logical_date": logical_date,
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "reason": _lookup_airflow_problem_reason(
+                        dag_id=dag_id,
+                        run_id=run_id,
+                        task_id=task_id,
+                        logical_date=logical_date,
+                    ),
+                }
+            )
+
+    return {
+        "expected": len(runs),
+        "success": success,
+        "failed": failed,
+        "running": running,
+        "failures": failures,
+    }
+
+
 def build_traffic_reliability_report(cursor=None, detected_at: datetime | None = None) -> dict[str, Any]:
     config = report_config()
     cursor = cursor or trino_cursor()
@@ -245,7 +482,30 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
             "reason": "dag_run_query_failed",
             "error": str(exc),
         }
-    status = traffic["status"] if not dag_runs.get("reason") else "FAIL"
+    try:
+        airflow_runs = collect_airflow_scheduled_run_summary(
+            TRAFFIC_BRONZE_DAG_ID,
+            detected_at,
+            config.lookback_hours,
+        )
+    except Exception as exc:
+        # The failure itself is reportable, but exception details may contain
+        # credentials or connection URLs and must not reach Discord.
+        airflow_runs = {
+            "expected": None,
+            "success": 0,
+            "failed": 0,
+            "running": 0,
+            "failures": [],
+            "reason": "airflow_metadata_query_failed",
+            "error_type": type(exc).__name__,
+        }
+
+    traffic_ok = traffic.get("status") == "PASS"
+    manifest_query_ok = not dag_runs.get("reason")
+    airflow_query_ok = not airflow_runs.get("reason")
+    airflow_failures_ok = int(airflow_runs.get("failed") or 0) == 0
+    status = "PASS" if traffic_ok and manifest_query_ok and airflow_query_ok and airflow_failures_ok else "FAIL"
 
     return {
         "report_name": "traffic_bronze_reliability",
@@ -256,6 +516,7 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
         "status": status,
         "traffic": traffic,
         "dag_runs": dag_runs,
+        "airflow_runs": airflow_runs,
         "blast_radius": [
             _qualified(config, TRAFFIC_TABLE),
             _qualified(config, TRAFFIC_AUDIT_TABLE),
@@ -277,14 +538,62 @@ def _icon(value: bool) -> str:
     return "✅" if value else "❌"
 
 
+def _airflow_failure_time(value: Any) -> str:
+    timestamp = _as_utc_datetime(value)
+    if timestamp is None:
+        return "unknown time"
+    return timestamp.astimezone(KST).strftime("%H:%M KST")
+
+
+def _airflow_failure_window(
+    failures: list[Mapping[str, Any]],
+    schedule_interval_minutes: int = TRAFFIC_SCHEDULE_INTERVAL_MINUTES,
+) -> str | None:
+    """Format a KST failure window, including the final scheduled slot.
+
+    Traffic Bronze's five-minute schedule means failures at 11:30 and 11:50
+    cover 25 minutes (20 minutes between timestamps plus the final 5-minute
+    slot). Keeping the interval as an argument makes the calculation testable
+    and allows a future schedule contract to override it without changing the
+    timestamp logic.
+    """
+    timestamps = [
+        timestamp.astimezone(KST)
+        for failure in failures
+        if (timestamp := _as_utc_datetime(failure.get("logical_date"))) is not None
+    ]
+    if not timestamps:
+        return None
+    first = min(timestamps)
+    last = max(timestamps)
+    if first.date() == last.date():
+        window = f"{first:%Y-%m-%d %H:%M}~{last:%H:%M} KST"
+    else:
+        window = f"{first:%Y-%m-%d %H:%M}~{last:%Y-%m-%d %H:%M} KST"
+    try:
+        interval_minutes = max(0, int(schedule_interval_minutes))
+    except (TypeError, ValueError):
+        interval_minutes = TRAFFIC_SCHEDULE_INTERVAL_MINUTES
+    elapsed_minutes = max(0, int((last - first).total_seconds() // 60))
+    return f"{window} ({elapsed_minutes + interval_minutes}분)"
+
+
 def format_traffic_discord_message(report: dict[str, Any]) -> str:
     traffic = report["traffic"]
+    airflow_runs = report.get("airflow_runs") or {}
     detected_date = str(report["detected_at"])[:10]
     target = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
     status_ok = report["status"] == "PASS"
     coverage_ok = bool(traffic.get("coverage_ok"))
     freshness_ok = bool(traffic.get("freshness_ok"))
     dag_ok = not bool(report["dag_runs"].get("reason"))
+    airflow_query_ok = not bool(airflow_runs.get("reason"))
+    airflow_failures_ok = int(airflow_runs.get("failed") or 0) == 0
+    scheduled_ok = airflow_query_ok and airflow_failures_ok
+    expected = airflow_runs.get("expected")
+    success = int(airflow_runs.get("success") or 0)
+    failed = int(airflow_runs.get("failed") or 0)
+    expected_text = str(expected) if expected is not None else "unknown"
     lines = [
         f"서울시 돌발정보 Bronze 신뢰성 리포트 - {detected_date} (target={target})",
         f"{_icon(status_ok)} 리포트 상태: {'성공' if status_ok else '실패'}",
@@ -304,14 +613,32 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
             f"running={report['dag_runs'].get('running', 0)} "
             f"reason={report['dag_runs'].get('reason', '-')}"
         ),
+        f"{_icon(scheduled_ok)} 스케줄 수집 상태: {success}/{expected_text} 성공, {failed} 실패",
+    ]
+    failure_window = _airflow_failure_window(list(airflow_runs.get("failures") or []))
+    if failure_window:
+        lines.extend([f"실패 수집 공백: {failure_window}", "실패 내역:"])
+        for failure in airflow_runs.get("failures") or []:
+            time_text = _airflow_failure_time(failure.get("logical_date"))
+            task_id = str(failure.get("task_id") or "unknown")
+            reason = str(failure.get("reason") or AIRFLOW_FAILURE_REASON_FALLBACK)
+            run_id = str(failure.get("run_id") or "unknown")
+            lines.append(f"- {time_text} | task={task_id} | {reason} | run_id={run_id}")
+    elif airflow_runs.get("reason"):
+        lines.append(
+            f"스케줄 수집 상태 조회 실패: {airflow_runs.get('reason')}"
+            f" (error_type={airflow_runs.get('error_type', 'unknown')})"
+        )
+    lines.extend([
         "",
         "Checks:",
         f"{_icon(coverage_ok)} traffic_coverage={_format_bool(coverage_ok)}",
         f"{_icon(freshness_ok)} traffic_freshness={_format_bool(freshness_ok)}",
         f"{_icon(dag_ok)} dag_run_summary={_format_bool(dag_ok)}",
+        f"{_icon(scheduled_ok)} airflow_scheduled_runs={_format_bool(scheduled_ok)}",
         "",
         "Blast radius:",
-    ]
+    ])
     lines.extend(f"`{table}`" for table in report["blast_radius"])
     lines.extend(["", f"detected_at: `{report['detected_at']}`", f"catalog/schema: `{report['catalog']}.{report['schema']}`"])
     message = "\n".join(lines)
