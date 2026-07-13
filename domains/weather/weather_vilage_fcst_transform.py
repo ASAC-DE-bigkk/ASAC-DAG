@@ -33,6 +33,7 @@ from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
@@ -188,41 +189,48 @@ with DAG(
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=dbt_command("deps"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_source_freshness = BashOperator(
         task_id="dbt_source_freshness",
         bash_command=dbt_command("source freshness"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_seed_asac_axes = BashOperator(
         task_id="dbt_seed_asac_axes",
         bash_command=dbt_command("seed --select asac_axes"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_run_common_admin_dong_dimension = BashOperator(
         task_id="dbt_run_common_admin_dong_dimension",
         bash_command=dbt_command("run --select asac_axes.dim_admin_dong"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_test_common_admin_dong_dimension = BashOperator(
         task_id="dbt_test_common_admin_dong_dimension",
         bash_command=dbt_command("test --select asac_axes.dim_admin_dong"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_seed_place_mapping = BashOperator(
         task_id="dbt_seed_place_mapping",
         bash_command=dbt_command("seed --select weather_place_grid_mapping"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_test_place_mapping_seed = BashOperator(
         task_id="dbt_test_place_mapping_seed",
+        pool=TRINO_HEAVY_POOL,
         bash_command=dbt_command(
             "test --select "
             "weather_place_grid_mapping "
@@ -236,11 +244,13 @@ with DAG(
     dbt_run_silver = BashOperator(
         task_id="dbt_run_silver",
         bash_command=dbt_command("run --select silver_kma_vilage_fcst"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_test_silver = BashOperator(
         task_id="dbt_test_silver",
+        pool=TRINO_HEAVY_POOL,
         bash_command=dbt_command(
             "test --select "
             "silver_kma_vilage_fcst "
@@ -257,11 +267,13 @@ with DAG(
     dbt_run_gold = BashOperator(
         task_id="dbt_run_gold",
         bash_command=dbt_command("run --select gold_weather_forecast_summary"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
     dbt_test_gold = BashOperator(
         task_id="dbt_test_gold",
+        pool=TRINO_HEAVY_POOL,
         bash_command=dbt_command(
             "test --select "
             "gold_weather_forecast_summary "
@@ -273,6 +285,7 @@ with DAG(
 
     dbt_run_place_mart = BashOperator(
         task_id="dbt_run_place_mart",
+        pool=TRINO_HEAVY_POOL,
         bash_command=dbt_command(
             "run --select "
             "dim_weather_place "
@@ -284,6 +297,7 @@ with DAG(
 
     dbt_test_place_mart = BashOperator(
         task_id="dbt_test_place_mart",
+        pool=TRINO_HEAVY_POOL,
         bash_command=dbt_command(
             "test --select "
             "dim_weather_place "

@@ -46,6 +46,10 @@ KMA_BRONZE_COLUMNS = (
 )
 
 
+class BronzeValidationError(RuntimeError):
+    """Permanent KMA Bronze data-contract failure; retrying cannot repair it."""
+
+
 try:
     from pyiceberg.exceptions import CommitFailedException
 except Exception:
@@ -630,16 +634,18 @@ def verify_kma_bronze_runtime(
     row = cursor.fetchone()
     row_count = int(row[0])
     if expected_rows is not None and row_count != expected_rows:
-        raise RuntimeError(
+        raise BronzeValidationError(
             f"KMA bronze verification failed: expected_rows={expected_rows}, actual_rows={row_count}"
         )
     if expected_raw_objects is not None and int(row[1]) != expected_raw_objects:
-        raise RuntimeError(
+        raise BronzeValidationError(
             "KMA bronze verification failed: "
             f"expected_raw_objects={expected_raw_objects}, actual_raw_objects={row[1]}"
         )
     if expected_raw_objects is None and expected_rows and raw_object_key and int(row[1]) != 1:
-        raise RuntimeError(f"KMA bronze verification failed: raw_object_count={row[1]}")
+        raise BronzeValidationError(
+            f"KMA bronze verification failed: raw_object_count={row[1]}"
+        )
     print(
         "weather_vilage_fcst_bronze "
         f"row_count={row[0]} raw_object_count={row[1]} last_collected_at={row[2]}"

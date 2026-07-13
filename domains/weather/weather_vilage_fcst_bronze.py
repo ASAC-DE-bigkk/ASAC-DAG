@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from airflow import DAG
 from airflow.sdk import Asset
+from airflow.sdk.exceptions import AirflowFailException
 from airflow.providers.standard.operators.python import PythonOperator
 
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,10 +36,12 @@ from _shared.bronze_run_manifest import (  # noqa: E402
     record_bronze_run_event,
 )
 from weather_ingest.bronze import (  # noqa: E402
+    BronzeValidationError,
     append_kma_bronze_row_batches_pyiceberg,
     create_kma_bronze_table,
     verify_kma_bronze_runtime as verify_kma_bronze_rows,
 )
+from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from weather_ingest.common.runtime import (  # noqa: E402
     download_raw_object,
     fetch_url,
@@ -696,12 +699,15 @@ def record_and_notify_kma_run_failed(context) -> None:
 
 def verify_kma_bronze_runtime(**context) -> int:
     ingest_result = context["ti"].xcom_pull(task_ids="load_kma_bronze") or {}
-    verified_rows = verify_kma_bronze_rows(
-        raw_object_keys=ingest_result["raw_object_keys"],
-        dag_run_id=context["run_id"],
-        expected_rows=int(ingest_result["inserted"]),
-        expected_raw_objects=int(ingest_result["expected_raw_object_count"]),
-    )
+    try:
+        verified_rows = verify_kma_bronze_rows(
+            raw_object_keys=ingest_result["raw_object_keys"],
+            dag_run_id=context["run_id"],
+            expected_rows=int(ingest_result["inserted"]),
+            expected_raw_objects=int(ingest_result["expected_raw_object_count"]),
+        )
+    except BronzeValidationError as exc:
+        raise AirflowFailException(str(exc)) from exc
     cursor, catalog, schema = trino_cursor()
     record_bronze_run_event(
         cursor,
@@ -756,6 +762,7 @@ def build_kma_bronze_dag(dag_id: str, schedule: str | None, description: str, ta
         load_bronze = PythonOperator(
             task_id="load_kma_bronze",
             python_callable=load_kma_bronze,
+            pool=TRINO_HEAVY_POOL,
             retries=3,
             retry_delay=timedelta(minutes=1),
             retry_exponential_backoff=True,
@@ -765,6 +772,10 @@ def build_kma_bronze_dag(dag_id: str, schedule: str | None, description: str, ta
         verify_bronze = PythonOperator(
             task_id="verify_kma_bronze_runtime",
             python_callable=verify_kma_bronze_runtime,
+            pool=TRINO_HEAVY_POOL,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
             on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
             outlets=[Asset(WEATHER_BRONZE_ASSET)],
         )
@@ -806,6 +817,7 @@ def build_kma_bronze_backfill_dag():
         load_bronze = PythonOperator(
             task_id="load_kma_bronze",
             python_callable=load_kma_bronze,
+            pool=TRINO_HEAVY_POOL,
             retries=3,
             retry_delay=timedelta(minutes=1),
             retry_exponential_backoff=True,
@@ -815,6 +827,10 @@ def build_kma_bronze_backfill_dag():
         verify_bronze = PythonOperator(
             task_id="verify_kma_bronze_runtime",
             python_callable=verify_kma_bronze_runtime,
+            pool=TRINO_HEAVY_POOL,
+            retries=3,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
             on_failure_callback=[record_and_notify_kma_run_failed, record_weather_problem],
             outlets=[Asset(WEATHER_BRONZE_ASSET)],
         )
