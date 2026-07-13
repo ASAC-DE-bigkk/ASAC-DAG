@@ -1,3 +1,4 @@
+<!-- shared-domains: weather,traffic -->
 # Weather·Traffic 비용 대리 지표 비교
 
 - 측정 시각: 2026-07-13 13:37:48–13:39:22 UTC (22:37:48–22:39:22 KST)

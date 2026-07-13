@@ -1,3 +1,4 @@
+# shared-domains: weather,traffic
 """Pure-function tests for the Weather/Traffic cost-proxy benchmark CLI."""
 from __future__ import annotations
 
@@ -6,7 +7,7 @@ import json
 from pathlib import Path
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "benchmark_weather_traffic_cost_proxy.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "benchmarks" / "weather_traffic_cost_proxy.py"
 SPEC = importlib.util.spec_from_file_location("cost_proxy_benchmark", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 benchmark = importlib.util.module_from_spec(SPEC)
