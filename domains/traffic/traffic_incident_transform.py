@@ -328,7 +328,17 @@ with DAG(
 
     dbt_test_common_admin_dong_dimension = dbt_task(
         "dbt_test_common_admin_dong_dimension",
-        "test --select asac_axes.dim_admin_dong",
+        (
+            "test --select asac_axes.dim_admin_dong "
+            # Canonical Gold tests that also ref dim_admin_dong are selected
+            # indirectly here, before the current run has rebuilt Gold.
+            "--exclude "
+            "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact "
+            "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness "
+            "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles"
+        ),
     )
 
     resolve_snapshot = PythonOperator(
