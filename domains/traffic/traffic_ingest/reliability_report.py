@@ -478,7 +478,30 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
             "reason": "dag_run_query_failed",
             "error": str(exc),
         }
-    status = traffic["status"] if not dag_runs.get("reason") else "FAIL"
+    try:
+        airflow_runs = collect_airflow_scheduled_run_summary(
+            TRAFFIC_BRONZE_DAG_ID,
+            detected_at,
+            config.lookback_hours,
+        )
+    except Exception as exc:
+        # The failure itself is reportable, but exception details may contain
+        # credentials or connection URLs and must not reach Discord.
+        airflow_runs = {
+            "expected": None,
+            "success": 0,
+            "failed": 0,
+            "running": 0,
+            "failures": [],
+            "reason": "airflow_metadata_query_failed",
+            "error_type": type(exc).__name__,
+        }
+
+    traffic_ok = traffic.get("status") == "PASS"
+    manifest_query_ok = not dag_runs.get("reason")
+    airflow_query_ok = not airflow_runs.get("reason")
+    airflow_failures_ok = int(airflow_runs.get("failed") or 0) == 0
+    status = "PASS" if traffic_ok and manifest_query_ok and airflow_query_ok and airflow_failures_ok else "FAIL"
 
     return {
         "report_name": "traffic_bronze_reliability",
@@ -489,6 +512,7 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
         "status": status,
         "traffic": traffic,
         "dag_runs": dag_runs,
+        "airflow_runs": airflow_runs,
         "blast_radius": [
             _qualified(config, TRAFFIC_TABLE),
             _qualified(config, TRAFFIC_AUDIT_TABLE),
@@ -510,14 +534,46 @@ def _icon(value: bool) -> str:
     return "✅" if value else "❌"
 
 
+def _airflow_failure_time(value: Any) -> str:
+    timestamp = _as_utc_datetime(value)
+    if timestamp is None:
+        return "unknown time"
+    return timestamp.astimezone(KST).strftime("%H:%M KST")
+
+
+def _airflow_failure_window(failures: list[Mapping[str, Any]]) -> str | None:
+    timestamps = [
+        timestamp.astimezone(KST)
+        for failure in failures
+        if (timestamp := _as_utc_datetime(failure.get("logical_date"))) is not None
+    ]
+    if not timestamps:
+        return None
+    first = min(timestamps)
+    last = max(timestamps)
+    if first.date() == last.date():
+        window = f"{first:%Y-%m-%d %H:%M}~{last:%H:%M} KST"
+    else:
+        window = f"{first:%Y-%m-%d %H:%M}~{last:%Y-%m-%d %H:%M} KST"
+    return window
+
+
 def format_traffic_discord_message(report: dict[str, Any]) -> str:
     traffic = report["traffic"]
+    airflow_runs = report.get("airflow_runs") or {}
     detected_date = str(report["detected_at"])[:10]
     target = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
     status_ok = report["status"] == "PASS"
     coverage_ok = bool(traffic.get("coverage_ok"))
     freshness_ok = bool(traffic.get("freshness_ok"))
     dag_ok = not bool(report["dag_runs"].get("reason"))
+    airflow_query_ok = not bool(airflow_runs.get("reason"))
+    airflow_failures_ok = int(airflow_runs.get("failed") or 0) == 0
+    scheduled_ok = airflow_query_ok and airflow_failures_ok
+    expected = airflow_runs.get("expected")
+    success = int(airflow_runs.get("success") or 0)
+    failed = int(airflow_runs.get("failed") or 0)
+    expected_text = str(expected) if expected is not None else "unknown"
     lines = [
         f"서울시 돌발정보 Bronze 신뢰성 리포트 - {detected_date} (target={target})",
         f"{_icon(status_ok)} 리포트 상태: {'성공' if status_ok else '실패'}",
@@ -537,14 +593,32 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
             f"running={report['dag_runs'].get('running', 0)} "
             f"reason={report['dag_runs'].get('reason', '-')}"
         ),
+        f"{_icon(scheduled_ok)} 스케줄 수집 상태: {success}/{expected_text} 성공, {failed} 실패",
+    ]
+    failure_window = _airflow_failure_window(list(airflow_runs.get("failures") or []))
+    if failure_window:
+        lines.extend([f"실패 수집 공백: {failure_window}", "실패 내역:"])
+        for failure in airflow_runs.get("failures") or []:
+            time_text = _airflow_failure_time(failure.get("logical_date"))
+            task_id = str(failure.get("task_id") or "unknown")
+            reason = str(failure.get("reason") or AIRFLOW_FAILURE_REASON_FALLBACK)
+            run_id = str(failure.get("run_id") or "unknown")
+            lines.append(f"- {time_text} | task={task_id} | {reason} | run_id={run_id}")
+    elif airflow_runs.get("reason"):
+        lines.append(
+            f"스케줄 수집 상태 조회 실패: {airflow_runs.get('reason')}"
+            f" (error_type={airflow_runs.get('error_type', 'unknown')})"
+        )
+    lines.extend([
         "",
         "Checks:",
         f"{_icon(coverage_ok)} traffic_coverage={_format_bool(coverage_ok)}",
         f"{_icon(freshness_ok)} traffic_freshness={_format_bool(freshness_ok)}",
         f"{_icon(dag_ok)} dag_run_summary={_format_bool(dag_ok)}",
+        f"{_icon(scheduled_ok)} airflow_scheduled_runs={_format_bool(scheduled_ok)}",
         "",
         "Blast radius:",
-    ]
+    ])
     lines.extend(f"`{table}`" for table in report["blast_radius"])
     lines.extend(["", f"detected_at: `{report['detected_at']}`", f"catalog/schema: `{report['catalog']}.{report['schema']}`"])
     message = "\n".join(lines)

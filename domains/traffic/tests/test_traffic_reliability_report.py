@@ -14,6 +14,7 @@ from traffic_ingest import reliability_report as report  # noqa: E402
 
 
 ORIGINAL_COLLECT_DAG_RUN_SUMMARY = report.collect_dag_run_summary
+ORIGINAL_COLLECT_AIRFLOW_SUMMARY = report.collect_airflow_scheduled_run_summary
 
 
 class RecordingCursor:
@@ -38,6 +39,17 @@ def stub_dag_run_summary(monkeypatch):
             "success": 3,
             "failed": 0,
             "running": 1,
+        },
+    )
+    monkeypatch.setattr(
+        report,
+        "collect_airflow_scheduled_run_summary",
+        lambda *args: {
+            "expected": 4,
+            "success": 3,
+            "failed": 0,
+            "running": 1,
+            "failures": [],
         },
     )
 
@@ -133,6 +145,69 @@ def test_traffic_message_does_not_include_webhook(monkeypatch):
     assert "✅ 리포트 상태: 성공" in message
     assert "success=3 failed=0 running=1" in message
     assert "Bronze" in message
+
+
+def test_traffic_report_fails_and_describes_failed_scheduled_runs(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setattr(
+        report,
+        "collect_airflow_scheduled_run_summary",
+        lambda *args: {
+            "expected": 288,
+            "success": 283,
+            "failed": 5,
+            "running": 0,
+            "failures": [
+                {
+                    "logical_date": datetime(2026, 7, 12, 2, 30, tzinfo=timezone.utc),
+                    "run_id": "scheduled__2026-07-12T02:30:00+00:00",
+                    "task_id": "record_seoul_traffic_run_started",
+                    "reason": "TrinoConnectionError: trino DNS 이름 해석 실패",
+                },
+            ],
+        },
+    )
+    cursor = RecordingCursor(
+        rows=[
+            (1, 25, 25, 1000, 0, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc)),
+        ]
+    )
+
+    result = report.build_traffic_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 13, 9, 0, tzinfo=report.KST),
+    )
+    message = report.format_traffic_discord_message(result)
+
+    assert result["status"] == "FAIL"
+    assert result["airflow_runs"]["failed"] == 5
+    assert "스케줄 수집 상태: 283/288 성공, 5 실패" in message
+    assert "11:30 KST | task=record_seoul_traffic_run_started" in message
+    assert "TrinoConnectionError" in message
+
+
+def test_traffic_report_fails_safely_when_airflow_summary_query_fails(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+
+    def fail_summary(*_args):
+        raise RuntimeError("credential=must-not-be-in-report")
+
+    monkeypatch.setattr(report, "collect_airflow_scheduled_run_summary", fail_summary)
+    cursor = RecordingCursor(
+        rows=[
+            (1, 25, 25, 1000, 0, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc)),
+        ]
+    )
+
+    result = report.build_traffic_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 13, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["airflow_runs"]["reason"] == "airflow_metadata_query_failed"
+    assert result["airflow_runs"]["error_type"] == "RuntimeError"
+    assert "must-not-be-in-report" not in json.dumps(result, ensure_ascii=False)
 
 
 def test_traffic_send_discord_posts_payload(monkeypatch):
@@ -275,7 +350,7 @@ def test_collect_airflow_scheduled_run_summary_includes_failed_task_reason(monke
         lambda **kwargs: "TrinoConnectionError: trino DNS 이름 해석 실패",
     )
 
-    summary = report.collect_airflow_scheduled_run_summary(
+    summary = ORIGINAL_COLLECT_AIRFLOW_SUMMARY(
         "traffic_incident_bronze",
         datetime(2026, 7, 13, 2, 30, tzinfo=timezone.utc),
         24,
@@ -315,7 +390,7 @@ def test_collect_airflow_scheduled_run_summary_excludes_manual_and_outside_windo
     monkeypatch.setattr(airflow_dagrun, "DagRun", _ScheduledDagRun)
     monkeypatch.setattr(airflow_session, "create_session", lambda: _SessionContext(session))
 
-    summary = report.collect_airflow_scheduled_run_summary(
+    summary = ORIGINAL_COLLECT_AIRFLOW_SUMMARY(
         "traffic_incident_bronze", detected_at, 24
     )
 
