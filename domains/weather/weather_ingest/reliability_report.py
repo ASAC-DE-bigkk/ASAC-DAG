@@ -317,7 +317,11 @@ def collect_dag_run_summary(
             max(CASE WHEN latest_status = 'SUCCESS' THEN latest_event_at END) AS last_success_at,
             max(
                 CASE WHEN latest_status = 'SUCCESS' AND latest_is_publishable THEN latest_event_at END
-            ) AS last_publishable_at
+            ) AS last_publishable_at,
+            max_by(dag_run_id, ROW(latest_event_at, dag_run_id)) AS latest_dag_run_id,
+            max_by(latest_status, ROW(latest_event_at, dag_run_id)) AS latest_status,
+            max_by(latest_is_publishable, ROW(latest_event_at, dag_run_id)) AS latest_is_publishable,
+            max_by(latest_event_at, ROW(latest_event_at, dag_run_id)) AS latest_event_at
         FROM latest
         """,
     )
@@ -330,6 +334,10 @@ def collect_dag_run_summary(
         "actual_raw_objects": 0,
         "last_success_at": None,
         "last_publishable_at": None,
+        "latest_dag_run_id": None,
+        "latest_status": None,
+        "latest_is_publishable": None,
+        "latest_event_at": None,
     }
     if row:
         summary.update(
@@ -340,6 +348,10 @@ def collect_dag_run_summary(
             actual_raw_objects=int(row[4] or 0),
             last_success_at=str(row[5]) if row[5] is not None else None,
             last_publishable_at=str(row[6]) if row[6] is not None else None,
+            latest_dag_run_id=str(row[7]) if row[7] is not None else None,
+            latest_status=str(row[8]) if row[8] is not None else None,
+            latest_is_publishable=bool(row[9]) if row[9] is not None else None,
+            latest_event_at=str(row[10]) if row[10] is not None else None,
         )
     return summary
 
@@ -368,7 +380,10 @@ def build_weather_reliability_report(cursor=None, detected_at: datetime | None =
             "reason": "dag_run_query_failed",
             "error": str(exc),
         }
-    publishability_ok = bool(dag_runs.get("last_publishable_at"))
+    publishability_ok = (
+        dag_runs.get("latest_status") == "SUCCESS"
+        and dag_runs.get("latest_is_publishable") is True
+    )
     dag_runs["publishability_ok"] = publishability_ok
     late_publishability = {
         "status": "NOT_EVALUATED",

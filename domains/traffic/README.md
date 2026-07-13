@@ -10,7 +10,7 @@ row와 metadata를 적재하는 것이다.
 | 파일 | 역할 |
 |---|---|
 | `traffic_incident_bronze.py` | Airflow DAG 엔트리포인트. 5분 dev schedule과 task 순서만 잡고 세부 로직은 domain package에 위임한다. |
-| `traffic_reliability_report.py` | 매일 09:00 KST 기준 traffic Bronze request audit freshness/coverage를 조회하고 Discord로 알리는 read-only 리포트 DAG다. |
+| `traffic_reliability_report.py` | 15분마다 traffic Bronze request audit freshness/coverage를 조회하고 Discord로 알리는 read-only 리포트 DAG다. |
 | `traffic_ingest/acc_info.py` | TOPIS AccInfo 요청 URL, raw object key, XML 응답 파싱, redacted request metadata를 담당한다. |
 | `traffic_ingest/bronze.py` | Iceberg bronze table DDL, schema evolution, insert, runtime verify SQL을 담당한다. |
 | `traffic_ingest/reliability_report.py` | 리포트 DAG의 Trino query, 메시지 포맷, Discord 전송(no-op/best-effort)을 담당한다. |
@@ -56,7 +56,7 @@ request 수, parsed row 수, `list_total_count` 대비 coverage, 정상 zero-row
 scheduled run이 실패하면 `실패 수집 공백`에 첫 실패 슬롯부터 마지막 실패 슬롯까지의 KST 범위를 표시한다.
 범위의 분 단위 길이는 두 시각의 차이에 마지막 슬롯을 포함하는 Bronze 5분 스케줄 간격을 더해 계산한다.
 
-기본 스케줄은 dev target에서 webhook env가 있을 때 `0 9 * * *`다. `ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE`
+기본 스케줄은 dev target에서 webhook env가 있을 때 15분마다(`*/15 * * * *`)다. `ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE`
 또는 공통 `ASK_SEOUL_REPORT_DAG_SCHEDULE`로 override할 수 있고, 빈 문자열이면 schedule을 끈다.
 webhook 미설정이나 Discord 전송 실패는 no-op/best-effort로 처리하며, 수집/검증 판정을 덮어쓰지 않는다.
 webhook URL은 코드, 로그, 리포트 메시지에 원문으로 남기지 않는다.
