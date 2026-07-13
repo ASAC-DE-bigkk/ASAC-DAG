@@ -192,6 +192,8 @@ Cosmos 가 청크 전량 빌드를 못 하므로(§3.1), **빈 silver 최초 빌
   docker compose --profile lineage up -d          # marquez 3종 기동(최초 flyway 마이그레이션)
   curl -s http://127.0.0.1:5000/api/v1/namespaces  # API 헬스(namespaces 응답)
   # 이후 commerce_load_silver 실행 → 브라우저 http://127.0.0.1:3000 에서 lineage 확인
+  docker compose --profile lineage down           # 종료도 프로파일 포함(대칭!) — 안 하면 marquez 가
+  #  살아남아 "Network elt_net Resource is still in use" 로 네트워크 제거가 실패한다.
   ```
 - **로컬 검증 한계(주의)**: Marquez 이미지 버전(`0.50.0`)·OL provider 버전은 canonical 기준으로
   고정했고 이 저장소에서 런타임 검증은 못 했다(도커 미기동). 최초 기동 시 이미지 버전/마이그레이션이
