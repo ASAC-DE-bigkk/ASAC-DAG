@@ -27,6 +27,7 @@ if DAGS_ROOT_DIR not in sys.path:
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from weather_ingest.common.runtime import trino_cursor  # noqa: E402
+from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -120,17 +121,20 @@ with DAG(
     create_isolated_schema = PythonOperator(
         task_id=SMOKE_SCHEMA_TASK_ID,
         python_callable=create_weather_w1_smoke_schema,
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=record_weather_problem,
     )
 
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=dbt_smoke_command("deps"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=record_weather_problem,
     )
 
     dbt_seed_bridge_inputs = BashOperator(
         task_id="dbt_seed_bridge_inputs",
+        pool=TRINO_HEAVY_POOL,
         bash_command=dbt_smoke_command(
             "seed --select asac_axes weather_place_grid_mapping weather_admin_dong_grid_bridge_history"
         ),
@@ -140,17 +144,20 @@ with DAG(
     dbt_run_common_admin_dong_dimension = BashOperator(
         task_id="dbt_run_common_admin_dong_dimension",
         bash_command=dbt_smoke_command("run --select asac_axes.dim_admin_dong"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=record_weather_problem,
     )
 
     dbt_run_bridge = BashOperator(
         task_id="dbt_run_bridge",
         bash_command=dbt_smoke_command("run --select bridge_weather_admin_dong_grid"),
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=record_weather_problem,
     )
 
     dbt_test_bridge_contract = BashOperator(
         task_id="dbt_test_bridge_contract",
+        pool=TRINO_HEAVY_POOL,
         bash_command=dbt_smoke_command(
             "test --select "
             "assert_weather_bridge_candidate_grain_unique "
@@ -165,6 +172,7 @@ with DAG(
     cleanup_isolated_schema = PythonOperator(
         task_id="cleanup_isolated_schema",
         python_callable=cleanup_weather_w1_smoke_schema,
+        pool=TRINO_HEAVY_POOL,
         trigger_rule=TriggerRule.ALL_DONE,
         on_failure_callback=record_weather_problem,
     )

@@ -1,3 +1,4 @@
+import ast
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,15 @@ class RecordingCursor:
 
     def execute(self, sql):
         self.statements.append(" ".join(sql.split()))
+
+
+class VerificationCursor(RecordingCursor):
+    def __init__(self, row):
+        super().__init__()
+        self.row = row
+
+    def fetchone(self):
+        return self.row
 
 
 class RecordingTransaction:
@@ -51,6 +61,57 @@ class RecordingTable:
 
     def transaction(self):
         return self.txn
+
+
+def test_kma_verify_count_mismatch_is_permanent_validation_error(monkeypatch):
+    cursor = VerificationCursor((4, 1, None))
+    monkeypatch.setattr(bronze, "trino_cursor", lambda: (cursor, "iceberg_dev", "weather"))
+
+    with pytest.raises(bronze.BronzeValidationError, match="expected_rows=5, actual_rows=4"):
+        bronze.verify_kma_bronze_runtime(expected_rows=5)
+
+
+def test_kma_verify_connection_error_remains_retryable(monkeypatch):
+    connection_error = ConnectionError("temporary Trino DNS failure")
+
+    def fail_to_connect():
+        raise connection_error
+
+    monkeypatch.setattr(bronze, "trino_cursor", fail_to_connect)
+
+    with pytest.raises(ConnectionError) as raised:
+        bronze.verify_kma_bronze_runtime(expected_rows=5)
+
+    assert raised.value is connection_error
+
+
+def test_airflow_wrapper_marks_only_validation_errors_non_retryable():
+    dag_path = Path(__file__).resolve().parents[1] / "weather_vilage_fcst_bronze.py"
+    tree = ast.parse(dag_path.read_text(encoding="utf-8"), filename=str(dag_path))
+    wrapper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "verify_kma_bronze_runtime"
+    )
+    validation_handler = next(
+        (
+            handler
+            for handler in ast.walk(wrapper)
+            if isinstance(handler, ast.ExceptHandler)
+            and isinstance(handler.type, ast.Name)
+            and handler.type.id == "BronzeValidationError"
+        ),
+        None,
+    )
+
+    assert validation_handler is not None
+    assert any(
+        isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Name)
+        and node.exc.func.id == "AirflowFailException"
+        for node in ast.walk(validation_handler)
+    )
 
 
 def test_kma_create_table_uses_load_date_partitioning_for_fresh_tables():
