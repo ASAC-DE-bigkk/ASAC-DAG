@@ -977,9 +977,13 @@ applies before sending to external channels.
 Current known rule:
 
 - `commerce_load_silver.masked_address_dong_mapping_skip > warning`: if `road_address` or
-  `jibun_address` contains `*`, silver must skip dong-level legal/admin mapping and report the total
-  count, settled count, and ratio. Gu/sgg parsing may remain populated because it does not depend on
-  the masked dong token.
+  `jibun_address` contains `*`, silver must skip dong-level legal/admin mapping and report the
+  settled count, affected count, and ratio. Gu/sgg parsing may remain populated because it does not
+  depend on the masked dong token. **Scope = this run's newly-loaded rows only (#65)**: the summary
+  aggregates `silver_license_current` filtered to `collected_at > 직전 silver 워터마크`
+  (`silver_state._watermark`, read before `mark_silver_done` advances it) — not the cumulative current
+  table — so already-loaded masked addresses are not re-warned every day. No new rows → `info`, no
+  external alert. Watermark unknown → full-table fallback.
 
 
 ## 20. Security Gate (recall · apply · check, ongoing)

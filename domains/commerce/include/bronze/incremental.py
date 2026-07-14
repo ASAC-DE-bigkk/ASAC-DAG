@@ -13,6 +13,14 @@ tie-break. 3·4순위는 **업소 식별키 (OPNSFTEAMCODE, MGTNO)** — MGTNO �
 silver 그레인 (dataset, opnsfteamcode, mgtno) · 정렬 `coalesce(updatedt_ts, lastmodts_ts, epoch)
 desc, lastmodts desc` 와 일치.
 
+**v1/v2 정본 해석(중요)**: 정렬·식별키는 원본 row 에서 뽑되 `canonical_get` 으로 v1 정본 키
+(UPDATEDT/LASTMODTS/OPNSFTEAMCODE/MGTNO) **없으면 v2 별칭**(DATA_UPDT_YMD/LAST_MDFCN_YMD/
+OGDP_INST_CD/MNG_NO)을 해석한다. 이걸 안 하면 v2(환경 13종) row 는 v1 키가 전무해 sort_key 가
+전부 `(0,0,'','')` 로 붕괴 → 정렬이 페이지네이션(무순서) 순서로 무너지고, 같은 데이터도 매 수집이
+위치 어긋남으로 **전량 신규(오탐)**로 방출된다(수질오염·대기배출 등 매일 수천 건 오탐의 원인).
+**내용 동일성 판정·저장(normalize/verification_key)은 원본 그대로**(§2.2 원천 보존) — 키 해석만
+정본화한다. 정렬키가 바뀌므로(v2) 배포 후 `bronze.resort` 1회로 기존 diff-target 재정렬 필요(#193 동일 절차).
+
 계약:
 - row = dict(파싱된 인허가 레코드). 정렬키 = 위 3키 — 결정적 전순서.
 - 검증키(verification key) = 정렬본 row 정규화(JSON, key정렬) 문자열을 순서대로 이어 sha256(순서 민감).
@@ -33,12 +41,17 @@ import re
 import tempfile
 from typing import Iterable, Iterator
 
+from commerce_core.schemas import canonical_get   # v1 정본 없으면 v2 별칭 해석(키 추출용)
+
 _NON_DIGIT = re.compile(r"\D")
 
 
 def _ts_num(row: dict, field: str) -> int:
-    """타임스탬프 필드(datetime 문자열) → YYYYMMDDHHMMSS 정수. 없거나 비정형이면 0."""
-    digits = _NON_DIGIT.sub("", (row.get(field) or "").strip())[:14]
+    """타임스탬프 필드(datetime 문자열) → YYYYMMDDHHMMSS 정수. 없거나 비정형이면 0.
+
+    v1 정본 키(예: UPDATEDT)가 없으면 v2 별칭(DATA_UPDT_YMD 등)을 `canonical_get` 으로 해석한다
+    — v2 환경 데이터셋이 정렬키 붕괴로 전량 오탐되던 문제 대응(원본 row 는 변형하지 않음)."""
+    digits = _NON_DIGIT.sub("", str(canonical_get(row, field) or "").strip())[:14]
     return int(digits) if digits else 0
 
 
@@ -63,7 +76,11 @@ def sort_key(row: dict) -> tuple[int, int, str, str]:
     u = updatedt_num(row)
     l = lastmodts_num(row)
     primary = u or l                        # UPDATEDT; 없으면(0) LASTMODTS 폴백
-    return (-primary, -l, row.get("OPNSFTEAMCODE") or "", row.get("MGTNO") or "")
+    # 3·4순위 식별키도 canonical_get 로 v1 정본→v2 별칭 해석(OGDP_INST_CD/MNG_NO). 안 하면 v2 는
+    # 전 row 가 ('','') 로 붕괴 → 정렬 무순서화·전량 오탐(위 모듈 docstring "v1/v2 정본 해석").
+    return (-primary, -l,
+            canonical_get(row, "OPNSFTEAMCODE") or "",
+            canonical_get(row, "MGTNO") or "")
 
 
 def normalize(row: dict) -> str:

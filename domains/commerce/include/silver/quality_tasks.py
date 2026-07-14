@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from decimal import Decimal
 
 from bronze.warehouse import _connect, _qualified
@@ -25,18 +26,44 @@ def _num(value) -> int | float:
     return int(value)
 
 
-def notify_masked_address_dong_skip_summary() -> dict:
-    """Warn when masked addresses were skipped for dong-level mapping.
+def _prev_silver_watermark() -> datetime | None:
+    """직전 silver run 의 history max(collected_at) — gold 핸드셰이크 파일(silver_state).
 
-    The query returns one aggregate row only; no silver records are loaded into
-    Airflow memory.
+    이 task 는 배선상 `mark_silver_done`(워터마크 전진) **이전** 단계라, 여기서 읽는 값은 아직
+    '직전 run' 워터마크다 → `collected_at > 이 값` = **이번 run 에 신규 유입된 current 행**.
+    (평상시 증분 = silver_license_current 의 affected 판정 `collected_at > max` 와 동일 계약.)
+    파일 부재/파싱 실패 → None(그 경우 전량 집계로 폴백 — 신규 판정 불가 시 전체를 보고).
     """
+    try:
+        from commerce_core import silver_state
+        from commerce_core.settings import get_settings
+        from commerce_core.storage import get_storage
+
+        doc = silver_state.read_watermark(get_storage(), get_settings().storage_prefix)
+        raw = (doc or {}).get("max_collected_at")
+        return datetime.fromisoformat(raw) if raw else None
+    except Exception as exc:  # noqa: BLE001 — 워터마크 문제로 품질 집계를 막지 않는다
+        log.warning("silver 워터마크 읽기 실패(전량 집계로 폴백): %s", type(exc).__name__)
+        return None
+
+
+def notify_masked_address_dong_skip_summary() -> dict:
+    """Warn when masked addresses were skipped for dong-level mapping — **이번 run 신규분만**.
+
+    기존엔 `silver_license_current` **전량**(기적재 포함)을 매일 집계해, 신규 적재가 없어도 현재
+    존재하는 마스킹 주소 전부를 반복 경고했다. 이제 직전 워터마크 이후(`collected_at >`) 신규 유입
+    행으로 **스코프**해, "현재 존재하는 데이터"가 아니라 "이번에 새로 들어온 데이터"의 품질만 알린다.
+    신규 유입이 없으면 settled=0 → level=info(외부 알림 없음). 워터마크 미상(첫 배포 등)이면 전량 집계.
+
+    쿼리는 집계 1행만 반환 — silver 레코드를 Airflow 메모리에 적재하지 않는다.
+    """
+    prev_hi = _prev_silver_watermark()
     catalog, schema, qschema = _qualified()
     qcurrent = f"{qschema}.{CURRENT_TABLE}"
     conn = _connect(catalog, schema)
     try:
         cur = conn.cursor()
-        cur.execute(  # security: allow-sql - qcurrent is built from _qualified() identifiers.
+        cur.execute(  # security: allow-sql - qcurrent is built from _qualified() identifiers; value bound.
             f"""
             select
                 count(*) as settled_rows,
@@ -55,7 +82,8 @@ def notify_masked_address_dong_skip_summary() -> dict:
                     end
                 ) as affected_rows_with_dong_mapping
             from {qcurrent}
-            """)
+            where collected_at > coalesce(cast(? as timestamp(6)), timestamp '1970-01-01 00:00:00')
+            """, (prev_hi,))
         row = cur.fetchall()[0]
     finally:
         conn.close()
@@ -74,6 +102,8 @@ def notify_masked_address_dong_skip_summary() -> dict:
         "dong_mapping_skipped_rows": affected_rows,
         "affected_rows_with_gu": affected_rows_with_gu,
         "affected_rows_with_dong_mapping": affected_rows_with_dong_mapping,
+        "scope": "new_since_last_run",
+        "since_collected_at": prev_hi.isoformat() if prev_hi else None,
     }
     level = "warning" if affected_rows else "info"
     summary = log_event(
@@ -87,17 +117,17 @@ def notify_masked_address_dong_skip_summary() -> dict:
         notify_quality_event(
             task=MASKED_ADDRESS_TASK,
             level="warning",
-            title="마스킹 주소 동단위 매핑 스킵",
+            title="마스킹 주소 동단위 매핑 스킵(신규 적재분)",
             description=(
                 "주소에 '*'가 포함된 행은 원천 주소가 마스킹된 것으로 보고, silver에서 "
                 "법정동/행정동 명칭과 코드를 산출하지 않습니다. 구/시군구 수준 파싱은 "
-                "유지하며, 이 알림은 해당 품질 이슈가 전체 silver current 중 어느 정도인지 "
-                "운영자가 바로 확인할 수 있게 집계합니다."
+                "유지하며, 이 알림은 **이번 실행에 신규 유입된 current 행**(직전 처리 이후 "
+                "collected_at) 중 해당 품질 이슈가 어느 정도인지 집계합니다(기적재분 제외)."
             ),
             metrics=metrics,
-            context={"table": qcurrent},
+            context={"table": qcurrent, "since_collected_at": metrics["since_collected_at"]},
         )
-    log.info("masked address dong-skip summary: %s", metrics)
+    log.info("masked address dong-skip summary (new since %s): %s", prev_hi, metrics)
     return summary
 
 

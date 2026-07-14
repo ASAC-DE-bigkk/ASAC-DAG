@@ -32,6 +32,12 @@
   — MGTNO 는 발급 자치단체 안에서만 유니크라 **단독 사용 시 다른 구청의 별개 업소가 같은 키로
   충돌**(중복/이력 매핑 오류)하므로 OPNSFTEAMCODE 를 포함한다. → silver 그레인 (dataset,
   opnsfteamcode, mgtno)·정렬 `coalesce(updatedt_ts, lastmodts_ts, epoch) desc, lastmodts desc` 와 일치.
+- **v1/v2 정본 해석(#65)**: 정렬·식별키는 원본 row 에서 뽑되 `schemas.canonical_get` 으로 **v1 정본 키가
+  없으면 v2 별칭**(`DATA_UPDT_YMD`·`LAST_MDFCN_YMD`·`OGDP_INST_CD`·`MNG_NO`)을 해석한다. 안 하면
+  v2(환경 13종)는 v1 키가 전무해 sort_key 가 **전부 `(0,0,'','')` 로 붕괴** → 정렬이 페이지네이션(무순서)
+  으로 무너지고, 같은 데이터도 매 수집이 위치 어긋남으로 **전량 신규(오탐)** 방출(수질오염·대기배출
+  매일 수천 건 오탐의 원인이었다). **내용 동일성 판정·저장(normalize/검증키)은 원본 그대로**(§2.2) —
+  키 해석만 정본화한다.
 - **전량 RAM 금지** → `external_merge_sort`: 청크를 임시파일로 쓰고 `heapq.merge` 로 병합(스트리밍·바운디드 RAM).
   비교정렬 하한 O(n log n). (정수키라 이론상 radix O(n) 가능하나, 외부 정렬 견고성/단순성으로 병합 채택.)
 
@@ -76,9 +82,10 @@
 
 ## 7. 정렬키 변경 시 재정렬 마이그레이션 (#193)
 
-정렬키를 바꾸면(예: UPDATEDT→LASTMODTS 폴백 추가) **검증키도 바뀌므로**, 기존 diff-target 을
-새 규칙으로 **1회 재정렬**해야 다음 수집의 diff 정렬이 정합한다(안 하면 새 정렬 today ↔ 옛 정렬
-prev 가 어긋나 diff 부정확). 배포 순서: **로직 반영 → 재정렬 → 스케줄 재개.**
+정렬키를 바꾸면(예: UPDATEDT→LASTMODTS 폴백 추가 #193, **v1/v2 별칭 해석 추가 #65**) **검증키도
+바뀌므로**, 기존 diff-target 을 새 규칙으로 **1회 재정렬**해야 다음 수집의 diff 정렬이 정합한다(안 하면
+새 정렬 today ↔ 옛 정렬 prev 가 어긋나 diff 부정확). 배포 순서: **로직 반영 → 재정렬 → 스케줄 재개.**
+(#65 는 v2 환경 13종만 정렬키가 바뀌므로 그 종만 `changed=RESORT`, v1 139종은 `ok`(no-op).)
 
 ```bash
 docker compose exec airflow-scheduler python -m bronze.resort --dry-run   # 대상/변경여부 점검

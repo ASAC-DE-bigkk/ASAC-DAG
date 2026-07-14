@@ -89,6 +89,48 @@ def test_diff_same_mgtno_different_opnsfteamcode_not_collapsed():
     assert out == [other]                        # 다른 구청 업소만 신규로 방출(keep 은 정합·스킵)
 
 
+def _v2_row(mng_no, data_updt_ymd, name="x", inst="3210000"):
+    """환경(v2) 응답 row — v1 키가 전무하고 별칭(MNG_NO/OGDP_INST_CD/DATA_UPDT_YMD…)만 있다."""
+    return {"MNG_NO": mng_no, "OGDP_INST_CD": inst, "DATA_UPDT_YMD": data_updt_ymd,
+            "LAST_MDFCN_YMD": data_updt_ymd, "BPLC_NM": name}
+
+
+def test_v2_sort_key_resolves_aliases_not_collapsed():
+    """v2(환경) row 는 v1 키가 없어도 별칭 해석으로 서로 다른 키를 갖는다(붕괴 금지).
+
+    회귀: 예전엔 sort_key 가 row.get('UPDATEDT'/'OPNSFTEAMCODE'…) 라 v2 는 전부 (0,0,'','')
+    로 붕괴 → 정렬 무순서화 → 매 수집 전량 오탐(수질오염·대기배출 수천 건/일)."""
+    a = _v2_row("1", "2026-01-01", inst="3210000")
+    b = _v2_row("2", "2026-06-01", inst="3210000")
+    assert inc.sort_key(a) != inc.sort_key(b)            # 별개 업소 → 별개 키
+    assert inc.sort_key(b) < inc.sort_key(a)             # DATA_UPDT_YMD 최신(2026-06) 먼저(desc)
+    # 같은 MNG_NO·다른 OGDP_INST_CD(다른 구청)는 충돌하지 않는다
+    c = _v2_row("1", "2026-01-01", inst="3220000")
+    assert inc.sort_key(a) != inc.sort_key(c)
+
+
+def test_v2_updatedt_lastmodts_num_resolve_aliases():
+    assert inc.updatedt_num(_v2_row("1", "2026-05-11")) == 20260511
+    assert inc.lastmodts_num({"LAST_MDFCN_YMD": "2026-05-11"}) == 20260511
+
+
+def test_v2_identical_data_reordered_yields_no_false_increment(tmp_path):
+    """핵심 회귀: 내용이 동일한 v2 데이터가 (페이지네이션 탓) 순서만 달라도 증분은 0 이어야.
+
+    수집 API 는 정렬키 없이 위치 기반 페이징이라(caveat C1) 같은 데이터도 run 마다 순서가 다르다.
+    별칭 해석 전에는 전 row 가 같은 sort_key 로 붕괴해 위치 비교가 어긋나 전량 신규로 방출됐다."""
+    rows = [_v2_row(f"{i:05d}", f"2026-01-{(i % 28) + 1:02d}") for i in range(50)]
+    prev = list(reversed(rows))                          # 다른(역순) 페이지네이션 순서
+    today = rows[10:] + rows[:10]                        # 또 다른 순서(회전)
+    prev_path = str(tmp_path / "prev.jsonl")
+    today_path = str(tmp_path / "today.jsonl")
+    inc.sort_rows_to_file(iter(prev), dest_path=prev_path, tmp_dir=str(tmp_path))
+    inc.sort_rows_to_file(iter(today), dest_path=today_path, tmp_dir=str(tmp_path))
+    out = list(inc.diff_new_rows(inc.read_rows(today_path), inc.read_rows(prev_path),
+                                 stop_on_aligned_match=True))
+    assert out == []                                     # 동일 데이터 → 오탐 0
+
+
 def test_resort_diff_target_reorders_and_idempotent(tmp_path):
     """#193 마이그레이션: 기존 정렬본을 새 규칙으로 재정렬 + 검증키 갱신, 재실행은 no-op."""
     import json

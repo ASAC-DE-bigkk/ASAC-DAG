@@ -11,7 +11,11 @@
 - **식별값 전량 유효(canonical)**: `OPNSFTEAMCODE·MGTNO·UPDATEDT·LASTMODTS = **152/152**`. v2(환경)는
   컬럼명이 달라도(§6) `schemas.py`의 v1/v2 별칭으로 흡수되어 식별값이 전 종 유효하다. 즉 bronze 정렬/식별키
   `(UPDATEDT → LASTMODTS → OPNSFTEAMCODE → MGTNO)` 와 silver 그레인 `(dataset, opnsfteamcode, mgtno)`
-  **그대로 사용 가능**. `content_hash` 는 레코드 전체 해시라 스키마 무관.
+  로 사용 가능. `content_hash` 는 레코드 전체 해시라 스키마 무관.
+  - ⚠️ **정정(#65)**: 이 "별칭 흡수"는 silver(`lf()` 매크로)에서만 실제였고, **bronze 증분 diff
+    (`incremental.py`)는 v1 키 이름으로만 읽어 v2 를 흡수하지 못했다** → v2 정렬키 붕괴로 전량 오탐
+    (매일 수천 건). #65 에서 `incremental.py` 의 키 추출을 `canonical_get`(v1 정본→v2 별칭)로 바꿔
+    비로소 위 문장이 bronze 에도 성립한다(배포 후 `bronze.resort` 재정렬 1회 필요).
 - **v1 공통 14 + 준공통 5 + 비공통(대다수)**: 139종 v1 전 종 공통은 **14컬럼**. 5개는 소수 데이터셋에서
   빠져 **준공통**. 나머지는 업종별 시설/설비 컬럼(비공통). **v2(환경 13종)은 별도 컬럼셋(§6).**
   silver 는 `record_json` **schema-on-read**(있으면 파싱, 없으면 null)라 비공통/누락은 **무손실**.

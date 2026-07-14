@@ -49,16 +49,17 @@ def test_sgg_prefix_mismatch_detects_admin_legal_code_disagreement():
     assert mismatches[0]["admin_prefix"] == "11680"
 
 
-def test_masked_address_quality_summary_logs_warning_and_notifies(monkeypatch):
+def _patch_masked_address_query(monkeypatch, *, fetch_row, watermark):
+    """공통 셋업 — Trino/알림/워터마크를 목킹하고 실행된 (sql, params) 를 캡처해 반환한다."""
     sent = []
     executed = []
 
     class Cursor:
-        def execute(self, sql):
-            executed.append(sql)
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
 
         def fetchall(self):
-            return [(100, 5, 5.0, 4, 0)]
+            return [fetch_row]
 
     class Conn:
         def cursor(self):
@@ -72,11 +73,21 @@ def test_masked_address_quality_summary_logs_warning_and_notifies(monkeypatch):
         lambda: ("iceberg_dev", "commerce", "iceberg_dev.commerce"),
     )
     monkeypatch.setattr(quality_tasks, "_connect", lambda _catalog, _schema: Conn())
+    monkeypatch.setattr(quality_tasks, "_prev_silver_watermark", lambda: watermark)
     monkeypatch.setattr(
         quality_tasks, "log_event",
         lambda event, **kwargs: {"event": event, **kwargs},
     )
     monkeypatch.setattr(quality_tasks, "notify_quality_event", lambda **kwargs: sent.append(kwargs))
+    return sent, executed
+
+
+def test_masked_address_quality_summary_scopes_to_new_rows_and_notifies(monkeypatch):
+    from datetime import datetime
+
+    wm = datetime(2026, 7, 13, 5, 0, 0)
+    sent, executed = _patch_masked_address_query(
+        monkeypatch, fetch_row=(100, 5, 5.0, 4, 0), watermark=wm)
 
     summary = quality_tasks.notify_masked_address_dong_skip_summary()
 
@@ -84,10 +95,33 @@ def test_masked_address_quality_summary_logs_warning_and_notifies(monkeypatch):
     assert summary["level"] == "warning"
     assert summary["affected_rows"] == 5
     assert summary["settled_rows"] == 100
+    # #3: 신규 유입분으로 스코프됐음을 표기
+    assert summary["scope"] == "new_since_last_run"
+    assert summary["since_collected_at"] == wm.isoformat()
+    sql, params = executed[0]
+    assert "silver_license_current" in sql
+    assert "collected_at >" in sql              # 워터마크 이후로만 집계
+    assert params == (wm,)                        # 워터마크가 바인딩됨
     assert sent[0]["task"] == quality_tasks.MASKED_ADDRESS_TASK
     assert sent[0]["level"] == "warning"
     assert sent[0]["metrics"]["affected_ratio_pct"] == 5
-    assert "silver_license_current" in executed[0]
+
+
+def test_masked_address_quality_summary_no_new_rows_is_info_no_alert(monkeypatch):
+    """핵심(#3): 이번 실행에 신규 유입이 없으면(settled=0) info 로만 남기고 외부 알림 안 함.
+
+    기존엔 기적재(현재 존재) 마스킹 주소를 매일 반복 경고했다 — 이제 신규분이 없으면 조용하다."""
+    from datetime import datetime
+
+    sent, executed = _patch_masked_address_query(
+        monkeypatch, fetch_row=(0, 0, None, 0, 0), watermark=datetime(2026, 7, 13, 5, 0, 0))
+
+    summary = quality_tasks.notify_masked_address_dong_skip_summary()
+
+    assert summary["settled_rows"] == 0
+    assert summary["affected_rows"] == 0
+    assert summary["level"] == "info"
+    assert sent == []                             # 신규 마스킹 주소 없음 → 알림 미발송
 
 
 def test_build_silver_reads_ndjson_and_writes_parquet(tmp_path, monkeypatch):

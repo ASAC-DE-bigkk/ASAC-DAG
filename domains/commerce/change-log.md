@@ -5,7 +5,50 @@
 
 ---
 
-## 2026-07-13
+## 2026-07-14
+
+### 65. v2(환경) 증분 diff 정본화 — 정렬/식별키 alias 해석(전량 오탐 해소) + 신규분 스코프 알림/리포트
+
+request:
+- ① raw: **환경(v2) 수집이 매일 4000건+** 신규로 나옴 — 이전 데이터와 중복 여부 확인·조치.
+- ② bronze: 수질오염·대기오염물질배출시설 인허가만 4000건+ — 정상 수집인지 검증.
+- ③ silver: 알림이 **신규 적재분이 아니라 현재 존재 데이터**로 옴 — 신규 적재분만 대상으로 조치.
+- ④ gold: 위 변경 대응 + **정확한 정보 표기 재검증**.
+
+response:
+- **근본원인(①② 동일 버그) 규명·실증**: `bronze/incremental.py` 의 `sort_key`/`_ts_num` 이 원본 row 를
+  **v1 정본 키 이름으로만**(`row.get("UPDATEDT"/"OPNSFTEAMCODE"/"MGTNO")`) 읽어, v2(환경 13종)는
+  해당 키가 전무 → **전 row 가 `(0,0,'','')` 로 붕괴**. 정렬이 무순서(페이지네이션)로 무너져, 내용이
+  같아도 매 수집이 위치 어긋남으로 **전량 신규 오탐**. 재현 시뮬레이션(동일 데이터·순서만 상이)에서
+  v1=오탐 0 / v2(구)=**전량 오탐** / v2(신)=오탐 0 으로 확정. water_pollution(≈10,602행)의 "4000건+/일"
+  이 실데이터가 아니라 이 오탐임을 확인(②의 답=정상 아님, 알고리즘 버그).
+- **조치(①②)**: 키 추출을 `commerce_core.schemas.canonical_get` 로 **정본(v1)→v2 별칭 폴백** 해석
+  (`_ts_num`·`sort_key`). **내용 동일성/저장(`normalize`·검증키)은 원본 그대로**(§2.2 원천 보존, #63
+  해시 계약과 정합) — 키 해석만 정본화. v1 은 무변경(회귀 0). **정렬키 변경 → 배포 후 `python -m
+  bronze.resort` 1회로 기존 v2 diff-target 재정렬 필수**(#193 동일 절차, 멱등). 재정렬 전엔 신 정렬
+  today ↔ 구 정렬 prev 가 어긋난다.
+- **조치(③ silver)**: `quality_tasks.notify_masked_address_dong_skip_summary` 가 `silver_license_current`
+  **전량**을 매일 집계해 기적재(현재 존재) 마스킹 주소를 반복 경고하던 것을, **직전 워터마크 이후
+  (`collected_at > silver_state._watermark`) 신규 유입분으로 스코프**. notify 는 `mark_silver_done`
+  (워터마크 전진) **이전** 단계라 읽는 값이 '직전 run' 워터마크 → 이번 run 신규분만 집계(=current
+  affected 판정과 동일 계약). 신규 유입 0 이면 info 로만 남기고 **외부 알림 미발송**(기적재 재경고 종료).
+  워터마크 미상이면 전량 폴백(fail-open).
+- **조치(④ gold)**: gold 는 이미 silver `collected_at` 워터마크 증분이라 **상류(①) 오탐 해소 시 자동으로
+  실변경분만 적재**(코드 변경 불필요 — 자기교정). **표기 정확성 재검증**에서 결함 발견·수정:
+  `gold/report.py` 가 **dim 3종(dataset/region/business_status)=매 run 전량 delete+insert 스냅샷** 행수를
+  신규 버전 적재와 **합산**해(예: 신규 1건인데 region 1.5만행) 대량 신규 유입처럼 오표기하던 것을,
+  **신규 버전 적재(entity/history/detail)** 와 **차원 스냅샷(전량 갱신)** 으로 분리 표기(헤드라인·제목=
+  신규 버전 행수, dim 은 별도 '전량 갱신' 섹션).
+- **검증**: 신규 회귀테스트 — incremental v2 3건(별칭 정렬·붕괴 금지·동일데이터 재정렬 오탐 0),
+  silver 2건(신규 스코프 바인딩·신규 0→알림 미발송), gold report 2건(신규 vs 차원 스냅샷 분리·조기
+  스킵). commerce pytest 전건 통과, `python -m security` PASS. **로컬 한계**: DAG 파싱·dbt·resort 실측은
+  컨테이너에서(로컬 py 미설치 스택) — 배포 절차는 아래 운영노트.
+- **운영 노트(배포 순서)**: (1) 이미지/코드 반영 → (2) `docker compose exec airflow-scheduler python -m
+  bronze.resort --dry-run` 로 v2 대상 확인 → (3) `python -m bronze.resort` 재정렬 → (4) 스케줄 재개.
+  재정렬 후 첫 v2 수집부터 증분이 정상(동일=identical, 실변경만 증분). **과거 오탐으로 누적된 v2
+  이력 정리**(bronze/silver history 의 반복 버전)는 별도 백필 결정(선택) — `commerce_load_gold_refresh`(#64)
+  로 gold 재적재 가능. **잔여 한계(기존과 동일)**: UPDATEDT·LASTMODTS 둘 다 무갱신 + 내용만 변한 행은
+  조기중단 diff 가 못 잡음(문서화된 전제) — v1/v2 공통이며 content_hash 계약(#63)이 보완.
 
 ### 64. commerce_load_gold_refresh — 마커 무관 강제 전량 재적재 DAG(트리거 전용)
 
