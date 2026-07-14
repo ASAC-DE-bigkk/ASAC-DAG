@@ -399,19 +399,24 @@ def _load_detail_chunked(tconn, qschema: str, pgconn, detail: dict, hi,
 
 
 def _load_chunked(tconn, qschema: str, pgconn, details: list[dict],
-                  dataset_map: dict[str, dict], hi) -> dict:
+                  dataset_map: dict[str, dict], hi, *, force_full: bool = False) -> dict:
     """cold-start/재개 전용 — dataset 배치 + detail content_hash 버킷으로 나눠 OOM 회피.
 
     **객체별 마커로 재개 가능**: 이미 hi 까지 DONE 인 객체는 건너뛴다(전 실행이 detail 도중 죽어도
     2.89M entity 단계를 다시 하지 않음). 각 객체가 끝나는 즉시 마커를 기록한다(후행 기록 원칙 유지 —
     부분적재 상태로 마커가 찍히는 일은 없음, 객체 단위 원자성). entity_history·entity 는 dataset 배치
-    스코프, detail 은 content_hash 버킷(대형)·단일(소형). 실패 시 다음 실행이 남은 객체만 이어 적재."""
+    스코프, detail 은 content_hash 버킷(대형)·단일(소형). 실패 시 다음 실행이 남은 객체만 이어 적재.
+
+    force_full=True: 마커 무관 전량 재적재(commerce_load_gold_refresh 트리거 전용) — 모든 객체를
+    _done=False 로 취급해 전량 삭제 후 재적재한다(entity_seq 매핑 commerce_entity_key 는 보존)."""
     budget = int(os.getenv("COMMERCE_GOLD_BATCH_ROWS", "500000"))
     counts = _history_dataset_counts(tconn, qschema)
     batches = _plan_batches(counts, budget)
     markers = read_markers(pgconn)
 
     def _done(obj: str) -> bool:                          # 이미 hi 까지 적재 완료면 재개 시 건너뜀
+        if force_full:                                    # 전량 재적재 — 마커 무시(항상 재적재)
+            return False
         wm = markers.get(obj)
         return wm is not None and wm >= hi
 
@@ -451,10 +456,11 @@ def _load_chunked(tconn, qschema: str, pgconn, details: list[dict],
     dims = load_dims(tconn, qschema, pgconn, dataset_map)
     write_markers_done(pgconn, dims, hi)
     loaded.update(dims)
-    log.info("gold 청크 DONE: hi=%s, 이번적재=%d객체, rows=%d",
-             hi, len(loaded), sum(loaded.values()))
-    return {"loaded": loaded, "hi": str(hi), "mode": "chunked", "batches": len(batches),
-            "resumed_objects": resumed}
+    log.info("gold 청크 DONE: hi=%s, 이번적재=%d객체, rows=%d (force_full=%s)",
+             hi, len(loaded), sum(loaded.values()), force_full)
+    return {"loaded": loaded, "hi": str(hi),
+            "mode": "full_reload" if force_full else "chunked",
+            "batches": len(batches), "resumed_objects": resumed}
 
 
 def _read_silver_watermark() -> datetime | None:
@@ -488,13 +494,18 @@ def no_new_silver(markers: dict, expected: list[str], silver_hi: datetime | None
         return False
 
 
-def run_load(details: list[dict], dataset_map: dict[str, dict]) -> dict:
+def run_load(details: list[dict], dataset_map: dict[str, dict], *,
+             force_full: bool = False) -> dict:
     """적재 본체 — 조기 스킵 판정 → DDL ensure → (cold-start=청크 / 증분=단일) → marker DONE.
 
     조기 스킵(신규 없음): silver 가 기록한 R2 워터마크(`commerce_silver_state/_watermark.json`)
     이하로 전 객체 마커가 이미 전진해 있으면 — 기적재분만 있는 상태 — Trino 접속·DDL·적재·검증을
     전부 생략한다(기적재 데이터만 있으면 추가 적재도 불필요한 검증도 하지 않음 — 사용자 계약).
     파일 부재/판정 실패 시 기존 경로로 전진(fail-open). 리포트에는 skipped 로 0건 표기.
+
+    force_full=True: **마커 무관 전량 재적재**(commerce_load_gold_refresh 트리거 전용). 조기 스킵과
+    마커 창을 모두 건너뛰고 청크 경로로 전량 삭제→재적재한다 — 새 서빙 DB 부트스트랩·강제 새로고침용.
+    entity_seq 매핑(commerce_entity_key)은 항상 보존(삭제 대상 아님 — refactor-guide §4).
 
     마커가 비면(첫 적재 또는 리셋) 전량이라 dataset 배치로 청크(OOM 회피, `_load_chunked`).
     마커가 있으면 증분 창(unmarked 신규분)이 소량이라 단일 경로가 안전·빠르다."""
@@ -504,11 +515,12 @@ def run_load(details: list[dict], dataset_map: dict[str, dict]) -> dict:
         markers = read_markers(pgconn)
         expected = (["commerce_business_entity_history", "commerce_business_entity"]
                     + [d["object"] for d in details])
-        silver_hi = _read_silver_watermark()
-        if no_new_silver(markers, expected, silver_hi):
-            log.info("gold 조기 스킵 — silver R2 워터마크(%s) 이하로 전 객체 기적재(마커 보유): "
-                     "Trino 접속·DDL·적재·검증 생략", silver_hi)
-            return {"loaded": {}, "hi": str(silver_hi), "skipped": "no_new_silver"}
+        if not force_full:
+            silver_hi = _read_silver_watermark()
+            if no_new_silver(markers, expected, silver_hi):
+                log.info("gold 조기 스킵 — silver R2 워터마크(%s) 이하로 전 객체 기적재(마커 보유): "
+                         "Trino 접속·DDL·적재·검증 생략", silver_hi)
+                return {"loaded": {}, "hi": str(silver_hi), "skipped": "no_new_silver"}
 
         tconn, qschema = _trino()
         ensure_objects(pgconn, details)
@@ -521,11 +533,12 @@ def run_load(details: list[dict], dataset_map: dict[str, dict]) -> dict:
             log.info("silver 비어 있음 — 적재 없음")
             return {"loaded": {}, "hi": None}
 
-        # cold-start(마커 전무) 또는 재개(일부 core/detail 객체가 아직 미적재=마커 없음)면 청크 경로.
+        # force_full(트리거 강제 재적재) 또는 cold-start(마커 전무)/재개(일부 객체 미적재)면 청크 경로.
         # 청크는 바운드+객체별 재개가 가능해 전량/부분완료 어느 쪽이든 안전. 전 객체가 마커를 가진
         # 평상시 증분(소량 델타)만 아래 단일 경로로 간다.
-        if any(markers.get(o) is None for o in expected):
-            return _load_chunked(tconn, qschema, pgconn, details, dataset_map, hi)
+        if force_full or any(markers.get(o) is None for o in expected):
+            return _load_chunked(tconn, qschema, pgconn, details, dataset_map, hi,
+                                 force_full=force_full)
 
         loaded: dict[str, int] = {}
 
