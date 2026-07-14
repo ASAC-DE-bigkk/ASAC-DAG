@@ -13,30 +13,30 @@
 
 ## 선택한 구조
 
-새 manual-only DAG `weather_w2_observation_recovery`가 지정된 KST 범위를 최대 24시간의 inclusive window로 분할한다. recovery 실행 task 하나가 `trino_heavy` pool slot 하나를 작업 시작부터 최종 test까지 보유한다. 기존 normal transform의 모든 dbt writer도 같은 pool을 사용하므로 두 writer가 dbt-trino의 고정 `__dbt_tmp`를 동시에 만들 수 없다.
+새 manual-only DAG `weather_w2_observation_recovery`가 지정된 KST 범위를 최대 6시간의 inclusive window로 분할한다. recovery 실행 task 하나가 `trino_heavy` pool slot 하나를 작업 시작부터 최종 test까지 보유한다. 기존 normal transform의 모든 dbt writer도 같은 pool을 사용하므로 두 writer가 dbt-trino의 고정 `__dbt_tmp`를 동시에 만들 수 없다.
 
 각 window는 다음 순서로 `--threads 1` DBT 명령을 실행한다.
 
 1. `deps`, bridge input seed, admin-dong dimension, bridge를 준비한다.
 2. W2 bounded vars를 전달해 Observation, Grid, canonical Gold를 차례로 merge한다.
-3. window-aware model tests를 실행한다.
+3. W2 범위가 명시된 Gold expected-row/extra-row reconciliation tests를 실행한다. 전체 Silver를 다시 group/join하는 normal-path tests는 window loop에 넣지 않는다.
 4. 성공한 window만 Airflow Variable checkpoint에 기록한다.
 5. 모든 window 뒤 global Observation reconciliation test를 실행한다.
 
-checkpoint는 `weather_w2_observation_recovery::<checkpoint_id>`에 범위와 완료 window 목록을 JSON으로 저장한다. 같은 `checkpoint_id`로 재시도하면 완료된 window는 건너뛰고 실패 지점부터 재개한다. 다른 범위에 같은 checkpoint를 재사용하면 실패시켜 잘못된 skip을 방지한다.
+checkpoint는 `ask_seoul.weather.w2_observation_recovery.<checkpoint_id>`에 범위와 완료 window 목록을 JSON으로 저장한다. 같은 `checkpoint_id`로 재시도하면 완료된 window는 건너뛰고 실패 지점부터 재개한다. 기존 24시간 checkpoint는 포함되는 6시간 window 전체로 안전하게 승계하고, 다른 범위에 같은 checkpoint를 재사용하면 실패시켜 잘못된 skip을 방지한다.
 
 ## 입력과 안전 경계
 
 - target은 `dev`만 허용한다.
 - 기본 범위는 #196의 `2026-07-02 00:00:00.000000`부터 `2026-07-14 23:59:59.999999` KST다.
 - 각 DBT 실행에는 `weather_w2_repair_mode=bounded_reconcile`, start/cutoff, `weather_admin_dong_grid_bridge_v1`, canonical revision `2025-04-01`을 모두 전달한다.
-- 각 window는 24시간 이하이며 미래 cutoff, 역전 범위, 비-KST timestamp는 task 시작 전에 거부한다.
+- 각 window는 6시간 이하이며 미래 cutoff, 역전 범위, 비-KST timestamp는 task 시작 전에 거부한다.
 - prod target, schema 변경, full-refresh, 원천 API 호출, 다른 도메인 write는 하지 않는다.
 - final global reconciliation이 0행이 아니면 checkpoint를 완료 처리하지 않고 task를 실패시킨다.
 
 ## 검증
 
-- 순수 helper test가 inclusive 24시간 분할, 범위 검증, checkpoint 범위 불일치를 검증한다.
+- 순수 helper test가 inclusive 6시간 분할, legacy 24시간 checkpoint 승계, 범위 검증, checkpoint 범위 불일치를 검증한다.
 - DAG test가 manual schedule, `max_active_runs=1`, `trino_heavy` pool, `--threads 1`, W2 five vars, final global reconciliation selector를 검증한다.
 - dev runtime에서 recovery run 후 global DBT test가 PASS=1이고 manifest/Observation row·raw object count가 일치하는지 확인한다.
 
@@ -44,5 +44,5 @@ checkpoint는 `weather_w2_observation_recovery::<checkpoint_id>`에 범위와 �
 
 - W1 30분 lookback 변경
 - prod 실행
-- 24시간을 넘는 full-history refresh
+- 6시간을 넘는 single-window repair 또는 full-history refresh
 - #196 범위 밖 historical data의 자동 복구

@@ -9,7 +9,8 @@ from typing import Any
 
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
-MAX_WINDOW = timedelta(days=1) - timedelta(microseconds=1)
+MAX_WINDOW = timedelta(hours=6) - timedelta(microseconds=1)
+LEGACY_MAX_WINDOW = timedelta(days=1) - timedelta(microseconds=1)
 BRIDGE_VERSION = "weather_admin_dong_grid_bridge_v1"
 CANONICAL_REVISION_DATE = "2025-04-01"
 
@@ -102,6 +103,16 @@ def checkpoint_payload(
     }
 
 
+def _parse_window_label(label: str) -> RepairWindow:
+    start_at, separator, cutoff_at = label.partition("__")
+    if not separator:
+        raise ValueError(f"invalid checkpoint window label: {label!r}")
+    return RepairWindow(
+        start_at=parse_timestamp(start_at),
+        cutoff_at=parse_timestamp(cutoff_at),
+    )
+
+
 def completed_window_labels(payload: dict[str, Any] | None, windows: list[RepairWindow]) -> set[str]:
     if not payload:
         return set()
@@ -111,8 +122,27 @@ def completed_window_labels(payload: dict[str, Any] | None, windows: list[Repair
     completed = payload.get("completed_windows") or []
     if not isinstance(completed, list) or not all(isinstance(label, str) for label in completed):
         raise ValueError("checkpoint completed_windows must be a list of labels")
-    allowed = {window.label for window in windows}
-    unknown = sorted(set(completed) - allowed)
-    if unknown:
-        raise ValueError(f"checkpoint contains unknown repair windows: {unknown}")
-    return set(completed)
+    range_start = windows[0].start_at
+    range_cutoff = windows[-1].cutoff_at
+    completed_ranges: list[RepairWindow] = []
+    for label in dict.fromkeys(completed):
+        completed_window = _parse_window_label(label)
+        if (
+            completed_window.start_at < range_start
+            or completed_window.cutoff_at > range_cutoff
+            or completed_window.start_at > completed_window.cutoff_at
+            or completed_window.duration_microseconds
+            > int(LEGACY_MAX_WINDOW.total_seconds() * 1_000_000) + 1
+        ):
+            raise ValueError(f"checkpoint contains unknown repair window: {label}")
+        completed_ranges.append(completed_window)
+
+    return {
+        window.label
+        for window in windows
+        if any(
+            completed_window.start_at <= window.start_at
+            and window.cutoff_at <= completed_window.cutoff_at
+            for completed_window in completed_ranges
+        )
+    }

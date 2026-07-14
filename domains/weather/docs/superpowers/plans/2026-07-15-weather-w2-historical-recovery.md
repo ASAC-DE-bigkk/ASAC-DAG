@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:test-driven-development and execute every RED/GREEN checkpoint in order. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** #196의 91개 과거 Observation 누락을 24시간 이하의 직렬 W2 repair로 복구하고 재개 가능한 manual Airflow DAG를 제공한다.
+**Goal:** #196의 91개 과거 Observation 누락을 6시간 이하의 직렬 W2 repair로 복구하고 재개 가능한 manual Airflow DAG를 제공한다.
 
 **Architecture:** `weather_ingest/w2_recovery.py`가 timestamp/window/checkpoint와 DBT command를 순수 함수로 제공한다. `weather_w2_observation_recovery.py`가 해당 함수를 사용해 하나의 pool-held PythonOperator 안에서 DBT writer를 순서대로 실행하고 Airflow Variable checkpoint를 갱신한다.
 
@@ -12,7 +12,7 @@
 
 - `dev`와 `iceberg_dev.weather`만 쓴다.
 - W1 30분 lookback과 2GB Trino query cap을 변경하지 않는다.
-- recovery window는 KST timestamp(6), inclusive, 최대 24시간이다.
+- recovery window는 KST timestamp(6), inclusive, 최대 6시간이다. 기존 24시간 checkpoint는 포함되는 6시간 완료 window로 승계한다.
 - `trino_heavy` pool slot은 seed부터 final test까지 보유한다.
 - DBT 명령은 `--threads 1`이고 `--full-refresh`를 사용하지 않는다.
 
@@ -47,7 +47,7 @@ Expected: import failure.
 
 - [ ] **Step 3: 최소 helper 구현**
 
-`datetime.strptime(..., "%Y-%m-%d %H:%M:%S.%f")`로 KST-naive timestamp를 파싱하고, `timedelta(days=1) - timedelta(microseconds=1)`로 inclusive window를 생성한다. checkpoint payload에는 range와 completed window label을 보존한다.
+`datetime.strptime(..., "%Y-%m-%d %H:%M:%S.%f")`로 KST-naive timestamp를 파싱하고, `timedelta(hours=6) - timedelta(microseconds=1)`로 inclusive window를 생성한다. checkpoint payload에는 range와 completed window label을 보존하며, 이전 24시간 label은 포함되는 6시간 window에만 승계한다.
 
 - [ ] **Step 4: helper test 통과 확인**
 
@@ -109,7 +109,7 @@ Expected: PASS.
 
 Run: `airflow dags trigger weather_w2_observation_recovery --run-id manual__weather_w2_issue_196_recovery`
 
-Expected: 13개 KST window가 checkpoint와 함께 serial로 성공하고 final reconciliation이 PASS.
+Expected: 6시간 KST window가 checkpoint와 함께 serial로 성공하고 final reconciliation이 PASS.
 
 - [ ] **Step 3: issue evidence 확인**
 

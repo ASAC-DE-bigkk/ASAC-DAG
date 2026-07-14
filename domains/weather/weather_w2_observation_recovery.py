@@ -69,13 +69,8 @@ WINDOW_DBT_ARGS = (
     (
         "test",
         "--select",
-        "assert_weather_observation_grain_unique "
-        "assert_weather_grid_selection_reconciles "
-        "assert_weather_grid_selected_observation_exists "
-        "assert_weather_w2_grid_retracted_winner_replaced "
         "assert_gold_weather_forecast_by_admin_dong_repair_reconciles "
-        "assert_gold_weather_forecast_by_admin_dong_repair_no_downgrade "
-        "assert_gold_weather_forecast_by_admin_dong_canonical_source_contract",
+        "assert_gold_weather_forecast_by_admin_dong_repair_window_no_extra_rows",
     ),
 )
 FINAL_DBT_ARGS = (
@@ -185,7 +180,7 @@ def recover_observation_windows(**context) -> dict[str, object]:
 
 with DAG(
     dag_id=DAG_ID,
-    description="Recover Weather W2 historical observations in resumable <=24h KST windows.",
+    description="Recover Weather W2 historical observations in resumable <=6h KST windows.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=None,
     catchup=False,
