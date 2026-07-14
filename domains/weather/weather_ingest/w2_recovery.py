@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import json
 from typing import Any
 
 
@@ -61,6 +62,22 @@ def window_dbt_vars(window: RepairWindow) -> dict[str, str]:
         "weather_w2_bridge_version": BRIDGE_VERSION,
         "weather_w2_canonical_revision_date": CANONICAL_REVISION_DATE,
     }
+
+
+def dbt_cli_options(
+    command: str, *, target: str, variables: dict[str, str]
+) -> tuple[str, ...]:
+    options = ["--target", target]
+    if command in {"seed", "run", "test"}:
+        options.extend(["--threads", "1"])
+    options.extend(
+        [
+            "--vars",
+            json.dumps(variables, separators=(",", ":")),
+            "--no-use-colors",
+        ]
+    )
+    return tuple(options)
 
 
 def _range_payload(windows: list[RepairWindow]) -> dict[str, str]:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -30,6 +29,7 @@ from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from weather_ingest.w2_recovery import (  # noqa: E402
     checkpoint_payload,
     completed_window_labels,
+    dbt_cli_options,
     split_repair_windows,
     window_dbt_vars,
 )
@@ -126,12 +126,7 @@ def run_dbt(args: tuple[str, ...], *, target: str, variables: dict[str, str]) ->
     command = [
         DBT_BIN,
         *args,
-        "--target",
-        target,
-        "--threads", "1",
-        "--vars",
-        json.dumps(variables, separators=(",", ":")),
-        "--no-use-colors",
+        *dbt_cli_options(args[0], target=target, variables=variables),
     ]
     LOGGER.info("[weather-w2-recovery] dbt command=%s", " ".join(command[:-3]))
     subprocess.run(command, cwd=DBT_PROJECT, env=dbt_environment(), check=True)
