@@ -55,6 +55,23 @@ def split_repair_windows(start_at: str, cutoff_at: str) -> list[RepairWindow]:
     return windows
 
 
+def select_windows_with_publishable_anchors(
+    windows: list[RepairWindow], anchor_window_indexes: set[int]
+) -> list[RepairWindow]:
+    invalid_indexes = sorted(
+        index
+        for index in anchor_window_indexes
+        if index < 0 or index >= len(windows)
+    )
+    if invalid_indexes:
+        raise ValueError(f"anchor query returned unknown repair window indexes: {invalid_indexes}")
+    return [
+        window
+        for index, window in enumerate(windows)
+        if index in anchor_window_indexes
+    ]
+
+
 def window_dbt_vars(window: RepairWindow) -> dict[str, str]:
     return {
         "weather_w2_repair_mode": "bounded_reconcile",

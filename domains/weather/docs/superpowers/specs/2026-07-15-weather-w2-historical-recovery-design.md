@@ -15,6 +15,8 @@
 
 새 manual-only DAG `weather_w2_observation_recovery`가 지정된 KST 범위를 최대 6시간의 inclusive window로 분할한다. recovery 실행 task 하나가 `trino_heavy` pool slot 하나를 작업 시작부터 최종 test까지 보유한다. 기존 normal transform의 모든 dbt writer도 같은 pool을 사용하므로 두 writer가 dbt-trino의 고정 `__dbt_tmp`를 동시에 만들 수 없다.
 
+분할한 모든 window를 무조건 실행하지 않는다. 각 window cutoff 이하 manifest의 run별 최신 상태를 계산해 `SUCCESS + is_publishable=true` anchor가 있는 window만 복구 대상으로 선택한다. 실패 또는 non-publishable manifest만 가진 Bronze raw는 발행 게이트를 우회하지 않고 제외한다. 이 선택은 W2 evidence guard의 fail-closed 계약을 보존하며, 실제 publishable run의 Observation 누락만 #196 범위로 한정한다.
+
 각 window는 다음 순서로 `--threads 1` DBT 명령을 실행한다.
 
 1. `deps`, bridge input seed, admin-dong dimension, bridge를 준비한다.
@@ -35,13 +37,14 @@ Silver·Gold write와 window data test는 항상 6시간 이하 범위로 실행
 - 기본 범위는 #196의 `2026-07-02 00:00:00.000000`부터 `2026-07-14 23:59:59.999999` KST다.
 - 각 DBT 실행에는 `weather_w2_repair_mode=bounded_reconcile`, start/cutoff, `weather_admin_dong_grid_bridge_v1`, canonical revision `2025-04-01`을 모두 전달한다.
 - 각 window는 6시간 이하이며 미래 cutoff, 역전 범위, 비-KST timestamp는 task 시작 전에 거부한다.
+- publishable anchor가 하나도 없는 요청 범위는 실패시키고, 일부 window만 anchor가 없으면 그 window를 `skipped_windows`로 보고한 뒤 나머지 대상만 실행한다.
 - prod target, schema 변경, full-refresh, 원천 API 호출, 다른 도메인 write는 하지 않는다.
 - final global reconciliation이 0행이 아니면 checkpoint를 완료 처리하지 않고 task를 실패시킨다.
 
 ## 검증
 
-- 순수 helper test가 inclusive 6시간 분할, legacy 24시간 checkpoint 승계, 범위 검증, checkpoint 범위 불일치를 검증한다.
-- DAG test가 manual schedule, `max_active_runs=1`, `trino_heavy` pool, `--threads 1`, W2 five vars, final global reconciliation selector를 검증한다.
+- 순수 helper test가 inclusive 6시간 분할, legacy 24시간 checkpoint 승계, 범위 검증, checkpoint 범위 불일치, publishable anchor window 선택을 검증한다.
+- DAG test가 manual schedule, `max_active_runs=1`, `trino_heavy` pool, `--threads 1`, W2 five vars, 최신 publishable manifest window 선택, final global reconciliation selector를 검증한다.
 - dev runtime에서 recovery run 후 global DBT test가 PASS=1이고 manifest/Observation row·raw object count가 일치하는지 확인한다.
 
 ## 제외 범위

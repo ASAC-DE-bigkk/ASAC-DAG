@@ -4,7 +4,7 @@
 
 **Goal:** #196의 91개 과거 Observation 누락을 6시간 이하의 직렬 W2 repair로 복구하고 재개 가능한 manual Airflow DAG를 제공한다.
 
-**Architecture:** `weather_ingest/w2_recovery.py`가 timestamp/window/checkpoint와 DBT command를 순수 함수로 제공한다. `weather_w2_observation_recovery.py`가 해당 함수를 사용해 하나의 pool-held PythonOperator 안에서 DBT writer를 순서대로 실행하고 Airflow Variable checkpoint를 갱신한다.
+**Architecture:** `weather_ingest/w2_recovery.py`가 timestamp/window/checkpoint와 publishable anchor window 선택을 순수 함수로 제공한다. `weather_w2_observation_recovery.py`가 각 cutoff 시점의 최신 manifest 상태에서 `SUCCESS + is_publishable=true` anchor가 있는 window만 선택하고, 하나의 pool-held PythonOperator 안에서 DBT writer를 순서대로 실행하며 Airflow Variable checkpoint를 갱신한다. 실패/non-publishable raw는 발행 게이트를 우회하지 않는다.
 
 **Tech Stack:** Airflow 3, Python 3.11, dbt 1.10, dbt-trino 1.10, Trino/Iceberg dev.
 

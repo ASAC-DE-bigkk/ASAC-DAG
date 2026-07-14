@@ -11,6 +11,7 @@ from weather_ingest.w2_recovery import (  # noqa: E402
     completed_window_labels,
     dbt_cli_options,
     preparation_dbt_vars,
+    select_windows_with_publishable_anchors,
     split_repair_windows,
     window_dbt_vars,
 )
@@ -67,6 +68,18 @@ def test_preparation_uses_one_bounded_24_hour_evidence_window():
         "weather_w2_bridge_version": "weather_admin_dong_grid_bridge_v1",
         "weather_w2_canonical_revision_date": "2025-04-01",
     }
+
+
+def test_selects_only_windows_that_have_publishable_manifest_anchors():
+    windows = split_repair_windows(
+        "2026-07-06 00:00:00.000000",
+        "2026-07-06 23:59:59.999999",
+    )
+
+    assert select_windows_with_publishable_anchors(windows, {0, 2}) == [
+        windows[0],
+        windows[2],
+    ]
 
 
 def test_only_dbt_execution_commands_receive_single_thread_option():
@@ -136,9 +149,26 @@ def test_manual_recovery_dag_serializes_w2_writers_and_runs_final_reconciliation
     assert "pool_slots=1" in source
     assert "dbt_cli_options(args[0]" in source
     assert "preparation_dbt_vars" in source
-    assert "preparation_variables = preparation_dbt_vars(windows[0], windows[-1])" in source
+    assert (
+        "preparation_variables = preparation_dbt_vars(\n"
+        "        selected_windows[0], selected_windows[-1]\n"
+        "    )"
+    ) in source
     assert "assert_weather_observation_publishable_and_counts_reconcile" in source
     assert "run_dbt(FINAL_DBT_ARGS, target=target, variables=preparation_variables)" in source
+
+
+def test_manual_recovery_only_executes_windows_with_publishable_manifest_anchors():
+    source = (
+        Path(__file__).resolve().parents[1] / "weather_w2_observation_recovery.py"
+    ).read_text(encoding="utf-8")
+
+    assert "publishable_window_indexes" in source
+    assert "select_windows_with_publishable_anchors" in source
+    assert "manifest_status = 'SUCCESS'" in source
+    assert "is_publishable" in source
+    assert "selected_windows" in source
+    assert "skipped_windows" in source
 
 
 def test_manual_recovery_runs_only_bounded_w2_data_test_per_window():
