@@ -38,6 +38,7 @@ from airflow.exceptions import AirflowException
 from airflow.sdk.exceptions import AirflowFailException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
+from airflow.sdk.definitions.deadline import DeadlineAlert, DeadlineReference, SyncCallback
 
 # 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,8 +46,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 _DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
+# deadline 콜백은 plugins 에 산다(#259 — 콜백 호스트 sys.path 에는 plugins 만 있음).
+# 파싱 프로세스에는 plugins 가 없으므로 여기서 dags 루트 기준으로 insert 한다.
+# 컨테이너에선 같은 폴더가 /opt/airflow/plugins 로도 마운트되어(ASK-Seoul#23)
+# 파싱·콜백 양쪽에서 동일 모듈명(culture_deadline)으로 풀린다 — dotpath 직렬화 전제.
+_PLUGINS_DIR = os.path.join(_DAGS_ROOT, "plugins")
+if _PLUGINS_DIR not in sys.path:
+    sys.path.insert(0, _PLUGINS_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from culture_deadline import on_deadline_missed  # noqa: E402
 
 from culture_ingest.common.config import (  # noqa: E402
     CULTURE_BRONZE_ASSET,
@@ -321,6 +330,14 @@ with DAG(
     default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},
     params=DEFAULT_PARAMS,
     tags=["ingest", "culture", "bronze", "r2"],
+    # 침묵 감시(#259): 실패 콜백·리포트는 "실패한 run"만 잡고, "끝나지 않는 run"
+    # (태스크 행·스케줄러 정지·지연 폭주)은 못 본다. queued 후 2h 안에 종결하지
+    # 못하면 Discord 발화 — 통상 run ~30분, 여유 4배(7/5 14분→7/7 28분 추이 반영).
+    deadline=DeadlineAlert(
+        reference=DeadlineReference.DAGRUN_QUEUED_AT,
+        interval=timedelta(hours=2),
+        callback=SyncCallback(on_deadline_missed),
+    ),
 ) as dag:
     # 1) plan: 적재할 데이터셋 목록과 공유 ingest_ts를 계산.
     plan = PythonOperator(
