@@ -36,6 +36,7 @@ from weather_ingest.trino_query_metrics import (  # noqa: E402
 
 
 DBT_BIN = os.environ.get("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
+MIN_REPEAT = 3
 CASES: dict[str, dict[str, Any]] = {
     "weather_silver": {
         "domain": "weather",
@@ -50,6 +51,27 @@ CASES: dict[str, dict[str, Any]] = {
         "domain": "traffic",
         "project": "/opt/airflow/dbt/domains/traffic",
         "model": "silver_seoul_traffic_incident",
+        "snapshot_source_id": "seoul_traffic_incident",
+        "snapshot_var": "traffic_snapshot_dag_run_id",
+        "source_tables": [
+            "bronze_seoul_traffic_incident",
+            "bronze_seoul_traffic_incident_request_audit",
+            "bronze_collection_run_manifest",
+        ],
+    },
+    "weather_gold": {
+        "domain": "weather",
+        "project": "/opt/airflow/dbt/domains/weather",
+        "model": "gold_weather_forecast_by_place",
+        "source_tables": [
+            "bronze_kma_vilage_fcst",
+            "bronze_collection_run_manifest",
+        ],
+    },
+    "traffic_gold": {
+        "domain": "traffic",
+        "project": "/opt/airflow/dbt/domains/traffic",
+        "model": "gold_traffic_incident_current_by_admin_dong_hourly",
         "snapshot_source_id": "seoul_traffic_incident",
         "snapshot_var": "traffic_snapshot_dag_run_id",
         "source_tables": [
@@ -315,8 +337,8 @@ def _connect_cursors(*, catalog: str, schema: str) -> tuple[Any, Any, Any]:
 def collect_bundle(label: str, repeat: int) -> dict[str, Any]:
     """Collect one dev-only benchmark bundle.  This never runs dbt models."""
     _ensure_dev_target()
-    if repeat < 1:
-        raise ValueError("repeat must be at least 1")
+    if repeat < MIN_REPEAT:
+        raise ValueError(f"repeat must be at least {MIN_REPEAT}")
     catalog = _catalog()
     schema = _schema()
     connection, workload_cursor, metadata_cursor = _connect_cursors(catalog=catalog, schema=schema)

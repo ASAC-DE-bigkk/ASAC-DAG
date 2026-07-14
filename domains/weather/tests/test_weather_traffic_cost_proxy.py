@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "domains" / "weather"))
@@ -61,6 +63,22 @@ def test_render_comparison_markdown_discloses_proxy_and_non_comparable_state():
 def test_median_or_none_requires_every_repeat_to_expose_the_metric():
     assert benchmark.median_or_none([10, 20, 30]) == 20
     assert benchmark.median_or_none([10, None, 30]) is None
+
+
+def test_collect_bundle_rejects_fewer_than_three_repeats(monkeypatch):
+    monkeypatch.setattr(benchmark, "_ensure_dev_target", lambda: None)
+
+    with pytest.raises(ValueError, match="repeat must be at least 3"):
+        benchmark.collect_bundle("before", 2)
+
+
+def test_gold_cases_use_the_scheduled_weather_and_canonical_traffic_models():
+    assert benchmark.CASES["weather_gold"]["model"] == "gold_weather_forecast_by_place"
+    assert (
+        benchmark.CASES["traffic_gold"]["model"]
+        == "gold_traffic_incident_current_by_admin_dong_hourly"
+    )
+    assert benchmark.CASES["traffic_gold"]["snapshot_var"] == "traffic_snapshot_dag_run_id"
 
 
 class FakeCursor:
