@@ -100,3 +100,4 @@ def test_manual_recovery_dag_serializes_w2_writers_and_runs_final_reconciliation
     assert "window_dbt_vars" in source
     assert "preparation_variables = window_dbt_vars(windows[0])" in source
     assert "assert_weather_observation_publishable_and_counts_reconcile" in source
+    assert "run_dbt(FINAL_DBT_ARGS, target=target, variables=preparation_variables)" in source

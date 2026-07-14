@@ -175,7 +175,7 @@ def recover_observation_windows(**context) -> dict[str, object]:
         completed.add(window.label)
         _save_checkpoint(variable_name, windows, completed)
 
-    run_dbt(FINAL_DBT_ARGS, target=target, variables=PREPARE_DBT_VARS)
+    run_dbt(FINAL_DBT_ARGS, target=target, variables=preparation_variables)
     return {
         "checkpoint_variable": variable_name,
         "completed_windows": len(completed),
