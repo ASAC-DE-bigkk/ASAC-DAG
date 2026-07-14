@@ -30,6 +30,7 @@ from weather_ingest.w2_recovery import (  # noqa: E402
     checkpoint_payload,
     completed_window_labels,
     dbt_cli_options,
+    preparation_dbt_vars,
     split_repair_windows,
     window_dbt_vars,
 )
@@ -70,7 +71,8 @@ WINDOW_DBT_ARGS = (
         "test",
         "--select",
         "assert_gold_weather_forecast_by_admin_dong_repair_reconciles "
-        "assert_gold_weather_forecast_by_admin_dong_repair_window_no_extra_rows",
+        "assert_gold_weather_forecast_by_admin_dong_repair_window_no_extra_rows "
+        "assert_gold_weather_forecast_by_admin_dong_repair_window_lineage",
     ),
 )
 FINAL_DBT_ARGS = (
@@ -155,7 +157,7 @@ def recover_observation_windows(**context) -> dict[str, object]:
 
     variable_name = checkpoint_variable_name(str(params["checkpoint_id"]))
     completed = _checkpoint_for_windows(variable_name, windows)
-    preparation_variables = window_dbt_vars(windows[0])
+    preparation_variables = preparation_dbt_vars(windows[0], windows[-1])
     for args in PREPARE_DBT_ARGS:
         run_dbt(args, target=target, variables=preparation_variables)
 

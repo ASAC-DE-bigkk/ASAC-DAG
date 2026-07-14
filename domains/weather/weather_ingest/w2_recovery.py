@@ -65,6 +65,22 @@ def window_dbt_vars(window: RepairWindow) -> dict[str, str]:
     }
 
 
+def preparation_dbt_vars(
+    first_window: RepairWindow, final_window: RepairWindow
+) -> dict[str, str]:
+    """Build the bounded evidence scope required by immutable bridge preparation."""
+    if final_window.cutoff_at < first_window.start_at:
+        raise ValueError("final repair window must not end before the first window")
+    preparation_window = RepairWindow(
+        start_at=first_window.start_at,
+        cutoff_at=min(
+            first_window.start_at + LEGACY_MAX_WINDOW,
+            final_window.cutoff_at,
+        ),
+    )
+    return window_dbt_vars(preparation_window)
+
+
 def dbt_cli_options(
     command: str, *, target: str, variables: dict[str, str]
 ) -> tuple[str, ...]:

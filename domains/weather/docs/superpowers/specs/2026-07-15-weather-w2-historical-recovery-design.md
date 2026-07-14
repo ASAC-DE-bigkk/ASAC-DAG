@@ -25,6 +25,10 @@
 
 checkpoint는 `ask_seoul.weather.w2_observation_recovery.<checkpoint_id>`에 범위와 완료 window 목록을 JSON으로 저장한다. 같은 `checkpoint_id`로 재시도하면 완료된 window는 건너뛰고 실패 지점부터 재개한다. 기존 24시간 checkpoint는 포함되는 6시간 window 전체로 안전하게 승계하고, 다른 범위에 같은 checkpoint를 재사용하면 실패시켜 잘못된 skip을 방지한다.
 
+### 6시간 write / 24시간 preparation evidence 분리
+
+Silver·Gold write와 window data test는 항상 6시간 이하 범위로 실행한다. 다만 immutable bridge seed의 W2 evidence guard는 publishable manifest anchor를 하나 이상 요구하므로, 준비 단계만 최초 repair 시각부터 최대 24시간의 bounded evidence scope를 사용한다. 이 준비 범위는 Bronze·manifest 완전성을 검증할 뿐 과거 Silver·Gold 데이터를 write하지 않으며, 실제 data repair 범위와 checkpoint 단위는 변경하지 않는다.
+
 ## 입력과 안전 경계
 
 - target은 `dev`만 허용한다.

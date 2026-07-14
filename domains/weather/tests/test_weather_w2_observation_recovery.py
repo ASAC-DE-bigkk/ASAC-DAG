@@ -10,6 +10,7 @@ from weather_ingest.w2_recovery import (  # noqa: E402
     checkpoint_payload,
     completed_window_labels,
     dbt_cli_options,
+    preparation_dbt_vars,
     split_repair_windows,
     window_dbt_vars,
 )
@@ -48,6 +49,21 @@ def test_builds_all_required_w2_vars_for_each_window():
         "weather_w2_repair_mode": "bounded_reconcile",
         "weather_w2_repair_start_at": "2026-07-08 00:00:00.000000",
         "weather_w2_publishable_cutoff_at": "2026-07-08 05:59:59.999999",
+        "weather_w2_bridge_version": "weather_admin_dong_grid_bridge_v1",
+        "weather_w2_canonical_revision_date": "2025-04-01",
+    }
+
+
+def test_preparation_uses_one_bounded_24_hour_evidence_window():
+    windows = split_repair_windows(
+        "2026-07-02 00:00:00.000000",
+        "2026-07-02 23:59:59.999999",
+    )
+
+    assert preparation_dbt_vars(windows[0], windows[-1]) == {
+        "weather_w2_repair_mode": "bounded_reconcile",
+        "weather_w2_repair_start_at": "2026-07-02 00:00:00.000000",
+        "weather_w2_publishable_cutoff_at": "2026-07-02 23:59:59.999999",
         "weather_w2_bridge_version": "weather_admin_dong_grid_bridge_v1",
         "weather_w2_canonical_revision_date": "2025-04-01",
     }
@@ -119,8 +135,8 @@ def test_manual_recovery_dag_serializes_w2_writers_and_runs_final_reconciliation
     assert "pool=TRINO_HEAVY_POOL" in source
     assert "pool_slots=1" in source
     assert "dbt_cli_options(args[0]" in source
-    assert "window_dbt_vars" in source
-    assert "preparation_variables = window_dbt_vars(windows[0])" in source
+    assert "preparation_dbt_vars" in source
+    assert "preparation_variables = preparation_dbt_vars(windows[0], windows[-1])" in source
     assert "assert_weather_observation_publishable_and_counts_reconcile" in source
     assert "run_dbt(FINAL_DBT_ARGS, target=target, variables=preparation_variables)" in source
 
@@ -135,6 +151,7 @@ def test_manual_recovery_runs_only_bounded_w2_data_test_per_window():
 
     assert "assert_gold_weather_forecast_by_admin_dong_repair_reconciles" in window_args
     assert "assert_gold_weather_forecast_by_admin_dong_repair_window_no_extra_rows" in window_args
+    assert "assert_gold_weather_forecast_by_admin_dong_repair_window_lineage" in window_args
     assert "assert_weather_observation_grain_unique" not in window_args
     assert "assert_weather_grid_selection_reconciles" not in window_args
     assert "assert_weather_grid_selected_observation_exists" not in window_args
