@@ -7,6 +7,34 @@
 
 ## 2026-07-14
 
+### 66. v2(환경 13종) 오탐 누적 데이터 전 계층 삭제 + raw 재수집 (dev 실행 완료)
+
+request:
+- #65 진단에 따라 v2 환경 데이터는 중복이 계속 쌓였을 것으로 판단 — **전 계층의 모든 v2
+  데이터를 삭제하고 raw 부터 수집 라인을 재실행**할 것.
+
+response:
+- **실측(삭제 전, dev)**: 가설 검증 — bronze Iceberg **65,289행 vs 고유 ~36,125**(중복 ~29K;
+  air_pollution 23,172행=고유 5,579의 4.2배, garbage_bag 3.5배, manifest 25 runs). raw 오탐 증분
+  25파일. **silver/gold 는 content_hash 인접중복 dedup 이 대부분 흡수**(history 36,140 vs current
+  36,117 — 진짜 버전 이력 23행뿐)했음을 확인·보고 후, 사용자 결정대로 전 계층 삭제(23행 손실 수용).
+- **삭제 도구**: [scripts/purge_v2_environment.py](scripts/purge_v2_environment.py) 신설 —
+  기본 dry-run(계수)·`--apply` 삭제·`--layers` 선택·멱등. 범위: raw(증분 25·마커 81·diff-target 26)
+  + bronze state(워터마크 v2 13 엔트리·receipts 26) + bronze Iceberg(license 65,289·manifest 25)
+  + silver(history/current/marker + **sync_state_files 로 R2 스냅샷 동기화** — 스냅샷 복원의 v2
+  마커 부활 차단) + gold(detail 13객체·entity 36,117·history 36,140). **보존**: `commerce_entity_key`
+  (entity_seq 안정, refactor-guide §4)·gold 마커(재수집분이 워터마크 초과라 증분 자동 포착)·dim(전량
+  재생성 자가 치유). 순수 분류 로직 단위테스트 4건(tests/test_purge_v2.py — v1/_RUN/유사이름 무접촉).
+- **재수집(수집 라인 재실행, dev)**: DAG 6종 pause → purge --apply → dry-run 재실행 **전 계층 0
+  검증** → collect 트리거(당일 completed 제외 규칙으로 **v2 13종만** 수집, mode=first 자가 시드)
+  → bronze(36,125행·manifest 13 runs=1/dataset) → silver(**history 36,125 = current 36,125 =
+  bronze 36,125**, 업소당 1버전·중복 0·DONE 마커 13) → gold 순 재적재. diff-target 이 새 정렬
+  기준으로 재생성되어 **#65 의 `bronze.resort` 재정렬 절차는 불필요해짐**(대체).
+- **런북**: [docs/cleanup-v2-environment-data.md](docs/cleanup-v2-environment-data.md) — 환경별
+  체크리스트(dev DONE · prod OPEN). CLAUDE.md Pending cleanup tasks 에 등록.
+- **후속 검증(다음날)**: 익일 collect 리포트에서 v2 증분이 0(identical) 또는 소량(실변경)인지 확인
+  — #65 수정의 최종 실증. 4000건+/일 오탐이 재발하면 즉시 보고.
+
 ### 65. v2(환경) 증분 diff 정본화 — 정렬/식별키 alias 해석(전량 오탐 해소) + 신규분 스코프 알림/리포트
 
 request:
