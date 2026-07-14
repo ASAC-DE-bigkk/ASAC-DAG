@@ -169,3 +169,42 @@ def test_execution_fingerprint_records_the_read_only_execution_contract():
     assert "report" not in model_fingerprint
     assert watchdog_fingerprint["report"] == "weather"
     assert "compile_command" not in watchdog_fingerprint
+
+
+def test_compare_bundles_rejects_execution_fingerprints_from_different_projects():
+    before_case = benchmark.CASES["weather_silver"]
+    after_case = {**before_case, "project": "/tmp/other-weather-project"}
+    before = {
+        "fingerprint": {"weather": {"snapshot_id": 1}},
+        "execution_fingerprint": {
+            "weather_silver": benchmark._execution_fingerprint(
+                "weather_silver",
+                before_case,
+                {},
+                catalog="iceberg_dev",
+                schema="weather_traffic_bronze",
+            )
+        },
+        "suites": [],
+    }
+    after = {
+        "fingerprint": {"weather": {"snapshot_id": 1}},
+        "execution_fingerprint": {
+            "weather_silver": benchmark._execution_fingerprint(
+                "weather_silver",
+                after_case,
+                {},
+                catalog="iceberg_dev",
+                schema="weather_traffic_bronze",
+            )
+        },
+        "suites": [],
+    }
+
+    comparison = benchmark.compare_bundles(before, after)
+
+    assert comparison == {
+        "comparable": False,
+        "reason": "execution_fingerprint_mismatch",
+        "metrics": [],
+    }

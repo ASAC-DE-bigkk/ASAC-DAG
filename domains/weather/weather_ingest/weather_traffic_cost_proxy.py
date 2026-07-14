@@ -228,6 +228,7 @@ def _execution_fingerprint(
         "dbt_bin": DBT_BIN,
     }
     if "model" in case:
+        fingerprint["project"] = str(case["project"])
         fingerprint["compile_command"] = _compile_command(case, dbt_vars)
     else:
         fingerprint["report"] = str(case["report"])
