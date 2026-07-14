@@ -24,7 +24,11 @@ from airflow.sdk import Asset
 from airflow.sdk.exceptions import AirflowFailException
 from airflow.utils.trigger_rule import TriggerRule
 
-# 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
+# 공통 패키지(dags/common)와 Weather 로컬 패키지 import 경로를 초기화한다.
+DAG_DIR = os.path.dirname(os.path.abspath(__file__))
+if DAG_DIR not in sys.path:
+    sys.path.insert(0, DAG_DIR)
+
 DAGS_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
