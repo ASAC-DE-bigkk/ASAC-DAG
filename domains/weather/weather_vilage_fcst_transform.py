@@ -11,14 +11,16 @@ import json
 import logging
 import os
 import shlex
+import subprocess
 import sys
 import urllib.request
 from datetime import datetime, timedelta
+from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
+from airflow.exceptions import AirflowException
 from airflow.models.param import Param
-from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
 
@@ -44,6 +46,23 @@ DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/weather"
 WEATHER_DBT_CONTRACT_VARS = {"weather_w2_canonical_revision_date": "2025-04-01"}
 RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, "target", "run_results.json")
+WEATHER_DBT_ARTIFACT_XCOM_KEY = "weather_dbt_artifact_path"
+DBT_PHASE_TASK_IDS = (
+    "dbt_deps",
+    "dbt_source_freshness",
+    "dbt_seed_asac_axes",
+    "dbt_run_common_admin_dong_dimension",
+    "dbt_test_common_admin_dong_dimension",
+    "dbt_seed_place_mapping",
+    "dbt_test_place_mapping_seed",
+    "dbt_run_silver",
+    "dbt_test_silver",
+    "dbt_run_gold",
+    "dbt_test_gold",
+    "dbt_run_place_mart",
+    "dbt_test_place_mart",
+)
+DBT_RETRY_DELAY = timedelta(minutes=2)
 DOMAIN = "weather"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
 DISCORD_RED = 15158332
@@ -145,27 +164,160 @@ def transform_schedule() -> str | list[Asset] | None:
     return [Asset(WEATHER_BRONZE_ASSET)]
 
 
-def dbt_command(args: str, *, include_project_vars: bool = True) -> str:
-    project = shlex.quote(DBT_PROJECT)
-    vars_argument = ""
-    if include_project_vars:
-        vars_json = json.dumps(WEATHER_DBT_CONTRACT_VARS, separators=(",", ":"))
-        vars_argument = f" --vars {shlex.quote(vars_json)}"
-    return (
-        "set -euo pipefail\n"
-        f"cd {project}\n"
-        f"export DBT_PROFILES_DIR={project} DBT_PROJECT_DIR={project}\n"
-        f"{shlex.quote(DBT_BIN)} {args} --target '{{{{ params.target }}}}'{vars_argument} --no-use-colors"
+def _artifact_path(*, run_id: str | None, task_id: str | None, try_number: int | None) -> str:
+    def safe(value: str | None) -> str:
+        return "".join(
+            char if char.isascii() and (char.isalnum() or char in "._=-") else "-"
+            for char in value or "unknown"
+        )
+
+    return str(
+        PurePosixPath(DBT_PROJECT.replace("\\", "/"))
+        / "target"
+        / "weather-transform"
+        / safe(run_id)
+        / safe(task_id)
+        / f"try{try_number if try_number is not None else 'unknown'}"
+        / "run_results.json"
     )
 
 
-def publish_dbt_run_metrics(run_results_path: str = RUN_RESULTS_PATH, **context) -> dict:
+def run_dbt_phase(
+    *, dbt_args: str, include_project_vars: bool = True, **context
+) -> dict[str, str | None]:
+    """Run one dbt phase with an artifact path isolated to this task attempt."""
+    ti = context["ti"]
+    artifact_path = _artifact_path(
+        run_id=context.get("run_id"),
+        task_id=getattr(ti, "task_id", None),
+        try_number=getattr(ti, "try_number", None),
+    )
+    command_args = shlex.split(dbt_args)
+    is_deps = bool(command_args) and command_args[0] == "deps"
+    target = (context.get("params") or {}).get("target", "dev")
+    command = [
+        DBT_BIN,
+        *command_args,
+        "--target",
+        target,
+        "--no-use-colors",
+    ]
+    if include_project_vars and not is_deps:
+        command.extend(
+            [
+                "--vars",
+                json.dumps(WEATHER_DBT_CONTRACT_VARS, separators=(",", ":")),
+            ]
+        )
+    if not is_deps:
+        command.extend(["--target-path", str(Path(artifact_path).parent)])
+
+    env = os.environ.copy()
+    env["DBT_PROFILES_DIR"] = DBT_PROJECT
+    env["DBT_PROJECT_DIR"] = DBT_PROJECT
+    artifact_reset_succeeded = False
+    try:
+        if not is_deps:
+            try:
+                os.remove(artifact_path)
+            except FileNotFoundError:
+                pass
+            artifact_reset_succeeded = True
+        completed = subprocess.run(
+            command,
+            cwd=DBT_PROJECT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        existing_artifact_path = (
+            artifact_path
+            if artifact_reset_succeeded and os.path.exists(artifact_path)
+            else None
+        )
+        ti.xcom_push(
+            key=WEATHER_DBT_ARTIFACT_XCOM_KEY,
+            value=existing_artifact_path,
+        )
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr)
+    if completed.returncode != 0:
+        raise AirflowException(
+            f"weather dbt command failed with exit code {completed.returncode}"
+        )
+    return {"status": "success", "artifact_path": existing_artifact_path}
+
+
+def dbt_task(
+    task_id: str, dbt_args: str, *, include_project_vars: bool = True
+) -> PythonOperator:
+    return PythonOperator(
+        task_id=task_id,
+        python_callable=run_dbt_phase,
+        op_kwargs={
+            "dbt_args": dbt_args,
+            "include_project_vars": include_project_vars,
+        },
+        pool=TRINO_HEAVY_POOL,
+        retries=1,
+        retry_delay=DBT_RETRY_DELAY,
+        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    )
+
+
+def _current_run_results_path(**context) -> str | None:
+    """Return the latest existing dbt artifact recorded by this DAG run."""
+    ti = context.get("ti") or context.get("task_instance")
+    if ti is None:
+        return None
+
+    def existing_path(candidate: object) -> str | None:
+        if not isinstance(candidate, (str, os.PathLike)):
+            return None
+        path = os.fspath(candidate)
+        if not isinstance(path, str) or not os.path.exists(path):
+            return None
+        return path
+
+    for task_id in reversed(DBT_PHASE_TASK_IDS):
+        try:
+            result = ti.xcom_pull(task_ids=task_id)
+        except Exception:  # noqa: BLE001 - continue to earlier current-run phases
+            result = None
+        if isinstance(result, dict):
+            path = existing_path(result.get("artifact_path"))
+            if path is not None:
+                return path
+
+        try:
+            failure_path = ti.xcom_pull(
+                task_ids=task_id,
+                key=WEATHER_DBT_ARTIFACT_XCOM_KEY,
+            )
+        except Exception:  # noqa: BLE001 - continue to earlier current-run phases
+            failure_path = None
+        path = existing_path(failure_path)
+        if path is not None:
+            return path
+    return None
+
+
+def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> dict:
     """Persist model/test run metrics without changing the dbt contract gate."""
-    if not os.path.exists(run_results_path):
-        print(f"run_results.json 없음 — 메트릭 적재 skip: {run_results_path}")
+    resolved_path = (
+        run_results_path
+        if run_results_path is not None
+        else _current_run_results_path(**context)
+    )
+    if not resolved_path or not os.path.exists(resolved_path):
+        print(f"run_results.json 없음 — 메트릭 적재 skip: {resolved_path}")
         return {"rows": 0, "skipped": True}
     target = (context.get("params") or {}).get("target")
-    records = dump_dbt_run_results(run_results_path, domain=DOMAIN, target=target)
+    records = dump_dbt_run_results(resolved_path, domain=DOMAIN, target=target)
     print(f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})")
     return {"rows": len(records), "skipped": False}
 
@@ -182,7 +334,7 @@ with DAG(
     schedule=transform_schedule(),
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 1, "retry_delay": timedelta(minutes=2)},
+    default_args={"retries": 1, "retry_delay": DBT_RETRY_DELAY},
     params=DEFAULT_PARAMS,
     on_success_callback=publish_weather_transform_success_metrics,
     tags=["ask_seoul", "weather", "transform", "silver", "gold", "dbt"],
@@ -194,134 +346,89 @@ with DAG(
         on_failure_callback=record_weather_problem,
     )
 
-    dbt_deps = BashOperator(
-        task_id="dbt_deps",
-        bash_command=dbt_command("deps", include_project_vars=False),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_deps = dbt_task("dbt_deps", "deps", include_project_vars=False)
+
+    dbt_source_freshness = dbt_task("dbt_source_freshness", "source freshness")
+
+    dbt_seed_asac_axes = dbt_task("dbt_seed_asac_axes", "seed --select asac_axes")
+
+    dbt_run_common_admin_dong_dimension = dbt_task(
+        "dbt_run_common_admin_dong_dimension",
+        "run --select asac_axes.dim_admin_dong",
     )
 
-    dbt_source_freshness = BashOperator(
-        task_id="dbt_source_freshness",
-        bash_command=dbt_command("source freshness"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_test_common_admin_dong_dimension = dbt_task(
+        "dbt_test_common_admin_dong_dimension",
+        "test --select asac_axes.dim_admin_dong",
     )
 
-    dbt_seed_asac_axes = BashOperator(
-        task_id="dbt_seed_asac_axes",
-        bash_command=dbt_command("seed --select asac_axes"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_seed_place_mapping = dbt_task(
+        "dbt_seed_place_mapping",
+        "seed --select weather_place_grid_mapping",
     )
 
-    dbt_run_common_admin_dong_dimension = BashOperator(
-        task_id="dbt_run_common_admin_dong_dimension",
-        bash_command=dbt_command("run --select asac_axes.dim_admin_dong"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_test_place_mapping_seed = dbt_task(
+        "dbt_test_place_mapping_seed",
+        "test --select "
+        "weather_place_grid_mapping "
+        "assert_weather_place_grid_mapping_major_aliases "
+        "assert_weather_place_grid_mapping_within_collected_grid_scope "
+        "assert_weather_place_grid_mapping_alias_unique_except_allowed",
     )
 
-    dbt_test_common_admin_dong_dimension = BashOperator(
-        task_id="dbt_test_common_admin_dong_dimension",
-        bash_command=dbt_command("test --select asac_axes.dim_admin_dong"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_run_silver = dbt_task(
+        "dbt_run_silver",
+        "run --select silver_kma_vilage_fcst",
     )
 
-    dbt_seed_place_mapping = BashOperator(
-        task_id="dbt_seed_place_mapping",
-        bash_command=dbt_command("seed --select weather_place_grid_mapping"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_test_silver = dbt_task(
+        "dbt_test_silver",
+        "test --select "
+        "silver_kma_vilage_fcst "
+        "assert_silver_kma_vilage_fcst_grain_unique "
+        "assert_silver_kma_vilage_fcst_grid_coverage "
+        "assert_silver_kma_uses_publishable_runs "
+        "assert_silver_kma_event_at_matches_forecast_at "
+        "--exclude "
+        "assert_gold_weather_counts_match_silver",
     )
 
-    dbt_test_place_mapping_seed = BashOperator(
-        task_id="dbt_test_place_mapping_seed",
-        pool=TRINO_HEAVY_POOL,
-        bash_command=dbt_command(
-            "test --select "
-            "weather_place_grid_mapping "
-            "assert_weather_place_grid_mapping_major_aliases "
-            "assert_weather_place_grid_mapping_within_collected_grid_scope "
-            "assert_weather_place_grid_mapping_alias_unique_except_allowed"
-        ),
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_run_gold = dbt_task(
+        "dbt_run_gold",
+        "run --select gold_weather_forecast_summary",
     )
 
-    dbt_run_silver = BashOperator(
-        task_id="dbt_run_silver",
-        bash_command=dbt_command("run --select silver_kma_vilage_fcst"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_test_gold = dbt_task(
+        "dbt_test_gold",
+        "test --select "
+        "gold_weather_forecast_summary "
+        "assert_gold_weather_counts_match_silver "
+        "assert_gold_weather_row_counts_positive",
     )
 
-    dbt_test_silver = BashOperator(
-        task_id="dbt_test_silver",
-        pool=TRINO_HEAVY_POOL,
-        bash_command=dbt_command(
-            "test --select "
-            "silver_kma_vilage_fcst "
-            "assert_silver_kma_vilage_fcst_grain_unique "
-            "assert_silver_kma_vilage_fcst_grid_coverage "
-            "assert_silver_kma_uses_publishable_runs "
-            "assert_silver_kma_event_at_matches_forecast_at "
-            "--exclude "
-            "assert_gold_weather_counts_match_silver"
-        ),
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_run_place_mart = dbt_task(
+        "dbt_run_place_mart",
+        "run --select "
+        "dim_weather_place "
+        "silver_weather_forecast_by_admin_dong "
+        "gold_weather_forecast_by_place",
     )
 
-    dbt_run_gold = BashOperator(
-        task_id="dbt_run_gold",
-        bash_command=dbt_command("run --select gold_weather_forecast_summary"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
-    )
-
-    dbt_test_gold = BashOperator(
-        task_id="dbt_test_gold",
-        pool=TRINO_HEAVY_POOL,
-        bash_command=dbt_command(
-            "test --select "
-            "gold_weather_forecast_summary "
-            "assert_gold_weather_counts_match_silver "
-            "assert_gold_weather_row_counts_positive"
-        ),
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
-    )
-
-    dbt_run_place_mart = BashOperator(
-        task_id="dbt_run_place_mart",
-        pool=TRINO_HEAVY_POOL,
-        bash_command=dbt_command(
-            "run --select "
-            "dim_weather_place "
-            "silver_weather_forecast_by_admin_dong "
-            "gold_weather_forecast_by_place"
-        ),
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
-    )
-
-    dbt_test_place_mart = BashOperator(
-        task_id="dbt_test_place_mart",
-        pool=TRINO_HEAVY_POOL,
-        bash_command=dbt_command(
-            "test --select "
-            "dim_weather_place "
-            "silver_weather_forecast_by_admin_dong "
-            "gold_weather_forecast_by_place "
-            "assert_silver_weather_admin_dong_grain_unique "
-            "assert_silver_weather_admin_axis_consistent "
-            "assert_silver_weather_admin_event_at_matches_forecast_at "
-            "assert_gold_weather_forecast_by_place_grain_unique "
-            "assert_gold_weather_forecast_by_place_major_coverage "
-            "assert_gold_weather_forecast_by_place_admin_axis_consistent "
-            "assert_dim_weather_place_admin_axis_consistent "
-            "assert_gold_weather_forecast_by_place_event_at_matches_forecast_at "
-            "assert_gold_weather_forecast_by_place_latest_silver_record"
-        ),
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+    dbt_test_place_mart = dbt_task(
+        "dbt_test_place_mart",
+        "test --select "
+        "dim_weather_place "
+        "silver_weather_forecast_by_admin_dong "
+        "gold_weather_forecast_by_place "
+        "assert_silver_weather_admin_dong_grain_unique "
+        "assert_silver_weather_admin_axis_consistent "
+        "assert_silver_weather_admin_event_at_matches_forecast_at "
+        "assert_gold_weather_forecast_by_place_grain_unique "
+        "assert_gold_weather_forecast_by_place_major_coverage "
+        "assert_gold_weather_forecast_by_place_admin_axis_consistent "
+        "assert_dim_weather_place_admin_axis_consistent "
+        "assert_gold_weather_forecast_by_place_event_at_matches_forecast_at "
+        "assert_gold_weather_forecast_by_place_latest_silver_record",
     )
 
     (
