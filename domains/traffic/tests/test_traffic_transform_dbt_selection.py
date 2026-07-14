@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import shlex
 import sys
 import types
@@ -183,6 +184,220 @@ def dbt_option_tokens(dbt_args: str, option: str) -> set[str]:
     return set(tokens[option_start:option_end])
 
 
+def test_normalize_dbt_test_tuples_uses_attached_resource_and_test_metadata():
+    module = load_transform_module()
+    nodes = [
+        {
+            "resource_type": "test",
+            "attached_node": "source.ask_seoul.traffic_bronze.seoul_traffic_incident",
+            "column_name": "request_id",
+            "test_metadata": {"name": "not_null", "kwargs": {}},
+        },
+        {
+            "resource_type": "test",
+            "attached_node": "seed.asac_axes.seoul_admin_dong_crosswalk",
+            "test_metadata": {
+                "name": "in_seoul_bbox",
+                "kwargs": {"column_name": "longitude"},
+            },
+        },
+    ]
+
+    assert module.normalize_dbt_test_tuples(nodes) == {
+        ("traffic_bronze.seoul_traffic_incident", "request_id", "not_null"),
+        ("asac_axes.seoul_admin_dong_crosswalk", "longitude", "in_seoul_bbox"),
+    }
+
+
+def test_normalize_dbt_test_tuples_uses_depends_on_when_attached_node_is_null():
+    module = load_transform_module()
+    nodes = [
+        {
+            "resource_type": "test",
+            "attached_node": None,
+            "depends_on": {
+                "nodes": ["source.traffic.traffic_bronze.seoul_traffic_incident"]
+            },
+            "column_name": "request_id",
+            "test_metadata": {"name": "not_null", "kwargs": {"column_name": "request_id"}},
+        }
+    ]
+
+    assert module.normalize_dbt_test_tuples(nodes) == {
+        ("traffic_bronze.seoul_traffic_incident", "request_id", "not_null"),
+    }
+
+
+def test_assert_exact_dbt_test_set_rejects_selector_drift():
+    module = load_transform_module()
+
+    with pytest.raises(FakeAirflowFailException, match="exact dbt test set"):
+        module.assert_exact_dbt_test_set(
+            actual={("traffic_bronze.seoul_traffic_incident", "request_id", "not_null")},
+            expected={
+                ("traffic_bronze.seoul_traffic_incident", "request_id", "not_null"),
+                ("traffic_bronze.seoul_traffic_incident", "acc_id", "not_null"),
+            },
+        )
+
+
+def test_traffic_contract_gates_have_exact_selectors_and_allowlists():
+    module = load_transform_module()
+
+    expected_source = {
+        ("traffic_bronze.seoul_traffic_incident", "request_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "source_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "source_id", "accepted_values"),
+        ("traffic_bronze.seoul_traffic_incident", "request_params_json", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "acc_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "start_index", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "end_index", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "occr_date", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "occr_time", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "result_code", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "result_msg", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "raw_object_key", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "payload_hash", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "http_status", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "list_total_count", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "row_count", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "collected_at", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "load_date", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "dag_run_id", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "source_id", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "dag_run_id", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "status", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "is_publishable", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "event_at", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "request_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "source_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "source_id", "accepted_values"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "start_index", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "end_index", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "request_params_json", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "raw_object_key", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "payload_hash", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "http_status", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "result_code", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "result_msg", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "list_total_count", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "row_count", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "collected_at", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "load_date", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "dag_run_id", "not_null"),
+    }
+    expected_seed = {
+        ("asac_axes.seoul_admin_dong_crosswalk", "admin_dong_code", "not_null"),
+        ("asac_axes.seoul_admin_dong_crosswalk", "admin_dong_code", "unique"),
+        ("asac_axes.seoul_admin_dong_crosswalk", "longitude", "in_seoul_bbox"),
+        ("asac_axes.seoul_admin_dong_crosswalk", "latitude", "in_seoul_bbox"),
+        ("asac_axes.seoul_admin_dong_boundary", "admin_dong_code", "axis_coverage"),
+        ("asac_axes.seoul_gu_boundary", "gu_code", "not_null"),
+        ("asac_axes.seoul_gu_boundary", "gu_code", "unique"),
+    }
+
+    assert module.TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS == expected_source
+    assert module.ASAC_AXES_SEED_CONTRACT_TESTS == expected_seed
+    assert len(expected_source) == 40
+    assert len(expected_seed) == 7
+    assert module.TRAFFIC_BRONZE_SOURCE_CONTRACT_SELECTOR == "source:traffic_bronze,test_type:generic"
+    assert module.ASAC_AXES_SEED_CONTRACT_SELECTOR == (
+        "asac_axes.seoul_admin_dong_crosswalk "
+        "asac_axes.seoul_admin_dong_boundary "
+        "asac_axes.seoul_gu_boundary"
+    )
+
+    source_task = module.dag.task_dict["dbt_test_traffic_bronze_source_contract"]
+    seed_task = module.dag.task_dict["dbt_test_asac_axes_seed_contract"]
+    assert source_task.kwargs["op_kwargs"]["contract_selector"] == "source:traffic_bronze,test_type:generic"
+    assert seed_task.kwargs["op_kwargs"]["contract_selector"] == module.ASAC_AXES_SEED_CONTRACT_SELECTOR
+    assert source_task.kwargs["op_kwargs"]["expected_test_tuples"] == expected_source
+    assert seed_task.kwargs["op_kwargs"]["expected_test_tuples"] == expected_seed
+
+
+def test_contract_gate_runs_dbt_ls_before_dbt_test(monkeypatch):
+    module = load_transform_module()
+    commands = []
+    nodes = [
+        {
+            "resource_type": "test",
+            "attached_node": f"source.ask_seoul.{resource}",
+            "column_name": column,
+            "test_metadata": {"name": test_name, "kwargs": {}},
+        }
+        for resource, column, test_name in module.TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS
+    ]
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_traffic_bronze_source_contract",
+        try_number=1,
+        xcom_pull=lambda task_ids: "snapshot-a",
+    )
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[1] == "ls":
+            return types.SimpleNamespace(returncode=0, stdout="\n".join(json.dumps(node) for node in nodes), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    result = module.run_dbt_phase(
+        dbt_args="test --select source:traffic_bronze,test_type:generic",
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        silver_persisted=False,
+        contract_selector=module.TRAFFIC_BRONZE_SOURCE_CONTRACT_SELECTOR,
+        expected_test_tuples=module.TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS,
+        ti=ti,
+        run_id="manual__a",
+        params={"target": "dev"},
+    )
+
+    assert result["status"] == "success"
+    assert commands[0][1:4] == ["ls", "--resource-type", "test"]
+    assert "--output" in commands[0]
+    assert commands[1][1:4] == ["test", "--select", "source:traffic_bronze,test_type:generic"]
+
+
+def test_contract_gate_does_not_run_dbt_test_after_selector_drift(monkeypatch):
+    module = load_transform_module()
+    commands = []
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_traffic_bronze_source_contract",
+        try_number=1,
+        xcom_pull=lambda task_ids: "snapshot-a",
+    )
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "resource_type": "test",
+                    "attached_node": "source.ask_seoul.traffic_bronze.seoul_traffic_incident",
+                    "column_name": "request_id",
+                    "test_metadata": {"name": "not_null", "kwargs": {}},
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    with pytest.raises(FakeAirflowFailException, match="exact dbt test set"):
+        module.run_dbt_phase(
+            dbt_args="test --select source:traffic_bronze,test_type:generic",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=False,
+            contract_selector=module.TRAFFIC_BRONZE_SOURCE_CONTRACT_SELECTOR,
+            expected_test_tuples=module.TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS,
+            ti=ti,
+            run_id="manual__a",
+            params={"target": "dev"},
+        )
+
+    assert len(commands) == 1
+    assert commands[0][1] == "ls"
+
+
 def test_traffic_transform_bootstraps_asac_axes_before_silver():
     module = load_transform_module()
     dag = module.dag
@@ -192,9 +407,11 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_deps",
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
+        "dbt_test_traffic_bronze_source_contract",
         "dbt_seed_asac_axes",
         "dbt_run_common_admin_dong_dimension",
         "dbt_test_common_admin_dong_dimension",
+        "dbt_test_asac_axes_seed_contract",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",
@@ -287,6 +504,27 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         canonical_gold_model,
     }
     assert dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["fresh_parse"] is True
+
+
+def test_contract_gates_are_the_only_path_into_persisted_silver():
+    module = load_transform_module()
+    dag = module.dag
+
+    assert dag.task_dict["dbt_test_traffic_bronze_source_contract"].downstream_task_ids == {
+        "dbt_seed_asac_axes",
+        "fail_transform_if_upstream_failed",
+    }
+    assert dag.task_dict["dbt_test_common_admin_dong_dimension"].downstream_task_ids == {
+        "dbt_test_asac_axes_seed_contract",
+        "fail_transform_if_upstream_failed",
+    }
+    assert dag.task_dict["dbt_test_asac_axes_seed_contract"].downstream_task_ids == {
+        "dbt_run_silver",
+        "fail_transform_if_upstream_failed",
+    }
+    assert dag.task_dict["dbt_run_silver"].upstream_task_ids == {
+        "dbt_test_asac_axes_seed_contract",
+    }
 
 
 def test_silver_excludes_eager_gold_contracts_until_gold_rebuild():
@@ -454,9 +692,11 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
         "dbt_deps",
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
+        "dbt_test_traffic_bronze_source_contract",
         "dbt_seed_asac_axes",
         "dbt_run_common_admin_dong_dimension",
         "dbt_test_common_admin_dong_dimension",
+        "dbt_test_asac_axes_seed_contract",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",
@@ -778,9 +1018,11 @@ def test_traffic_transform_has_independent_failure_propagating_leaf():
         "dbt_deps",
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
+        "dbt_test_traffic_bronze_source_contract",
         "dbt_seed_asac_axes",
         "dbt_run_common_admin_dong_dimension",
         "dbt_test_common_admin_dong_dimension",
+        "dbt_test_asac_axes_seed_contract",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",

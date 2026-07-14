@@ -7,6 +7,7 @@ through the dbt models and keeps transform retries independent from API calls.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -61,13 +62,76 @@ TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
 TRAFFIC_SOURCE_ID = "seoul_traffic_incident"
 SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
 DBT_FAILURE_XCOM_KEY = "traffic_dbt_failure"
+TRAFFIC_BRONZE_SOURCE_CONTRACT_SELECTOR = "source:traffic_bronze,test_type:generic"
+ASAC_AXES_SEED_CONTRACT_SELECTOR = (
+    "asac_axes.seoul_admin_dong_crosswalk "
+    "asac_axes.seoul_admin_dong_boundary "
+    "asac_axes.seoul_gu_boundary"
+)
+TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS = frozenset(
+    {
+        ("traffic_bronze.seoul_traffic_incident", "request_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "source_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "source_id", "accepted_values"),
+        ("traffic_bronze.seoul_traffic_incident", "request_params_json", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "acc_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "start_index", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "end_index", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "occr_date", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "occr_time", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "result_code", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "result_msg", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "raw_object_key", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "payload_hash", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "http_status", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "list_total_count", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "row_count", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "collected_at", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "load_date", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident", "dag_run_id", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "source_id", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "dag_run_id", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "status", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "is_publishable", "not_null"),
+        ("traffic_bronze.collection_run_manifest", "event_at", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "request_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "source_id", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "source_id", "accepted_values"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "start_index", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "end_index", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "request_params_json", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "raw_object_key", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "payload_hash", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "http_status", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "result_code", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "result_msg", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "list_total_count", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "row_count", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "collected_at", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "load_date", "not_null"),
+        ("traffic_bronze.seoul_traffic_incident_request_audit", "dag_run_id", "not_null"),
+    }
+)
+ASAC_AXES_SEED_CONTRACT_TESTS = frozenset(
+    {
+        ("asac_axes.seoul_admin_dong_crosswalk", "admin_dong_code", "not_null"),
+        ("asac_axes.seoul_admin_dong_crosswalk", "admin_dong_code", "unique"),
+        ("asac_axes.seoul_admin_dong_crosswalk", "longitude", "in_seoul_bbox"),
+        ("asac_axes.seoul_admin_dong_crosswalk", "latitude", "in_seoul_bbox"),
+        ("asac_axes.seoul_admin_dong_boundary", "admin_dong_code", "axis_coverage"),
+        ("asac_axes.seoul_gu_boundary", "gu_code", "not_null"),
+        ("asac_axes.seoul_gu_boundary", "gu_code", "unique"),
+    }
+)
 DBT_PHASE_TASK_IDS = (
     "dbt_deps",
     "dbt_source_freshness",
     "dbt_test_traffic_incident_availability",
+    "dbt_test_traffic_bronze_source_contract",
     "dbt_seed_asac_axes",
     "dbt_run_common_admin_dong_dimension",
     "dbt_test_common_admin_dong_dimension",
+    "dbt_test_asac_axes_seed_contract",
     "dbt_run_silver",
     "dbt_test_silver",
     "dbt_run_gold",
@@ -84,6 +148,42 @@ DEFAULT_PARAMS = {
 }
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 record_traffic_problem = problem_failure_callback(domain="traffic")
+
+
+def normalize_dbt_test_tuples(nodes: list[dict]) -> set[tuple[str, str, str]]:
+    """Normalize dbt ls JSON nodes to stable resource/column/test tuples."""
+    normalized = set()
+    for node in nodes:
+        depends_on_nodes = (node.get("depends_on") or {}).get("nodes") or []
+        attached_node = str(
+            node.get("attached_node")
+            or node.get("resource_name")
+            or (depends_on_nodes[0] if depends_on_nodes else "")
+        )
+        resource_parts = attached_node.split(".")
+        resource = ".".join(resource_parts[-2:]) if len(resource_parts) >= 2 else attached_node
+        metadata = node.get("test_metadata") or {}
+        kwargs = metadata.get("kwargs") or {}
+        column = node.get("column_name") or kwargs.get("column_name")
+        test_name = metadata.get("name") or node.get("name")
+        if not resource or not column or not test_name:
+            raise AirflowFailException(f"dbt test node is missing tuple fields: {node!r}")
+        normalized.add((resource, str(column), str(test_name)))
+    return normalized
+
+
+def assert_exact_dbt_test_set(
+    *, actual: set[tuple[str, str, str]], expected: set[tuple[str, str, str]]
+) -> None:
+    """Reject selector drift before a contract gate executes dbt test."""
+    if actual == expected:
+        return
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    raise AirflowFailException(
+        "exact dbt test set mismatch: "
+        f"missing={missing!r}, unexpected={unexpected!r}"
+    )
 
 
 def transform_schedule() -> str | None:
@@ -125,6 +225,8 @@ def _artifact_path(*, run_id: str | None, task_id: str | None, try_number: int |
 
 def run_dbt_phase(*, dbt_args: str, snapshot_task_id: str,
                   silver_persisted: bool, fresh_parse: bool = False,
+                  contract_selector: str | None = None,
+                  expected_test_tuples: frozenset[tuple[str, str, str]] | None = None,
                   **context) -> dict[str, str]:
     """Run one pinned dbt phase and let Airflow retry infrastructure failures only."""
     ti = context["ti"]
@@ -150,7 +252,17 @@ def run_dbt_phase(*, dbt_args: str, snapshot_task_id: str,
     env = os.environ.copy()
     env["DBT_PROFILES_DIR"] = DBT_PROJECT
     env["DBT_PROJECT_DIR"] = DBT_PROJECT
-    phase_args = ["parse --no-partial-parse", dbt_args] if fresh_parse else [dbt_args]
+    phase_args = ["parse --no-partial-parse"] if fresh_parse else []
+    if expected_test_tuples is not None:
+        if not contract_selector:
+            raise ValueError("contract_selector is required for an exact dbt test gate")
+        phase_args.append(
+            "ls --resource-type test "
+            f"--select {contract_selector} --output json "
+            "--output-keys name resource_type attached_node column_name "
+            "test_metadata depends_on unique_id"
+        )
+    phase_args.append(dbt_args)
     for current_args in phase_args:
         completed = subprocess.run(
             build_command(current_args), cwd=DBT_PROJECT, env=env, check=False,
@@ -162,6 +274,21 @@ def run_dbt_phase(*, dbt_args: str, snapshot_task_id: str,
             print(completed.stderr, end="", file=sys.stderr)
         if completed.returncode != 0:
             break
+        if current_args.startswith("ls "):
+            nodes = []
+            for line in completed.stdout.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    node = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(node, dict):
+                    nodes.append(node)
+            assert_exact_dbt_test_set(
+                actual=normalize_dbt_test_tuples(nodes),
+                expected=set(expected_test_tuples),
+            )
     if completed.returncode == 0:
         return {"status": "success", "artifact_path": artifact_path}
 
@@ -234,7 +361,8 @@ def record_traffic_dbt_problem(context) -> None:
 
 
 def dbt_task(task_id: str, dbt_args: str, *, silver_persisted: bool = False,
-             fresh_parse: bool = False) -> PythonOperator:
+             fresh_parse: bool = False, contract_selector: str | None = None,
+             expected_test_tuples: frozenset[tuple[str, str, str]] | None = None) -> PythonOperator:
     return PythonOperator(
         task_id=task_id,
         python_callable=run_dbt_phase,
@@ -243,6 +371,8 @@ def dbt_task(task_id: str, dbt_args: str, *, silver_persisted: bool = False,
             "snapshot_task_id": SNAPSHOT_TASK_ID,
             "silver_persisted": silver_persisted,
             "fresh_parse": fresh_parse,
+            "contract_selector": contract_selector,
+            "expected_test_tuples": expected_test_tuples,
         },
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
@@ -319,6 +449,13 @@ with DAG(
         "test --select assert_traffic_incident_row_availability",
     )
 
+    dbt_test_traffic_bronze_source_contract = dbt_task(
+        "dbt_test_traffic_bronze_source_contract",
+        f"test --select {TRAFFIC_BRONZE_SOURCE_CONTRACT_SELECTOR}",
+        contract_selector=TRAFFIC_BRONZE_SOURCE_CONTRACT_SELECTOR,
+        expected_test_tuples=TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS,
+    )
+
     dbt_seed_asac_axes = dbt_task("dbt_seed_asac_axes", "seed --select asac_axes")
 
     dbt_run_common_admin_dong_dimension = dbt_task(
@@ -339,6 +476,13 @@ with DAG(
             "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness "
             "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles"
         ),
+    )
+
+    dbt_test_asac_axes_seed_contract = dbt_task(
+        "dbt_test_asac_axes_seed_contract",
+        f"test --select {ASAC_AXES_SEED_CONTRACT_SELECTOR}",
+        contract_selector=ASAC_AXES_SEED_CONTRACT_SELECTOR,
+        expected_test_tuples=ASAC_AXES_SEED_CONTRACT_TESTS,
     )
 
     resolve_snapshot = PythonOperator(
@@ -427,9 +571,11 @@ with DAG(
         >> dbt_deps
         >> dbt_source_freshness
         >> dbt_test_traffic_incident_availability
+        >> dbt_test_traffic_bronze_source_contract
         >> dbt_seed_asac_axes
         >> dbt_run_common_admin_dong_dimension
         >> dbt_test_common_admin_dong_dimension
+        >> dbt_test_asac_axes_seed_contract
         >> dbt_run_silver
         >> dbt_test_silver
         >> dbt_run_gold
@@ -443,9 +589,11 @@ with DAG(
         dbt_deps,
         dbt_source_freshness,
         dbt_test_traffic_incident_availability,
+        dbt_test_traffic_bronze_source_contract,
         dbt_seed_asac_axes,
         dbt_run_common_admin_dong_dimension,
         dbt_test_common_admin_dong_dimension,
+        dbt_test_asac_axes_seed_contract,
         dbt_run_silver,
         dbt_test_silver,
         dbt_run_gold,

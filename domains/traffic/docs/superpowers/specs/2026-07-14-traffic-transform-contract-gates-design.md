@@ -16,7 +16,7 @@
 
 ### 1. Bounded Bronze source gate
 
-새 `dbt_test_traffic_bronze_source_contract` task는 `test --select source:traffic_bronze`를 실행한다. 실행 직전에 같은 dbt target/profile/vars로 `dbt ls --resource-type test --select source:traffic_bronze --output json`을 호출하고, JSONL 결과를 `(resource, column, test_name)` tuple로 정규화한다.
+새 `dbt_test_traffic_bronze_source_contract` task는 `test --select source:traffic_bronze,test_type:generic`를 실행한다. 실행 직전에 같은 dbt target/profile/vars로 `dbt ls --resource-type test --select source:traffic_bronze,test_type:generic --output json`을 호출하고, JSONL 결과를 `(resource, column, test_name)` tuple로 정규화한다. `test_type:generic`을 사용해 source에 의존하는 recovery/singular test가 gate에 섞이지 않게 한다.
 
 승인 allowlist는 traffic source schema의 generic test 40개다. actual set이 exact set과 다르면 dbt test를 실행하지 않고 명시적 validation error로 실패한다.
 

@@ -13,7 +13,7 @@
 - Modify or create files only under `dags/domains/traffic/**`.
 - Keep `dbt_source_freshness`, incident availability, common admin dimension materialization/test, canonical Gold, same-target fresh parse, and stale Gold exclusions intact.
 - Use dev target only; do not add full-refresh, backfill, destructive delete, or repair parameterization.
-- Bronze source allowlist has exactly 40 `(resource, column, test_name)` tuples.
+- Bronze source selector is `source:traffic_bronze,test_type:generic` and its allowlist has exactly 40 `(resource, column, test_name)` tuples.
 - Admin-axis seed allowlist has exactly 7 `(resource, column, test_name)` tuples.
 - Silver remains the first persisted downstream phase after all gates; all gate failures must block Silver and Gold.
 
@@ -62,7 +62,7 @@ Run the same pytest command and expect PASS.
 
 - [ ] **Step 1: Write the failing task contract tests**
 
-Assert that the source gate uses `test --select source:traffic_bronze`, the seed gate selects the three explicit `asac_axes` seeds, and their constants contain exactly 40 and 7 tuples respectively. Add a subprocess-output test proving `dbt ls` is invoked before the test command for a contract task.
+Assert that the source gate uses `test --select source:traffic_bronze,test_type:generic`, the seed gate selects the three explicit `asac_axes` seeds, and their constants contain exactly 40 and 7 tuples respectively. Add a subprocess-output test proving `dbt ls` is invoked before the test command for a contract task.
 
 - [ ] **Step 2: Run the focused tests to verify failure**
 
