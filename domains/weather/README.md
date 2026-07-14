@@ -44,7 +44,7 @@ raw와 bronze를 둘 다 남기는 이유는 역할이 다르기 때문이다.
 보조 정보로 함께 표시한다. 실제 전송은
 `ASK_SEOUL_DISCORD_WEBHOOK_URL` 또는 `WEATHER_DISCORD_WEBHOOK_URL`이 있을 때만 활성화된다.
 
-기본 스케줄은 dev target에서 webhook env가 있을 때 매시간(`0 * * * *`)이다. `ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE`
+기본 스케줄은 dev target에서 webhook env가 있을 때 매일 09:00 KST(`0 9 * * *`)이다. `ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE`
 또는 공통 `ASK_SEOUL_REPORT_DAG_SCHEDULE`로 override할 수 있고, 빈 문자열이면 schedule을 끈다.
 webhook 미설정이나 Discord 전송 실패는 no-op/best-effort로 처리하며, 수집/검증 판정을 덮어쓰지 않는다.
 webhook URL은 코드, 로그, 리포트 메시지에 원문으로 남기지 않는다.
