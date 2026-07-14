@@ -7,6 +7,41 @@
 
 ## 2026-07-14
 
+### 68. 서빙 레이어 전면 개편 — gold=Iceberg(RDB 모델링 승계) · 서빙 Postgres 폐기 · D1(SQLite) 예정
+
+request:
+- 서빙은 Postgres 가 아니다 — 변경 + 기존 리소스 삭제. 대상은 D1(SQLite). PROJECT.md 에
+  "DB 특성에 따른 gold·서빙 레이어 설계 필요"를 명시. gold 를 bronze/silver 처럼 **Iceberg
+  카탈로그 구조**로 만들고 특정 몇 가지만 SQLite 로 제공(예정). **재심의**: 집계 테이블만으로
+  가지 말 것 — API 마다 컬럼이 크게 상이하므로 기존 RDB 구조(관계형 모델링)를 버리지 말고,
+  gold 를 통해 **서빙 가능한 단위**로 데이터를 뽑아낼 수 있어야 함.
+
+response:
+- **정책(PROJECT.md §4 신설 + §7 변경 이력)**: 아키텍처 2단(gold=Iceberg 정본 → D1 선별 export
+  예정) · **DB 특성별 설계 원칙 표**(§4.2 — 용량 상한→소형만 export, 단일 writer→스냅샷 재생성,
+  시퀀스 없음→자연키, 엣지 읽기→사전 집계/평탄화) · gold 구조 표(§4.3).
+- **gold(Iceberg) 구조 — RDB 관계형 모델링 승계(재심의 반영)**:
+  - 코어(dbt): `gold_license_entity`(현재)·`gold_license_entity_history`(이력, collected_at 증분)
+    ·`gold_license_dong_summary`(집계 — D1 1순위 예시). 실빌드 검증: 289만·290만·417행, OOM 없음.
+  - **detail(API 별 상이 컬럼 평탄화) 승계**: 카탈로그 구동 유지 — `gold_catalog`(Iceberg, 78 specs
+    실측 기록)를 정본으로 `commerce_<domain>_detail` DDL ensure + **멤버별 증분
+    `INSERT INTO SELECT`**(Trino 단독 — 행이 Python 을 안 거침, 문장 원자). 워터마크 = detail
+    테이블 자체의 멤버별 max(collected_at)(별도 마커 없음). 스모크: 858행 적재 + 멱등 재실행 0행.
+  - 서빙 단위 추출 = entity ⋈ detail(자연키 조인) → D1 export 는 대상별 선별(§4.2).
+  - 미승계: 뷰 320(Iceberg REST 뷰 제약 — detail 직접 조회로 대체)·entity_seq/commerce_entity_key
+    (bigserial — 자연키 전환)·dim 3종(entity 에 코드·명 병기)·code_value(후속 포팅 후보).
+- **DAG 재작성**: `commerce_load_gold`(06:00) = build_catalog → dbt_gold(Cosmos, 모델당 run+test)
+  → load_details → report_gold. `commerce_load_gold_refresh`(트리거 전용) = full_refresh(dbt)
+  + detail 전량 재적재(force_full). 리니지는 Cosmos 네이티브 OL(기존 Asset inlets/outlets 불요).
+- **Postgres 리소스 삭제(사용자 지시)**: include/gold 의 ddl/pg/code_values.py + loader·report
+  전면 재작성(Iceberg), compose `serving-postgres` 서비스·볼륨 정의 제거, **컨테이너·볼륨 물리
+  삭제**(데이터는 silver 에서 전량 재생 가능), `.env.commerce.example` GOLD_PG/PG 튜닝 노브 정리
+  (신규 노브 `COMMERCE_GOLD_DETAIL_BUCKET_ROWS`). silver_state `_watermark.json` 은 관측용 유지
+  (구 gold 조기 스킵 소비처는 dbt 증분이 대체).
+- **검증**: commerce pytest 358 전건(폐기 테스트 정리 + gold report/loader 테스트 재작성),
+  `python -m security` PASS, dbt parse/컴파일·gold 3모델 실빌드, 카탈로그+detail 스모크(멱등),
+  전 DAG import 오류 0(Cosmos 그래프 11노드 렌더).
+
 ### 67. silver 리포트 지표 변경 — 현재행수(누적) → 이번 실행 신규 처리행
 
 request:
