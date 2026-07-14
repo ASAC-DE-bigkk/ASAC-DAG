@@ -1,4 +1,5 @@
 import importlib.util
+import shlex
 import sys
 import types
 from pathlib import Path
@@ -168,6 +169,20 @@ def load_transform_module():
     return module
 
 
+def dbt_option_tokens(dbt_args: str, option: str) -> set[str]:
+    tokens = shlex.split(dbt_args)
+    option_start = tokens.index(option) + 1
+    option_end = next(
+        (
+            index
+            for index, token in enumerate(tokens[option_start:], start=option_start)
+            if token.startswith("--")
+        ),
+        len(tokens),
+    )
+    return set(tokens[option_start:option_end])
+
+
 def test_traffic_transform_bootstraps_asac_axes_before_silver():
     module = load_transform_module()
     dag = module.dag
@@ -212,7 +227,15 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     )
     assert (
         task_commands["dbt_test_common_admin_dong_dimension"]
-        == "test --select asac_axes.dim_admin_dong"
+        == (
+            "test --select asac_axes.dim_admin_dong "
+            "--exclude "
+            "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact "
+            "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles "
+            "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness "
+            "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles"
+        )
     )
     for task_id in (
         "dbt_run_common_admin_dong_dimension",
@@ -227,11 +250,12 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_deps",
         "fail_transform_if_upstream_failed",
     }
-    assert (
-        "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current"
-        in task_commands["dbt_run_silver"]
-    )
+    assert dbt_option_tokens(task_commands["dbt_run_silver"], "--select") == {
+        "silver_seoul_traffic_incident",
+        "silver_seoul_traffic_incident_current",
+    }
     assert dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["snapshot_task_id"] == "resolve_traffic_snapshot_run"
+    assert dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["fresh_parse"] is True
     assert dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["snapshot_task_id"] == "resolve_traffic_snapshot_run"
     assert "assert_silver_traffic_event_at_matches_occurred_at" in task_commands["dbt_test_silver"]
     assert (
@@ -243,6 +267,184 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
     assert "assert_silver_traffic_latest_publishable_record" in task_commands["dbt_test_silver"]
     assert "silver_seoul_traffic_incident_current" in task_commands["dbt_test_silver"]
     assert "assert_traffic_current_pinned_publishable_run" in task_commands["dbt_test_silver"]
+    assert dbt_option_tokens(task_commands["dbt_test_silver"], "--select") == {
+        "silver_seoul_traffic_incident",
+        "silver_seoul_traffic_incident_current",
+        "assert_traffic_current_pinned_publishable_run",
+        "assert_silver_traffic_uses_publishable_runs",
+        "assert_silver_traffic_location_contract",
+        "assert_traffic_audit_covers_latest_total_count",
+        "assert_silver_seoul_traffic_incident_grain_unique",
+        "assert_silver_traffic_event_at_matches_occurred_at",
+        "assert_silver_traffic_wgs84_required_when_source_coordinate_available",
+        "assert_silver_traffic_admin_axis_consistent",
+        "assert_silver_traffic_admin_axis_coverage",
+        "assert_silver_traffic_latest_publishable_record",
+    }
+    canonical_gold_model = "gold_traffic_incident_current_by_admin_dong_hourly"
+    assert dbt_option_tokens(task_commands["dbt_run_gold"], "--select") == {
+        "gold_traffic_incident_summary",
+        canonical_gold_model,
+    }
+    assert dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["fresh_parse"] is True
+
+
+def test_silver_excludes_eager_gold_contracts_until_gold_rebuild():
+    module = load_transform_module()
+    silver_test_args = module.dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["dbt_args"]
+    excluded_tokens = dbt_option_tokens(silver_test_args, "--exclude")
+
+    assert excluded_tokens == {
+        "assert_gold_traffic_counts_match_silver",
+        "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles",
+    }
+
+
+def test_common_admin_dimension_excludes_eager_gold_contracts_until_gold_rebuild():
+    module = load_transform_module()
+    common_admin_test_args = module.dag.task_dict[
+        "dbt_test_common_admin_dong_dimension"
+    ].kwargs["op_kwargs"]["dbt_args"]
+    excluded_tokens = dbt_option_tokens(common_admin_test_args, "--exclude")
+
+    assert excluded_tokens == {
+        "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact",
+        "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness",
+        "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles",
+    }
+
+
+def test_gold_phase_selects_exact_canonical_hourly_contracts():
+    module = load_transform_module()
+    gold_test_args = module.dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["dbt_args"]
+    selected_tokens = dbt_option_tokens(gold_test_args, "--select")
+    expected_selected_tokens = {
+        "gold_traffic_incident_summary",
+        "gold_traffic_incident_current_by_admin_dong_hourly",
+        "assert_gold_traffic_counts_match_silver",
+        "assert_gold_traffic_row_counts_positive",
+        "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact",
+        "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_grain_unique",
+        "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness",
+        "assert_gold_traffic_current_by_admin_dong_hourly_product_row_id_reproducible",
+        "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles",
+        "assert_gold_traffic_current_by_admin_dong_hourly_zero_requires_complete",
+    }
+
+    assert selected_tokens == expected_selected_tokens
+
+
+def test_gold_contract_test_fresh_parses_in_same_task_artifact(monkeypatch):
+    module = load_transform_module()
+    commands = []
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=2,
+        xcom_pull=lambda task_ids: "snapshot-a",
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **_kwargs: (
+            commands.append(command)
+            or types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+
+    result = module.run_dbt_phase(
+        dbt_args="test --select gold_traffic_incident_current_by_admin_dong_hourly",
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        silver_persisted=True,
+        fresh_parse=True,
+        ti=ti,
+        run_id="manual__a",
+        params={"target": "dev"},
+    )
+
+    assert [command[1] for command in commands] == ["parse", "test"]
+    assert "--no-partial-parse" in commands[0]
+    assert commands[0][commands[0].index("--target") + 1] == "dev"
+    assert commands[1][commands[1].index("--target") + 1] == "dev"
+    assert commands[0][commands[0].index("--vars") + 1] == (
+        '{"traffic_snapshot_dag_run_id": "snapshot-a"}'
+    )
+    assert commands[1][commands[1].index("--vars") + 1] == (
+        '{"traffic_snapshot_dag_run_id": "snapshot-a"}'
+    )
+    parse_target = Path(commands[0][commands[0].index("--target-path") + 1])
+    test_target = Path(commands[1][commands[1].index("--target-path") + 1])
+    assert parse_target == test_target == Path(result["artifact_path"]).parent
+    assert Path(result["artifact_path"]).parts[-4:] == (
+        "manual__a",
+        "dbt_test_gold",
+        "try2",
+        "run_results.json",
+    )
+
+
+def test_gold_contract_parse_failure_stops_before_test_and_records_task_artifact(monkeypatch):
+    module = load_transform_module()
+    commands = []
+    loaded_paths = []
+    pushed = {}
+    ti = types.SimpleNamespace(
+        dag_id="traffic_incident_transform",
+        task_id="dbt_test_gold",
+        try_number=2,
+        xcom_pull=lambda task_ids: "snapshot-a",
+        xcom_push=lambda key, value: pushed.update(key=key, value=value),
+    )
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if command[1] == "parse":
+            return types.SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="Compilation Error",
+            )
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    monkeypatch.setattr(
+        module,
+        "load_dbt_results",
+        lambda path: loaded_paths.append(Path(path)) or [],
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="model-execution-failed"):
+        module.run_dbt_phase(
+            dbt_args="test --select gold_traffic_incident_current_by_admin_dong_hourly",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=True,
+            fresh_parse=True,
+            ti=ti,
+            run_id="manual__a",
+            params={"target": "dev"},
+        )
+
+    assert [command[1] for command in commands] == ["parse"]
+    assert pushed["key"] == module.DBT_FAILURE_XCOM_KEY
+    record = pushed["value"]
+    artifact_path = Path(record["dbt_artifact_path"])
+    assert loaded_paths == [artifact_path]
+    assert record["failure_classification"] == "model-execution-failed"
+    assert record["traffic_snapshot_dag_run_id"] == "snapshot-a"
+    assert record["run_id"] == "manual__a"
+    assert record["task_id"] == "dbt_test_gold"
+    assert record["try_number"] == 2
+    assert artifact_path.parts[-5:] == (
+        "traffic-transform",
+        "manual__a",
+        "dbt_test_gold",
+        "try2",
+        "run_results.json",
+    )
 
 
 def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
