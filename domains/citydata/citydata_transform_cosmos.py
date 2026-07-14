@@ -62,6 +62,10 @@ FAST_SELECT = [
     "gold_citydata_ppltn_by_time", "gold_citydata_place_latest",
     "gold_citydata_ppltn_x_weather_hourly", "gold_citydata_ppltn_x_commerce_dong",
     "gold_citydata_transit_x_incident_hourly",
+    # 챗봇용 신규 골드 — 전부 view(즉시)/경량 cross. "지금 상태" 라 5분 tier.
+    "gold_citydata_ppltn_anomaly", "gold_citydata_ppltn_trend",
+    "gold_citydata_place_scorecard", "gold_citydata_hot_commerce",
+    "gold_citydata_ppltn_forecast", "gold_citydata_ppltn_x_transit_hourly",
 ]
 SLOW_SELECT = [
     "silver_citydata_cmrcl", "silver_citydata_cmrcl_rsb", "silver_citydata_air",
