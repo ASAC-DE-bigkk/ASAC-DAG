@@ -315,7 +315,7 @@ def test_weather_report_schedule_requires_dev_target_and_webhook(monkeypatch):
     assert report.report_dag_schedule() is None
 
     monkeypatch.setenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
-    assert report.report_dag_schedule() == "0 * * * *"
+    assert report.report_dag_schedule() == "0 9 * * *"
 
     monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
     monkeypatch.setenv("ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE", "*/5 * * * *")
