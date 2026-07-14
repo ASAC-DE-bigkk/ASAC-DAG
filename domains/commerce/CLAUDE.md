@@ -50,6 +50,9 @@ This file governs the **commerce** category bundle at `dags/domains/commerce/`.
 
 - **[docs/cleanup-detail-health.md](docs/cleanup-detail-health.md)** — `silver_license_detail_health`
   레거시(폐기·gold 승계) 제거. 코드 정리(dbt/dags) + **환경별 물리 테이블 drop 체크리스트**. 상태: OPEN.
+- **[docs/cleanup-v2-environment-data.md](docs/cleanup-v2-environment-data.md)** — v2(환경 13종)
+  오탐 누적 삭제 + 재수집(#66, `scripts/purge_v2_environment.py`). 상태: **dev DONE(2026-07-14)** ·
+  prod OPEN(환경 존재 시 체크리스트 실행).
 - **[docs/silver-gold-refactor-guide.md](docs/silver-gold-refactor-guide.md)** — silver/gold 구조 1차
   판정(2026-07-12, Critical 0 · Major 4 · Minor 3) + 확정 변경 **C1~C7**(식별자 게이트·컬럼 단일화·
   매크로 추출·exposures·문서 정합)과 검증 동반 **V1**(OL 엣지) 구현 지시. §4 변경 금지 목록 준수.
@@ -977,9 +980,13 @@ applies before sending to external channels.
 Current known rule:
 
 - `commerce_load_silver.masked_address_dong_mapping_skip > warning`: if `road_address` or
-  `jibun_address` contains `*`, silver must skip dong-level legal/admin mapping and report the total
-  count, settled count, and ratio. Gu/sgg parsing may remain populated because it does not depend on
-  the masked dong token.
+  `jibun_address` contains `*`, silver must skip dong-level legal/admin mapping and report the
+  settled count, affected count, and ratio. Gu/sgg parsing may remain populated because it does not
+  depend on the masked dong token. **Scope = this run's newly-loaded rows only (#65)**: the summary
+  aggregates `silver_license_current` filtered to `collected_at > 직전 silver 워터마크`
+  (`silver_state._watermark`, read before `mark_silver_done` advances it) — not the cumulative current
+  table — so already-loaded masked addresses are not re-warned every day. No new rows → `info`, no
+  external alert. Watermark unknown → full-table fallback.
 
 
 ## 20. Security Gate (recall · apply · check, ongoing)

@@ -61,7 +61,8 @@ minor = short               (API)
 ## 2. 리포트 표기 정책 (#218 — DAG 완료 알림)
 
 - **건수는 신규(정렬 파일 diff)** 중심: collect=`increment_count`, bronze=`rows_loaded`,
-  silver=현재행수(누적). 전체수집량은 병기. → 전체 API 호출량이 아니라 **실제 신규·변경분**이 지표.
+  silver=**이번 실행 신규 처리행**(이 DAG run 중 DONE 마킹된 run 의 history 적재행 — 누적 현황 아님).
+  전체수집량은 병기(collect/bronze). → 전체 API 호출량·누적 현황이 아니라 **실제 신규·변경분**이 지표.
 - **섹션 순서 = 에러 › 경고 › 성공.** (실패 → 부분경고 → 미수집 → API별 신규(성공) → 변경내역 없음)
   세 그룹은 **빈 줄(`\n\n`)로 간격**을 둬 시각적으로 분리한다.
 - **실패는 어떤 DAG task 에서 났는지 `@task` 로 명시**(collect=`@ingest_one`, bronze=`@load_one`,
@@ -170,6 +171,10 @@ silver/gold 변환·DB 명세는 **dbt 번들**(별도 서브모듈 ASAC-DBT —
 
 ## 6. 변경 이력
 
+- 2026-07-14: **silver 리포트 지표를 현재행수(누적) → 이번 실행 신규 처리행으로 변경**(#66 후속,
+  사용자 지시). 근거: 누적 현황은 신규 적재가 없어도 매일 전체를 반복 보고 — collect/bronze 와 같은
+  "실제 신규분" 지표로 통일. 구현: 이 DAG run 중 DONE 마킹된 run(marker_source=dbt_test_silver·
+  processed_no_rows)의 history 적재행을 dataset 별 집계(seed 청크빌드·Cosmos 증분 모두 포괄).
 - 2026-07-10: **문서 지도(§5)** 신설 — 양 번들(dags/dbt) 문서를 폴더 뎁스로 인덱싱(폴더→README→파일).
   dbt docs 에 폴더별 README(root·DB/gold·DB/silver) 추가로 3단 인덱싱 완성.
 - 2026-07-09: **정책 변경 시 §변경 이력에 요약 항목 남기기** 규정을 CLAUDE.md(Project policy)에 명문화
