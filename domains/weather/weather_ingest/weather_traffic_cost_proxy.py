@@ -36,6 +36,7 @@ from weather_ingest.trino_query_metrics import (  # noqa: E402
 
 
 DBT_BIN = os.environ.get("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
+MIN_REPEAT = 3
 CASES: dict[str, dict[str, Any]] = {
     "weather_silver": {
         "domain": "weather",
@@ -50,6 +51,27 @@ CASES: dict[str, dict[str, Any]] = {
         "domain": "traffic",
         "project": "/opt/airflow/dbt/domains/traffic",
         "model": "silver_seoul_traffic_incident",
+        "snapshot_source_id": "seoul_traffic_incident",
+        "snapshot_var": "traffic_snapshot_dag_run_id",
+        "source_tables": [
+            "bronze_seoul_traffic_incident",
+            "bronze_seoul_traffic_incident_request_audit",
+            "bronze_collection_run_manifest",
+        ],
+    },
+    "weather_gold": {
+        "domain": "weather",
+        "project": "/opt/airflow/dbt/domains/weather",
+        "model": "gold_weather_forecast_by_place",
+        "source_tables": [
+            "bronze_kma_vilage_fcst",
+            "bronze_collection_run_manifest",
+        ],
+    },
+    "traffic_gold": {
+        "domain": "traffic",
+        "project": "/opt/airflow/dbt/domains/traffic",
+        "model": "gold_traffic_incident_current_by_admin_dong_hourly",
         "snapshot_source_id": "seoul_traffic_incident",
         "snapshot_var": "traffic_snapshot_dag_run_id",
         "source_tables": [
@@ -187,6 +209,32 @@ def _compile_command(case: Mapping[str, Any], dbt_vars: Mapping[str, str]) -> li
     return command
 
 
+def _execution_fingerprint(
+    name: str,
+    case: Mapping[str, Any],
+    dbt_vars: Mapping[str, str],
+    *,
+    catalog: str,
+    schema: str,
+) -> dict[str, Any]:
+    """Describe the stable dev-only execution contract for one benchmark suite."""
+    fingerprint: dict[str, Any] = {
+        "name": name,
+        "domain": case["domain"],
+        "source_tables": _source_tables(case),
+        "target": "dev",
+        "catalog": catalog,
+        "schema": schema,
+        "dbt_bin": DBT_BIN,
+    }
+    if "model" in case:
+        fingerprint["project"] = str(case["project"])
+        fingerprint["compile_command"] = _compile_command(case, dbt_vars)
+    else:
+        fingerprint["report"] = str(case["report"])
+    return fingerprint
+
+
 def _compile_model(case: Mapping[str, Any], *, dbt_vars: Mapping[str, str] | None = None) -> str:
     project = str(case["project"])
     env = {
@@ -269,6 +317,13 @@ def _collect_suite(
         catalog=catalog,
         schema=schema,
     ) if "model" in case else {}
+    execution_fingerprint = _execution_fingerprint(
+        name,
+        case,
+        dbt_vars,
+        catalog=catalog,
+        schema=schema,
+    )
     compiled_code = _compile_model(case, dbt_vars=dbt_vars) if "model" in case else None
     runs: list[dict[str, Any]] = []
     for iteration in range(1, repeat + 1):
@@ -292,6 +347,7 @@ def _collect_suite(
         "domain": case["domain"],
         "source_tables": tables,
         "dbt_vars": dbt_vars,
+        "execution_fingerprint": execution_fingerprint,
         "fingerprints": {"before": before_fingerprint, "after": after_fingerprint},
         "comparable_within_run": before_fingerprint == after_fingerprint,
         "runs": runs,
@@ -315,8 +371,8 @@ def _connect_cursors(*, catalog: str, schema: str) -> tuple[Any, Any, Any]:
 def collect_bundle(label: str, repeat: int) -> dict[str, Any]:
     """Collect one dev-only benchmark bundle.  This never runs dbt models."""
     _ensure_dev_target()
-    if repeat < 1:
-        raise ValueError("repeat must be at least 1")
+    if repeat < MIN_REPEAT:
+        raise ValueError(f"repeat must be at least {MIN_REPEAT}")
     catalog = _catalog()
     schema = _schema()
     connection, workload_cursor, metadata_cursor = _connect_cursors(catalog=catalog, schema=schema)
@@ -342,6 +398,9 @@ def collect_bundle(label: str, repeat: int) -> dict[str, Any]:
             "schema": schema,
             "repeat": repeat,
             "fingerprint": {suite["name"]: suite["fingerprints"]["after"] for suite in suites},
+            "execution_fingerprint": {
+                suite["name"]: suite["execution_fingerprint"] for suite in suites
+            },
             "suites": suites,
             "proxy_notice": "실제 Cloudflare 청구액이 아닌 Trino·Iceberg 비용 대리 지표입니다.",
         }
@@ -401,6 +460,8 @@ def _compare_metric(before_runs: list[Mapping[str, Any]], after_runs: list[Mappi
 
 def compare_bundles(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
     """Compare matching benchmark bundles while refusing changed input snapshots."""
+    if before.get("execution_fingerprint") != after.get("execution_fingerprint"):
+        return {"comparable": False, "reason": "execution_fingerprint_mismatch", "metrics": []}
     if before.get("fingerprint") != after.get("fingerprint"):
         return {"comparable": False, "reason": "fingerprint_mismatch", "metrics": []}
     for bundle in (before, after):
