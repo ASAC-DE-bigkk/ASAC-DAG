@@ -52,17 +52,21 @@ DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata", dbt_project_dir=DBT_PROJECT)
 
-# 티어별 모델 (기존 citydata_transform 과 동일, #283).
+# 티어별 모델 — 골드의 "자연 주기"로 배치.
+# fast(5분): 실시간 grain(현재 스냅샷·시간대별) + 시간 grain 크로스(날씨·교통돌발). commerce
+#   는 view 라 재생성이 순간이라 fast 에 둔다(항상 최신·R2 write 없음).
+# slow(10분): 일 grain 집계(daily) — 하루치라 5분마다 재계산할 필요 없음 + 무거운 cmrcl/air silver.
 FAST_SELECT = [
     "dim_admin_dong", "dim_seoul_area",
-    "silver_seoul_ppltn", "silver_citydata_transit_ppltn", "silver_citydata_sbike",
-    "gold_seoul_ppltn_by_time", "gold_citydata_place_latest",
+    "silver_citydata_ppltn", "silver_citydata_transit_ppltn", "silver_citydata_sbike",
+    "gold_citydata_ppltn_by_time", "gold_citydata_place_latest",
+    "gold_citydata_ppltn_x_weather_hourly", "gold_citydata_ppltn_x_commerce_dong",
+    "gold_citydata_transit_x_incident_hourly",
 ]
 SLOW_SELECT = [
     "silver_citydata_cmrcl", "silver_citydata_cmrcl_rsb", "silver_citydata_air",
-    "gold_seoul_ppltn_daily", "gold_citydata_cmrcl_daily",
+    "gold_citydata_ppltn_daily", "gold_citydata_cmrcl_daily",
     "gold_citydata_purchasing_power_daily", "gold_citydata_ppltn_x_culture_daily",
-    "gold_citydata_transit_x_incident_hourly",
 ]
 
 # DBT_MANIFEST 로드 — 파싱 시점에 dbt 를 돌리지 않고 target/manifest.json 을 읽어 그래프를
