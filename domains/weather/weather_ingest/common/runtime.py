@@ -8,19 +8,28 @@ from datetime import datetime, timezone
 from common.errors import types as error_types
 from common.http import HttpCore, NoAuth, OK_2XX, QueryKey
 from common.http.errors import HttpProblemError
+from weather_ingest.errors import WeatherBronzeConfigurationError
 
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DEFAULT_TRINO_PORT = 8080
+MIN_TCP_PORT = 1
+MAX_TCP_PORT = 65535
 
 
 def is_dev_target() -> bool:
-    return os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod")) == "dev"
+    return (
+        os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
+        == "dev"
+    )
 
 
 def required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
+        raise WeatherBronzeConfigurationError(
+            f"Missing required environment variable: {name}"
+        )
     return value
 
 
@@ -52,9 +61,24 @@ def ask_seoul_schema() -> str:
     return os.environ.get("ASK_SEOUL_SCHEMA", "ask_seoul")
 
 
+def trino_port() -> int:
+    configured = os.environ.get("TRINO_PORT", str(DEFAULT_TRINO_PORT))
+    try:
+        port = int(configured)
+    except (TypeError, ValueError) as exc:
+        raise WeatherBronzeConfigurationError(
+            f"TRINO_PORT must be an integer: {configured}"
+        ) from exc
+    if not MIN_TCP_PORT <= port <= MAX_TCP_PORT:
+        raise WeatherBronzeConfigurationError(
+            f"TRINO_PORT must be between {MIN_TCP_PORT} and {MAX_TCP_PORT}: {port}"
+        )
+    return port
+
+
 def sql_identifier(value: str) -> str:
     if not IDENTIFIER_PATTERN.match(value):
-        raise ValueError(f"Unsafe SQL identifier: {value}")
+        raise WeatherBronzeConfigurationError(f"Unsafe SQL identifier: {value}")
     return value
 
 
@@ -216,12 +240,13 @@ def download_raw_object(object_key: str, log_label: str) -> bytes:
 
 
 def trino_cursor():
+    port = trino_port()
     import trino.dbapi
 
     catalog = sql_identifier(trino_catalog())
     connection = trino.dbapi.connect(
         host=os.environ.get("TRINO_HOST", "trino"),
-        port=int(os.environ.get("TRINO_PORT", "8080")),
+        port=port,
         user=os.environ.get("TRINO_USER", "airflow"),
         catalog=catalog,
         http_scheme=os.environ.get("TRINO_HTTP_SCHEME", "http"),

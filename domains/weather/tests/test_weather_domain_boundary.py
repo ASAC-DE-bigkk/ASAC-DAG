@@ -1,51 +1,56 @@
-import os
-import subprocess
+import ast
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[3]
-ALLOWED_PREFIX = "domains/weather/"
+DOMAINS_DIR = Path(__file__).resolve().parents[2]
 
 
-def _git_paths(*args: str) -> set[str]:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
+def _production_modules(domain: str) -> tuple[Path, ...]:
+    domain_root = DOMAINS_DIR / domain
+    return tuple(
+        path
+        for path in sorted(domain_root.rglob("*.py"))
+        if "tests" not in path.relative_to(domain_root).parts
+        and "__pycache__" not in path.parts
     )
-    return {
-        path.strip().replace("\\", "/")
-        for path in result.stdout.splitlines()
-        if path.strip()
+
+
+def _imports(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    return imported
+
+
+def test_traffic_transform_modules_do_not_import_weather_modules():
+    violations = {
+        str(path.relative_to(DOMAINS_DIR)): sorted(
+            name
+            for name in _imports(path)
+            if name == "weather"
+            or name.startswith("weather.")
+            or name.startswith("weather_")
+        )
+        for path in _production_modules("traffic")
     }
 
-
-def _changed_paths() -> list[str]:
-    paths = set()
-    base_ref = os.getenv("WEATHER_DOMAIN_BASE_REF", "origin/dev")
-
-    if subprocess.run(
-        ["git", "rev-parse", "--verify", base_ref],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    ).returncode == 0:
-        paths.update(_git_paths("diff", "--name-only", f"{base_ref}...HEAD"))
-
-    paths.update(_git_paths("diff", "--name-only"))
-    paths.update(_git_paths("diff", "--cached", "--name-only"))
-    paths.update(_git_paths("ls-files", "--others", "--exclude-standard"))
-    return sorted(paths)
+    assert not {path: names for path, names in violations.items() if names}
 
 
-def test_weather_branch_changes_stay_inside_weather_domain():
-    violations = [
-        path for path in _changed_paths() if not path.startswith(ALLOWED_PREFIX)
-    ]
+def test_weather_transform_modules_do_not_import_traffic_modules():
+    violations = {
+        str(path.relative_to(DOMAINS_DIR)): sorted(
+            name
+            for name in _imports(path)
+            if name == "traffic"
+            or name.startswith("traffic.")
+            or name.startswith("traffic_")
+        )
+        for path in _production_modules("weather")
+    }
 
-    assert violations == [], (
-        "Weather 작업은 domains/weather/** 안에서만 변경할 수 있습니다. "
-        f"범위 밖 변경: {violations}"
-    )
+    assert not {path: names for path, names in violations.items() if names}

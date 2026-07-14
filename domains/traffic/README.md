@@ -1,145 +1,81 @@
-# traffic 도메인 Bronze DAG 설계 메모
+# Traffic 도메인 AI 인덱스
 
-이 폴더는 교통 돌발정보 원천 수집 DAG와 설계 의도를 함께 둔다. 현재 범위는 이슈
-[#13](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/13)의 서울 TOPIS `AccInfo`
-XML을 dev R2 raw 영역에 보존하고, 같은 실행에서 Iceberg bronze 테이블에 조회 가능한
-row와 metadata를 적재하는 것이다.
+서울 TOPIS `AccInfo` 수집부터 Traffic Silver/Gold 변환, 복구, 신뢰성 보고까지의 실행 코드다.
+변경 범위는 `domains/traffic/**`이며 Weather나 다른 도메인 모듈을 import하지 않는다.
 
-## 현재 구조
+## 가장 먼저 읽을 파일
 
-| 파일 | 역할 |
+1. 수집 흐름: `traffic_incident_bronze.py`
+2. 변환 흐름과 dbt tag: `traffic_incident_transform.py`
+3. landing 계약: `traffic_ingest/landing.py`
+4. 수집 manifest 계약: `traffic_ingest/run_manifest.py`
+5. dbt 실행·artifact 계약: `traffic_dbt_execution.py`
+6. 원천 의미: `docs/source.md`
+7. 상세 Bronze 배경: `docs/bronze-pipeline-reference.md`
+
+## DAG entrypoints
+
+| 파일 | 책임 |
 |---|---|
-| `traffic_incident_bronze.py` | Airflow DAG 엔트리포인트. 5분 dev schedule과 task 순서만 잡고 세부 로직은 domain package에 위임한다. |
-| `traffic_reliability_report.py` | 15분마다 traffic Bronze request audit freshness/coverage를 조회하고 Discord로 알리는 read-only 리포트 DAG다. |
-| `traffic_ingest/acc_info.py` | TOPIS AccInfo 요청 URL, raw object key, XML 응답 파싱, redacted request metadata를 담당한다. |
-| `traffic_ingest/bronze.py` | Iceberg bronze table DDL, schema evolution, insert, runtime verify SQL을 담당한다. |
-| `traffic_ingest/reliability_report.py` | 리포트 DAG의 Trino query, 메시지 포맷, Discord 전송(no-op/best-effort)을 담당한다. |
-| `traffic_ingest/common/runtime.py` | traffic 도메인 내부에서만 쓰는 env, HTTP, R2, Trino, SQL literal helper다. |
-| `docs/source.md` | TOPIS AccInfo API 소스 정보, 시간 의미, raw object key, bronze 컬럼 의미를 정리한다. |
-| `.airflowignore` | `traffic_ingest/`, `docs/`, `tests/`를 DAG 파일 스캔에서 제외하고 import 대상으로만 둔다. |
+| `traffic_incident_bronze.py` | TOPIS 수집, raw checkpoint, Bronze 적재·검증, run manifest 상태 전이를 조율한다. |
+| `traffic_incident_transform.py` | 최신 publishable Bronze run을 고정하고 root dbt project의 Traffic tag를 순서대로 실행한다. |
+| `traffic_snapshot_recovery.py` | 특정 publishable snapshot을 격리된 recovery relation으로 검증하는 dev 전용 수동 DAG다. |
+| `traffic_reliability_report.py` | Bronze·manifest·Airflow 실패 증거를 읽어 Discord 신뢰성 리포트를 보낸다. |
 
-## 실행 흐름
+`traffic_snapshot_recovery`는 `snapshot_dag_run_id`를 입력받아
+`recovery_silver_seoul_traffic_incident`부터 검증하며 canonical Silver/Gold relation은 쓰지 않는다.
+
+DAG entrypoint는 순서와 Airflow wiring만 소유한다. 도메인 로직은 아래 모듈에 둔다.
+
+## 모듈 책임 지도
+
+| 모듈 | 책임 |
+|---|---|
+| `traffic_ingest/acc_info.py` | TOPIS request/response 파싱과 source-native 필드 |
+| `traffic_ingest/landing.py` | pagination, page checkpoint, complete marker, raw object 계약 |
+| `traffic_ingest/runtime.py` | HTTP·R2 adapter와 landing/manifest 조립 |
+| `traffic_ingest/bronze.py` | Traffic Iceberg Bronze DDL, MERGE/검증 SQL |
+| `traffic_ingest/run_manifest.py` | STARTED/SUCCESS/FAILED와 publishability 기록 |
+| `traffic_dbt_execution.py` | root dbt 실행, attempt 격리, artifact 보존, 선택 방식 |
+| `traffic_dbt_failure.py` | dbt 실패 분류와 안전한 진단 정보 |
+| `traffic_lineage.py` | 명시적 opt-in일 때만 DAG OpenLineage selective enable |
+| `traffic_ingest/reliability_report.py` | 기존 import를 보존하는 compatibility facade |
+| `traffic_ingest/reliability/config.py` | 환경설정, identifier, 상수 |
+| `traffic_ingest/reliability/trino_repository.py` | Bronze·manifest read-only 요약 |
+| `traffic_ingest/reliability/airflow_evidence.py` | scheduled run·R2 Problem 증거와 redaction |
+| `traffic_ingest/reliability/report.py` | 최종 상태와 report dict 조립 |
+| `traffic_ingest/reliability/discord.py` | 메시지 formatting과 webhook transport |
+
+## 핵심 실행 흐름
 
 ```text
-Airflow DAG
-  -> Seoul TOPIS AccInfo XML 호출 (`list_total_count` 기준 필요한 page 추가 호출)
-  -> 응답 XML 성공 여부 검증
-  -> R2 raw object로 원본 bytes 저장
-  -> Trino SQL로 Iceberg bronze table 생성/insert
-  -> Trino count query로 적재 확인
+Bronze DAG -> TrafficLanding -> R2 raw/checkpoint -> Bronze MERGE/verify
+           -> TrafficRunManifest SUCCESS + is_publishable
+Transform DAG -> publishable dag_run_id 고정 -> dbt tag run/test
+              -> invocation 전용 manifest.json/run_results.json -> lineage/metrics
+Reliability DAG -> Trino + Airflow/R2 evidence -> report -> Discord
 ```
 
-traffic은 실시간성 있는 변수로 쓸 수 있어 dev에서는 커버리지를 넓게 보기 위해 기본
-5분 스케줄을 둔다. 단, prod에서는 명시적으로 `ASK_SEOUL_TRAFFIC_DAG_SCHEDULE`을
-넣지 않으면 자동 스케줄을 만들지 않는다.
+## dbt 선택·manifest·lineage
 
-## Transform schedule
+- 활성 dbt project는 root monoproject `${ASK_SEOUL_DBT_PROJECT_DIR:-/opt/airflow/dbt}`다.
+- 도메인별 하위 dbt project를 따로 실행하지 않고 root project 하나만 사용한다.
+- DAG는 모델명을 나열하지 않고 `traffic_incident_transform.py`의 `tag:ask_seoul_traffic_*` 선택자를 호출한다.
+- artifact는 `target/<pipeline>/<run_id>/<task_id>/try<n>/execution/` 아래에 invocation별로 둔다.
+- 해당 invocation의 `manifest.json`과 `run_results.json`만 읽으며 공유 target fallback을 쓰지 않는다.
+- Airflow DAG lineage는 `traffic_lineage.py`, dbt OpenLineage 실행은 `traffic_dbt_execution.py`가 소유한다.
 
-`traffic_incident_transform`은 Bronze 적재 주기와 별개로 매시 12분(KST)에 실행한다.
-Bronze는 5분 주기로 계속 수집하지만, transform은 hourly batch로 최신 publishable
-snapshot 하나만 처리한다. 이 분리는 Iceberg metadata/snapshot 증가를 제한하면서,
-transform 시작 시 `SUCCESS + is_publishable` Bronze run id를 고정해, 이후 Bronze가 완료돼도
-같은 transform의 dbt run/test가 서로 다른 manifest를 보지 않도록 한다.
-운영상 schedule override가 필요하면 `ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE`을 쓰되,
-Bronze의 5분 경계와 겹치지 않는 시각을 선택한다.
+## 변경 시작점
 
-기본 첫 호출 범위는 `SEOUL_ACC_INFO_START_INDEX=1`, `SEOUL_ACC_INFO_END_INDEX=1000`이다.
-첫 응답의 `list_total_count`가 1000을 초과하면 같은 page size로 뒤 range를 이어서 호출한다.
-전체 parsed row 수가 `list_total_count`보다 작으면 partial 수집으로 보고 DAG를 실패시킨다.
+- API·pagination·checkpoint: `traffic_ingest/landing.py`, `traffic_ingest/acc_info.py`
+- Bronze schema·적재: `traffic_ingest/bronze.py`
+- 수집 정합성·publishability: `traffic_ingest/run_manifest.py`
+- dbt tag/실행/artifact: `traffic_incident_transform.py`, `traffic_dbt_execution.py`
+- 알림·신뢰성: `traffic_ingest/reliability/`
+- 회귀 검증: `tests/test_traffic_*.py`
 
-## Snapshot recovery
+## 문서 주의
 
-`traffic_snapshot_recovery` is a manual, dev-only DAG for validating a specific
-historical Traffic Bronze snapshot after a transform recovery. Trigger it with
-the Airflow run configuration below; `snapshot_dag_run_id` must identify a
-`SUCCESS + is_publishable` row in the Bronze run manifest.
-
-```json
-{
-  "target": "dev",
-  "snapshot_dag_run_id": "scheduled__2026-07-13T14:12:00+00:00"
-}
-```
-
-The DAG runs only the recovery relations in this order:
-
-1. `recovery_silver_seoul_traffic_incident`
-2. `recovery_traffic_snapshot_metadata` and its recovery Silver contract
-3. `recovery_gold_traffic_incident_summary` and its recovery Gold contract
-
-It never writes canonical Silver or Gold relations. Each dbt run/test phase has
-a run/task/try-scoped `run_results.json` artifact under
-`target/traffic-snapshot-recovery`; `dbt deps` contributes its task status but
-does not create that artifact. Completion or classified dbt failures write a
-recovery record and notify the operator with the selected `snapshot_dag_run_id`.
-
-## 운영 리포트와 Discord 알림
-
-`traffic_bronze_reliability_report`는 request audit table을 read-only로 조회해 최근 수집 freshness,
-request 수, parsed row 수, `list_total_count` 대비 coverage, 정상 zero-row 응답 수를 Discord에 보고한다.
-실제 전송은 `ASK_SEOUL_DISCORD_WEBHOOK_URL` 또는 `TRAFFIC_DISCORD_WEBHOOK_URL`이 있을 때만 활성화된다.
-
-scheduled run이 실패하면 `실패 수집 공백`에 첫 실패 슬롯부터 마지막 실패 슬롯까지의 KST 범위를 표시한다.
-범위의 분 단위 길이는 두 시각의 차이에 마지막 슬롯을 포함하는 Bronze 5분 스케줄 간격을 더해 계산한다.
-
-기본 스케줄은 dev target에서 webhook env가 있을 때 15분마다(`*/15 * * * *`)다. `ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE`
-또는 공통 `ASK_SEOUL_REPORT_DAG_SCHEDULE`로 override할 수 있고, 빈 문자열이면 schedule을 끈다.
-webhook 미설정이나 Discord 전송 실패는 no-op/best-effort로 처리하며, 수집/검증 판정을 덮어쓰지 않는다.
-webhook URL은 코드, 로그, 리포트 메시지에 원문으로 남기지 않는다.
-
-## Bronze metadata 결정 이유
-
-| 컬럼 | 이유 |
-|---|---|
-| `request_id` | 한 번의 API 호출과 그 결과 row를 묶는 추적 키다. |
-| `source_id` | 여러 source가 같은 schema에 들어와도 출처를 SQL에서 필터링할 수 있게 한다. |
-| `request_params_json` | API key를 제외한 요청 범위를 남긴다. 재현성과 호출 범위 검증에 필요하다. |
-| `start_index`, `end_index` | Seoul OpenAPI 페이징 범위를 명시한다. |
-| `raw_object_key` | R2에 저장된 원본 XML 위치다. bronze row에서 원본 payload로 되돌아가는 연결점이다. |
-| `payload_hash` | 같은 raw payload인지 비교할 수 있는 fingerprint다. |
-| `http_status` | API gateway 레벨 응답 상태를 남긴다. TOPIS 업무 result code와 구분한다. |
-| `result_code`, `result_msg` | TOPIS 응답 내부 성공 기준이다. `INFO-000`만 성공으로 본다. |
-| `list_total_count`, `row_count` | API 전체 건수와 실제 파싱 row 수를 비교한다. |
-| `collected_at`, `load_date` | 수집 시각과 KST 적재 파티션 후보를 분리한다. |
-| `dag_run_id` | Airflow run과 연결해 로그, task 상태, 적재 결과를 함께 추적한다. |
-
-traffic 데이터는 시간 의미가 섞이기 쉬워서 bronze에 원문을 최대한 보존한다.
-
-- `collected_at`: DAG가 수집한 시각
-- `occr_date + occr_time`: 사고 또는 통제 발생 시각
-- `exp_clr_date + exp_clr_time`: 예상 해제 시각
-
-`HHMM` 또는 `HHMMSS`가 올 수 있으므로 bronze에서 억지로 6자리 시각으로 고정하지 않는다.
-
-## 의도적으로 제외한 것
-
-이 DAG는 bronze 검증까지가 범위다. Silver의 표준 시간 타입 변환, GRS80 TM 좌표 변환,
-동일 사고 dedup 기준, Gold feature mart는 ASAC-DBT에서 공통 계약을 정한 뒤 별도 PR로 작업한다.
-
-초기 smoke 검증은 한 파일에서 끝까지 확인했지만, 이슈
-[#16](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/16)의 도메인 폴더 기준에 맞춰 지금은
-아래처럼 DAG entry와 helper package를 분리했다.
-
-```text
-domains/traffic/
-  .airflowignore
-  traffic_incident_bronze.py
-  traffic_reliability_report.py
-  traffic_ingest/
-    common/
-      runtime.py
-    acc_info.py
-    bronze.py
-    reliability_report.py
-  docs/
-    source.md
-  tests/
-```
-
-`traffic_ingest/common`은 최상위 공통 프레임워크가 아니다. traffic 도메인 내부에서 반복되는
-런타임 접속/직렬화 코드만 묶은 얇은 helper이며, API별 성공 기준과 schema 판단은 source/bronze
-모듈에 남긴다.
-
-weather 도메인의 `weather_ingest/common/runtime.py`와 같은 런타임 helper를 의도적으로 복제한다.
-R2/Trino/env 동작을 바꿀 때는 두 도메인 runtime을 같이 확인하고, 세 번째 도메인에서도 같은 코드가
-반복되면 그때 최소 공통 모듈 추출을 다시 논의한다.
+`docs/superpowers/**`와 `docs/retrospectives/**`는 당시 결정·검증 기록이다. 이전 모델 목록이나
+pre-monoproject 경로가 남아 있을 수 있으므로 현재 동작의 기준으로 사용하지 않는다.
+현재 계약의 우선순위는 실제 코드와 이 README, `docs/source.md`, 그다음 보존 문서 순이다.

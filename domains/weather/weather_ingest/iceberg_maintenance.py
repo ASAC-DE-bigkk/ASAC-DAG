@@ -10,7 +10,10 @@ def _is_dev_target(target: str | None = None) -> bool:
         return target == "dev"
     import os
 
-    return os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod")) == "dev"
+    return (
+        os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
+        == "dev"
+    )
 
 
 def _trino_catalog(host_target: str = "dev") -> str:

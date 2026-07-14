@@ -1,4 +1,5 @@
 """Weather watchdog DAG import tests without a live Airflow installation."""
+
 from __future__ import annotations
 
 import copy
@@ -87,7 +88,9 @@ def load_module():
     airflow_python = types.ModuleType("airflow.providers.standard.operators.python")
     airflow_python.PythonOperator = FakePythonOperator
     errors_airflow = types.ModuleType("common.errors.airflow")
-    errors_airflow.problem_failure_callback = lambda **_kwargs: lambda *_args, **_kwargs: None
+    errors_airflow.problem_failure_callback = lambda **_kwargs: (
+        lambda *_args, **_kwargs: None
+    )
     runmetrics = types.ModuleType("common.runmetrics")
     runmetrics.track = _track
     sys.modules.update(
@@ -104,7 +107,9 @@ def load_module():
         }
     )
     module_path = Path(__file__).resolve().parents[1] / "weather_reliability_report.py"
-    spec = importlib.util.spec_from_file_location("weather_reliability_report_under_test", module_path)
+    spec = importlib.util.spec_from_file_location(
+        "weather_reliability_report_under_test", module_path
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -147,27 +152,43 @@ def test_weather_fingerprint_ignores_timestamps_and_distinguishes_failure_identi
 
     assert module.notification_fingerprint(timestamp_only_change) == first_fingerprint
     assert module.notification_fingerprint(different_failure) != first_fingerprint
-    assert module.should_notify_fingerprint(
-        first_fingerprint,
-        get=lambda *_args, **_kwargs: first_fingerprint,
-    ) is False
-    assert module.should_notify_fingerprint(
-        module.notification_fingerprint(different_failure),
-        get=lambda *_args, **_kwargs: first_fingerprint,
-    ) is True
+    assert (
+        module.should_notify_fingerprint(
+            first_fingerprint,
+            get=lambda *_args, **_kwargs: first_fingerprint,
+        )
+        is False
+    )
+    assert (
+        module.should_notify_fingerprint(
+            module.notification_fingerprint(different_failure),
+            get=lambda *_args, **_kwargs: first_fingerprint,
+        )
+        is True
+    )
 
 
 def test_weather_variable_tracking_is_fail_open():
     module = load_module()
 
-    assert module.should_notify_fingerprint(
-        "fingerprint",
-        get=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("state unavailable")),
-    ) is True
-    assert module.record_delivered_fingerprint(
-        "fingerprint",
-        set=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("state unavailable")),
-    ) is False
+    assert (
+        module.should_notify_fingerprint(
+            "fingerprint",
+            get=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("state unavailable")
+            ),
+        )
+        is True
+    )
+    assert (
+        module.record_delivered_fingerprint(
+            "fingerprint",
+            set=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("state unavailable")
+            ),
+        )
+        is False
+    )
 
 
 def test_weather_records_fingerprint_only_after_successful_send(monkeypatch):
@@ -175,8 +196,12 @@ def test_weather_records_fingerprint_only_after_successful_send(monkeypatch):
     source_report = _weather_failure_report()
     expected_fingerprint = module.notification_fingerprint(source_report)
     events = []
-    monkeypatch.setattr(module, "build_weather_reliability_report", lambda: copy.deepcopy(source_report))
-    monkeypatch.setattr(module, "format_weather_discord_message", lambda _report: "message")
+    monkeypatch.setattr(
+        module, "build_weather_reliability_report", lambda: copy.deepcopy(source_report)
+    )
+    monkeypatch.setattr(
+        module, "format_weather_discord_message", lambda _report: "message"
+    )
     monkeypatch.setattr(
         module,
         "should_notify_fingerprint",
@@ -210,8 +235,12 @@ def test_weather_failed_send_is_retried_without_recording_state(monkeypatch):
     state = {"value": "UNKNOWN"}
     attempts = []
     records = []
-    monkeypatch.setattr(module, "build_weather_reliability_report", lambda: copy.deepcopy(source_report))
-    monkeypatch.setattr(module, "format_weather_discord_message", lambda _report: "message")
+    monkeypatch.setattr(
+        module, "build_weather_reliability_report", lambda: copy.deepcopy(source_report)
+    )
+    monkeypatch.setattr(
+        module, "format_weather_discord_message", lambda _report: "message"
+    )
     monkeypatch.setattr(
         module,
         "should_notify_fingerprint",
@@ -225,7 +254,9 @@ def test_weather_failed_send_is_retried_without_recording_state(monkeypatch):
     monkeypatch.setattr(
         module,
         "record_delivered_fingerprint",
-        lambda fingerprint: records.append(fingerprint) or state.update(value=fingerprint) or True,
+        lambda fingerprint: (
+            records.append(fingerprint) or state.update(value=fingerprint) or True
+        ),
     )
 
     first = module.collect_and_notify(run_id="report-run-1")
@@ -244,8 +275,12 @@ def test_weather_sender_exception_leaves_state_retryable(monkeypatch):
     state = {"value": "UNKNOWN"}
     outcomes = [RuntimeError("network unavailable"), True]
     attempts = []
-    monkeypatch.setattr(module, "build_weather_reliability_report", lambda: copy.deepcopy(source_report))
-    monkeypatch.setattr(module, "format_weather_discord_message", lambda _report: "message")
+    monkeypatch.setattr(
+        module, "build_weather_reliability_report", lambda: copy.deepcopy(source_report)
+    )
+    monkeypatch.setattr(
+        module, "format_weather_discord_message", lambda _report: "message"
+    )
     monkeypatch.setattr(
         module,
         "should_notify_fingerprint",

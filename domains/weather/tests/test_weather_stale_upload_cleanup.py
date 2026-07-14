@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -6,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from weather_ingest import bronze  # noqa: E402
+from weather_ingest import bronze_pyiceberg  # noqa: E402
 
 
 NOW = datetime(2026, 7, 9, 12, 0, tzinfo=timezone.utc)
@@ -58,7 +60,12 @@ def test_aborts_uploads_older_than_threshold():
 
 def test_keeps_recent_uploads_from_live_writers():
     client = FakeS3Client(
-        [{"Uploads": [upload("table/data/live.parquet", "u3", 120)], "IsTruncated": False}]
+        [
+            {
+                "Uploads": [upload("table/data/live.parquet", "u3", 120)],
+                "IsTruncated": False,
+            }
+        ]
     )
 
     count = bronze._abort_stale_multipart_uploads(
@@ -107,10 +114,31 @@ def test_pyiceberg_table_runs_stale_upload_cleanup(monkeypatch):
             assert identifier == f"dev_x.{bronze.BRONZE_TABLE}"
             return fake_table
 
-    monkeypatch.setattr(bronze, "_pyiceberg_catalog", lambda: FakeCatalog())
-    monkeypatch.setattr(bronze, "_cleanup_stale_uploads", cleaned.append)
+    monkeypatch.setattr(bronze_pyiceberg, "_pyiceberg_catalog", lambda: FakeCatalog())
+    monkeypatch.setattr(bronze_pyiceberg, "_cleanup_stale_uploads", cleaned.append)
 
     table = bronze._pyiceberg_table("dev_x")
 
     assert table is fake_table
     assert cleaned == [fake_table]
+
+
+def test_stale_cleanup_failure_is_best_effort_and_safely_observable(
+    monkeypatch,
+    caplog,
+):
+    class FailingTable:
+        def location(self):
+            raise RuntimeError("R2_SECRET_ACCESS_KEY=must-not-be-logged")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "boto3",
+        SimpleNamespace(client=lambda *_args, **_kwargs: object()),
+    )
+
+    bronze._cleanup_stale_uploads(FailingTable())
+
+    assert "operation=cleanup_stale_multipart_uploads" in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+    assert "must-not-be-logged" not in caplog.text

@@ -1,5 +1,11 @@
 # Weather 소유 Cross-domain 계약 정리 설계
 
+> 현재 상태(2026-07-15): 이 문서는 ASAC-DAG #331 당시의 이동 결정을 보존한다.
+> 현재 run-manifest 구현의 단일 소유자는 `weather_ingest/run_manifest.py`이며,
+> `weather.bronze_run_manifest`는 deprecated compatibility facade로만 유지한다.
+> 새 코드와 다른 도메인은 이 facade를 통해 Weather runtime을 import하지 않는다.
+> 현재 계약은 `domains/weather/README.md`를 우선한다.
+
 ## 목적
 
 `domains/_shared` 아래의 Bronze run manifest 계약과 Iceberg 유지보수 DAG를 Weather 도메인의 명시적 소유 코드로 이동한다. 돌발정보와 기상청 파이프라인은 같은 담당 범위이며, Traffic은 공개된 Weather 계약을 import한다.

@@ -3,6 +3,7 @@
 실제 Trino/네트워크 없이 System connector의 컬럼 차이와 cursor.stats 폴백을
 검증한다. 수집기는 조회 전용이며, 누락한 값은 0이 아니라 ``None``이어야 한다.
 """
+
 from pathlib import Path
 import sys
 
@@ -12,10 +13,21 @@ sys.path.insert(0, str(ROOT / "domains" / "weather"))
 
 from weather_ingest.trino_query_metrics import (  # noqa: E402
     TelemetryCursor,
+    UNAVAILABLE_REASONS_KEY,
     collect_iceberg_fingerprint,
     collect_query_metrics,
     query_id_from_cursor,
 )
+
+
+def test_unavailable_reason_contract_key_has_one_owner():
+    source_path = (
+        ROOT / "domains" / "weather" / "weather_ingest" / "trino_query_metrics.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert UNAVAILABLE_REASONS_KEY == "unavailable_reasons"
+    assert source.count('"unavailable_reasons"') == 1
 
 
 class FakeWorkCursor:
@@ -117,9 +129,13 @@ def test_collect_query_metrics_enriches_limited_system_row_with_cursor_stats():
 
 
 def test_collect_query_metrics_marks_missing_history_as_unavailable_not_zero():
-    cursor = FakeMetadataCursor(describe_rows=[("query_id", "varchar")], result_row=None)
+    cursor = FakeMetadataCursor(
+        describe_rows=[("query_id", "varchar")], result_row=None
+    )
 
-    result = collect_query_metrics(cursor, "q_missing", fallback_stats={"processedBytes": 22})
+    result = collect_query_metrics(
+        cursor, "q_missing", fallback_stats={"processedBytes": 22}
+    )
 
     assert result["metric_source"] == "cursor.stats"
     assert result["input_bytes"] == 22
@@ -144,7 +160,9 @@ def test_collect_iceberg_fingerprint_uses_snapshot_and_files_metadata():
     }
     assert '"bronze_table$snapshots"' in cursor.statements[0]
     assert '"bronze_table$files"' in cursor.statements[1]
-    assert "count(*) FROM iceberg_dev.demo.bronze_table" not in " ".join(cursor.statements)
+    assert "count(*) FROM iceberg_dev.demo.bronze_table" not in " ".join(
+        cursor.statements
+    )
 
 
 def test_telemetry_cursor_records_metrics_after_fetchall():
@@ -164,19 +182,40 @@ def test_telemetry_cursor_records_metrics_after_fetchall():
     assert workload.statements == ["SELECT 1"]
     assert cursor.records == [
         {
-            **{name: None for name in (
-                "state", "queued_time_ms", "analysis_time_ms", "distributed_planning_time_ms",
-                "cpu_time_ms", "wall_time_ms", "peak_user_memory_bytes", "input_rows",
-                "output_rows", "output_bytes", "physical_input_bytes", "physical_written_bytes",
-                "spilled_bytes",
-            )},
+            **{
+                name: None
+                for name in (
+                    "state",
+                    "queued_time_ms",
+                    "analysis_time_ms",
+                    "distributed_planning_time_ms",
+                    "cpu_time_ms",
+                    "wall_time_ms",
+                    "peak_user_memory_bytes",
+                    "input_rows",
+                    "output_rows",
+                    "output_bytes",
+                    "physical_input_bytes",
+                    "physical_written_bytes",
+                    "spilled_bytes",
+                )
+            },
             "query_id": "q_wrapped",
             "input_bytes": 101,
             "metric_source": "system.runtime.queries",
             "unavailable_metrics": [
-                "state", "queued_time_ms", "analysis_time_ms", "distributed_planning_time_ms",
-                "cpu_time_ms", "wall_time_ms", "peak_user_memory_bytes", "input_rows",
-                "output_rows", "output_bytes", "physical_input_bytes", "physical_written_bytes",
+                "state",
+                "queued_time_ms",
+                "analysis_time_ms",
+                "distributed_planning_time_ms",
+                "cpu_time_ms",
+                "wall_time_ms",
+                "peak_user_memory_bytes",
+                "input_rows",
+                "output_rows",
+                "output_bytes",
+                "physical_input_bytes",
+                "physical_written_bytes",
                 "spilled_bytes",
             ],
             "unavailable_reasons": [],

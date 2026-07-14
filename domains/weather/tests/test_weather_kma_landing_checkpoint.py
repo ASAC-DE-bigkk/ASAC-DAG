@@ -1,25 +1,69 @@
+import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from airflow.sdk.exceptions import AirflowFailException
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import weather_vilage_fcst_bronze as dag_module  # noqa: E402
+from weather_ingest.landing import (  # noqa: E402
+    KmaGrid,
+    KmaLanding,
+    KmaLandingRequest,
+    RunIdentity,
+    RawObjectIntegrityError,
+)
 
 
-class MissingObjectError(Exception):
-    response = {"Error": {"Code": "NoSuchKey"}}
+class MemoryRawObjectStore:
+    def __init__(self, objects: dict[str, bytes] | None = None) -> None:
+        self.objects = dict(objects or {})
+
+    def exists(self, key: str) -> bool:
+        return key in self.objects
+
+    def read_bytes(self, key: str) -> bytes:
+        return self.objects[key]
+
+    def write_bytes(self, key: str, payload: bytes, _content_type: str) -> None:
+        self.objects[key] = payload
 
 
-class DagRun:
-    conf = {}
+class ScriptedKmaSource:
+    def __init__(self, pages: dict[tuple[int, int, int], bytes]) -> None:
+        self.pages = pages
+        self.requests: list[tuple[int, int, int]] = []
+
+    def fetch_page(
+        self,
+        *,
+        base_date: str,
+        base_time: str,
+        nx: int,
+        ny: int,
+        page_no: int,
+        num_of_rows: int,
+    ) -> tuple[int, bytes]:
+        del base_date, base_time, num_of_rows
+        key = (nx, ny, page_no)
+        self.requests.append(key)
+        return 200, self.pages[key]
 
 
-class Dag:
-    dag_id = "weather_vilage_fcst_bronze"
+def landing_for(source, store, request_ids=None):
+    request_ids = request_ids or iter(("request-1", "request-2", "request-3"))
+    return KmaLanding(
+        source=source,
+        raw_store=store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 5, 8, 20, tzinfo=timezone.utc),
+        request_id=lambda: next(request_ids),
+    )
 
 
 class TaskInstance:
@@ -31,13 +75,19 @@ class TaskInstance:
         return self.raw_result
 
 
-def kma_payload(total_count: int = 1, item_count: int = 1, page_no: int = 1, num_of_rows: int = 1000) -> bytes:
+def kma_payload(
+    total_count: int = 1, item_count: int = 1, page_no: int = 1, num_of_rows: int = 1000
+) -> bytes:
     return json.dumps(
         {
             "response": {
                 "header": {"resultCode": "00", "resultMsg": "OK"},
                 "body": {
-                    "items": {"item": [{"category": "TMP", "seq": seq} for seq in range(item_count)]},
+                    "items": {
+                        "item": [
+                            {"category": "TMP", "seq": seq} for seq in range(item_count)
+                        ]
+                    },
                     "pageNo": page_no,
                     "numOfRows": num_of_rows,
                     "totalCount": total_count,
@@ -58,131 +108,96 @@ def invalid_kma_payload() -> bytes:
     ).encode("utf-8")
 
 
-def test_land_kma_raw_reuses_checkpointed_grid(monkeypatch):
-    context = {"dag": Dag(), "dag_run": DagRun(), "run_id": "manual__retry:1"}
-    existing_raw_object = {
-        "request_id": "request-1",
-        "raw_object_key": "raw/weather/kma/first.json",
-        "raw_hash": "abc",
-        "http_status": 200,
-        "collected_at": "2026-07-03T00:00:00+00:00",
-        "place_id": "first",
-        "base_date": "20260703",
-        "base_time": "0800",
-        "nx": 56,
-        "ny": 130,
-    }
-    checkpoint_key = dag_module.kma_landing_checkpoint_key(context, "20260703", "0800")
-    checkpoint_bytes = json.dumps(
-        {"base_date": "20260703", "base_time": "0800", "raw_objects": [existing_raw_object]}
-    ).encode("utf-8")
-    fetch_calls = []
-    uploads = []
-
-    def fake_download_raw_object(object_key, log_label):
-        if object_key == checkpoint_key:
-            return checkpoint_bytes
-        if object_key == existing_raw_object["raw_object_key"]:
-            return kma_payload()
-        raise MissingObjectError()
-
-    def fake_fetch_url(url, *_args, **_kwargs):
-        fetch_calls.append(url)
-        return 200, kma_payload()
-
-    def fake_upload_raw_object(**kwargs):
-        uploads.append(kwargs)
-        return kwargs["object_key"]
-
-    monkeypatch.setattr(dag_module, "resolve_kma_base_datetime", lambda: ("20260703", "0800"))
-    monkeypatch.setattr(
-        dag_module,
-        "load_kma_grids",
-        lambda: [
-            {"place_id": "first", "nx": 56, "ny": 130},
-            {"place_id": "second", "nx": 57, "ny": 130},
-        ],
+def test_land_kma_raw_reuses_checkpointed_grid():
+    request = KmaLandingRequest(
+        base_date="20260703",
+        base_time="0800",
+        grids=(KmaGrid("first", 56, 130), KmaGrid("second", 57, 130)),
+        num_of_rows=1000,
     )
-    monkeypatch.setattr(dag_module, "download_raw_object", fake_download_raw_object)
-    monkeypatch.setattr(dag_module, "fetch_url", fake_fetch_url)
-    monkeypatch.setattr(dag_module, "upload_raw_object", fake_upload_raw_object)
-    monkeypatch.setattr(dag_module, "build_kma_url", lambda **kwargs: f"{kwargs['nx']}/{kwargs['ny']}")
-    monkeypatch.setattr(dag_module.time, "sleep", lambda _seconds: None)
+    run = RunIdentity("weather_vilage_fcst_bronze", "manual__retry:1")
+    store = MemoryRawObjectStore()
 
-    result = dag_module.land_kma_raw(**context)
+    first_source = ScriptedKmaSource({(56, 130, 1): kma_payload()})
+    with pytest.raises(KeyError):
+        landing_for(first_source, store, iter(("request-1", "request-fails"))).collect(
+            run,
+            request,
+        )
 
-    assert fetch_calls == ["57/130"]
-    assert result["raw_object_keys"][0] == existing_raw_object["raw_object_key"]
+    first_raw_key = next(
+        key
+        for key in store.objects
+        if "/nx=56/ny=130/" in key and not key.endswith("landing.json")
+    )
+    retry_source = ScriptedKmaSource({(57, 130, 1): kma_payload()})
+    result = (
+        landing_for(retry_source, store, iter(("request-2",)))
+        .collect(
+            run,
+            request,
+        )
+        .to_xcom()
+    )
+
+    assert retry_source.requests == [(57, 130, 1)]
+    assert result["raw_object_keys"][0] == first_raw_key
     assert len(result["raw_object_keys"]) == 2
     assert result["grid_count"] == 2
     assert result["api_call_count"] == 2
     assert result["api_request_count"] == 1
     assert result["reused_raw_object_count"] == 1
-    assert [upload["log_label"] for upload in uploads] == ["KMA raw payload", "KMA landing checkpoint"]
 
 
-def test_land_kma_raw_fetches_all_pages_when_total_count_exceeds_page_size(monkeypatch):
-    context = {"dag": Dag(), "dag_run": DagRun(), "run_id": "manual__pagination:1"}
-    fetch_calls = []
-    uploads = []
-
-    def fake_download_raw_object(object_key, log_label):
-        raise MissingObjectError()
-
-    def fake_fetch_url(url, *_args, **_kwargs):
-        fetch_calls.append(url)
-        if url.endswith("page-1"):
-            return 200, kma_payload(total_count=1001, item_count=1000)
-        return 200, kma_payload(total_count=1001, item_count=1)
-
-    def fake_upload_raw_object(**kwargs):
-        uploads.append(kwargs)
-        return kwargs["object_key"]
-
-    monkeypatch.setattr(dag_module, "resolve_kma_base_datetime", lambda: ("20260705", "1700"))
-    monkeypatch.setattr(dag_module, "load_kma_grids", lambda: [{"place_id": "first", "nx": 56, "ny": 130}])
-    monkeypatch.setattr(dag_module, "download_raw_object", fake_download_raw_object)
-    monkeypatch.setattr(dag_module, "fetch_url", fake_fetch_url)
-    monkeypatch.setattr(dag_module, "upload_raw_object", fake_upload_raw_object)
-    monkeypatch.setattr(
-        dag_module,
-        "build_kma_url",
-        lambda **kwargs: f"{kwargs['nx']}/{kwargs['ny']}/page-{kwargs['page_no']}",
+def test_land_kma_raw_fetches_all_pages_when_total_count_exceeds_page_size():
+    source = ScriptedKmaSource(
+        {
+            (56, 130, 1): kma_payload(total_count=1001, item_count=1000),
+            (56, 130, 2): kma_payload(
+                total_count=1001,
+                item_count=1,
+                page_no=2,
+            ),
+        }
     )
-    monkeypatch.setattr(dag_module, "kma_num_of_rows", lambda: 1000)
-    monkeypatch.setattr(dag_module.time, "sleep", lambda _seconds: None)
+    result = (
+        landing_for(source, MemoryRawObjectStore())
+        .collect(
+            RunIdentity("weather_vilage_fcst_bronze", "manual__pagination:1"),
+            KmaLandingRequest(
+                base_date="20260705",
+                base_time="1700",
+                grids=(KmaGrid("first", 56, 130),),
+                num_of_rows=1000,
+            ),
+        )
+        .to_xcom()
+    )
 
-    result = dag_module.land_kma_raw(**context)
-
-    assert fetch_calls == ["56/130/page-1", "56/130/page-2"]
+    assert source.requests == [(56, 130, 1), (56, 130, 2)]
     assert [item["page_no"] for item in result["raw_objects"]] == [1, 2]
     assert [item["row_count"] for item in result["raw_objects"]] == [1000, 1]
     assert [item["total_count"] for item in result["raw_objects"]] == [1001, 1001]
     assert result["raw_page_count"] == 2
     assert result["api_request_count"] == 2
-    assert [upload["log_label"] for upload in uploads].count("KMA raw payload") == 2
 
 
-def test_land_kma_raw_object_keys_rebuilds_loader_input(monkeypatch):
+def test_land_kma_raw_object_keys_rebuilds_loader_input():
     raw_key = (
         "raw/weather_forecast/kma_vilage_fcst/load_date=2026-07-05/"
         "nx=56/ny=130/20260705T082000KST_base-202607050800_request-1.json"
     )
 
-    class BackfillDagRun:
-        conf = {"raw_object_keys": [raw_key]}
-
-    monkeypatch.setattr(dag_module, "load_kma_grids", lambda: [{"place_id": "first", "nx": 56, "ny": 130}])
-    monkeypatch.setattr(
-        dag_module,
-        "download_raw_object",
-        lambda object_key, _log_label: kma_payload(total_count=1001, item_count=1000, page_no=1, num_of_rows=1000),
+    store = MemoryRawObjectStore(
+        {raw_key: kma_payload(total_count=1, item_count=1, page_no=1, num_of_rows=1000)}
     )
-
-    result = dag_module.land_kma_raw_object_keys(
-        dag=Dag(),
-        dag_run=BackfillDagRun(),
-        run_id="manual__backfill",
+    result = (
+        landing_for(ScriptedKmaSource({}), store)
+        .replay(
+            [raw_key],
+            grids=(KmaGrid("first", 56, 130),),
+        )
+        .to_xcom()
     )
 
     assert result["api_request_count"] == 0
@@ -193,30 +208,26 @@ def test_land_kma_raw_object_keys_rebuilds_loader_input(monkeypatch):
     assert result["raw_objects"][0]["num_of_rows"] == 1000
 
 
-def test_land_kma_raw_fails_when_kma_response_result_code_is_not_ok(monkeypatch):
-    context = {"dag": Dag(), "dag_run": DagRun(), "run_id": "manual__retry:2"}
-
-    def fake_fetch_url(url, *_args, **_kwargs):
-        return 200, invalid_kma_payload()
-
-    def fake_download_raw_object(object_key, log_label):
-        raise MissingObjectError()
-
-    monkeypatch.setattr(dag_module, "resolve_kma_base_datetime", lambda: ("20260703", "0800"))
-    monkeypatch.setattr(dag_module, "load_kma_grids", lambda: [{"place_id": "first", "nx": 56, "ny": 130}])
-    monkeypatch.setattr(dag_module, "download_raw_object", fake_download_raw_object)
-    monkeypatch.setattr(dag_module, "fetch_url", fake_fetch_url)
-    monkeypatch.setattr(dag_module, "build_kma_url", lambda **kwargs: f"{kwargs['nx']}/{kwargs['ny']}")
-
+def test_land_kma_raw_fails_when_kma_response_result_code_is_not_ok():
+    source = ScriptedKmaSource({(56, 130, 1): invalid_kma_payload()})
     with pytest.raises(RuntimeError, match="KMA API returned resultCode=99"):
-        dag_module.land_kma_raw(**context)
+        landing_for(source, MemoryRawObjectStore()).collect(
+            RunIdentity("weather_vilage_fcst_bronze", "manual__retry:2"),
+            KmaLandingRequest(
+                base_date="20260703",
+                base_time="0800",
+                grids=(KmaGrid("first", 56, 130),),
+                num_of_rows=1000,
+            ),
+        )
 
 
 def test_load_kma_bronze_fails_before_insert_when_expected_page_is_missing(monkeypatch):
+    payload = kma_payload(total_count=1001, item_count=1000)
     raw_object = {
         "request_id": "request-page-1",
         "raw_object_key": "raw/weather/kma/page-1.json",
-        "raw_hash": "abc",
+        "raw_hash": hashlib.sha256(payload).hexdigest(),
         "http_status": 200,
         "collected_at": "2026-07-05T08:20:00+00:00",
         "place_id": "first",
@@ -236,12 +247,16 @@ def test_load_kma_bronze_fails_before_insert_when_expected_page_is_missing(monke
     }
     insert_calls = []
 
-    monkeypatch.setattr(dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev"))
-    monkeypatch.setattr(dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze")
+    monkeypatch.setattr(
+        dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev")
+    )
+    monkeypatch.setattr(
+        dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze"
+    )
     monkeypatch.setattr(
         dag_module,
         "download_raw_object",
-        lambda _object_key, _log_label: kma_payload(total_count=1001, item_count=1000),
+        lambda _object_key, _log_label: payload,
     )
     monkeypatch.setattr(
         dag_module,
@@ -249,17 +264,67 @@ def test_load_kma_bronze_fails_before_insert_when_expected_page_is_missing(monke
         lambda **kwargs: insert_calls.append(kwargs),
     )
 
-    with pytest.raises(RuntimeError, match="KMA bronze pagination incomplete"):
-        dag_module.load_kma_bronze(ti=TaskInstance(raw_result), run_id="manual__load:missing-page")
+    with pytest.raises(AirflowFailException, match="KMA bronze pagination incomplete"):
+        dag_module.load_kma_bronze(
+            ti=TaskInstance(raw_result), run_id="manual__load:missing-page"
+        )
 
     assert insert_calls == []
 
 
+def test_load_kma_bronze_rejects_downloaded_payload_hash_mismatch(monkeypatch):
+    payload = kma_payload()
+    raw_result = {
+        "raw_objects": [
+            {
+                "request_id": "request-1",
+                "raw_object_key": "raw/weather/page.json",
+                "raw_hash": hashlib.sha256(b"different").hexdigest(),
+                "http_status": 200,
+                "collected_at": "2026-07-05T08:20:00+00:00",
+                "place_id": "first",
+                "base_date": "20260705",
+                "base_time": "1700",
+                "nx": 56,
+                "ny": 130,
+                "page_no": 1,
+                "num_of_rows": 1000,
+            }
+        ],
+        "grid_count": 1,
+        "base_date": "20260705",
+        "base_time": "1700",
+    }
+    monkeypatch.setattr(
+        dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev")
+    )
+    monkeypatch.setattr(
+        dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze"
+    )
+    monkeypatch.setattr(dag_module, "download_raw_object", lambda *_args: payload)
+    monkeypatch.setattr(
+        dag_module,
+        "append_kma_bronze_row_batches_pyiceberg",
+        lambda **_kwargs: pytest.fail(
+            "mismatched raw bytes must not reach Bronze insert"
+        ),
+    )
+
+    with pytest.raises(AirflowFailException, match="hash mismatch") as raised:
+        dag_module.load_kma_bronze(
+            ti=TaskInstance(raw_result),
+            run_id="manual__hash-mismatch",
+        )
+
+    assert isinstance(raised.value.__cause__, RawObjectIntegrityError)
+
+
 def test_load_kma_bronze_allows_partial_pages_when_conf_flag_set(monkeypatch):
+    payload = kma_payload(total_count=1001, item_count=1000)
     raw_object = {
         "request_id": "request-page-1",
         "raw_object_key": "raw/weather/kma/page-1.json",
-        "raw_hash": "abc",
+        "raw_hash": hashlib.sha256(payload).hexdigest(),
         "http_status": 200,
         "collected_at": "2026-07-05T08:20:00+00:00",
         "place_id": "first",
@@ -286,14 +351,22 @@ def test_load_kma_bronze_allows_partial_pages_when_conf_flag_set(monkeypatch):
         insert_calls.append(kwargs)
         return sum(len(batch["rows"]) for batch in kwargs["row_batches"])
 
-    monkeypatch.setattr(dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev"))
-    monkeypatch.setattr(dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze")
+    monkeypatch.setattr(
+        dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev")
+    )
+    monkeypatch.setattr(
+        dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze"
+    )
     monkeypatch.setattr(
         dag_module,
         "download_raw_object",
-        lambda _object_key, _log_label: kma_payload(total_count=1001, item_count=1000),
+        lambda _object_key, _log_label: payload,
     )
-    monkeypatch.setattr(dag_module, "append_kma_bronze_row_batches_pyiceberg", fake_insert_kma_bronze_row_batches)
+    monkeypatch.setattr(
+        dag_module,
+        "append_kma_bronze_row_batches_pyiceberg",
+        fake_insert_kma_bronze_row_batches,
+    )
 
     result = dag_module.load_kma_bronze(
         ti=TaskInstance(raw_result),
@@ -305,14 +378,24 @@ def test_load_kma_bronze_allows_partial_pages_when_conf_flag_set(monkeypatch):
     assert result["inserted"] == 1000
     assert result["expected_rows"] == 1001
     assert result["expected_raw_object_count"] == 1
+    assert result["is_publishable"] is False
 
 
 def test_load_kma_bronze_inserts_pages_after_aggregate_count_matches(monkeypatch):
+    page_payloads = {
+        "raw/weather/kma/page-1.json": kma_payload(
+            total_count=1001,
+            item_count=1000,
+        ),
+        "raw/weather/kma/page-2.json": kma_payload(total_count=1001, item_count=1),
+    }
     raw_objects = [
         {
             "request_id": "request-page-1",
             "raw_object_key": "raw/weather/kma/page-1.json",
-            "raw_hash": "abc",
+            "raw_hash": hashlib.sha256(
+                page_payloads["raw/weather/kma/page-1.json"]
+            ).hexdigest(),
             "http_status": 200,
             "collected_at": "2026-07-05T08:20:00+00:00",
             "place_id": "first",
@@ -326,7 +409,9 @@ def test_load_kma_bronze_inserts_pages_after_aggregate_count_matches(monkeypatch
         {
             "request_id": "request-page-2",
             "raw_object_key": "raw/weather/kma/page-2.json",
-            "raw_hash": "def",
+            "raw_hash": hashlib.sha256(
+                page_payloads["raw/weather/kma/page-2.json"]
+            ).hexdigest(),
             "http_status": 200,
             "collected_at": "2026-07-05T08:20:01+00:00",
             "place_id": "first",
@@ -350,9 +435,7 @@ def test_load_kma_bronze_inserts_pages_after_aggregate_count_matches(monkeypatch
     insert_calls = []
 
     def fake_download_raw_object(object_key, _log_label):
-        if object_key.endswith("page-1.json"):
-            return kma_payload(total_count=1001, item_count=1000)
-        return kma_payload(total_count=1001, item_count=1)
+        return page_payloads[object_key]
 
     def fake_insert_kma_bronze_row_batches(**kwargs):
         row_batches = kwargs["row_batches"]
@@ -367,12 +450,22 @@ def test_load_kma_bronze_inserts_pages_after_aggregate_count_matches(monkeypatch
         )
         return sum(len(batch["rows"]) for batch in row_batches)
 
-    monkeypatch.setattr(dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev"))
-    monkeypatch.setattr(dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze")
+    monkeypatch.setattr(
+        dag_module, "trino_cursor", lambda: (object(), "iceberg_dev", "dev")
+    )
+    monkeypatch.setattr(
+        dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze"
+    )
     monkeypatch.setattr(dag_module, "download_raw_object", fake_download_raw_object)
-    monkeypatch.setattr(dag_module, "append_kma_bronze_row_batches_pyiceberg", fake_insert_kma_bronze_row_batches)
+    monkeypatch.setattr(
+        dag_module,
+        "append_kma_bronze_row_batches_pyiceberg",
+        fake_insert_kma_bronze_row_batches,
+    )
 
-    result = dag_module.load_kma_bronze(ti=TaskInstance(raw_result), run_id="manual__load:all-pages")
+    result = dag_module.load_kma_bronze(
+        ti=TaskInstance(raw_result), run_id="manual__load:all-pages"
+    )
 
     assert len(insert_calls) == 1
     assert insert_calls[0]["dag_run_id"] == "manual__load:all-pages"

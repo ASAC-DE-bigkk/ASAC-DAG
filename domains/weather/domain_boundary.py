@@ -1,4 +1,5 @@
 """Enforce domain-local placement for changed pipeline artifacts."""
+
 from __future__ import annotations
 
 import argparse
@@ -34,7 +35,9 @@ def validate_paths(root: Path, paths: Iterable[str]) -> list[str]:
             continue
         if len(parts) >= 3 and parts[0] == "domains" and parts[1]:
             continue
-        violations.append(f"{relative_path}: product artifacts must live under domains/<domain>/")
+        violations.append(
+            f"{relative_path}: product artifacts must live under domains/<domain>/"
+        )
     return violations
 
 
@@ -75,7 +78,9 @@ def main() -> int:
         for violation in violations:
             print(f"- {violation}")
         return 1
-    print(f"PASS: {len(paths)} changed product artifact path(s) satisfy the domain boundary.")
+    print(
+        f"PASS: {len(paths)} changed product artifact path(s) satisfy the domain boundary."
+    )
     return 0
 
 

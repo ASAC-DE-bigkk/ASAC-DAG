@@ -8,12 +8,12 @@ through the dbt models and keeps transform retries independent from API calls.
 from __future__ import annotations
 
 import json
+import logging
 import os
-import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
@@ -34,13 +34,12 @@ DAGS_ROOT_DIR = os.path.dirname(os.path.dirname(DAG_DIR))
 if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
-from weather.bronze_run_manifest import MANIFEST_TABLE, STATUS_SUCCESS  # noqa: E402
 from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa: E402
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
-from traffic_ingest.common.runtime import sql_string, trino_cursor  # noqa: E402
+from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from traffic_dbt_failure import (  # noqa: E402
     R2RecoveryRecordSink,
     build_failure_notification,
@@ -49,94 +48,101 @@ from traffic_dbt_failure import (  # noqa: E402
     load_dbt_results,
     silver_persisted_from_results,
 )
+import traffic_dbt_execution as traffic_dbt  # noqa: E402
+from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
+from traffic_ingest.transform_dag_support import (  # noqa: E402
+    TRAFFIC_TRANSFORM_CRON_KST as TRAFFIC_TRANSFORM_CRON_KST,
+    TransformFailurePorts,
+    fail_transform_if_upstream_failed,
+    record_classified_dbt_problem,
+    transform_schedule,
+)
+from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 
 
 KST = ZoneInfo("Asia/Seoul")
-DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
-DBT_PROJECT = "/opt/airflow/dbt/domains/traffic"
-RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, "target", "run_results.json")
+LOGGER = logging.getLogger(__name__)
+DBT_BIN = traffic_dbt.dbt_bin()
+DBT_PROJECT = traffic_dbt.dbt_project_dir()
 DOMAIN = "traffic"
-# Bronze runs every five minutes. Keep the hourly transform outside that boundary
-# so a run consumes one stable, publishable Bronze snapshot.
-TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
-TRAFFIC_SOURCE_ID = "seoul_traffic_incident"
 SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
 DBT_FAILURE_XCOM_KEY = "traffic_dbt_failure"
-TRAFFIC_BRONZE_SOURCE_CONTRACT_SELECTOR = "source:traffic_bronze,test_type:generic"
-ASAC_AXES_SEED_CONTRACT_SELECTOR = (
-    "asac_axes.seoul_admin_dong_crosswalk "
-    "asac_axes.seoul_admin_dong_boundary "
-    "asac_axes.seoul_gu_boundary"
+DBT_RUN_RESULTS_RECORD_KEY = "dbt_run_results_path"
+
+
+@dataclass(frozen=True)
+class DbtPhaseSpec:
+    task_id: str
+    dbt_command: str
+    selection: str | None = None
+    silver_persisted: bool = False
+    fresh_parse: bool = False
+
+
+DBT_PHASE_SPECS = (
+    DbtPhaseSpec("dbt_deps", "deps"),
+    DbtPhaseSpec(
+        "dbt_source_freshness",
+        "source freshness",
+        "tag:ask_seoul_traffic_transform_source",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_traffic_incident_availability",
+        "test",
+        "tag:ask_seoul_traffic_transform_availability",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_traffic_bronze_source_contract",
+        "test",
+        "traffic_transform_contract_gate",
+    ),
+    DbtPhaseSpec(
+        "dbt_seed_asac_axes",
+        "seed",
+        "tag:ask_seoul_traffic_transform_asac_axes",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_common_admin_dong_dimension",
+        "run",
+        "tag:ask_seoul_traffic_transform_common_admin",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_common_admin_dong_dimension",
+        "test",
+        "tag:ask_seoul_traffic_transform_common_admin",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_asac_axes_seed_contract",
+        "test",
+        "tag:ask_seoul_traffic_transform_asac_axes_contract",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_silver",
+        "run",
+        "tag:ask_seoul_traffic_transform_silver",
+        fresh_parse=True,
+    ),
+    DbtPhaseSpec(
+        "dbt_test_silver",
+        "test",
+        "tag:ask_seoul_traffic_transform_silver",
+        silver_persisted=True,
+    ),
+    DbtPhaseSpec(
+        "dbt_run_gold",
+        "run",
+        "tag:ask_seoul_traffic_transform_gold",
+        silver_persisted=True,
+    ),
+    DbtPhaseSpec(
+        "dbt_test_gold",
+        "test",
+        "tag:ask_seoul_traffic_transform_gold",
+        silver_persisted=True,
+        fresh_parse=True,
+    ),
 )
-TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS = frozenset(
-    {
-        ("traffic_bronze.seoul_traffic_incident", "request_id", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "source_id", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "source_id", "accepted_values"),
-        ("traffic_bronze.seoul_traffic_incident", "request_params_json", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "acc_id", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "start_index", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "end_index", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "occr_date", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "occr_time", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "result_code", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "result_msg", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "raw_object_key", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "payload_hash", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "http_status", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "list_total_count", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "row_count", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "collected_at", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "load_date", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident", "dag_run_id", "not_null"),
-        ("traffic_bronze.collection_run_manifest", "source_id", "not_null"),
-        ("traffic_bronze.collection_run_manifest", "dag_run_id", "not_null"),
-        ("traffic_bronze.collection_run_manifest", "status", "not_null"),
-        ("traffic_bronze.collection_run_manifest", "is_publishable", "not_null"),
-        ("traffic_bronze.collection_run_manifest", "event_at", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "request_id", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "source_id", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "source_id", "accepted_values"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "start_index", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "end_index", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "request_params_json", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "raw_object_key", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "payload_hash", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "http_status", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "result_code", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "result_msg", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "list_total_count", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "row_count", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "collected_at", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "load_date", "not_null"),
-        ("traffic_bronze.seoul_traffic_incident_request_audit", "dag_run_id", "not_null"),
-    }
-)
-ASAC_AXES_SEED_CONTRACT_TESTS = frozenset(
-    {
-        ("asac_axes.seoul_admin_dong_crosswalk", "admin_dong_code", "not_null"),
-        ("asac_axes.seoul_admin_dong_crosswalk", "admin_dong_code", "unique"),
-        ("asac_axes.seoul_admin_dong_crosswalk", "longitude", "in_seoul_bbox"),
-        ("asac_axes.seoul_admin_dong_crosswalk", "latitude", "in_seoul_bbox"),
-        ("asac_axes.seoul_admin_dong_boundary", "admin_dong_code", "axis_coverage"),
-        ("asac_axes.seoul_gu_boundary", "gu_code", "not_null"),
-        ("asac_axes.seoul_gu_boundary", "gu_code", "unique"),
-    }
-)
-DBT_PHASE_TASK_IDS = (
-    "dbt_deps",
-    "dbt_source_freshness",
-    "dbt_test_traffic_incident_availability",
-    "dbt_test_traffic_bronze_source_contract",
-    "dbt_seed_asac_axes",
-    "dbt_run_common_admin_dong_dimension",
-    "dbt_test_common_admin_dong_dimension",
-    "dbt_test_asac_axes_seed_contract",
-    "dbt_run_silver",
-    "dbt_test_silver",
-    "dbt_run_gold",
-    "dbt_test_gold",
-)
+DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
 DBT_RETRY_DELAY = timedelta(minutes=2)
 DEFAULT_PARAMS = {
     "target": Param(
@@ -150,154 +156,75 @@ DEFAULT_PARAMS = {
 record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
-def normalize_dbt_test_tuples(nodes: list[dict]) -> set[tuple[str, str, str]]:
-    """Normalize dbt ls JSON nodes to stable resource/column/test tuples."""
-    normalized = set()
-    for node in nodes:
-        depends_on_nodes = (node.get("depends_on") or {}).get("nodes") or []
-        attached_node = str(
-            node.get("attached_node")
-            or node.get("resource_name")
-            or (depends_on_nodes[0] if depends_on_nodes else "")
-        )
-        resource_parts = attached_node.split(".")
-        resource = ".".join(resource_parts[-2:]) if len(resource_parts) >= 2 else attached_node
-        metadata = node.get("test_metadata") or {}
-        kwargs = metadata.get("kwargs") or {}
-        column = node.get("column_name") or kwargs.get("column_name")
-        test_name = metadata.get("name") or node.get("name")
-        if not resource or not column or not test_name:
-            raise AirflowFailException(f"dbt test node is missing tuple fields: {node!r}")
-        normalized.add((resource, str(column), str(test_name)))
-    return normalized
-
-
-def assert_exact_dbt_test_set(
-    *, actual: set[tuple[str, str, str]], expected: set[tuple[str, str, str]]
-) -> None:
-    """Reject selector drift before a contract gate executes dbt test."""
-    if actual == expected:
-        return
-    missing = sorted(expected - actual)
-    unexpected = sorted(actual - expected)
-    raise AirflowFailException(
-        "exact dbt test set mismatch: "
-        f"missing={missing!r}, unexpected={unexpected!r}"
-    )
-
-
-def transform_schedule() -> str | None:
-    if "ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE" in os.environ:
-        return os.environ["ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE"] or None
-    return TRAFFIC_TRANSFORM_CRON_KST
-
-
 def resolve_traffic_snapshot_run() -> str:
     """Pin the newest completed Bronze run for every dbt command in this DAG run."""
-    cursor, catalog, schema = trino_cursor()
-    cursor.execute(
-        f"""
-        SELECT CAST(dag_run_id AS varchar)
-        FROM {catalog}.{schema}.{MANIFEST_TABLE}
-        WHERE source_id = {sql_string(TRAFFIC_SOURCE_ID)}
-          AND status = {sql_string(STATUS_SUCCESS)}
-          AND is_publishable
-        ORDER BY CAST(event_at AS timestamp(6)) DESC, CAST(dag_run_id AS varchar) DESC
-        LIMIT 1
-        """
-    )
-    row = cursor.fetchone()
-    if not row or not row[0]:
-        raise RuntimeError("No publishable Seoul traffic Bronze run is available for transform.")
-    return str(row[0])
+    return build_traffic_manifest().latest_publishable_run_id()
 
 
-def _artifact_path(*, run_id: str | None, task_id: str | None, try_number: int | None) -> str:
-    def safe(value: str | None) -> str:
-        return "".join(char if char.isalnum() or char in "._=-" else "-" for char in value or "unknown")
-
-    return str(
-        Path(DBT_PROJECT) / "target" / "traffic-transform" / safe(run_id)
-        / safe(task_id) / f"try{try_number if try_number is not None else 'unknown'}"
-        / "run_results.json"
-    )
-
-
-def run_dbt_phase(*, dbt_args: str, snapshot_task_id: str,
-                  silver_persisted: bool, fresh_parse: bool = False,
-                  contract_selector: str | None = None,
-                  expected_test_tuples: frozenset[tuple[str, str, str]] | None = None,
-                  **context) -> dict[str, str]:
+def run_dbt_phase(
+    *,
+    dbt_command: str,
+    selection: str | None,
+    snapshot_task_id: str,
+    silver_persisted: bool,
+    fresh_parse: bool = False,
+    **context,
+) -> dict[str, object]:
     """Run one pinned dbt phase and let Airflow retry infrastructure failures only."""
     ti = context["ti"]
     snapshot_run_id = ti.xcom_pull(task_ids=snapshot_task_id)
     run_id = context.get("run_id")
     task_id = getattr(ti, "task_id", None)
     try_number = getattr(ti, "try_number", None)
-    artifact_path = _artifact_path(run_id=run_id, task_id=task_id, try_number=try_number)
     params = context.get("params") or {}
     target = params.get("target", "dev")
-    def build_command(current_args: str) -> list[str]:
-        command = [
-            DBT_BIN,
-            *shlex.split(current_args),
-            "--target", target,
-            "--no-use-colors",
-            "--vars", f'{{"traffic_snapshot_dag_run_id": "{snapshot_run_id}"}}',
-        ]
-        if shlex.split(current_args)[0] != "deps":
-            command.extend(["--target-path", str(Path(artifact_path).parent)])
-        return command
-
-    env = os.environ.copy()
-    env["DBT_PROFILES_DIR"] = DBT_PROJECT
-    env["DBT_PROJECT_DIR"] = DBT_PROJECT
-    phase_args = ["parse --no-partial-parse"] if fresh_parse else []
-    if expected_test_tuples is not None:
-        if not contract_selector:
-            raise ValueError("contract_selector is required for an exact dbt test gate")
-        phase_args.append(
-            "ls --resource-type test "
-            f"--select {contract_selector} --output json "
-            "--output-keys name resource_type attached_node column_name "
-            "test_metadata depends_on unique_id"
-        )
-    phase_args.append(dbt_args)
-    for current_args in phase_args:
-        completed = subprocess.run(
-            build_command(current_args), cwd=DBT_PROJECT, env=env, check=False,
-            capture_output=True, text=True,
-        )
+    execution = traffic_dbt.execute_dbt_phase(
+        dbt_command=dbt_command,
+        selection=selection,
+        pipeline="traffic-transform",
+        run_id=run_id,
+        task_id=task_id,
+        try_number=try_number,
+        target=target,
+        variables=json.dumps({"traffic_snapshot_dag_run_id": snapshot_run_id}),
+        fresh_parse=fresh_parse,
+        project_dir=DBT_PROJECT,
+        executable=DBT_BIN,
+        runner=subprocess.run,
+    )
+    for completed in execution.attempts:
         if completed.stdout:
             print(completed.stdout, end="")
         if completed.stderr:
             print(completed.stderr, end="", file=sys.stderr)
-        if completed.returncode != 0:
-            break
-        if current_args.startswith("ls "):
-            nodes = []
-            for line in completed.stdout.splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    node = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(node, dict):
-                    nodes.append(node)
-            assert_exact_dbt_test_set(
-                actual=normalize_dbt_test_tuples(nodes),
-                expected=set(expected_test_tuples),
-            )
-    if completed.returncode == 0:
-        return {"status": "success", "artifact_path": artifact_path}
+    completed = execution.completed
+    missing_artifact_error = (
+        "missing expected dbt artifacts: "
+        + ", ".join(execution.missing_expected_artifacts)
+        if completed.returncode == 0 and execution.missing_expected_artifacts
+        else ""
+    )
+    if completed.returncode == 0 and not missing_artifact_error:
+        return {
+            "status": "success",
+            "run_results_path": execution.existing_run_results_path,
+            "sources_path": execution.existing_sources_path,
+            "manifest_path": execution.existing_manifest_path,
+            "selected_unique_ids": list(execution.selected_unique_ids),
+        }
 
-    results = load_dbt_results(artifact_path)
+    results = (
+        load_dbt_results(execution.existing_run_results_path)
+        if execution.existing_run_results_path
+        else []
+    )
     failure = classify_dbt_failure(
-        returncode=completed.returncode,
+        returncode=completed.returncode or 2,
         results=results,
-        artifact_path=artifact_path,
-        command_output=f"{completed.stdout}\n{completed.stderr}",
+        artifact_path=execution.primary_artifact_path,
+        command_output=(
+            f"{completed.stdout}\n{completed.stderr}\n{missing_artifact_error}"
+        ),
     )
     record = build_recovery_record(
         failure,
@@ -306,11 +233,25 @@ def run_dbt_phase(*, dbt_args: str, snapshot_task_id: str,
         task_id=task_id,
         run_id=run_id,
         try_number=try_number if isinstance(try_number, int) else None,
-        silver_persisted=silver_persisted_from_results(results, default=silver_persisted),
+        silver_persisted=silver_persisted_from_results(
+            results,
+            selected_unique_ids=execution.selected_unique_ids,
+            default=silver_persisted,
+        ),
         occurred_at=datetime.now(timezone.utc),
     )
+    record.update(
+        {
+            DBT_RUN_RESULTS_RECORD_KEY: execution.existing_run_results_path,
+            "dbt_sources_path": execution.existing_sources_path,
+            "dbt_manifest_path": execution.existing_manifest_path,
+        }
+    )
     ti.xcom_push(key=DBT_FAILURE_XCOM_KEY, value=record)
-    message = f"traffic dbt {failure.classification}: artifact={artifact_path}"
+    message = (
+        f"traffic dbt {failure.classification}: "
+        f"artifact={execution.primary_artifact_path or 'unknown'}"
+    )
     if failure.retryable:
         raise AirflowException(message)
     raise AirflowFailException(message)
@@ -318,64 +259,38 @@ def run_dbt_phase(*, dbt_args: str, snapshot_task_id: str,
 
 def record_traffic_dbt_problem(context) -> None:
     """Persist and notify final classified dbt failures without changing task state."""
-    ti = context.get("task_instance") or context.get("ti")
-    try:
-        record = ti.xcom_pull(task_ids=getattr(ti, "task_id", None), key=DBT_FAILURE_XCOM_KEY)
-    except Exception:  # noqa: BLE001 - fall back to the common failure record
-        record = None
-    if not isinstance(record, dict):
-        record_traffic_problem(context)
-        return
-
-    try:
-        problem = problem_from_airflow_context(context, domain="traffic")
-        problem.detail = (
-            f"{record.get('failure_classification')}; snapshot="
-            f"{record.get('traffic_snapshot_dag_run_id')}; artifact={record.get('dbt_artifact_path')}"
-        )
-        problem.extensions = {
-            name: record.get(name)
-            for name in (
-                "traffic_snapshot_dag_run_id",
-                "dbt_test_names",
-                "dbt_failed_row_count",
-                "dbt_artifact_path",
-                "silver_persisted",
-                "failure_classification",
-                "recovery_action",
-            )
-        }
-        R2ErrorSink().write(problem)
-    except Exception:  # noqa: BLE001 - a record failure must not hide the task failure
-        pass
-    try:
-        R2RecoveryRecordSink().write(record)
-    except Exception:  # noqa: BLE001 - a record failure must not hide the task failure
-        pass
-    try:
-        if first_notice_for_run(record.get("dag_id"), record.get("run_id")):
-            title, description, footer = build_failure_notification(record)
-            send_embed(title, description, color=COLOR_FAIL, footer=footer, domain="traffic")
-    except Exception:  # noqa: BLE001 - a notification failure must not hide the task failure
-        pass
+    record_classified_dbt_problem(
+        context,
+        failure_xcom_key=DBT_FAILURE_XCOM_KEY,
+        run_results_record_key=DBT_RUN_RESULTS_RECORD_KEY,
+        ports=TransformFailurePorts(
+            fallback_recorder=record_traffic_problem,
+            problem_from_context=problem_from_airflow_context,
+            error_sink_factory=R2ErrorSink,
+            recovery_sink_factory=R2RecoveryRecordSink,
+            first_notice=first_notice_for_run,
+            notification_builder=build_failure_notification,
+            send_notification=send_embed,
+            failure_color=COLOR_FAIL,
+            logger=LOGGER,
+        ),
+    )
 
 
-def dbt_task(task_id: str, dbt_args: str, *, silver_persisted: bool = False,
-             fresh_parse: bool = False, contract_selector: str | None = None,
-             expected_test_tuples: frozenset[tuple[str, str, str]] | None = None) -> PythonOperator:
+def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
     return PythonOperator(
-        task_id=task_id,
+        task_id=spec.task_id,
         python_callable=run_dbt_phase,
         op_kwargs={
-            "dbt_args": dbt_args,
+            "dbt_command": spec.dbt_command,
+            "selection": spec.selection,
             "snapshot_task_id": SNAPSHOT_TASK_ID,
-            "silver_persisted": silver_persisted,
-            "fresh_parse": fresh_parse,
-            "contract_selector": contract_selector,
-            "expected_test_tuples": expected_test_tuples,
+            "silver_persisted": spec.silver_persisted,
+            "fresh_parse": spec.fresh_parse,
         },
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=record_traffic_dbt_problem,
     )
 
@@ -388,16 +303,26 @@ def _current_run_results_path(**context) -> str | None:
     for task_id in reversed(DBT_PHASE_TASK_IDS):
         try:
             result = ti.xcom_pull(task_ids=task_id)
-        except Exception:  # noqa: BLE001 - continue to earlier current-run phases
+        except Exception as exc:  # noqa: BLE001 - inspect earlier current-run phases
+            LOGGER.debug(
+                "traffic dbt result XCom lookup failed for %s: %s",
+                task_id,
+                type(exc).__name__,
+            )
             result = None
-        if isinstance(result, dict) and result.get("artifact_path"):
-            return str(result["artifact_path"])
+        if isinstance(result, dict) and result.get("run_results_path"):
+            return str(result["run_results_path"])
         try:
             failure = ti.xcom_pull(task_ids=task_id, key=DBT_FAILURE_XCOM_KEY)
-        except Exception:  # noqa: BLE001 - continue to earlier current-run phases
+        except Exception as exc:  # noqa: BLE001 - inspect earlier current-run phases
+            LOGGER.debug(
+                "traffic dbt failure XCom lookup failed for %s: %s",
+                task_id,
+                type(exc).__name__,
+            )
             failure = None
-        if isinstance(failure, dict) and failure.get("dbt_artifact_path"):
-            return str(failure["dbt_artifact_path"])
+        if isinstance(failure, dict) and failure.get(DBT_RUN_RESULTS_RECORD_KEY):
+            return str(failure[DBT_RUN_RESULTS_RECORD_KEY])
     return None
 
 
@@ -413,13 +338,10 @@ def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> d
         return {"rows": 0, "skipped": True}
     target = (context.get("params") or {}).get("target")
     records = dump_dbt_run_results(resolved_path, domain=DOMAIN, target=target)
-    print(f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})")
+    print(
+        f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})"
+    )
     return {"rows": len(records), "skipped": False}
-
-
-def fail_transform_if_upstream_failed() -> None:
-    """Leave a failed DAG leaf whenever a transform task fails."""
-    raise AirflowFailException("traffic transform upstream task failed")
 
 
 with DAG(
@@ -440,116 +362,14 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     )
 
-    dbt_deps = dbt_task("dbt_deps", "deps")
-
-    dbt_source_freshness = dbt_task("dbt_source_freshness", "source freshness")
-
-    dbt_test_traffic_incident_availability = dbt_task(
-        "dbt_test_traffic_incident_availability",
-        "test --select assert_traffic_incident_row_availability",
-    )
-
-    dbt_test_traffic_bronze_source_contract = dbt_task(
-        "dbt_test_traffic_bronze_source_contract",
-        f"test --select {TRAFFIC_BRONZE_SOURCE_CONTRACT_SELECTOR}",
-        contract_selector=TRAFFIC_BRONZE_SOURCE_CONTRACT_SELECTOR,
-        expected_test_tuples=TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS,
-    )
-
-    dbt_seed_asac_axes = dbt_task("dbt_seed_asac_axes", "seed --select asac_axes")
-
-    dbt_run_common_admin_dong_dimension = dbt_task(
-        "dbt_run_common_admin_dong_dimension",
-        "run --select asac_axes.dim_admin_dong",
-    )
-
-    dbt_test_common_admin_dong_dimension = dbt_task(
-        "dbt_test_common_admin_dong_dimension",
-        (
-            "test --select asac_axes.dim_admin_dong "
-            # Canonical Gold tests that also ref dim_admin_dong are selected
-            # indirectly here, before the current run has rebuilt Gold.
-            "--exclude "
-            "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles "
-            "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact "
-            "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles "
-            "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness "
-            "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles"
-        ),
-    )
-
-    dbt_test_asac_axes_seed_contract = dbt_task(
-        "dbt_test_asac_axes_seed_contract",
-        f"test --select {ASAC_AXES_SEED_CONTRACT_SELECTOR}",
-        contract_selector=ASAC_AXES_SEED_CONTRACT_SELECTOR,
-        expected_test_tuples=ASAC_AXES_SEED_CONTRACT_TESTS,
-    )
-
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
         python_callable=resolve_traffic_snapshot_run,
         on_failure_callback=record_traffic_problem,
     )
 
-    dbt_run_silver = dbt_task(
-        "dbt_run_silver",
-        "run --select silver_seoul_traffic_incident silver_seoul_traffic_incident_current",
-        fresh_parse=True,
-    )
-
-    dbt_test_silver = dbt_task(
-        "dbt_test_silver",
-        (
-            "test --select "
-            "silver_seoul_traffic_incident "
-            "silver_seoul_traffic_incident_current "
-            "assert_traffic_current_pinned_publishable_run "
-            "assert_silver_traffic_uses_publishable_runs "
-            "assert_silver_traffic_location_contract "
-            "assert_traffic_audit_covers_latest_total_count "
-            "assert_silver_seoul_traffic_incident_grain_unique "
-            "assert_silver_traffic_event_at_matches_occurred_at "
-            "assert_silver_traffic_wgs84_required_when_source_coordinate_available "
-            "assert_silver_traffic_admin_axis_consistent "
-            "assert_silver_traffic_admin_axis_coverage "
-            "assert_silver_traffic_latest_publishable_record "
-            # gold-silver 교차 카운트 테스트는 silver 모델명 셀렉터가 참조 테스트로
-            # 끌어오지만, 이 단계에서는 gold가 직전 사이클 상태라 silver 가 갱신된
-            # 사이클마다 구조적으로 FAIL 한다. gold 재빌드 후 dbt_test_gold 에서만 돌린다.
-            "--exclude assert_gold_traffic_counts_match_silver "
-            "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles "
-            "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles"
-        ),
-        silver_persisted=True,
-    )
-
-    dbt_run_gold = dbt_task(
-        "dbt_run_gold",
-        "run --select gold_traffic_incident_summary "
-        "gold_traffic_incident_current_by_admin_dong_hourly",
-        silver_persisted=True,
-    )
-
-    dbt_test_gold = dbt_task(
-        "dbt_test_gold",
-        (
-            "test --select "
-            "gold_traffic_incident_summary "
-            "gold_traffic_incident_current_by_admin_dong_hourly "
-            "assert_gold_traffic_counts_match_silver "
-            "assert_gold_traffic_row_counts_positive "
-            "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles "
-            "assert_gold_traffic_current_by_admin_dong_hourly_admin_stamp_exact "
-            "assert_gold_traffic_current_by_admin_dong_hourly_fanout_reconciles "
-            "assert_gold_traffic_current_by_admin_dong_hourly_grain_unique "
-            "assert_gold_traffic_current_by_admin_dong_hourly_hourly_completeness "
-            "assert_gold_traffic_current_by_admin_dong_hourly_product_row_id_reproducible "
-            "assert_gold_traffic_current_by_admin_dong_hourly_snapshot_reconciles "
-            "assert_gold_traffic_current_by_admin_dong_hourly_zero_requires_complete"
-        ),
-        silver_persisted=True,
-        fresh_parse=True,
-    )
+    dbt_phase_tasks = {spec.task_id: dbt_task(spec) for spec in DBT_PHASE_SPECS}
+    dbt_tasks_in_order = list(dbt_phase_tasks.values())
 
     publish_dbt_metrics = PythonOperator(
         task_id="publish_dbt_run_metrics",
@@ -565,38 +385,13 @@ with DAG(
         retries=0,
     )
 
-    (
-        validate_runtime
-        >> resolve_snapshot
-        >> dbt_deps
-        >> dbt_source_freshness
-        >> dbt_test_traffic_incident_availability
-        >> dbt_test_traffic_bronze_source_contract
-        >> dbt_seed_asac_axes
-        >> dbt_run_common_admin_dong_dimension
-        >> dbt_test_common_admin_dong_dimension
-        >> dbt_test_asac_axes_seed_contract
-        >> dbt_run_silver
-        >> dbt_test_silver
-        >> dbt_run_gold
-        >> dbt_test_gold
-        >> publish_dbt_metrics
-    )
+    transform_tasks = [validate_runtime, resolve_snapshot, *dbt_tasks_in_order]
+    pipeline_tasks = [*transform_tasks, publish_dbt_metrics]
+    for upstream, downstream in zip(pipeline_tasks, pipeline_tasks[1:]):
+        upstream >> downstream
 
-    for transform_task in (
-        validate_runtime,
-        resolve_snapshot,
-        dbt_deps,
-        dbt_source_freshness,
-        dbt_test_traffic_incident_availability,
-        dbt_test_traffic_bronze_source_contract,
-        dbt_seed_asac_axes,
-        dbt_run_common_admin_dong_dimension,
-        dbt_test_common_admin_dong_dimension,
-        dbt_test_asac_axes_seed_contract,
-        dbt_run_silver,
-        dbt_test_silver,
-        dbt_run_gold,
-        dbt_test_gold,
-    ):
+    for transform_task in transform_tasks:
         transform_task >> propagate_transform_failure
+
+
+enable_lineage_if_configured(dag)
