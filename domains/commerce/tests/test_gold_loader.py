@@ -1,98 +1,53 @@
-"""gold loader — force_full(트리거 전량 재적재) 분기 계약.
+"""gold Iceberg loader — DDL/증분 SQL 생성·식별자 게이트·버킷 분할(순수 로직).
 
-commerce_load_gold_refresh 가 쓰는 force_full=True 가:
-- no_new_silver 조기 스킵을 **건너뛰고**(기적재만 있어도 재적재),
-- _load_chunked 에 force_full=True 를 전파해 마커 무관 전량 재적재하는지 검증.
-기본(force_full=False)은 기존 조기 스킵 동작을 그대로 유지하는지도 고정한다.
-DB/Trino 왕복은 페이크로 격리(순수 분기 로직만).
+서빙 레이어 개편(PROJECT.md §4): detail 은 카탈로그 구동으로 Iceberg 에 DDL ensure + 멤버별
+증분 INSERT INTO SELECT. 여기서는 DB 왕복 없이 SQL 생성 계약을 고정한다.
 """
 from __future__ import annotations
-
-from datetime import datetime
 
 import pytest
 
 from gold import loader
 
-
-class _FakeCur:
-    def __init__(self, fetchone_val=None):
-        self._fetchone = fetchone_val
-
-    def execute(self, *a, **k):
-        return None
-
-    def fetchone(self):
-        return self._fetchone
+_Q = "iceberg_dev.commerce"
+_DETAIL = {"object": "commerce_food_detail", "kind": "detail_cluster",
+           "members": ["bakery", "general_restaurant"], "payload": ["sitearea", "uptaenm"]}
 
 
-class _FakeTrinoConn:
-    def __init__(self, hi):
-        self._hi = hi
-
-    def cursor(self):
-        return _FakeCur(fetchone_val=(self._hi,))
-
-    def close(self):
-        pass
-
-
-class _FakePgConn:
-    def close(self):
-        pass
+def test_detail_ddl_natural_key_no_bigserial():
+    ddl = loader.detail_ddl(_Q, _DETAIL)
+    assert "CREATE TABLE IF NOT EXISTS iceberg_dev.commerce.commerce_food_detail" in ddl
+    for col in loader.DETAIL_KEY_COLUMNS:          # 자연키+버전 키 전부 포함
+        assert col in ddl
+    assert "sitearea varchar" in ddl and "uptaenm varchar" in ddl
+    assert "serial" not in ddl.lower() and "entity_seq" not in ddl   # 서러게이트 없음(§4.2)
+    assert "PARQUET" in ddl
 
 
-_HI = datetime(2026, 7, 13, 2, 37, 14)
-_DETAILS = [{"object": "commerce_food_detail", "kind": "detail_single",
-             "members": ["bakery"], "payload": ["A"]}]
-_DMAP = {"bakery": {"entity_type": "food", "detail_table": "commerce_food_detail"}}
-_EXPECTED = ["commerce_business_entity_history", "commerce_business_entity", "commerce_food_detail"]
+def test_detail_insert_sql_member_watermark_and_json_extract():
+    sql = loader.detail_insert_sql(_Q, _DETAIL)
+    # 멤버별 워터마크 = detail 테이블 자체 max(collected_at) — 별도 마커 없음
+    assert "WHERE dataset = ?" in sql
+    assert "FROM iceberg_dev.commerce.commerce_food_detail WHERE dataset = ?" in sql
+    assert "collected_at > (SELECT coalesce(max(collected_at)" in sql
+    # payload 는 record_json json 추출(대문자 키)
+    assert "json_extract_scalar(record_json, '$.SITEAREA')" in sql
+    assert "json_extract_scalar(record_json, '$.UPTAENM')" in sql
+    assert "FROM iceberg_dev.commerce.silver_license_history" in sql
 
 
-def _patch_common(monkeypatch, markers):
-    monkeypatch.setattr(loader.pg, "connect", lambda: _FakePgConn())
-    monkeypatch.setattr(loader, "read_markers", lambda pg: dict(markers))
-    monkeypatch.setattr(loader, "_trino", lambda: (_FakeTrinoConn(_HI), "iceberg_dev.commerce"))
-    monkeypatch.setattr(loader, "ensure_objects", lambda pg, details: None)
+def test_detail_insert_sql_bucket_pred():
+    sql = loader.detail_insert_sql(_Q, _DETAIL, bucket=(2, 5))
+    assert "mod(from_base(substr(content_hash, 1, 8), 16), 5) = 2" in sql
+    assert "mod(" not in loader.detail_insert_sql(_Q, _DETAIL)       # 기본은 버킷 없음
 
 
-def test_force_full_bypasses_no_new_silver_skip(monkeypatch):
-    # 전 객체 마커가 hi 이상 → 평상시라면 no_new_silver 로 스킵되는 상태.
-    markers = {o: _HI for o in _EXPECTED}
-    _patch_common(monkeypatch, markers)
-    monkeypatch.setattr(loader, "_read_silver_watermark", lambda: _HI)
-    seen = {}
-
-    def _fake_chunked(tconn, qschema, pgconn, details, dmap, hi, *, force_full=False):
-        seen["force_full"] = force_full
-        return {"loaded": {"commerce_food_detail": 3}, "hi": str(hi),
-                "mode": "full_reload" if force_full else "chunked"}
-
-    monkeypatch.setattr(loader, "_load_chunked", _fake_chunked)
-    out = loader.run_load(_DETAILS, _DMAP, force_full=True)
-    assert seen["force_full"] is True          # force_full 이 청크 경로로 전파
-    assert out["mode"] == "full_reload"
-    assert "skipped" not in out                 # 조기 스킵 안 함
-
-
-def test_default_still_skips_when_no_new(monkeypatch):
-    # 동일 상태에서 force_full=False(기본)면 기존대로 조기 스킵(회귀 방지).
-    markers = {o: _HI for o in _EXPECTED}
-    _patch_common(monkeypatch, markers)
-    monkeypatch.setattr(loader, "_read_silver_watermark", lambda: _HI)
-    monkeypatch.setattr(loader, "_load_chunked",
-                        lambda *a, **k: pytest.fail("스킵돼야 하는데 청크 진입"))
-    out = loader.run_load(_DETAILS, _DMAP)
-    assert out.get("skipped") == "no_new_silver"
-
-
-def test_force_full_reloads_even_with_full_markers(monkeypatch):
-    # 마커가 전부 있어도(정상 증분 경로 조건) force_full 이면 청크 전량 경로로 간다.
-    markers = {o: _HI for o in _EXPECTED}
-    _patch_common(monkeypatch, markers)
-    monkeypatch.setattr(loader, "_read_silver_watermark", lambda: None)  # 워터마크 무관
-    seen = {}
-    monkeypatch.setattr(loader, "_load_chunked",
-                        lambda *a, force_full=False, **k: seen.setdefault("ff", force_full) or {"mode": "full_reload"})
-    loader.run_load(_DETAILS, _DMAP, force_full=True)
-    assert seen["ff"] is True
+def test_identifier_gate_blocks_injection():
+    bad_obj = {**_DETAIL, "object": "x; drop table y"}
+    bad_col = {**_DETAIL, "payload": ["good", "bad-col;--"]}
+    bad_member = {**_DETAIL, "members": ["ok", "1' or '1"]}
+    for bad in (bad_obj, bad_col, bad_member):
+        with pytest.raises(Exception):
+            loader.detail_ddl(_Q, bad)
+        with pytest.raises(Exception):
+            loader.detail_insert_sql(_Q, bad)

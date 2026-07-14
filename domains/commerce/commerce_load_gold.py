@@ -1,21 +1,21 @@
-"""commerce_load_gold — gold 카탈로그 생성 + 카탈로그 기반 서빙 DB(Postgres) 증분 적재.
+"""commerce_load_gold — gold **Iceberg** 적재: 코어(dbt/Cosmos) + 카탈로그 구동 detail.
 
-silver(05:00) 이후 06:00 KST. **카탈로그와 DB 가 함께 존재**한다는 전제(사용자 확정):
-task1 이 카탈로그(DB 테이블 `commerce_catalog`)를 만들고, task2 가 그 카탈로그를 읽어
-없는 table/view 를 생성(task 초기)한 뒤 증분 데이터를 적재한다.
+silver(05:00) 이후 06:00 KST. 서빙 레이어 정책(docs/PROJECT.md §4 — 2026-07-14 개편):
+서빙 Postgres 폐기, gold 는 bronze/silver 와 동일한 **Iceberg 카탈로그**에 만들고 선별 소수
+테이블만 D1(SQLite)로 export(예정). 기존 RDB 관계형 모델링은 Iceberg 로 승계한다:
 
-  build_catalog ──> load_gold
+- **코어(공통 컬럼, dbt)**: gold_license_entity(현재) · gold_license_entity_history(이력) ·
+  gold_license_dong_summary(행정동 집계, D1 1순위) — Cosmos 가 모델당 run+test 로 실행.
+- **detail(API 별 상이 컬럼, 카탈로그 구동)**: bronze record_json 실측 → 엄격 클러스터 규칙
+  (Jaccard>=0.7 ∧ 멤버>=3 ∧ 공유>=8) → `gold_catalog`(Iceberg) 갱신 → detail 테이블
+  (`commerce_<domain>_detail`) DDL ensure + **멤버별 증분 INSERT INTO SELECT**(Trino 단독,
+  행이 Python 을 거치지 않음). 워터마크 = detail 테이블 자체의 멤버별 max(collected_at).
 
-- build_catalog: 적재된 bronze `record_json` 키를 dataset 별 실측(Trino) → 엄격 클러스터 규칙
-  (Jaccard>=0.7 ∧ 멤버>=3 ∧ 공유>=8) + 도메인 명명맵 → `commerce_catalog` 갱신(version) +
-  버전 변경(드리프트) 감지 로그.
-- load_gold: 카탈로그를 읽어 **DDL ensure**(core·dim·detail·view — IF NOT EXISTS) →
-  marker(`commerce_load_run_marker`, collected_at 워터마크) → **중단 방어**(워터마크 이후
-  잔존행 선삭제, marker 없으면 전량 재적재) → silver 신규 버전만 적재 → **완료 후 DONE**.
+  build_catalog ──> dbt_gold(Cosmos) ──> load_details ──> report_gold
 
-이력: silver history(append-only)의 버전행을 그대로 승계 — 값 변경 = 버전 누적(A→B→A 보존).
-위치 매핑 키(gu_code·admin_dong_code)와 시간축(updatedt)은 entity/history/view 에 상시 노출.
-객체 명세: dbt/domains/commerce/docs/DB/gold/ (tables.md·views.md) · 카탈로그 규칙: include/gold/.
+식별자: 자연키 (dataset, opnsfteamcode, mgtno) — bigserial/entity_seq 없음(§4.2 D1 특성).
+리니지: 코어는 Cosmos 네이티브 OL, detail 은 물리명 stitch(같은 웨어하우스). 뷰 320 미승계.
+객체 명세: dbt/domains/commerce/docs/DB/gold/(재편 중) · 카탈로그 규칙: include/gold/.
 """
 from __future__ import annotations
 
@@ -38,68 +38,64 @@ import os  # noqa: E402
 
 import pendulum  # noqa: E402
 from airflow.decorators import dag, task  # noqa: E402
-from airflow.sdk import Asset  # noqa: E402
+from cosmos import (  # noqa: E402
+    DbtTaskGroup,
+    ExecutionConfig,
+    ProfileConfig,
+    ProjectConfig,
+    RenderConfig,
+)
+from cosmos.constants import ExecutionMode, InvocationMode, LoadMode, TestBehavior  # noqa: E402
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5)}
 
-# ── OpenLineage inlets/outlets (V1 — silver→gold 엣지를 Marquez 에) ─────────────
-# Cosmos(dbt) 가 방출하는 silver dataset 표기를 2026-07-12 Marquez 실측으로 확인:
-#   namespace `trino://trino:8080` · name `iceberg_dev.commerce.silver_license_history`.
-# Airflow trino/postgres provider 의 Asset 컨버터가 아래 URI 를 정확히 같은 표기로 변환한다
-# (trino://host:port/<catalog>/<schema>/<table> → ns `trino://host:port` + name `catalog.schema.table`,
-#  postgres://host:port/<db>/<schema>/<table> 동일 규칙). 표기는 env 로 dev/prod 이식
-# (bronze.warehouse._qualified 와 동일 계약). OL 은 fail-open — 컨버터/백엔드 부재 시 파이프라인 무영향.
-_TRINO_AUTH = f"{os.getenv('TRINO_HOST', 'trino')}:{os.getenv('TRINO_PORT', '8080')}"
-_CATALOG = (os.getenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-            if os.getenv("DBT_TARGET", "dev").strip().lower() == "dev"
-            else os.getenv("TRINO_ICEBERG_CATALOG", "iceberg"))
-_SCHEMA = os.getenv("COMMERCE_SCHEMA", "commerce")
-_PG_AUTH = f"{os.getenv('COMMERCE_GOLD_PG_HOST', 'serving-postgres')}:{os.getenv('COMMERCE_GOLD_PG_PORT', '5432')}"
-_PG_DB = os.getenv("COMMERCE_GOLD_PG_DB", "serving")
-_GOLD_INLETS = [
-    Asset(f"trino://{_TRINO_AUTH}/{_CATALOG}/{_SCHEMA}/silver_license_history"),
-    Asset(f"trino://{_TRINO_AUTH}/{_CATALOG}/{_SCHEMA}/silver_license_current"),
-]
-# outlets 는 대표 core 2객체만(85개 전수 나열 금지 — 카탈로그 구동으로 가변). 상세 소비 계약은
-# dbt exposures(commerce_gold_serving)와 docs/DB/gold/ 가 정본.
-_GOLD_OUTLETS = [
-    Asset(f"postgres://{_PG_AUTH}/{_PG_DB}/public/commerce_business_entity"),
-    Asset(f"postgres://{_PG_AUTH}/{_PG_DB}/public/commerce_business_entity_history"),
-]
+# dbt 실행 계약 — commerce_load_silver 와 동일(venv dbt · SUBPROCESS · 기존 profiles 재사용).
+DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce")
+DBT_BIN = os.getenv("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
+DBT_TARGET = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
+GOLD_SELECT = ["gold_license_entity", "gold_license_entity_history", "gold_license_dong_summary"]
+
+_profile_config = ProfileConfig(
+    profile_name="commerce",
+    target_name=DBT_TARGET,
+    profiles_yml_filepath=Path(DBT_PROJECT_DIR) / "profiles.yml",
+)
+_project_config = ProjectConfig(dbt_project_path=DBT_PROJECT_DIR)
+_execution_config = ExecutionConfig(
+    execution_mode=ExecutionMode.LOCAL,
+    invocation_mode=InvocationMode.SUBPROCESS,
+    dbt_executable_path=DBT_BIN,
+)
+_render_config = RenderConfig(
+    select=GOLD_SELECT,
+    test_behavior=TestBehavior.AFTER_EACH,
+    load_method=LoadMode.DBT_LS,
+    invocation_mode=InvocationMode.SUBPROCESS,
+    dbt_executable_path=DBT_BIN,
+)
 
 
 @dag(dag_id="commerce_load_gold", schedule="0 6 * * *",
      start_date=pendulum.datetime(2024, 1, 1, tz="Asia/Seoul"), catchup=False,
      max_active_runs=1, default_args=_DEFAULT_ARGS,
-     tags=["seoul", "commerce", "gold", "serving"], doc_md=__doc__)
+     tags=["seoul", "commerce", "gold", "iceberg"], doc_md=__doc__)
 def commerce_load_gold():
     @task
     def build_catalog() -> dict:
-        """실측(bronze record_json) → 카탈로그 규칙 → commerce_catalog 갱신(+드리프트 감지)."""
+        """실측(bronze record_json) → 카탈로그 규칙 → gold_catalog(Iceberg) 갱신(+드리프트 감지)."""
         from commerce_core import registry
-        from gold import catalog_rules, ddl, loader, measure, pg
+        from gold import catalog_rules, loader, measure
 
         fields = measure.measure_fields()
         meta = {d.short: {"fmt": d.fmt} for d in registry.enabled_for_schedule("daily")}
         cat = catalog_rules.build_catalog(fields, meta)
 
-        pgconn = pg.connect()
-        try:
-            with pgconn.cursor() as cur:            # 카탈로그/마커 테이블 선생성(멱등)
-                for _n, sql in ddl.create_core_sql():
-                    cur.execute(sql)  # security: allow-sql - 코드 상수 DDL
-            pgconn.commit()
-            with pgconn.cursor() as cur:
-                cur.execute("select distinct catalog_version from commerce_catalog limit 1")
-                row = cur.fetchone()
-            prev = row[0] if row else None
-            if prev and prev != cat["version"]:
-                log.warning("카탈로그 드리프트: %s → %s (신규 API/필드 반영)", prev, cat["version"])
-            loader.upsert_catalog(pgconn, cat["details"], cat["version"])
-        finally:
-            pgconn.close()
+        _prev_details, prev = loader.read_catalog()
+        if prev and prev != cat["version"]:
+            log.warning("카탈로그 드리프트: %s → %s (신규 API/필드 반영)", prev, cat["version"])
+        loader.upsert_catalog(cat["details"], cat["version"])
         summary = {"version": cat["version"], "datasets": len(fields),
                    "clusters": sum(1 for d in cat["details"] if d["kind"] == "detail_cluster"),
                    "singles": sum(1 for d in cat["details"] if d["kind"] == "detail_single"),
@@ -107,60 +103,43 @@ def commerce_load_gold():
         log.info("catalog: %s", summary)
         return summary
 
-    @task(inlets=_GOLD_INLETS, outlets=_GOLD_OUTLETS)
-    def load_gold() -> dict:
-        """카탈로그(DB)를 읽어 DDL ensure → marker 증분 → 중단 방어 → 적재 → DONE."""
-        from gold import loader, pg
+    @task
+    def load_details() -> dict:
+        """gold_catalog 를 읽어 detail 테이블 DDL ensure + 멤버별 증분 적재(Trino 단독)."""
+        from gold import loader
 
-        pgconn = pg.connect()
-        try:
-            with pgconn.cursor() as cur:
-                cur.execute("select object, kind, members, payload_columns from commerce_catalog "
-                            "where kind in ('detail_cluster', 'detail_single') order by object")
-                rows = cur.fetchall()
-        finally:
-            pgconn.close()
-        if not rows:
+        details, version = loader.read_catalog()
+        if not details:
             log.info("카탈로그 비어 있음 — build_catalog 선행 필요")
             return {"loaded": {}}
-        details = [{"object": r[0], "kind": r[1], "members": (r[2] or "").split(),
-                    "payload": (r[3] or "").split()} for r in rows]
-        dataset_map = {}
-        for d in details:
-            etype = d["object"].removeprefix("commerce_").removesuffix("_detail")
-            for m in d["members"]:
-                dataset_map[m] = {"entity_type": etype, "detail_table": d["object"]}
-        return loader.run_load(details, dataset_map)
-
-    @task
-    def build_code_values() -> dict:
-        """정규화 검토(Option 1) 채움 — detail 저카디널리티 컬럼(표본검증 완료 72쌍) 값을
-        commerce_code_value 에 집계(거버넌스/참조용, detail 스키마는 불변). load_gold 이후 실행
-        (detail 실데이터가 있어야 집계 가능)."""
-        from gold import code_values, pg
-
-        pgconn = pg.connect()
-        try:
-            return code_values.build_code_values(pgconn)
-        finally:
-            pgconn.close()
+        loaded = loader.run_load_details(details)
+        return {"loaded": loaded, "catalog_version": version}
 
     @task(trigger_rule="all_done")
     def report_gold(**ctx) -> dict:
-        """실행시간 + 카탈로그 + 객체별 적재행 Discord 리포트(#218). 실패해도 반드시 보고."""
+        """실행시간 + 카탈로그 + 코어 현황 + detail 적재행 Discord 리포트(#218). 실패해도 보고."""
         from datetime import datetime, timezone
 
         from gold import report
 
         ti = ctx["ti"]
-        catalog = ti.xcom_pull(task_ids="build_catalog")   # 실패 시 None → 실패 리포트
-        load = ti.xcom_pull(task_ids="load_gold")
+        catalog = ti.xcom_pull(task_ids="build_catalog")
+        load = ti.xcom_pull(task_ids="load_details")
         dr = ctx.get("dag_run")
         elapsed = ((datetime.now(timezone.utc) - dr.start_date).total_seconds()
                    if dr and getattr(dr, "start_date", None) else None)
         return report.send_gold_report(catalog=catalog, load=load, elapsed_seconds=elapsed)
 
-    build_catalog() >> load_gold() >> build_code_values() >> report_gold()
+    dbt_gold = DbtTaskGroup(
+        group_id="dbt_gold",
+        project_config=_project_config,
+        profile_config=_profile_config,
+        execution_config=_execution_config,
+        render_config=_render_config,
+        operator_args={"install_deps": False},
+    )
+
+    build_catalog() >> dbt_gold >> load_details() >> report_gold()
 
 
 commerce_load_gold()

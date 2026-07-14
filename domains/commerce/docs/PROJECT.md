@@ -91,7 +91,7 @@ minor = short               (API)
 | **raw** | (dataset, run) | 당일 `completed` 마커 제외 | `recollect`(incomplete 재수집) | 재수집이 파일 덮어씀 + `cleanup_incomplete` |
 | **bronze** | (dataset, run) | 워터마크 이후만 | `commit_watermark`(실패 run 직전까지만 전진) | PyIceberg **delete+append 원자 트랜잭션**(재적재 시 delete 선행) |
 | **silver** | (dataset, bronze_run_id) | **DONE 마커**(dbt test 통과분) | 미마커 run 재처리 | `delete_unmarked_silver_history_runs`(미완성 이력 삭제 후 재append). current/detail 은 grain 단위 incremental(원자) |
-| **gold** | (미구현) | — | — | 구현 시 **동일 패턴**: DONE 마커 + 미마커 drop, 단위=(집계키, 입력 run) |
+| **gold** | (Iceberg·dbt) grain/워터마크 | incremental 워터마크(collected_at) 이후만 | 미반영 창 재처리 | dbt incremental(delete+insert/append) · full-refresh(§4) |
 | **유지보수(#226)** | (테이블, op) | 멱등 → 성공 재실행 무해 | 실패 op 만 재실행 | 각 op 원자·멱등 |
 
 - **불변식**: `silver_license_history` 는 **append-only(전 버전 보존)** — 값이 바뀌어도 이전 값은 삭제되지
@@ -101,7 +101,66 @@ minor = short               (API)
 
 ---
 
-## 4. 작업 워크플로 (이슈 → 브랜치 → PR)
+## 4. 서빙 레이어 정책 — gold(Iceberg) → D1(SQLite) 선별 서빙
+
+> 2026-07-14 사용자 확정: **서빙 DB 는 Postgres 가 아니다.** 기존 serving Postgres 경로(Python
+> gold 적재·`commerce_entity_key` bigserial·전용 컨테이너)는 폐기한다. 서빙 대상은
+> **Cloudflare D1(SQLite)** 이며, gold 는 bronze/silver 와 동일한 **Iceberg 카탈로그** 구조로 만든다.
+
+### 4.1 아키텍처 (2단)
+
+```
+bronze(Iceberg) → silver(Iceberg, dbt) → gold(Iceberg, dbt)  ← 전체 데이터·분석용(정본)
+                                              └→ D1(SQLite)  ← 선별 소수 테이블만 export(서빙, 예정)
+```
+
+- **gold = Iceberg(dbt-trino)**: silver 와 같은 웨어하우스·같은 도구. 전체 규모(수백만 행)를 담는
+  정본 서빙-준비 계층. 리니지도 dbt/Cosmos 네이티브로 이어진다(기존 Python gold 의 리니지 사각 해소).
+- **D1 = 선별 export**: gold 중 **특정 몇 가지 테이블만** SQLite 로 옮겨 제공한다(export 절차는
+  후속 구현 — 대상 목록은 §4.3).
+
+### 4.2 DB 특성에 따른 설계 원칙 (필수 준수)
+
+서빙 DB 특성이 gold·서빙 레이어 설계를 결정한다. **D1(SQLite) 특성** 과 그에 따른 원칙:
+
+| D1/SQLite 특성 | 설계 원칙 |
+|---|---|
+| DB 당 용량 상한(D1 10GB, 실용 권장 ≪1GB)·단일 파일 | **소형 테이블만 export** — 전량 이력·`record_json`(통짜 JSON)·수백만 행 원장은 D1 금지, Iceberg gold 에만 둔다 |
+| 단일 writer·동시 쓰기 제약 | export 는 **전량 교체 스냅샷**(재생성) 우선 — 증분 upsert 대신 파일 단위 재생성이 단순·안전 |
+| 시퀀스/bigserial 없음(rowid 만) | **식별자는 자연키/결정적 키** — DB 발급 서러게이트 금지. `commerce_entity_key`(Postgres bigserial) 계약 종료, 자연키 = (dataset, opnsfteamcode, mgtno) |
+| 서버리스 엣지 **읽기 최적화** | export 대상은 조회 형태로 **사전 집계/평탄화**(조인 최소화) — 행정동 집계·현재 상태 등 |
+| 동적 타이핑(타입 강제 약함) | export 시 타입 정규화(문자/정수/실수 명시) — 좌표 double·코드 varchar 유지 |
+
+**규약**: 서빙 DB 를 바꾸거나 export 대상을 늘릴 때는 반드시 이 표(§4.2)에 대상 DB 특성을 먼저
+정리하고, gold(Iceberg) 모델과 export 계층을 그 특성에 맞게 설계한다 — "DB 가 바뀌면 서빙 설계도
+바뀐다"가 원칙이다.
+
+### 4.3 gold(Iceberg) 구조 — RDB 관계형 모델링 승계(재심의 2026-07-14)
+
+> 집계 테이블만으로 축소하지 않는다 — **API 별로 컬럼이 크게 상이**하므로, 기존 RDB gold 의
+> 관계형 모델링(코어 + 카탈로그 구동 detail)을 Iceberg 로 그대로 승계해 **서빙 가능한 단위**
+> (테이블·컬럼)로 데이터를 뽑아낼 수 있어야 한다(사용자 확정).
+
+| gold 객체(Iceberg) | 도구 | 내용 | D1 export |
+|---|---|---|---|
+| `gold_license_entity` | dbt | 업소 현재 상태(공통 컬럼, 자연키 grain) | 선별(필터/컬럼 축소) 후보 |
+| `gold_license_entity_history` | dbt | 버전 이력 프로젝션(append, collected_at 증분) | ❌ (대용량 — Iceberg 전용) |
+| `gold_catalog` | Python(Trino) | detail 스펙 정본(실측→클러스터 규칙, 버전·드리프트) | ❌ (내부 메타) |
+| `commerce_<domain>_detail` ×N | Python(Trino) | **API 별 상이(비공통) 컬럼 평탄화** — 카탈로그 구동, 멤버별 증분 INSERT INTO SELECT | 대상별 선별 후보 |
+| `gold_license_dong_summary` | dbt | 행정동별 업소/영업/폐업 집계(소형) | ✅ 1순위 |
+
+- **서빙 단위 추출** = 코어(entity) ⋈ detail(자연키 조인) — D1 export 는 이 조합에서 대상별
+  필터·컬럼 축소로 뽑는다(§4.2 원칙).
+- detail 이 dbt 가 아닌 이유: 카탈로그 구동(런타임 실측으로 테이블 셋이 변함) — dbt 정적 모델로
+  표현 불가. 단 적재는 Trino `INSERT INTO … SELECT`(문장 원자·행이 Python 을 안 거침)로 수행.
+- 재개 표준(§3): dbt incremental(워터마크) + detail 은 **테이블 자체의 멤버별 max(collected_at)**
+  이 워터마크(별도 마커 없음) + full-refresh(`commerce_load_gold_refresh`).
+- **뷰 320 개만 미승계**(Iceberg REST 카탈로그 뷰 제약) — detail 직접 조회(`WHERE dataset=…`)로
+  대체. code_value 집계는 후속 포팅 후보.
+
+---
+
+## 5. 작업 워크플로 (이슈 → 브랜치 → PR)
 
 commerce 도메인의 모든 변경은 **GitHub 이슈 → 이슈 번호 기반 브랜치 → PR** 순서를 따른다.
 "먼저 이슈로 무엇을·왜 바꾸는지 기록"하고, 브랜치·PR 이 그 이슈로 추적되게 하는 것이 목적이다.
@@ -121,14 +180,14 @@ commerce 도메인의 모든 변경은 **GitHub 이슈 → 이슈 번호 기반 
 
 ---
 
-## 5. 문서 지도 (뎁스별 인덱스)
+## 6. 문서 지도 (뎁스별 인덱스)
 
 commerce 전체 문서를 **레포·폴더 뎁스**로 조망하는 마스터 인덱스. 각 폴더는 **자체 README** 로 다시
 진입하고, 그 README 가 폴더 안 파일을 인덱싱한다(폴더→README→파일 3단). 여기서는 최상위에서 **어디에
 무엇이 있는지**를 한 줄 요약으로 정리한다. 파이프라인·운영·보안·정책은 **dags 번들**,
 silver/gold 변환·DB 명세는 **dbt 번들**(별도 서브모듈 ASAC-DBT — 경로로 표기).
 
-### 5.1 dags/domains/commerce/docs/ — 수집~적재 파이프라인·운영·정책
+### 6.1 dags/domains/commerce/docs/ — 수집~적재 파이프라인·운영·정책
 
 - [README.md](README.md) — 문서 최상위 인덱스(주제별 폴더 진입)
 - **PROJECT.md**(이 문서) — 프로젝트 고유 정책 단일 소스(분류·리포트·재개·워크플로·문서지도)
@@ -153,7 +212,7 @@ silver/gold 변환·DB 명세는 **dbt 번들**(별도 서브모듈 ASAC-DBT —
 - [security/](security/README.md) — 보안 게이트
   - [security.md](security/security.md)(위협모델·가드·단일점검) · [usage.md](security/usage.md) · [techniques.md](security/techniques.md) · [adoption.md](security/adoption.md)
 
-### 5.2 dbt/domains/commerce/docs/ — silver/gold 변환·DB 명세 (ASAC-DBT 번들)
+### 6.2 dbt/domains/commerce/docs/ — silver/gold 변환·DB 명세 (ASAC-DBT 번들)
 
 > 별도 서브모듈이라 GitHub 상 상대링크가 끊기므로 **경로**로 표기한다. 진입점은
 > `dbt/domains/commerce/docs/README.md`(용도별 인덱스) → 하위 폴더 README.
@@ -169,7 +228,13 @@ silver/gold 변환·DB 명세는 **dbt 번들**(별도 서브모듈 ASAC-DBT —
 
 ---
 
-## 6. 변경 이력
+## 7. 변경 이력
+
+- 2026-07-14: **서빙 레이어 전면 개편(§4 신설)** — 서빙 DB Postgres 폐기, 대상 = **D1(SQLite)**.
+  gold 는 bronze/silver 와 동일 **Iceberg 카탈로그**(dbt)로 재구축하고 **선별 소수 테이블만 D1 export**
+  (예정). "DB 특성(용량 상한·단일 writer·시퀀스 없음·엣지 읽기 최적화)에 따라 gold·서빙 레이어를
+  설계한다" 원칙 명문화(§4.2). `commerce_entity_key`(bigserial) 계약 종료 — 자연키로 전환. 기존
+  serving Postgres 리소스(컨테이너·볼륨·Python gold 적재 경로) 삭제(사용자 지시).
 
 - 2026-07-14: **silver 리포트 지표를 현재행수(누적) → 이번 실행 신규 처리행으로 변경**(#66 후속,
   사용자 지시). 근거: 누적 현황은 신규 적재가 없어도 매일 전체를 반복 보고 — collect/bronze 와 같은

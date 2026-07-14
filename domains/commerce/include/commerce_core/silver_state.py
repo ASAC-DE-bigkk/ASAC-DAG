@@ -8,9 +8,10 @@ DONE 이 사라져 **기적재 run 이 신규처럼 재선별·재적재**됨). 
 
 1. `_markers.json` — DONE (dataset, bronze_run_id) 전량 스냅샷. 마커 테이블이 유실/재생성되면
    `silver_markers.ensure_silver_marker_table` 이 여기서 복원한다(기적재 재적재 원천 차단).
-2. `_watermark.json` — silver history 의 max(collected_at). **gold 가 소비하는 핸드셰이크**:
-   gold 마커(collected_at 워터마크)가 이미 이 값 이상이면 신규가 없으므로 gold 는 Trino
-   접속·DDL·적재·검증을 전부 생략한다(기적재만 있으면 추가 적재/검증 없음 — 사용자 계약).
+2. `_watermark.json` — silver history 의 max(collected_at). silver 처리 완료 시점의 관측
+   워터마크(모니터링·후속 export 스킵 판정용 참조값). ※ 과거 gold(Postgres) 조기 스킵 핸드셰이크
+   소비처는 서빙 레이어 개편(PROJECT.md §4 — gold=Iceberg dbt)으로 폐기 — dbt incremental 이
+   자체 워터마크로 같은 효과(신규 없으면 0행)를 낸다.
 
 쓰기 시점 = 마커 테이블 변경 직후(`mark_silver_runs_done` / `_unmark_datasets`) — 테이블과
 파일은 한 몸으로 움직인다. 파일 기록 실패는 경고만(fail-open): 파일이 뒤처지면 gold 가 스킵하지
