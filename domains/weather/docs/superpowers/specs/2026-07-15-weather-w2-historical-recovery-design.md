@@ -19,7 +19,7 @@
 
 1. `deps`, bridge input seed, admin-dong dimension, bridge를 준비한다.
 2. W2 bounded vars를 전달해 Observation, Grid, canonical Gold를 차례로 merge한다.
-3. W2 범위가 명시된 Gold expected-row/extra-row reconciliation tests를 실행한다. 전체 Silver를 다시 group/join하는 normal-path tests는 window loop에 넣지 않는다.
+3. W2 범위가 명시된 Gold expected-row/extra-row reconciliation과 exact lineage test를 실행한다. lineage test는 Gold의 `source_id + dag_run_id` 후보로 Silver Grid를 먼저 한정한 뒤 ordered typed JSON 전체 동등성을 비교한다. 전체 Silver를 다시 group/join하는 normal-path tests는 window loop에 넣지 않는다.
 4. 성공한 window만 Airflow Variable checkpoint에 기록한다.
 5. 모든 window 뒤 global Observation reconciliation test를 실행한다.
 
