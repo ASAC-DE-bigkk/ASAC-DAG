@@ -21,8 +21,6 @@ from airflow.models.param import Param
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
-from airflow.sdk.exceptions import AirflowFailException
-from airflow.utils.trigger_rule import TriggerRule
 
 # 공통 패키지(dags/common)와 Weather 로컬 패키지 import 경로를 초기화한다.
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -172,9 +170,9 @@ def publish_dbt_run_metrics(run_results_path: str = RUN_RESULTS_PATH, **context)
     return {"rows": len(records), "skipped": False}
 
 
-def fail_transform_if_upstream_failed() -> None:
-    """Leave a failed DAG leaf whenever a transform task fails."""
-    raise AirflowFailException("weather transform upstream task failed")
+def publish_weather_transform_success_metrics(context: dict) -> dict:
+    """Adapt Airflow's single callback context argument for the metrics helper."""
+    return publish_dbt_run_metrics(**context)
 
 
 with DAG(
@@ -186,6 +184,7 @@ with DAG(
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=2)},
     params=DEFAULT_PARAMS,
+    on_success_callback=publish_weather_transform_success_metrics,
     tags=["ask_seoul", "weather", "transform", "silver", "gold", "dbt"],
 ) as dag:
     validate_runtime = PythonOperator(
@@ -325,20 +324,6 @@ with DAG(
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )
 
-    publish_dbt_metrics = PythonOperator(
-        task_id="publish_dbt_run_metrics",
-        python_callable=publish_dbt_run_metrics,
-        trigger_rule=TriggerRule.ALL_DONE,
-        on_failure_callback=record_weather_problem,
-    )
-
-    propagate_transform_failure = PythonOperator(
-        task_id="fail_transform_if_upstream_failed",
-        python_callable=fail_transform_if_upstream_failed,
-        trigger_rule=TriggerRule.ONE_FAILED,
-        retries=0,
-    )
-
     (
         validate_runtime
         >> dbt_deps
@@ -354,23 +339,4 @@ with DAG(
         >> dbt_test_gold
         >> dbt_run_place_mart
         >> dbt_test_place_mart
-        >> publish_dbt_metrics
     )
-
-    for transform_task in (
-        validate_runtime,
-        dbt_deps,
-        dbt_source_freshness,
-        dbt_seed_asac_axes,
-        dbt_run_common_admin_dong_dimension,
-        dbt_test_common_admin_dong_dimension,
-        dbt_seed_place_mapping,
-        dbt_test_place_mapping_seed,
-        dbt_run_silver,
-        dbt_test_silver,
-        dbt_run_gold,
-        dbt_test_gold,
-        dbt_run_place_mart,
-        dbt_test_place_mart,
-    ):
-        transform_task >> propagate_transform_failure
