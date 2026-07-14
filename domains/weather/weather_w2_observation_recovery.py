@@ -48,6 +48,7 @@ CHECKPOINT_PREFIX = "ask_seoul.weather.w2_observation_recovery"
 CHECKPOINT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 KMA_SOURCE_ID = "kma_vilage_fcst"
 MANIFEST_TABLE = "bronze_collection_run_manifest"
+LINEAGE_RUN_BUCKET_COUNT = 4
 
 PREPARE_DBT_ARGS = (
     ("deps",),
@@ -72,13 +73,18 @@ WINDOW_DBT_ARGS = (
     ("run", "--select", "silver_kma_vilage_fcst_observation"),
     ("run", "--select", "silver_kma_vilage_fcst_grid"),
     ("run", "--select", "gold_weather_forecast_by_admin_dong"),
+    ("run", "--select", "weather_w2_observation_recovery_lineage_workset"),
     (
         "test",
         "--select",
         "assert_gold_weather_forecast_by_admin_dong_repair_reconciles "
-        "assert_gold_weather_forecast_by_admin_dong_repair_window_no_extra_rows "
-        "assert_gold_weather_forecast_by_admin_dong_repair_window_lineage",
+        "assert_gold_weather_forecast_by_admin_dong_repair_window_no_extra_rows",
     ),
+)
+LINEAGE_DBT_ARGS = (
+    "test",
+    "--select",
+    "assert_gold_weather_forecast_by_admin_dong_repair_window_lineage",
 )
 FINAL_DBT_ARGS = (
     "test",
@@ -238,6 +244,13 @@ def recover_observation_windows(**context) -> dict[str, object]:
         LOGGER.info("[weather-w2-recovery] recover window=%s", window.label)
         for args in WINDOW_DBT_ARGS:
             run_dbt(args, target=target, variables=variables)
+        for lineage_bucket_index in range(LINEAGE_RUN_BUCKET_COUNT):
+            lineage_variables = {
+                **variables,
+                "weather_w2_lineage_run_bucket_count": str(LINEAGE_RUN_BUCKET_COUNT),
+                "weather_w2_lineage_run_bucket_index": str(lineage_bucket_index),
+            }
+            run_dbt(LINEAGE_DBT_ARGS, target=target, variables=lineage_variables)
         completed.add(window.label)
         _save_checkpoint(variable_name, windows, completed)
 

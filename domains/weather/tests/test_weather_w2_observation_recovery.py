@@ -176,13 +176,18 @@ def test_manual_recovery_runs_only_bounded_w2_data_test_per_window():
         Path(__file__).resolve().parents[1] / "weather_w2_observation_recovery.py"
     ).read_text(encoding="utf-8")
     window_args = source[
-        source.index("WINDOW_DBT_ARGS =") : source.index("FINAL_DBT_ARGS =")
+        source.index("WINDOW_DBT_ARGS =") : source.index("LINEAGE_DBT_ARGS =")
     ]
 
     assert "assert_gold_weather_forecast_by_admin_dong_repair_reconciles" in window_args
     assert "assert_gold_weather_forecast_by_admin_dong_repair_window_no_extra_rows" in window_args
-    assert "assert_gold_weather_forecast_by_admin_dong_repair_window_lineage" in window_args
+    assert "weather_w2_observation_recovery_lineage_workset" in window_args
+    assert "assert_gold_weather_forecast_by_admin_dong_repair_window_lineage" not in window_args
     assert "assert_weather_observation_grain_unique" not in window_args
     assert "assert_weather_grid_selection_reconciles" not in window_args
     assert "assert_weather_grid_selected_observation_exists" not in window_args
     assert "assert_gold_weather_forecast_by_admin_dong_repair_no_downgrade" not in window_args
+    assert "LINEAGE_RUN_BUCKET_COUNT = 4" in source
+    assert "for lineage_bucket_index in range(LINEAGE_RUN_BUCKET_COUNT):" in source
+    assert '"weather_w2_lineage_run_bucket_count": str(LINEAGE_RUN_BUCKET_COUNT)' in source
+    assert '"weather_w2_lineage_run_bucket_index": str(lineage_bucket_index)' in source
