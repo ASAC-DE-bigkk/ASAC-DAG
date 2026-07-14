@@ -44,6 +44,7 @@ LOGGER = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/weather"
+WEATHER_DBT_CONTRACT_VARS = {"weather_w2_canonical_revision_date": "2025-04-01"}
 RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, "target", "run_results.json")
 DOMAIN = "weather"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
@@ -146,13 +147,17 @@ def transform_schedule() -> str | list[Asset] | None:
     return [Asset(WEATHER_BRONZE_ASSET)]
 
 
-def dbt_command(args: str) -> str:
+def dbt_command(args: str, *, include_project_vars: bool = True) -> str:
     project = shlex.quote(DBT_PROJECT)
+    vars_argument = ""
+    if include_project_vars:
+        vars_json = json.dumps(WEATHER_DBT_CONTRACT_VARS, separators=(",", ":"))
+        vars_argument = f" --vars {shlex.quote(vars_json)}"
     return (
         "set -euo pipefail\n"
         f"cd {project}\n"
         f"export DBT_PROFILES_DIR={project} DBT_PROJECT_DIR={project}\n"
-        f"{shlex.quote(DBT_BIN)} {args} --target '{{{{ params.target }}}}' --no-use-colors"
+        f"{shlex.quote(DBT_BIN)} {args} --target '{{{{ params.target }}}}'{vars_argument} --no-use-colors"
     )
 
 
@@ -192,7 +197,7 @@ with DAG(
 
     dbt_deps = BashOperator(
         task_id="dbt_deps",
-        bash_command=dbt_command("deps"),
+        bash_command=dbt_command("deps", include_project_vars=False),
         pool=TRINO_HEAVY_POOL,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
     )

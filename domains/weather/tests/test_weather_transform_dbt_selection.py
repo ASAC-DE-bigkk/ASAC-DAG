@@ -259,6 +259,30 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
     )
 
 
+def test_weather_transform_passes_w2_canonical_revision_to_model_commands():
+    module = load_transform_module()
+    dag = module.dag
+    expected_vars = "--vars '{\"weather_w2_canonical_revision_date\":\"2025-04-01\"}'"
+    model_parsing_task_ids = (
+        "dbt_source_freshness",
+        "dbt_seed_asac_axes",
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
+        "dbt_seed_place_mapping",
+        "dbt_test_place_mapping_seed",
+        "dbt_run_silver",
+        "dbt_test_silver",
+        "dbt_run_gold",
+        "dbt_test_gold",
+        "dbt_run_place_mart",
+        "dbt_test_place_mart",
+    )
+
+    for task_id in model_parsing_task_ids:
+        assert expected_vars in dag.task_dict[task_id].bash_command
+    assert "--vars" not in dag.task_dict["dbt_deps"].bash_command
+
+
 def test_weather_transform_subscribes_to_bronze_asset_by_default():
     module = load_transform_module()
 
