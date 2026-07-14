@@ -98,4 +98,5 @@ def test_manual_recovery_dag_serializes_w2_writers_and_runs_final_reconciliation
     assert "pool_slots=1" in source
     assert "dbt_cli_options(args[0]" in source
     assert "window_dbt_vars" in source
+    assert "preparation_variables = window_dbt_vars(windows[0])" in source
     assert "assert_weather_observation_publishable_and_counts_reconcile" in source

@@ -83,7 +83,6 @@ FINAL_DBT_ARGS = (
     "--select",
     "assert_weather_observation_publishable_and_counts_reconcile",
 )
-PREPARE_DBT_VARS = {"weather_w2_canonical_revision_date": "2025-04-01"}
 DEFAULT_PARAMS = {
     "target": Param(
         default="dev",
@@ -161,8 +160,9 @@ def recover_observation_windows(**context) -> dict[str, object]:
 
     variable_name = checkpoint_variable_name(str(params["checkpoint_id"]))
     completed = _checkpoint_for_windows(variable_name, windows)
+    preparation_variables = window_dbt_vars(windows[0])
     for args in PREPARE_DBT_ARGS:
-        run_dbt(args, target=target, variables=PREPARE_DBT_VARS)
+        run_dbt(args, target=target, variables=preparation_variables)
 
     for window in windows:
         if window.label in completed:
