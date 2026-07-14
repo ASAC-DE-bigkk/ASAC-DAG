@@ -190,21 +190,17 @@ def commerce_load_silver():
 
     @task(trigger_rule="all_done")
     def report_silver(**ctx) -> dict:
-        """DAG 완료 리포트(#218) — silver current 데이터셋(API)별 현재 행수 + 실행시간 +
-        이번 신규 처리 run 마킹 건수(0=기적재만·변경 없음). 실패해도 보고."""
+        """DAG 완료 리포트(#218, PROJECT.md §2) — **이번 실행이 silver 로 적재한 신규분만**
+        API 별 표기(누적 현황 아님): 이 run 중 DONE 마킹된 run 의 history 적재행 집계.
+        run 시작시각(start_date)이 '이번 실행' 마킹의 경계다. 실패해도 보고."""
         from datetime import datetime, timezone
 
         from silver import quality_tasks
 
         dr = ctx.get("dag_run")
-        elapsed = ((datetime.now(timezone.utc) - dr.start_date).total_seconds()
-                   if dr and getattr(dr, "start_date", None) else None)
-        marked = None
-        try:                              # 마킹 실패/스킵 시에도 리포트는 전송(best-effort)
-            marked = ctx["ti"].xcom_pull(task_ids="mark_silver_done")
-        except Exception:  # noqa: BLE001
-            marked = None
-        return quality_tasks.report_silver_run(elapsed_seconds=elapsed, marked=marked)
+        start = getattr(dr, "start_date", None) if dr else None
+        elapsed = ((datetime.now(timezone.utc) - start).total_seconds() if start else None)
+        return quality_tasks.report_silver_run(elapsed_seconds=elapsed, run_started_at=start)
 
     # Cosmos: silver 모델 run+test(모델당 태스크). 증분은 여기서, 전량 빌드는 seed 가 선처리.
     dbt_silver = DbtTaskGroup(

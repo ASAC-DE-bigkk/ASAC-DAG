@@ -92,8 +92,8 @@ def test_stage_labels():
     b = _build([_s(_shorts("food")[0], "ok", 16620, 16620)], stage="bronze_load")
     assert "(bronze 적재)" in b["title"] and "신규 16,620건" in b["description"]
     s = _build([_s(_shorts("food")[0], "ok", 999, 999)], stage="silver",
-               count_label="현재", show_total=False)
-    assert "(silver 변환)" in s["title"] and "현재 999건" in s["description"] and "전체수집" not in s["description"]
+               count_label="신규", show_total=False)   # silver 도 신규 지표(PROJECT.md §2, #66 후속)
+    assert "(silver 변환)" in s["title"] and "신규 999건" in s["description"] and "전체수집" not in s["description"]
 
 
 def test_send_no_webhook_is_safe(monkeypatch):

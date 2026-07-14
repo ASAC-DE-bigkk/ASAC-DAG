@@ -7,6 +7,28 @@
 
 ## 2026-07-14
 
+### 67. silver 리포트 지표 변경 — 현재행수(누적) → 이번 실행 신규 처리행
+
+request:
+- silver report 는 현행(누적) 상태가 아니라 **실제로 silver 과정을 거치며 몇 건이 적재됐는지만**
+  표기할 것.
+
+response:
+- **정책 갱신(PROJECT.md §2 + §변경 이력)**: silver 리포트 지표 = 이번 실행 신규 처리행(누적 현황
+  폐기). collect(increment_count)/bronze(rows_loaded)와 동일한 "실제 신규분" 계열로 통일.
+- **구현(`quality_tasks.report_silver_run`)**: `silver_license_current` 전량 집계를 제거하고,
+  **이 DAG run 중 DONE 마킹된 run 의 history 적재행**을 dataset(API)별 집계 —
+  `silver_load_run_marker` 에서 `marked_at >= run 시작` ∧ `marker_source in (dbt_test_silver,
+  processed_no_rows)`(복원 restore_r2_snapshot·부트스트랩 bootstrap_history 는 처리가 아니라 제외)
+  로 이번 실행 마킹 run 을 뽑아 history 와 조인. **seed 청크빌드·Cosmos 증분 모두 같은 마킹
+  경로라 포괄**(seed 가 마킹한 날 downstream mark 가 0건이어도 정확). dedup 0행 run 은 new=0
+  (변경내역 없음)으로 표기. count_label "현재"→"신규". run 시작시각은 DAG 가 `run_started_at`
+  으로 전달(미상이면 now 폴백=0건 — 과대보고 방지). mark_silver_done XCom 의존 제거.
+- **검증**: 신규 테스트 2건(이번 run 마킹만 집계·경계/소스 필터/바인딩, 마킹 0건→'신규 처리 run
+  0건' 요약) + 렌더러 테스트 라벨 갱신 — commerce pytest 369 전건 통과, `python -m security` PASS.
+  **실 Trino 검증**: 오늘 재수집 창(08:00Z~)으로 실행 → 정확히 13종·13 runs·36,125행(그라운드
+  트루스 일치). 컨테이너 DAG 파싱 오류 0.
+
 ### 66. v2(환경 13종) 오탐 누적 데이터 전 계층 삭제 + raw 재수집 (dev 실행 완료)
 
 request:
