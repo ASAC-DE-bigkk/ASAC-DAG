@@ -217,6 +217,27 @@ def test_traffic_records_fingerprint_only_after_successful_send(monkeypatch):
     assert result["notification_state_recorded"] is True
 
 
+def test_traffic_collect_and_notify_passes_current_task_log_url_to_report_builder(monkeypatch):
+    module = load_module()
+    source_report = _traffic_failure_report()
+    captured = {}
+    monkeypatch.setattr(
+        module,
+        "build_traffic_reliability_report",
+        lambda **kwargs: captured.update(kwargs) or copy.deepcopy(source_report),
+    )
+    monkeypatch.setattr(module, "should_notify_fingerprint", lambda _fingerprint: False)
+
+    module.collect_and_notify(
+        run_id="report-run",
+        ti=types.SimpleNamespace(log_url="http://localhost:30585/dags/traffic_bronze_reliability_report/log"),
+    )
+
+    assert captured == {
+        "airflow_metadata_log_url": "http://localhost:30585/dags/traffic_bronze_reliability_report/log"
+    }
+
+
 def test_traffic_failed_send_is_retried_without_recording_state(monkeypatch):
     module = load_module()
     source_report = _traffic_failure_report()
