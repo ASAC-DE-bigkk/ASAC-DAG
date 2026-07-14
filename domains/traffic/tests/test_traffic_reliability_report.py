@@ -356,12 +356,16 @@ def test_traffic_report_fails_safely_when_airflow_summary_query_fails(monkeypatc
     result = report.build_traffic_reliability_report(
         cursor=cursor,
         detected_at=datetime(2026, 7, 13, 9, 0, tzinfo=report.KST),
+        airflow_metadata_log_url="http://localhost:30585/log?token=must-not-be-in-report",
     )
+    message = report.format_traffic_discord_message(result)
 
     assert result["status"] == "FAIL"
     assert result["airflow_runs"]["reason"] == "airflow_metadata_query_failed"
     assert result["airflow_runs"]["error_type"] == "RuntimeError"
     assert "must-not-be-in-report" not in json.dumps(result, ensure_ascii=False)
+    assert "diagnostic_log_url=" in message
+    assert "must-not-be-in-report" not in message
 
 
 def test_traffic_send_discord_posts_payload(monkeypatch):
@@ -465,6 +469,14 @@ class _AirflowSession:
         return self.query_result
 
 
+class _FailingAirflowSession:
+    def __init__(self, secret):
+        self.secret = secret
+
+    def query(self, _model):
+        raise RuntimeError(f"metadata connection failed: token={self.secret}")
+
+
 class _SessionContext:
     def __init__(self, session):
         self.session = session
@@ -516,6 +528,100 @@ def test_collect_airflow_scheduled_run_summary_includes_failed_task_reason(monke
     assert summary["failed"] == 1
     assert summary["failures"][0]["task_id"] == "record_seoul_traffic_run_started"
     assert summary["failures"][0]["reason"] == "TrinoConnectionError: trino DNS 이름 해석 실패"
+
+
+def test_collect_airflow_scheduled_run_summary_retries_once_after_transient_failure(monkeypatch, capfd):
+    secret = "traffic-metadata-secret"
+    monkeypatch.setenv("ASK_SEOUL_METADATA_DIAGNOSTIC_TOKEN", secret)
+    detected_at = datetime(2026, 7, 13, 2, 30, tzinfo=timezone.utc)
+    successful_run = _ScheduledDagRun(
+        state="success",
+        logical_date=datetime(2026, 7, 12, 3, 0, tzinfo=timezone.utc),
+        run_id="scheduled__recovered",
+        task_instances=[],
+    )
+    sessions = [_FailingAirflowSession(secret), _AirflowSession([successful_run])]
+
+    import airflow.models.dagrun as airflow_dagrun
+    import airflow.utils.session as airflow_session
+
+    monkeypatch.setattr(airflow_dagrun, "DagRun", _ScheduledDagRun)
+    monkeypatch.setattr(
+        airflow_session,
+        "create_session",
+        lambda: _SessionContext(sessions.pop(0)),
+    )
+
+    summary = ORIGINAL_COLLECT_AIRFLOW_SUMMARY("traffic_incident_bronze", detected_at, 24)
+    task_log_output = capfd.readouterr().out
+
+    assert summary == {"expected": 1, "success": 1, "failed": 0, "running": 0, "failures": []}
+    assert sessions == []
+    assert "attempt=1/2" in task_log_output
+    assert "RuntimeError" in task_log_output
+    assert secret not in task_log_output
+
+
+def test_collect_airflow_scheduled_run_summary_logs_redacted_traceback_after_retry_exhaustion(monkeypatch, capfd):
+    secret = "traffic-metadata-secret"
+    monkeypatch.setenv("ASK_SEOUL_METADATA_DIAGNOSTIC_TOKEN", secret)
+    detected_at = datetime(2026, 7, 13, 2, 30, tzinfo=timezone.utc)
+    sessions = [_FailingAirflowSession(secret), _FailingAirflowSession(secret)]
+
+    import airflow.models.dagrun as airflow_dagrun
+    import airflow.utils.session as airflow_session
+
+    monkeypatch.setattr(airflow_dagrun, "DagRun", _ScheduledDagRun)
+    monkeypatch.setattr(
+        airflow_session,
+        "create_session",
+        lambda: _SessionContext(sessions.pop(0)),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ORIGINAL_COLLECT_AIRFLOW_SUMMARY("traffic_incident_bronze", detected_at, 24)
+    task_log_output = capfd.readouterr().out
+
+    assert sessions == []
+    assert secret not in str(exc_info.value)
+    assert task_log_output.count("Traffic Airflow metadata query failed") == 2
+    assert "Traceback" in task_log_output
+    assert secret not in task_log_output
+
+
+def test_collect_airflow_scheduled_run_summary_logs_safe_traceback_when_redaction_is_unavailable(
+    monkeypatch,
+    capfd,
+):
+    secret = "traffic-metadata-secret"
+    detected_at = datetime(2026, 7, 13, 2, 30, tzinfo=timezone.utc)
+    sessions = [_FailingAirflowSession(secret), _FailingAirflowSession(secret)]
+
+    import airflow.models.dagrun as airflow_dagrun
+    import airflow.utils.session as airflow_session
+    import common.security as security
+
+    monkeypatch.setattr(airflow_dagrun, "DagRun", _ScheduledDagRun)
+    monkeypatch.setattr(
+        airflow_session,
+        "create_session",
+        lambda: _SessionContext(sessions.pop(0)),
+    )
+    monkeypatch.setattr(
+        security,
+        "refresh_env_secrets",
+        lambda: (_ for _ in ()).throw(RuntimeError("redaction unavailable")),
+    )
+
+    with pytest.raises(RuntimeError):
+        ORIGINAL_COLLECT_AIRFLOW_SUMMARY("traffic_incident_bronze", detected_at, 24)
+    task_log_output = capfd.readouterr().out
+
+    assert sessions == []
+    assert task_log_output.count("Traffic Airflow metadata query failed") == 2
+    assert "diagnostic=redaction_unavailable" in task_log_output
+    assert "Traceback" in task_log_output
+    assert secret not in task_log_output
 
 
 def test_collect_airflow_scheduled_run_summary_excludes_manual_and_outside_window(monkeypatch):

@@ -99,9 +99,27 @@ def record_delivered_fingerprint(fingerprint: str, *, set=Variable.set) -> bool:
         return False
 
 
+def task_log_url(context: dict) -> str | None:
+    """Return the current task log location without making notification fail."""
+    task_instance = context.get("ti")
+    if task_instance is None:
+        return None
+    try:
+        value = getattr(task_instance, "log_url", None)
+        return str(value) if value else None
+    except Exception:
+        return None
+
+
 @track(layer="bronze", domain="traffic")
 def collect_and_notify(**context) -> dict:
-    report = build_traffic_reliability_report()
+    airflow_metadata_log_url = task_log_url(context)
+    if airflow_metadata_log_url:
+        report = build_traffic_reliability_report(
+            airflow_metadata_log_url=airflow_metadata_log_url,
+        )
+    else:
+        report = build_traffic_reliability_report()
     fingerprint = notification_fingerprint(report)
     should_notify = should_notify_fingerprint(fingerprint)
     discord_sent = False

@@ -32,6 +32,7 @@ GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 DISCORD_GREEN = 3066993
 DISCORD_YELLOW = 16776960
 DISCORD_RED = 15158332
+AIRFLOW_METADATA_QUERY_MAX_ATTEMPTS = 2
 AIRFLOW_FAILURE_REASON_FALLBACK = "원인 미확인"
 AIRFLOW_FAILURE_REASON_MAX_LENGTH = 240
 PROBLEM_DOCUMENT_PREFIX = "errors"
@@ -428,7 +429,63 @@ def _lookup_airflow_problem_reason(
     return AIRFLOW_FAILURE_REASON_FALLBACK
 
 
+def _log_airflow_metadata_query_failure(
+    exc: Exception,
+    *,
+    attempt: int,
+) -> None:
+    """Log a retryable metadata failure without exposing its original detail."""
+    try:
+        from common.security import refresh_env_secrets, scrub_exception
+
+        refresh_env_secrets()
+        scrub_exception(exc)
+    except Exception:
+        # Do not fall back to the original exception text when the safety layer
+        # is unavailable. Retain the query stack with a synthetic exception so
+        # operators still get a safe traceback while the caller fails closed.
+        safe_exc = RuntimeError("diagnostic redaction unavailable")
+        LOGGER.warning(
+            "Traffic Airflow metadata query failed: attempt=%s/%s error_type=%s "
+            "diagnostic=redaction_unavailable",
+            attempt,
+            AIRFLOW_METADATA_QUERY_MAX_ATTEMPTS,
+            type(exc).__name__,
+            exc_info=(RuntimeError, safe_exc, exc.__traceback__),
+        )
+        return
+
+    LOGGER.warning(
+        "Traffic Airflow metadata query failed: attempt=%s/%s error_type=%s",
+        attempt,
+        AIRFLOW_METADATA_QUERY_MAX_ATTEMPTS,
+        type(exc).__name__,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
 def collect_airflow_scheduled_run_summary(
+    dag_id: str,
+    detected_at: datetime,
+    lookback_hours: int,
+) -> dict[str, Any]:
+    """Retry one transient, read-only Airflow metadata query failure."""
+    for attempt in range(1, AIRFLOW_METADATA_QUERY_MAX_ATTEMPTS + 1):
+        try:
+            return _collect_airflow_scheduled_run_summary_once(
+                dag_id,
+                detected_at,
+                lookback_hours,
+            )
+        except Exception as exc:
+            _log_airflow_metadata_query_failure(exc, attempt=attempt)
+            if attempt == AIRFLOW_METADATA_QUERY_MAX_ATTEMPTS:
+                raise
+
+    raise AssertionError("Airflow metadata retry loop exited unexpectedly")
+
+
+def _collect_airflow_scheduled_run_summary_once(
     dag_id: str,
     detected_at: datetime,
     lookback_hours: int,
@@ -532,7 +589,25 @@ def collect_airflow_scheduled_run_summary(
     }
 
 
-def build_traffic_reliability_report(cursor=None, detected_at: datetime | None = None) -> dict[str, Any]:
+def _redacted_airflow_metadata_log_url(value: Any) -> str | None:
+    """Return an operator-facing log location only when it can be redacted safely."""
+    if not value:
+        return None
+    try:
+        from common.security import redact, refresh_env_secrets
+
+        refresh_env_secrets()
+        return str(redact(str(value)))
+    except Exception:
+        return None
+
+
+def build_traffic_reliability_report(
+    cursor=None,
+    detected_at: datetime | None = None,
+    *,
+    airflow_metadata_log_url: str | None = None,
+) -> dict[str, Any]:
     config = report_config()
     cursor = cursor or trino_cursor()
     detected_at = detected_at or datetime.now(KST)
@@ -575,6 +650,9 @@ def build_traffic_reliability_report(cursor=None, detected_at: datetime | None =
             "reason": "airflow_metadata_query_failed",
             "error_type": type(exc).__name__,
         }
+        diagnostic_log_url = _redacted_airflow_metadata_log_url(airflow_metadata_log_url)
+        if diagnostic_log_url:
+            airflow_runs["diagnostic_log_url"] = diagnostic_log_url
 
     manifest_query_ok = not dag_runs.get("reason")
     airflow_query_ok = not airflow_runs.get("reason")
@@ -739,6 +817,9 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
             f"스케줄 수집 상태 조회 실패: {airflow_runs.get('reason')}"
             f" (error_type={airflow_runs.get('error_type', 'unknown')})"
         )
+        diagnostic_log_url = airflow_runs.get("diagnostic_log_url")
+        if diagnostic_log_url:
+            lines.append(f"diagnostic_log_url={diagnostic_log_url}")
     lines.extend([
         "",
         "Checks:",
