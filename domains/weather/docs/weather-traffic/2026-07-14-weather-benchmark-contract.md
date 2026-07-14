@@ -4,7 +4,7 @@
 
 이 benchmark는 Cloudflare 청구액이 아닌 Trino·Iceberg 비용 대리 지표를 before/after로 비교하기 위한 Weather 소유 도구다. `collect`는 `ASK_SEOUL_TARGET=dev`에서만 동작하며, `--repeat`은 최소 `3`이어야 한다. 이보다 작은 값은 Trino 연결 전에 `ValueError`로 실패한다.
 
-수집 과정은 dbt `compile`, 컴파일된 SQL의 `EXPLAIN ANALYZE`, 기존 Weather/Traffic reliability report 조회만 수행한다. dbt model run, table write, raw upload, backfill, prod write를 수행하지 않는다. 따라서 이 작업은 Traffic 코드·table·raw object·benchmark 결과에 대한 쓰기를 만들지 않는다.
+수집 과정은 dbt `compile`, 컴파일된 SQL의 `EXPLAIN ANALYZE`, 기존 Weather/Traffic reliability report 조회만 수행한다. dbt model run, Trino/Iceberg table write, R2 raw upload, backfill, prod write를 수행하지 않는다. 따라서 이 작업은 Traffic 코드·table·raw object를 변경하지 않는다. 다만 `--output`에 파일 경로를 지정하면 수집 bundle JSON 또는 비교 Markdown을 해당 로컬 경로에 UTF-8 파일로 생성할 수 있으며, `--output -`이면 표준 출력만 사용한다.
 
 ## 측정 suite
 
