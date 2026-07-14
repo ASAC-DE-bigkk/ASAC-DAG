@@ -68,6 +68,12 @@ class FakePythonOperator:
         other.upstream_task_ids.add(self.task_id)
         return other
 
+    def as_teardown(self, setups=None, on_failure_fail_dagrun=False):
+        self.is_teardown = True
+        self.on_failure_fail_dagrun = on_failure_fail_dagrun
+        self.kwargs["trigger_rule"] = "all_done_setup_success"
+        return self
+
 
 class FakeParam:
     def __init__(self, default=None, **schema):
@@ -658,30 +664,24 @@ def test_weather_transform_limits_target_param_to_dev_or_prod():
     assert target_param.schema["enum"] == ["dev"]
 
 
-def test_weather_transform_publishes_dbt_run_metrics_from_dag_success_callback():
+def test_weather_transform_publishes_dbt_run_metrics_as_non_gating_teardown():
     module = load_transform_module()
     dag = module.dag
 
-    assert dag.kwargs["on_success_callback"] is module.publish_weather_transform_success_metrics
-    assert "publish_dbt_run_metrics" not in dag.task_ids
-    assert "fail_transform_if_upstream_failed" not in dag.task_ids
-    assert dag.task_dict["dbt_test_place_mart"].downstream_task_ids == set()
+    assert "publish_dbt_run_metrics" in dag.task_ids
+    metrics = dag.task_dict["publish_dbt_run_metrics"]
 
-def test_weather_success_callback_forwards_airflow_context(monkeypatch):
-    module = load_transform_module()
-    captured = {}
-
-    def fake_publish(**context):
-        captured.update(context)
-        return {"rows": 3, "skipped": False}
-
-    monkeypatch.setattr(module, "publish_dbt_run_metrics", fake_publish)
-
-    assert module.publish_weather_transform_success_metrics({"params": {"target": "dev"}}) == {
-        "rows": 3,
-        "skipped": False,
+    assert metrics.python_callable is module.publish_dbt_run_metrics
+    assert metrics.is_teardown is True
+    assert metrics.on_failure_fail_dagrun is False
+    assert metrics.kwargs["trigger_rule"] == "all_done_setup_success"
+    assert metrics.kwargs["on_failure_callback"] is module.record_weather_problem
+    assert dag.task_dict["dbt_test_place_mart"].downstream_task_ids == {
+        "publish_dbt_run_metrics"
     }
-    assert captured == {"params": {"target": "dev"}}
+    assert metrics.downstream_task_ids == set()
+    assert "fail_transform_if_upstream_failed" not in dag.task_ids
+    assert "on_success_callback" not in dag.kwargs
 
 
 def test_weather_publish_dbt_run_metrics_forwards_domain_and_target(tmp_path, monkeypatch):

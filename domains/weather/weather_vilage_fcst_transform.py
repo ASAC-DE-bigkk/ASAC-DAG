@@ -322,11 +322,6 @@ def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> d
     return {"rows": len(records), "skipped": False}
 
 
-def publish_weather_transform_success_metrics(context: dict) -> dict:
-    """Adapt Airflow's single callback context argument for the metrics helper."""
-    return publish_dbt_run_metrics(**context)
-
-
 with DAG(
     dag_id="weather_vilage_fcst_transform",
     description="Transform weather bronze -> silver/gold via dbt.",
@@ -336,7 +331,6 @@ with DAG(
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": DBT_RETRY_DELAY},
     params=DEFAULT_PARAMS,
-    on_success_callback=publish_weather_transform_success_metrics,
     tags=["ask_seoul", "weather", "transform", "silver", "gold", "dbt"],
 ) as dag:
     validate_runtime = PythonOperator(
@@ -431,6 +425,12 @@ with DAG(
         "assert_gold_weather_forecast_by_place_latest_silver_record",
     )
 
+    publish_dbt_metrics = PythonOperator(
+        task_id="publish_dbt_run_metrics",
+        python_callable=publish_dbt_run_metrics,
+        on_failure_callback=record_weather_problem,
+    ).as_teardown(on_failure_fail_dagrun=False)
+
     (
         validate_runtime
         >> dbt_deps
@@ -447,3 +447,5 @@ with DAG(
         >> dbt_run_place_mart
         >> dbt_test_place_mart
     )
+
+    dbt_test_place_mart >> publish_dbt_metrics
