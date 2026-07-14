@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
-import shlex
+import subprocess
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
+from airflow.exceptions import AirflowException
 from airflow.models.param import Param
-from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.utils.trigger_rule import TriggerRule
 
@@ -28,13 +29,17 @@ from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from weather_ingest.common.runtime import trino_cursor  # noqa: E402
 from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+import weather_dbt_execution as weather_dbt  # noqa: E402
+from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
 
 KST = ZoneInfo("Asia/Seoul")
-DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
-DBT_PROJECT = "/opt/airflow/dbt/domains/weather"
+DBT_BIN = weather_dbt.dbt_bin()
+DBT_PROJECT = weather_dbt.dbt_project_dir()
 SMOKE_CATALOG = "iceberg_dev"
-SMOKE_SCHEMA_PATTERN = re.compile(r"^dev_weather_w1_weather_contract_test_[0-9a-f]{24}$")
+SMOKE_SCHEMA_PATTERN = re.compile(
+    r"^dev_weather_w1_weather_contract_test_[0-9a-f]{24}$"
+)
 SMOKE_SCHEMA_TASK_ID = "create_isolated_schema"
 DEFAULT_PARAMS = {
     "target": Param(
@@ -73,7 +78,9 @@ def create_weather_w1_smoke_schema(**context) -> str:
     return schema
 
 
-def cleanup_weather_w1_smoke_schema(*, ti, run_id: str | None = None, **_context) -> None:
+def cleanup_weather_w1_smoke_schema(
+    *, ti, run_id: str | None = None, **_context
+) -> None:
     schema = ti.xcom_pull(task_ids=SMOKE_SCHEMA_TASK_ID)
     if not schema and run_id:
         schema = smoke_schema_name(run_id)
@@ -87,17 +94,67 @@ def cleanup_weather_w1_smoke_schema(*, ti, run_id: str | None = None, **_context
     print(f"[weather-w1-smoke] dropped isolated schema {catalog}.{schema}")
 
 
-def dbt_smoke_command(args: str) -> str:
-    project = shlex.quote(DBT_PROJECT)
-    schema = "{{ ti.xcom_pull(task_ids='create_isolated_schema') }}"
-    return (
-        "set -euo pipefail\n"
-        f"cd {project}\n"
-        f"export DBT_PROFILES_DIR={project} DBT_PROJECT_DIR={project}\n"
-        f"export WEATHER_SCHEMA='{schema}' ASK_SEOUL_SCHEMA='{schema}'\n"
-        f"{shlex.quote(DBT_BIN)} {args} --target '{{{{ params.target }}}}' "
-        "--vars '{\"weather_w1_initial_build_mode\": \"bounded_isolated_smoke\"}' "
-        "--no-use-colors"
+def run_dbt_smoke_phase(
+    *, dbt_command: str, selection: str | None, **context
+) -> dict[str, object]:
+    """Run one W1 phase in the current run's isolated schema and artifacts."""
+    ti = context["ti"]
+    schema = _safe_smoke_schema(str(ti.xcom_pull(task_ids=SMOKE_SCHEMA_TASK_ID)))
+    environ = os.environ.copy()
+    environ["WEATHER_SCHEMA"] = schema
+    environ["ASK_SEOUL_SCHEMA"] = schema
+    environ["ASAC_AXES_SCHEMA"] = schema
+    execution = weather_dbt.execute_dbt_phase(
+        dbt_command=dbt_command,
+        selection=selection,
+        pipeline="weather-w1-contract-smoke",
+        run_id=context.get("run_id"),
+        task_id=getattr(ti, "task_id", None),
+        try_number=getattr(ti, "try_number", None),
+        target=(context.get("params") or {}).get("target", "dev"),
+        variables=json.dumps(
+            {"weather_w1_initial_build_mode": "bounded_isolated_smoke"},
+            separators=(",", ":"),
+        ),
+        project_dir=DBT_PROJECT,
+        executable=DBT_BIN,
+        runner=subprocess.run,
+        environ=environ,
+    )
+    for completed in execution.attempts:
+        if completed.stdout:
+            print(completed.stdout, end="")
+        if completed.stderr:
+            print(completed.stderr, end="", file=sys.stderr)
+    completed = execution.completed
+    if completed.returncode != 0 or execution.missing_expected_artifacts:
+        missing = (
+            "; missing expected dbt artifacts: "
+            + ", ".join(execution.missing_expected_artifacts)
+            if execution.missing_expected_artifacts
+            else ""
+        )
+        raise AirflowException(
+            f"weather W1 dbt command failed with exit code {completed.returncode}{missing}"
+        )
+    return {
+        "status": "success",
+        "run_results_path": execution.existing_run_results_path,
+        "sources_path": execution.existing_sources_path,
+        "manifest_path": execution.existing_manifest_path,
+        "selected_unique_ids": list(execution.selected_unique_ids),
+    }
+
+
+def dbt_smoke_task(
+    task_id: str, dbt_command: str, selection: str | None = None
+) -> PythonOperator:
+    return PythonOperator(
+        task_id=task_id,
+        python_callable=run_dbt_smoke_phase,
+        op_kwargs={"dbt_command": dbt_command, "selection": selection},
+        pool=TRINO_HEAVY_POOL,
+        on_failure_callback=record_weather_problem,
     )
 
 
@@ -125,48 +182,24 @@ with DAG(
         on_failure_callback=record_weather_problem,
     )
 
-    dbt_deps = BashOperator(
-        task_id="dbt_deps",
-        bash_command=dbt_smoke_command("deps"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=record_weather_problem,
+    dbt_deps = dbt_smoke_task("dbt_deps", "deps")
+
+    dbt_seed_bridge_inputs = dbt_smoke_task(
+        "dbt_seed_bridge_inputs", "seed", "tag:ask_seoul_weather_w1_inputs"
     )
 
-    dbt_seed_bridge_inputs = BashOperator(
-        task_id="dbt_seed_bridge_inputs",
-        pool=TRINO_HEAVY_POOL,
-        bash_command=dbt_smoke_command(
-            "seed --select asac_axes weather_place_grid_mapping weather_admin_dong_grid_bridge_history"
-        ),
-        on_failure_callback=record_weather_problem,
+    dbt_run_common_admin_dong_dimension = dbt_smoke_task(
+        "dbt_run_common_admin_dong_dimension",
+        "run",
+        "tag:ask_seoul_weather_transform_common_admin",
     )
 
-    dbt_run_common_admin_dong_dimension = BashOperator(
-        task_id="dbt_run_common_admin_dong_dimension",
-        bash_command=dbt_smoke_command("run --select asac_axes.dim_admin_dong"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=record_weather_problem,
+    dbt_run_bridge = dbt_smoke_task(
+        "dbt_run_bridge", "run", "tag:ask_seoul_weather_w1_bridge"
     )
 
-    dbt_run_bridge = BashOperator(
-        task_id="dbt_run_bridge",
-        bash_command=dbt_smoke_command("run --select bridge_weather_admin_dong_grid"),
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=record_weather_problem,
-    )
-
-    dbt_test_bridge_contract = BashOperator(
-        task_id="dbt_test_bridge_contract",
-        pool=TRINO_HEAVY_POOL,
-        bash_command=dbt_smoke_command(
-            "test --select "
-            "assert_weather_bridge_candidate_grain_unique "
-            "assert_weather_bridge_canonical_stamp_exact "
-            "assert_weather_bridge_legacy_mapping_reconciles "
-            "assert_weather_bridge_temporal_evidence "
-            "assert_weather_bridge_validity_non_overlapping"
-        ),
-        on_failure_callback=record_weather_problem,
+    dbt_test_bridge_contract = dbt_smoke_task(
+        "dbt_test_bridge_contract", "test", "tag:ask_seoul_weather_w1_bridge"
     )
 
     cleanup_isolated_schema = PythonOperator(
@@ -187,3 +220,6 @@ with DAG(
         >> dbt_test_bridge_contract
         >> cleanup_isolated_schema
     )
+
+
+enable_lineage_if_configured(dag)

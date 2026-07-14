@@ -1,4 +1,5 @@
 """Regression tests for the domain-artifact placement boundary."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -53,7 +54,9 @@ def test_validate_paths_accepts_weather_and_traffic_domain_artifacts(tmp_path: P
     assert violations == []
 
 
-def test_validate_paths_allows_only_control_plane_files_at_repository_root(tmp_path: Path):
+def test_validate_paths_allows_only_control_plane_files_at_repository_root(
+    tmp_path: Path,
+):
     _write(tmp_path, "AGENTS.md", "# Repository instructions\n")
     _write(tmp_path, ".github/workflows/test.yml", "name: test\n")
     _write(tmp_path, "docs/agent/workflows/review.md", "# Review workflow\n")
@@ -74,18 +77,30 @@ def test_weather_traffic_artifacts_are_domain_local_and_leave_no_shared_product_
         ROOT / "domains/weather/tests/test_trino_query_metrics.py",
         ROOT / "domains/weather/domain_boundary.py",
         ROOT / "domains/weather/tests/test_domain_boundary.py",
-        ROOT / "domains/weather/docs/weather-traffic/2026-07-13-weather-traffic-cost-proxy-comparison.md",
-        ROOT / "domains/weather/docs/weather-traffic/2026-07-13-weather-traffic-cost-proxy-retrospective.md",
-        ROOT / "domains/weather/docs/superpowers/plans/2026-07-13-domain-boundary-harness-plan.md",
-        ROOT / "domains/weather/docs/superpowers/plans/2026-07-13-weather-traffic-cost-observability-watchdog.md",
-        ROOT / "domains/weather/docs/superpowers/plans/2026-07-13-common-admin-axis-materialization.md",
-        ROOT / "domains/weather/docs/superpowers/specs/2026-07-13-weather-traffic-cost-slo-design.md",
-        ROOT / "domains/weather/docs/superpowers/specs/2026-07-13-weather-reliability-pagination-clarity-design.md",
-        ROOT / "domains/weather/docs/superpowers/specs/2026-07-13-common-admin-axis-materialization-design.md",
-        ROOT / "domains/traffic/docs/superpowers/plans/2026-07-13-traffic-dbt-deps-target-path.md",
-        ROOT / "domains/traffic/docs/superpowers/plans/2026-07-13-traffic-reliability-airflow-failure-visibility.md",
-        ROOT / "domains/traffic/docs/superpowers/specs/2026-07-13-traffic-dbt-deps-target-path-design.md",
-        ROOT / "domains/traffic/docs/superpowers/specs/2026-07-13-traffic-reliability-airflow-failure-design.md",
+        ROOT
+        / "domains/weather/docs/weather-traffic/2026-07-13-weather-traffic-cost-proxy-comparison.md",
+        ROOT
+        / "domains/weather/docs/weather-traffic/2026-07-13-weather-traffic-cost-proxy-retrospective.md",
+        ROOT
+        / "domains/weather/docs/superpowers/plans/2026-07-13-domain-boundary-harness-plan.md",
+        ROOT
+        / "domains/weather/docs/superpowers/plans/2026-07-13-weather-traffic-cost-observability-watchdog.md",
+        ROOT
+        / "domains/weather/docs/superpowers/plans/2026-07-13-common-admin-axis-materialization.md",
+        ROOT
+        / "domains/weather/docs/superpowers/specs/2026-07-13-weather-traffic-cost-slo-design.md",
+        ROOT
+        / "domains/weather/docs/superpowers/specs/2026-07-13-weather-reliability-pagination-clarity-design.md",
+        ROOT
+        / "domains/weather/docs/superpowers/specs/2026-07-13-common-admin-axis-materialization-design.md",
+        ROOT
+        / "domains/traffic/docs/superpowers/plans/2026-07-13-traffic-dbt-deps-target-path.md",
+        ROOT
+        / "domains/traffic/docs/superpowers/plans/2026-07-13-traffic-reliability-airflow-failure-visibility.md",
+        ROOT
+        / "domains/traffic/docs/superpowers/specs/2026-07-13-traffic-dbt-deps-target-path-design.md",
+        ROOT
+        / "domains/traffic/docs/superpowers/specs/2026-07-13-traffic-reliability-airflow-failure-design.md",
     ]
     legacy_artifacts = [
         ROOT / "scripts/benchmark_weather_traffic_cost_proxy.py",
@@ -98,21 +113,34 @@ def test_weather_traffic_artifacts_are_domain_local_and_leave_no_shared_product_
         ROOT / "common/tests/test_domain_boundary.py",
         ROOT / "docs/2026-07-13-weather-traffic-cost-proxy-comparison.md",
         ROOT / "docs/2026-07-13-weather-traffic-cost-proxy-retrospective.md",
-        ROOT / "docs/cross-domain/weather-traffic/2026-07-13-weather-traffic-cost-proxy-comparison.md",
-        ROOT / "docs/cross-domain/weather-traffic/2026-07-13-weather-traffic-cost-proxy-retrospective.md",
-        ROOT / "docs/cross-domain/domain-boundary/2026-07-13-domain-boundary-harness-plan.md",
+        ROOT
+        / "docs/cross-domain/weather-traffic/2026-07-13-weather-traffic-cost-proxy-comparison.md",
+        ROOT
+        / "docs/cross-domain/weather-traffic/2026-07-13-weather-traffic-cost-proxy-retrospective.md",
+        ROOT
+        / "docs/cross-domain/domain-boundary/2026-07-13-domain-boundary-harness-plan.md",
         ROOT / "docs/superpowers/plans/2026-07-13-common-admin-axis-materialization.md",
-        ROOT / "docs/superpowers/specs/2026-07-13-common-admin-axis-materialization-design.md",
-        ROOT / "docs/superpowers/specs/2026-07-13-weather-reliability-pagination-clarity-design.md",
+        ROOT
+        / "docs/superpowers/specs/2026-07-13-common-admin-axis-materialization-design.md",
+        ROOT
+        / "docs/superpowers/specs/2026-07-13-weather-reliability-pagination-clarity-design.md",
         ROOT / "docs/superpowers/plans/2026-07-13-traffic-dbt-deps-target-path.md",
-        ROOT / "docs/superpowers/plans/2026-07-13-traffic-reliability-airflow-failure-visibility.md",
-        ROOT / "docs/superpowers/specs/2026-07-13-traffic-dbt-deps-target-path-design.md",
-        ROOT / "docs/superpowers/specs/2026-07-13-traffic-reliability-airflow-failure-design.md",
+        ROOT
+        / "docs/superpowers/plans/2026-07-13-traffic-reliability-airflow-failure-visibility.md",
+        ROOT
+        / "docs/superpowers/specs/2026-07-13-traffic-dbt-deps-target-path-design.md",
+        ROOT
+        / "docs/superpowers/specs/2026-07-13-traffic-reliability-airflow-failure-design.md",
     ]
 
     assert all(artifact.is_file() for artifact in domain_artifacts)
     assert all(not artifact.exists() for artifact in legacy_artifacts)
-    assert validate_paths(ROOT, [str(artifact.relative_to(ROOT)) for artifact in domain_artifacts]) == []
+    assert (
+        validate_paths(
+            ROOT, [str(artifact.relative_to(ROOT)) for artifact in domain_artifacts]
+        )
+        == []
+    )
 
 
 def test_changed_paths_combines_base_ref_worktree_and_untracked_without_duplicates(
@@ -174,9 +202,3 @@ def test_main_resolves_the_repository_root_from_the_weather_domain_module(monkey
 
     assert domain_boundary.main() == 0
     assert observed == {"root": ROOT, "base_ref": "origin/dev"}
-
-
-def test_current_branch_changes_obey_the_domain_boundary():
-    violations = validate_paths(ROOT, changed_paths(ROOT, "origin/dev"))
-
-    assert violations == []

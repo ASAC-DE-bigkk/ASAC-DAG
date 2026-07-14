@@ -9,6 +9,7 @@ from traffic_ingest.common.runtime import (
     sql_timestamp,
     trino_cursor,
 )
+from traffic_ingest.errors import TrafficCompletenessError, TrafficSourceSchemaError
 
 
 BRONZE_TABLE = "bronze_seoul_traffic_incident"
@@ -109,13 +110,18 @@ def metadata_int(metadata: dict, key: str) -> int:
     value = metadata.get(key)
     if value is None or value == "":
         return 0
-    return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise TrafficSourceSchemaError(
+            f"Traffic metadata field must be an integer: {key}"
+        ) from exc
 
 
 def validate_seoul_traffic_row_count(rows: list[dict], metadata: dict) -> None:
     list_total_count = metadata_int(metadata, "list_total_count")
     if list_total_count > 0 and not rows:
-        raise RuntimeError(
+        raise TrafficCompletenessError(
             "Seoul traffic bronze validation failed: "
             f"list_total_count={list_total_count}, parsed row_count=0"
         )
@@ -175,9 +181,9 @@ def insert_seoul_traffic_request_audit(
             {sql_string(raw_object_key)},
             {sql_string(raw_hash)},
             {sql_int(http_status)},
-            {sql_string(metadata.get('result_code'))},
-            {sql_string(metadata.get('result_msg'))},
-            {sql_int(metadata.get('list_total_count'))},
+            {sql_string(metadata.get("result_code"))},
+            {sql_string(metadata.get("result_msg"))},
+            {sql_int(metadata.get("list_total_count"))},
             {sql_int(len(rows))},
             {sql_timestamp(collected_at)},
             {sql_string(load_date)},
@@ -228,7 +234,9 @@ def insert_seoul_traffic_bronze_rows(
     )
 
     if not rows:
-        print("Seoul traffic API returned no incident rows; raw XML was preserved without bronze rows.")
+        print(
+            "Seoul traffic API returned no incident rows; raw XML was preserved without bronze rows."
+        )
         return 0
 
     load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
@@ -334,19 +342,27 @@ def verify_seoul_traffic_bronze_runtime(
     row = cursor.fetchone()
     table_rows = int(row[0])
     if expected_rows is not None and table_rows != expected_rows:
-        raise RuntimeError(
+        raise TrafficCompletenessError(
             "Seoul traffic bronze verification failed: "
             f"expected_rows={expected_rows}, actual_rows={table_rows}"
         )
-    if expected_raw_objects is not None and expected_rows != 0 and int(row[1]) != expected_raw_objects:
-        raise RuntimeError(
+    if (
+        expected_raw_objects is not None
+        and expected_rows != 0
+        and int(row[1]) != expected_raw_objects
+    ):
+        raise TrafficCompletenessError(
             "Seoul traffic bronze verification failed: "
             f"expected_raw_objects={expected_raw_objects}, actual_raw_objects={row[1]}"
         )
-    audit_raw_object_keys = raw_object_keys or ([raw_object_key] if raw_object_key else [])
+    audit_raw_object_keys = raw_object_keys or (
+        [raw_object_key] if raw_object_key else []
+    )
     if expected_rows == 0 and audit_raw_object_keys:
         audit_table = request_audit_table_for(qualified_table)
-        audit_raw_key_values = ", ".join(sql_string(key) for key in audit_raw_object_keys)
+        audit_raw_key_values = ", ".join(
+            sql_string(key) for key in audit_raw_object_keys
+        )
         audit_filters = [
             f"source_id = {sql_string(SOURCE_ID)}",
             f"raw_object_key IN ({audit_raw_key_values})",
@@ -363,13 +379,15 @@ def verify_seoul_traffic_bronze_runtime(
         audit_row = cursor.fetchone()
         expected_audit_rows = expected_raw_objects or len(audit_raw_object_keys)
         if int(audit_row[0]) != expected_audit_rows:
-            raise RuntimeError(
+            raise TrafficCompletenessError(
                 "Seoul traffic bronze verification failed: "
                 f"expected_request_audit_rows={expected_audit_rows}, "
                 f"actual_request_audit_rows={audit_row[0]}"
             )
     if expected_rows and expected_raw_objects is None and int(row[1]) != 1:
-        raise RuntimeError(f"Seoul traffic bronze verification failed: raw_object_count={row[1]}")
+        raise TrafficCompletenessError(
+            f"Seoul traffic bronze verification failed: raw_object_count={row[1]}"
+        )
     print(
         "traffic_incident_bronze "
         f"table_rows={row[0]} raw_object_count={row[1]} last_collected_at={row[2]}"

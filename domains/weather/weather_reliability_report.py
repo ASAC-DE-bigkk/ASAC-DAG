@@ -19,6 +19,7 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runmetrics import track  # noqa: E402
+from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
 from weather_ingest.reliability_report import (  # noqa: E402
     KST,
@@ -32,7 +33,9 @@ from weather_ingest.reliability_report import (  # noqa: E402
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 # 리포트 DAG 은 외부 소스 API 를 호출하지 않으므로 source_system 은 생략한다.
 record_weather_problem = problem_failure_callback(domain="weather")
-DELIVERY_FINGERPRINT_VARIABLE = "ask_seoul.weather.bronze_reliability.delivery_fingerprint"
+DELIVERY_FINGERPRINT_VARIABLE = (
+    "ask_seoul.weather.bronze_reliability.delivery_fingerprint"
+)
 
 
 def notification_fingerprint(report: dict) -> str:
@@ -54,7 +57,9 @@ def notification_fingerprint(report: dict) -> str:
             "status": dag_runs.get("latest_status"),
             "is_publishable": dag_runs.get("latest_is_publishable"),
         }
-    payload = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -121,3 +126,6 @@ with DAG(
         python_callable=collect_and_notify,
         on_failure_callback=record_weather_problem,
     )
+
+
+enable_lineage_if_configured(dag)

@@ -1,20 +1,34 @@
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from weather.bronze_run_manifest import failure_reason_from_context  # noqa: E402
+from traffic_ingest.run_manifest import TrafficRun, TrafficRunManifest  # noqa: E402
+
+
+class RecordingCursor:
+    def __init__(self):
+        self.statements = []
+
+    def execute(self, statement):
+        self.statements.append(" ".join(statement.split()))
 
 
 def test_failure_reason_does_not_store_exception_message():
-    reason = failure_reason_from_context(
-        {
-            "task_instance": SimpleNamespace(task_id="verify_seoul_traffic_bronze_runtime"),
-            "exception": RuntimeError("api credential redacted"),
-        }
+    cursor = RecordingCursor()
+    manifest = TrafficRunManifest(
+        lambda: (cursor, "iceberg_dev", "weather_traffic_bronze")
     )
 
-    assert reason == "RuntimeError in verify_seoul_traffic_bronze_runtime"
-    assert "api credential" not in reason
+    manifest.fail(
+        TrafficRun("traffic_incident_bronze", "manual__failed"),
+        task_id="verify_seoul_traffic_bronze_runtime",
+        error=RuntimeError("api credential redacted"),
+    )
+
+    mutation = next(
+        statement for statement in cursor.statements if statement.startswith("MERGE ")
+    )
+    assert "RuntimeError in verify_seoul_traffic_bronze_runtime" in mutation
+    assert "api credential" not in mutation

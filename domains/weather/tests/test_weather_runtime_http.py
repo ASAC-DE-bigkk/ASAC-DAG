@@ -17,13 +17,18 @@ class FakeTransport:
         self.calls = []
 
     def send(self, method, url, *, params, headers, timeout):
-        self.calls.append((method, url, dict(params or {}), dict(headers or {}), timeout))
+        self.calls.append(
+            (method, url, dict(params or {}), dict(headers or {}), timeout)
+        )
         return self.responses.pop(0)
 
 
 def test_fetch_url_retries_configured_429(monkeypatch):
     transport = FakeTransport(
-        [TransportResponse(status=429, headers={"Retry-After": "0"}), TransportResponse(status=200, content=b"ok")]
+        [
+            TransportResponse(status=429, headers={"Retry-After": "0"}),
+            TransportResponse(status=200, content=b"ok"),
+        ]
     )
     monkeypatch.setenv("KMA_SERVICE_KEY", "kma-key-12345")
     monkeypatch.setattr(runtime._HTTP, "_transport", transport)

@@ -19,6 +19,7 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runmetrics import track  # noqa: E402
+from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 
 from traffic_ingest.reliability_report import (  # noqa: E402
     KST,
@@ -31,7 +32,9 @@ from traffic_ingest.reliability_report import (  # noqa: E402
 
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 record_traffic_problem = problem_failure_callback(domain="traffic")
-DELIVERY_FINGERPRINT_VARIABLE = "ask_seoul.traffic.bronze_reliability.delivery_fingerprint"
+DELIVERY_FINGERPRINT_VARIABLE = (
+    "ask_seoul.traffic.bronze_reliability.delivery_fingerprint"
+)
 
 
 def notification_fingerprint(report: dict) -> str:
@@ -78,7 +81,9 @@ def notification_fingerprint(report: dict) -> str:
         }
         if not airflow_failures:
             identity["airflow"]["failed_count"] = airflow_failed_count
-    payload = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -163,3 +168,6 @@ with DAG(
         python_callable=collect_and_notify,
         on_failure_callback=record_traffic_problem,
     )
+
+
+enable_lineage_if_configured(dag)

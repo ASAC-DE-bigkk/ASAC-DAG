@@ -1,17 +1,17 @@
 import json
 import os
-import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from traffic_ingest.common.runtime import raw_prefix, required_env
-
-
-SEOUL_OPEN_API_BASE_URL = os.environ.get(
-    "SEOUL_OPEN_API_BASE_URL",
-    "http://openapi.seoul.go.kr:8088",
+from traffic_ingest.common.runtime import raw_prefix
+from traffic_ingest.errors import (
+    TrafficInvalidWindowError,
+    TrafficSourceBusinessError,
+    TrafficSourceSchemaError,
 )
+
+
 KST = ZoneInfo("Asia/Seoul")
 
 SOURCE_ID = "seoul_traffic_incident"
@@ -45,11 +45,6 @@ def request_params_json(start_index: int, end_index: int) -> str:
     )
 
 
-def build_seoul_acc_info_url(start_index: int, end_index: int) -> str:
-    api_key = urllib.parse.quote(required_env("SEOUL_API_KEY_TRIC"), safe="")
-    return f"{SEOUL_OPEN_API_BASE_URL.rstrip('/')}/{api_key}/xml/AccInfo/{start_index}/{end_index}/"
-
-
 def metadata_total_count(metadata: dict) -> int:
     value = metadata.get("list_total_count")
     if value is None or value == "":
@@ -61,7 +56,7 @@ def _int_setting(value: object, name: str) -> int:
     try:
         return int(str(value).strip())
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be an integer: {value}") from exc
+        raise TrafficInvalidWindowError(f"{name} must be an integer: {value}") from exc
 
 
 def resolve_acc_info_page_window(
@@ -85,11 +80,13 @@ def resolve_acc_info_page_window(
         else end_index - start_index + 1
     )
     if start_index < 1:
-        raise ValueError(f"start_index must be positive: {start_index}")
+        raise TrafficInvalidWindowError(f"start_index must be positive: {start_index}")
     if end_index < start_index:
-        raise ValueError(f"end_index must be >= start_index: {start_index}, {end_index}")
+        raise TrafficInvalidWindowError(
+            f"end_index must be >= start_index: {start_index}, {end_index}"
+        )
     if page_size < 1:
-        raise ValueError(f"page_size must be positive: {page_size}")
+        raise TrafficInvalidWindowError(f"page_size must be positive: {page_size}")
     return start_index, end_index, page_size
 
 
@@ -100,13 +97,19 @@ def next_acc_info_page_ranges(
     page_size: int | None = None,
 ) -> list[tuple[int, int]]:
     if start_index < 1:
-        raise ValueError(f"start_index must be positive: {start_index}")
+        raise TrafficInvalidWindowError(f"start_index must be positive: {start_index}")
     if end_index < start_index:
-        raise ValueError(f"end_index must be >= start_index: {start_index}, {end_index}")
+        raise TrafficInvalidWindowError(
+            f"end_index must be >= start_index: {start_index}, {end_index}"
+        )
 
-    resolved_page_size = page_size if page_size is not None else (end_index - start_index + 1)
+    resolved_page_size = (
+        page_size if page_size is not None else (end_index - start_index + 1)
+    )
     if resolved_page_size < 1:
-        raise ValueError(f"page_size must be positive: {resolved_page_size}")
+        raise TrafficInvalidWindowError(
+            f"page_size must be positive: {resolved_page_size}"
+        )
     if list_total_count <= end_index:
         return []
 
@@ -129,19 +132,34 @@ def xml_text(element: ET.Element | None, name: str) -> str | None:
 
 
 def parse_seoul_acc_info_response(raw_bytes: bytes) -> tuple[dict, list[dict]]:
-    root = ET.fromstring(raw_bytes)
+    try:
+        root = ET.fromstring(raw_bytes)
+    except ET.ParseError as exc:
+        raise TrafficSourceSchemaError(
+            "Seoul AccInfo response is not valid XML"
+        ) from exc
     if root.tag == "RESULT":
         code = xml_text(root, "CODE")
         message = xml_text(root, "MESSAGE")
-        raise RuntimeError(f"Seoul AccInfo API returned resultCode={code}, resultMsg={message}")
+        raise TrafficSourceBusinessError(
+            f"Seoul AccInfo API returned resultCode={code}, resultMsg={message}"
+        )
     if root.tag != "AccInfo":
-        raise RuntimeError(f"Unexpected Seoul AccInfo root element: {root.tag}")
+        raise TrafficSourceSchemaError(
+            f"Unexpected Seoul AccInfo root element: {root.tag}"
+        )
 
     result = root.find("RESULT")
+    if result is None:
+        raise TrafficSourceSchemaError("Seoul AccInfo response is missing RESULT")
     code = xml_text(result, "CODE")
     message = xml_text(result, "MESSAGE")
+    if not code:
+        raise TrafficSourceSchemaError("Seoul AccInfo RESULT is missing CODE")
     if code != "INFO-000":
-        raise RuntimeError(f"Seoul AccInfo API returned resultCode={code}, resultMsg={message}")
+        raise TrafficSourceBusinessError(
+            f"Seoul AccInfo API returned resultCode={code}, resultMsg={message}"
+        )
 
     rows = []
     for row in root.findall("row"):

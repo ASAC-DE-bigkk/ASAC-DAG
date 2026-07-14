@@ -3,6 +3,28 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
+
+_FAKE_MODULE_NAMES = (
+    "airflow",
+    "airflow.providers",
+    "airflow.providers.standard",
+    "airflow.providers.standard.operators",
+    "airflow.providers.standard.operators.python",
+)
+
+
+@pytest.fixture(autouse=True)
+def restore_fake_modules_after_maintenance_import():
+    originals = {name: sys.modules.get(name) for name in _FAKE_MODULE_NAMES}
+    yield
+    for name, module in originals.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
 
 class FakeDAG:
     _stack = []
@@ -67,9 +89,14 @@ def load_maintenance_module():
 
 def test_default_maintenance_tables_include_incremental_models():
     module = load_maintenance_module()
+    from weather_ingest.run_manifest import MANIFEST_TABLE
 
     tables = module.DEFAULT_PARAMS["tables"]
+    source = Path(module.__file__).read_text(encoding="utf-8")
 
+    assert module.MANIFEST_TABLE == MANIFEST_TABLE
+    assert MANIFEST_TABLE in tables
+    assert source.count('"bronze_collection_run_manifest"') == 0
     assert "silver_seoul_traffic_incident" in tables
     assert "gold_weather_forecast_by_place" in tables
     assert "gold_traffic_incident_summary" in tables

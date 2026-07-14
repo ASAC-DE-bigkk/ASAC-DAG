@@ -10,16 +10,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
 import subprocess
 import sys
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowException, AirflowFailException
 from airflow.models.param import Param
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
@@ -29,7 +28,9 @@ DAG_DIR = os.path.dirname(os.path.abspath(__file__))
 if DAG_DIR not in sys.path:
     sys.path.insert(0, DAG_DIR)
 
-DAGS_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DAGS_ROOT_DIR = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
@@ -38,30 +39,91 @@ from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+import weather_dbt_execution as weather_dbt  # noqa: E402
+from weather_dbt_failure import classify_weather_dbt_failure  # noqa: E402
+from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
-DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
-DBT_PROJECT = "/opt/airflow/dbt/domains/weather"
+DBT_BIN = weather_dbt.dbt_bin()
+DBT_PROJECT = weather_dbt.dbt_project_dir()
 WEATHER_DBT_CONTRACT_VARS = {"weather_w2_canonical_revision_date": "2025-04-01"}
-RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, "target", "run_results.json")
-WEATHER_DBT_ARTIFACT_XCOM_KEY = "weather_dbt_artifact_path"
-DBT_PHASE_TASK_IDS = (
-    "dbt_deps",
-    "dbt_source_freshness",
-    "dbt_seed_asac_axes",
-    "dbt_run_common_admin_dong_dimension",
-    "dbt_test_common_admin_dong_dimension",
-    "dbt_seed_place_mapping",
-    "dbt_test_place_mapping_seed",
-    "dbt_run_silver",
-    "dbt_test_silver",
-    "dbt_run_gold",
-    "dbt_test_gold",
-    "dbt_run_place_mart",
-    "dbt_test_place_mart",
+WEATHER_DBT_RUN_RESULTS_XCOM_KEY = "weather_dbt_run_results_path"
+
+
+@dataclass(frozen=True)
+class DbtPhaseSpec:
+    task_id: str
+    dbt_command: str
+    selection: str | None = None
+    include_project_vars: bool = True
+
+
+DBT_PHASE_SPECS = (
+    DbtPhaseSpec("dbt_deps", "deps", include_project_vars=False),
+    DbtPhaseSpec(
+        "dbt_source_freshness",
+        "source freshness",
+        "tag:ask_seoul_weather_transform_source",
+    ),
+    DbtPhaseSpec(
+        "dbt_seed_asac_axes",
+        "seed",
+        "tag:ask_seoul_weather_transform_asac_axes",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_common_admin_dong_dimension",
+        "run",
+        "tag:ask_seoul_weather_transform_common_admin",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_common_admin_dong_dimension",
+        "test",
+        "tag:ask_seoul_weather_transform_common_admin",
+    ),
+    DbtPhaseSpec(
+        "dbt_seed_place_mapping",
+        "seed",
+        "tag:ask_seoul_weather_transform_place_mapping",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_place_mapping_seed",
+        "test",
+        "tag:ask_seoul_weather_transform_place_mapping",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_silver",
+        "run",
+        "tag:ask_seoul_weather_transform_silver",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_silver",
+        "test",
+        "tag:ask_seoul_weather_transform_silver",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_gold",
+        "run",
+        "tag:ask_seoul_weather_transform_gold",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_gold",
+        "test",
+        "tag:ask_seoul_weather_transform_gold",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_place_mart",
+        "run",
+        "tag:ask_seoul_weather_transform_place_mart",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_place_mart",
+        "test",
+        "tag:ask_seoul_weather_transform_place_mart",
+    ),
 )
+DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
 DBT_RETRY_DELAY = timedelta(minutes=2)
 DOMAIN = "weather"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
@@ -115,17 +177,22 @@ def send_weather_discord(title: str, description: str, color: int, footer: str) 
         LOGGER.info("[weather notify:noop] %s (webhook url not configured)", title)
         return
     payload = {
-        "embeds": [{
-            "title": title,
-            "description": description[:4096],
-            "color": color,
-            "footer": {"text": footer[:2048]},
-        }]
+        "embeds": [
+            {
+                "title": title,
+                "description": description[:4096],
+                "color": color,
+                "footer": {"text": footer[:2048]},
+            }
+        ]
     }
     request = urllib.request.Request(
         webhook_url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": "ask-seoul-airflow/1.0"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "ask-seoul-airflow/1.0",
+        },
         method="POST",
     )
     try:
@@ -164,103 +231,85 @@ def transform_schedule() -> str | list[Asset] | None:
     return [Asset(WEATHER_BRONZE_ASSET)]
 
 
-def _artifact_path(*, run_id: str | None, task_id: str | None, try_number: int | None) -> str:
-    def safe(value: str | None) -> str:
-        return "".join(
-            char if char.isascii() and (char.isalnum() or char in "._=-") else "-"
-            for char in value or "unknown"
-        )
-
-    return str(
-        PurePosixPath(DBT_PROJECT.replace("\\", "/"))
-        / "target"
-        / "weather-transform"
-        / safe(run_id)
-        / safe(task_id)
-        / f"try{try_number if try_number is not None else 'unknown'}"
-        / "run_results.json"
-    )
-
-
 def run_dbt_phase(
-    *, dbt_args: str, include_project_vars: bool = True, **context
-) -> dict[str, str | None]:
+    *,
+    dbt_command: str,
+    selection: str | None,
+    include_project_vars: bool = True,
+    **context,
+) -> dict[str, object]:
     """Run one dbt phase with an artifact path isolated to this task attempt."""
     ti = context["ti"]
-    artifact_path = _artifact_path(
-        run_id=context.get("run_id"),
-        task_id=getattr(ti, "task_id", None),
-        try_number=getattr(ti, "try_number", None),
-    )
-    command_args = shlex.split(dbt_args)
-    is_deps = bool(command_args) and command_args[0] == "deps"
+    is_deps = dbt_command == "deps"
     target = (context.get("params") or {}).get("target", "dev")
-    command = [
-        DBT_BIN,
-        *command_args,
-        "--target",
-        target,
-        "--no-use-colors",
-    ]
-    if include_project_vars and not is_deps:
-        command.extend(
-            [
-                "--vars",
-                json.dumps(WEATHER_DBT_CONTRACT_VARS, separators=(",", ":")),
-            ]
-        )
-    if not is_deps:
-        command.extend(["--target-path", str(Path(artifact_path).parent)])
-
-    env = os.environ.copy()
-    env["DBT_PROFILES_DIR"] = DBT_PROJECT
-    env["DBT_PROJECT_DIR"] = DBT_PROJECT
-    artifact_reset_succeeded = False
+    run_results_path = None
     try:
-        if not is_deps:
-            try:
-                os.remove(artifact_path)
-            except FileNotFoundError:
-                pass
-            artifact_reset_succeeded = True
-        completed = subprocess.run(
-            command,
-            cwd=DBT_PROJECT,
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
+        execution = weather_dbt.execute_dbt_phase(
+            dbt_command=dbt_command,
+            selection=selection,
+            pipeline="weather-transform",
+            run_id=context.get("run_id"),
+            task_id=getattr(ti, "task_id", None),
+            try_number=getattr(ti, "try_number", None),
+            target=target,
+            variables=(
+                json.dumps(WEATHER_DBT_CONTRACT_VARS, separators=(",", ":"))
+                if include_project_vars and not is_deps
+                else None
+            ),
+            project_dir=DBT_PROJECT,
+            executable=DBT_BIN,
+            runner=subprocess.run,
         )
+        run_results_path = execution.existing_run_results_path
     finally:
-        existing_artifact_path = (
-            artifact_path
-            if artifact_reset_succeeded and os.path.exists(artifact_path)
-            else None
-        )
         ti.xcom_push(
-            key=WEATHER_DBT_ARTIFACT_XCOM_KEY,
-            value=existing_artifact_path,
+            key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
+            value=run_results_path,
         )
-    if completed.stdout:
-        print(completed.stdout, end="")
-    if completed.stderr:
-        print(completed.stderr, end="", file=sys.stderr)
-    if completed.returncode != 0:
-        raise AirflowException(
-            f"weather dbt command failed with exit code {completed.returncode}"
+    for completed in execution.attempts:
+        if completed.stdout:
+            print(completed.stdout, end="")
+        if completed.stderr:
+            print(completed.stderr, end="", file=sys.stderr)
+    completed = execution.completed
+    if completed.returncode != 0 or execution.missing_expected_artifacts:
+        command_output = "\n".join(
+            str(value)
+            for attempt in execution.attempts
+            for value in (attempt.stdout, attempt.stderr)
+            if value
         )
-    return {"status": "success", "artifact_path": existing_artifact_path}
+        failure = classify_weather_dbt_failure(
+            dbt_command=dbt_command,
+            returncode=int(completed.returncode),
+            artifact_path=execution.existing_run_results_path,
+            missing_expected_artifacts=execution.missing_expected_artifacts,
+            command_output=command_output,
+        )
+        exception_type = AirflowException if failure.retryable else AirflowFailException
+        raise exception_type(
+            "weather dbt command failed: "
+            f"classification={failure.classification}; "
+            f"exit_code={completed.returncode}"
+        )
+    return {
+        "status": "success",
+        "run_results_path": execution.existing_run_results_path,
+        "sources_path": execution.existing_sources_path,
+        "manifest_path": execution.existing_manifest_path,
+        "selected_unique_ids": list(execution.selected_unique_ids),
+    }
 
 
-def dbt_task(
-    task_id: str, dbt_args: str, *, include_project_vars: bool = True
-) -> PythonOperator:
+def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
     return PythonOperator(
-        task_id=task_id,
+        task_id=spec.task_id,
         python_callable=run_dbt_phase,
         op_kwargs={
-            "dbt_args": dbt_args,
-            "include_project_vars": include_project_vars,
+            "dbt_command": spec.dbt_command,
+            "selection": spec.selection,
+            "include_project_vars": spec.include_project_vars,
         },
         pool=TRINO_HEAVY_POOL,
         retries=1,
@@ -289,14 +338,14 @@ def _current_run_results_path(**context) -> str | None:
         except Exception:  # noqa: BLE001 - continue to earlier current-run phases
             result = None
         if isinstance(result, dict):
-            path = existing_path(result.get("artifact_path"))
+            path = existing_path(result.get("run_results_path"))
             if path is not None:
                 return path
 
         try:
             failure_path = ti.xcom_pull(
                 task_ids=task_id,
-                key=WEATHER_DBT_ARTIFACT_XCOM_KEY,
+                key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
             )
         except Exception:  # noqa: BLE001 - continue to earlier current-run phases
             failure_path = None
@@ -318,7 +367,9 @@ def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> d
         return {"rows": 0, "skipped": True}
     target = (context.get("params") or {}).get("target")
     records = dump_dbt_run_results(resolved_path, domain=DOMAIN, target=target)
-    print(f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})")
+    print(
+        f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})"
+    )
     return {"rows": len(records), "skipped": False}
 
 
@@ -340,90 +391,8 @@ with DAG(
         on_failure_callback=record_weather_problem,
     )
 
-    dbt_deps = dbt_task("dbt_deps", "deps", include_project_vars=False)
-
-    dbt_source_freshness = dbt_task("dbt_source_freshness", "source freshness")
-
-    dbt_seed_asac_axes = dbt_task("dbt_seed_asac_axes", "seed --select asac_axes")
-
-    dbt_run_common_admin_dong_dimension = dbt_task(
-        "dbt_run_common_admin_dong_dimension",
-        "run --select asac_axes.dim_admin_dong",
-    )
-
-    dbt_test_common_admin_dong_dimension = dbt_task(
-        "dbt_test_common_admin_dong_dimension",
-        "test --select asac_axes.dim_admin_dong",
-    )
-
-    dbt_seed_place_mapping = dbt_task(
-        "dbt_seed_place_mapping",
-        "seed --select weather_place_grid_mapping",
-    )
-
-    dbt_test_place_mapping_seed = dbt_task(
-        "dbt_test_place_mapping_seed",
-        "test --select "
-        "weather_place_grid_mapping "
-        "assert_weather_place_grid_mapping_major_aliases "
-        "assert_weather_place_grid_mapping_within_collected_grid_scope "
-        "assert_weather_place_grid_mapping_alias_unique_except_allowed",
-    )
-
-    dbt_run_silver = dbt_task(
-        "dbt_run_silver",
-        "run --select silver_kma_vilage_fcst",
-    )
-
-    dbt_test_silver = dbt_task(
-        "dbt_test_silver",
-        "test --select "
-        "silver_kma_vilage_fcst "
-        "assert_silver_kma_vilage_fcst_grain_unique "
-        "assert_silver_kma_vilage_fcst_grid_coverage "
-        "assert_silver_kma_uses_publishable_runs "
-        "assert_silver_kma_event_at_matches_forecast_at "
-        "--exclude "
-        "assert_gold_weather_counts_match_silver",
-    )
-
-    dbt_run_gold = dbt_task(
-        "dbt_run_gold",
-        "run --select gold_weather_forecast_summary",
-    )
-
-    dbt_test_gold = dbt_task(
-        "dbt_test_gold",
-        "test --select "
-        "gold_weather_forecast_summary "
-        "assert_gold_weather_counts_match_silver "
-        "assert_gold_weather_row_counts_positive",
-    )
-
-    dbt_run_place_mart = dbt_task(
-        "dbt_run_place_mart",
-        "run --select "
-        "dim_weather_place "
-        "silver_weather_forecast_by_admin_dong "
-        "gold_weather_forecast_by_place",
-    )
-
-    dbt_test_place_mart = dbt_task(
-        "dbt_test_place_mart",
-        "test --select "
-        "dim_weather_place "
-        "silver_weather_forecast_by_admin_dong "
-        "gold_weather_forecast_by_place "
-        "assert_silver_weather_admin_dong_grain_unique "
-        "assert_silver_weather_admin_axis_consistent "
-        "assert_silver_weather_admin_event_at_matches_forecast_at "
-        "assert_gold_weather_forecast_by_place_grain_unique "
-        "assert_gold_weather_forecast_by_place_major_coverage "
-        "assert_gold_weather_forecast_by_place_admin_axis_consistent "
-        "assert_dim_weather_place_admin_axis_consistent "
-        "assert_gold_weather_forecast_by_place_event_at_matches_forecast_at "
-        "assert_gold_weather_forecast_by_place_latest_silver_record",
-    )
+    dbt_phase_tasks = {spec.task_id: dbt_task(spec) for spec in DBT_PHASE_SPECS}
+    dbt_tasks_in_order = list(dbt_phase_tasks.values())
 
     publish_dbt_metrics = PythonOperator(
         task_id="publish_dbt_run_metrics",
@@ -431,21 +400,9 @@ with DAG(
         on_failure_callback=record_weather_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
-    (
-        validate_runtime
-        >> dbt_deps
-        >> dbt_source_freshness
-        >> dbt_seed_asac_axes
-        >> dbt_run_common_admin_dong_dimension
-        >> dbt_test_common_admin_dong_dimension
-        >> dbt_seed_place_mapping
-        >> dbt_test_place_mapping_seed
-        >> dbt_run_silver
-        >> dbt_test_silver
-        >> dbt_run_gold
-        >> dbt_test_gold
-        >> dbt_run_place_mart
-        >> dbt_test_place_mart
-    )
+    pipeline_tasks = [validate_runtime, *dbt_tasks_in_order, publish_dbt_metrics]
+    for upstream, downstream in zip(pipeline_tasks, pipeline_tasks[1:]):
+        upstream >> downstream
 
-    dbt_test_place_mart >> publish_dbt_metrics
+
+enable_lineage_if_configured(dag)

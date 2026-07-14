@@ -8,12 +8,24 @@
 | 작업 API | `AccInfo` |
 | 기본 endpoint | `http://openapi.seoul.go.kr:8088/{KEY}/xml/AccInfo/{start}/{end}/` |
 | 응답 형식 | XML |
-| 인증 env | `SEOUL_API_KEY_TRIC` |
+| 인증 env | `SEOUL_OPEN_API_KEY` |
 | Airflow DAG | `traffic_incident_bronze` |
 | Bronze table | `iceberg_dev.<ASK_SEOUL_SCHEMA>.bronze_seoul_traffic_incident` |
 
-`SEOUL_API_KEY_TRIC`는 URL에는 들어가지만 raw object key, request metadata, 로그, 문서에
-원문으로 남기지 않는다.
+`SEOUL_OPEN_API_KEY`는 URL에는 들어가지만 raw object key, request metadata, 로그, 문서에
+원문으로 남기지 않는다. `SEOUL_API_KEY_TRIC`는 이전 배포를 위한 deprecated fallback이며,
+사용 시 secret 값을 포함하지 않는 `DeprecationWarning`을 남긴다.
+
+## 수집 모드 계약
+
+| 모드 | 입력 | 완료 조건 | publishable |
+|---|---|---|---|
+| `full_snapshot` | API, `start_index=1` | TOPIS `list_total_count` 전체를 연속 수집 | 예 |
+| `window` | API, 명시한 start/end | 요청 범위와 전체 건수의 교집합을 정확히 수집 | 아니오 |
+| `backfill` | 기존 `raw_object_keys` | 1부터 전체 건수까지 연속된 raw page를 정확히 replay | 예 |
+
+기본값은 `full_snapshot`이다. 부분 범위는 반드시
+`dag_run.conf.collection_mode=window`로 표시해야 하며 전체 snapshot처럼 publish되지 않는다.
 
 ## 요청 파라미터
 
