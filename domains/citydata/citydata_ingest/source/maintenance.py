@@ -39,14 +39,14 @@ from ..common.trino import build_trino_settings, connect, sql_identifier
 # 제외 — dim 의 drop 잔재는 storage_cleanup 이 스키마 스캔으로 정리한다.
 CITYDATA_TABLES: tuple[str, ...] = (
     "bronze_seoul_citydata",
-    "silver_seoul_ppltn",
+    "silver_citydata_ppltn",
     "silver_citydata_cmrcl",
     "silver_citydata_cmrcl_rsb",
     "silver_citydata_transit_ppltn",
     "silver_citydata_sbike",
     "silver_citydata_air",
-    "gold_seoul_ppltn_by_time",
-    "gold_seoul_ppltn_daily",
+    "gold_citydata_ppltn_by_time",
+    "gold_citydata_ppltn_daily",
     "gold_citydata_place_latest",
     "gold_citydata_cmrcl_daily",
 )

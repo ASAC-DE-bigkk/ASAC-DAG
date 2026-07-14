@@ -52,13 +52,13 @@ DEFAULT_PARAMS = {"target": "dev"}
 # fast: 5분마다 새 값. dim 은 상시 최신 유지(저렴)라 fast 에 둔다.
 FAST_MODELS = " ".join([
     "dim_admin_dong", "dim_seoul_area",
-    "silver_seoul_ppltn", "silver_citydata_transit_ppltn", "silver_citydata_sbike",
-    "gold_seoul_ppltn_by_time", "gold_citydata_place_latest",
+    "silver_citydata_ppltn", "silver_citydata_transit_ppltn", "silver_citydata_sbike",
+    "gold_citydata_ppltn_by_time", "gold_citydata_place_latest",
 ])
 # slow: 10분마다 새 값 + 일/시간 집계 골드.
 SLOW_MODELS = " ".join([
     "silver_citydata_cmrcl", "silver_citydata_cmrcl_rsb", "silver_citydata_air",
-    "gold_seoul_ppltn_daily", "gold_citydata_cmrcl_daily",
+    "gold_citydata_ppltn_daily", "gold_citydata_cmrcl_daily",
     "gold_citydata_purchasing_power_daily", "gold_citydata_ppltn_x_culture_daily",
     "gold_citydata_transit_x_incident_hourly",
 ])
