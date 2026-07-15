@@ -39,6 +39,7 @@ from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from weather_ingest.runtime import build_weather_manifest  # noqa: E402
 import weather_dbt_execution as weather_dbt  # noqa: E402
 from weather_dbt_failure import classify_weather_dbt_failure  # noqa: E402
 from weather_lineage import enable_lineage_if_configured  # noqa: E402
@@ -50,6 +51,8 @@ DBT_BIN = weather_dbt.dbt_bin()
 DBT_PROJECT = weather_dbt.dbt_project_dir()
 WEATHER_DBT_CONTRACT_VARS = {"weather_w2_canonical_revision_date": "2025-04-01"}
 WEATHER_DBT_RUN_RESULTS_XCOM_KEY = "weather_dbt_run_results_path"
+SNAPSHOT_TASK_ID = "resolve_weather_snapshot_run"
+WEATHER_SNAPSHOT_VAR = "weather_snapshot_dag_run_id"
 
 
 @dataclass(frozen=True)
@@ -139,6 +142,84 @@ DEFAULT_PARAMS = {
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 # dbt transform 은 외부 소스 API 를 호출하지 않으므로 source_system 은 생략한다.
 record_weather_problem = problem_failure_callback(domain="weather")
+
+
+def _triggering_asset_events(*, context: dict, asset_uri: str):
+    triggering = context.get("triggering_asset_events") or {}
+    matched = []
+    for asset_key, events in triggering.items():
+        key_uri = getattr(asset_key, "uri", None) or str(asset_key)
+        if key_uri != asset_uri:
+            continue
+        matched.extend(events if isinstance(events, (list, tuple)) else [events])
+    if not matched:
+        raise AirflowFailException(
+            "weather transform requires at least one triggering Bronze asset event"
+        )
+    return matched
+
+
+def resolve_weather_snapshot_run(**context) -> str:
+    """Pin and verify the exact Weather Bronze run that triggered this DAG run."""
+    events = _triggering_asset_events(
+        context=context, asset_uri=WEATHER_BRONZE_ASSET
+    )
+    event_metadata = [getattr(event, "extra", None) for event in events]
+    required = {
+        "source_id",
+        "bronze_run_id",
+        "bronze_dag_run_id",
+        "event_at",
+        "load_date",
+        "row_count",
+        "payload_hash",
+        "is_publishable",
+    }
+    for index, extra in enumerate(event_metadata):
+        if not isinstance(extra, dict) or not required <= extra.keys():
+            raise AirflowFailException("weather Bronze asset event metadata is incomplete")
+        candidate_run_id = str(extra["bronze_dag_run_id"] or "")
+        if (
+            extra["source_id"] != "kma_vilage_fcst"
+            or not candidate_run_id
+            or extra["bronze_run_id"] != candidate_run_id
+            or extra["is_publishable"] is not True
+        ):
+            raise AirflowFailException(
+                "weather Bronze asset event does not identify a publishable snapshot"
+            )
+        try:
+            event_datetime = datetime.fromisoformat(
+                str(extra["event_at"]).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError) as exc:
+            raise AirflowFailException(
+                "weather Bronze asset event timestamp is malformed"
+            ) from exc
+        event_metadata[index] = (extra, event_datetime)
+
+    extra, _event_datetime = max(
+        event_metadata,
+        key=lambda item: (item[1], str(item[0]["bronze_dag_run_id"])),
+    )
+    run_id = str(extra["bronze_dag_run_id"])
+    for candidate, _candidate_datetime in event_metadata:
+        candidate_run_id = str(candidate["bronze_dag_run_id"])
+        if candidate_run_id != run_id:
+            build_weather_manifest().coalesce(
+                candidate_run_id, replacement_run_id=run_id
+            )
+    try:
+        verified_run_id = build_weather_manifest().require_publishable(run_id)
+    except Exception as exc:
+        raise AirflowFailException(
+            f"weather Bronze snapshot is not publishable: {run_id}"
+        ) from exc
+    if str(verified_run_id) != run_id:
+        raise AirflowFailException(
+            f"weather Bronze manifest identity mismatch for snapshot: {run_id}"
+        )
+    return run_id
 
 
 def discord_report_date(context) -> str:
@@ -236,6 +317,7 @@ def run_dbt_phase(
     dbt_command: str,
     selector: str | None,
     include_project_vars: bool = True,
+    snapshot_task_id: str | None = None,
     **context,
 ) -> dict[str, object]:
     """Run one dbt phase with an artifact path isolated to this task attempt."""
@@ -243,6 +325,9 @@ def run_dbt_phase(
     task_id = getattr(ti, "task_id", None)
     is_deps = dbt_command == "deps"
     target = (context.get("params") or {}).get("target", "dev")
+    snapshot_run_id = (
+        ti.xcom_pull(task_ids=snapshot_task_id) if snapshot_task_id else None
+    )
     run_results_path = None
     try:
         execution = weather_dbt.execute_dbt_phase(
@@ -255,7 +340,17 @@ def run_dbt_phase(
             try_number=getattr(ti, "try_number", None),
             target=target,
             variables=(
-                json.dumps(WEATHER_DBT_CONTRACT_VARS, separators=(",", ":"))
+                json.dumps(
+                    {
+                        **WEATHER_DBT_CONTRACT_VARS,
+                        **(
+                            {WEATHER_SNAPSHOT_VAR: snapshot_run_id}
+                            if snapshot_task_id
+                            else {}
+                        ),
+                    },
+                    separators=(",", ":"),
+                )
                 if include_project_vars and not is_deps
                 else None
             ),
@@ -312,6 +407,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
             "dbt_command": spec.dbt_command,
             "selector": spec.selector,
             "include_project_vars": spec.include_project_vars,
+            "snapshot_task_id": SNAPSHOT_TASK_ID,
         },
         pool=TRINO_HEAVY_POOL,
         retries=1,
@@ -393,6 +489,12 @@ with DAG(
         on_failure_callback=record_weather_problem,
     )
 
+    resolve_snapshot = PythonOperator(
+        task_id=SNAPSHOT_TASK_ID,
+        python_callable=resolve_weather_snapshot_run,
+        on_failure_callback=record_weather_problem,
+    )
+
     dbt_phase_tasks = {spec.task_id: dbt_task(spec) for spec in DBT_PHASE_SPECS}
     dbt_tasks_in_order = list(dbt_phase_tasks.values())
 
@@ -402,7 +504,12 @@ with DAG(
         on_failure_callback=record_weather_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
-    pipeline_tasks = [validate_runtime, *dbt_tasks_in_order, publish_dbt_metrics]
+    pipeline_tasks = [
+        validate_runtime,
+        resolve_snapshot,
+        *dbt_tasks_in_order,
+        publish_dbt_metrics,
+    ]
     for upstream, downstream in zip(pipeline_tasks, pipeline_tasks[1:]):
         upstream >> downstream
 

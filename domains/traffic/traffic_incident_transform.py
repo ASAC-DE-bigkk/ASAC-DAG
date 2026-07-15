@@ -21,7 +21,6 @@ from airflow.exceptions import AirflowException
 from airflow.models.param import Param
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk.exceptions import AirflowFailException
-from airflow.utils.trigger_rule import TriggerRule
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +34,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa: E402
+from common.assets import TRAFFIC_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
@@ -49,12 +49,13 @@ from traffic_dbt_failure import (  # noqa: E402
     silver_persisted_from_results,
 )
 import traffic_dbt_execution as traffic_dbt  # noqa: E402
+from traffic_ingest.acc_info import SOURCE_ID  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     TRAFFIC_TRANSFORM_CRON_KST as TRAFFIC_TRANSFORM_CRON_KST,
     TransformFailurePorts,
-    fail_transform_if_upstream_failed,
     record_classified_dbt_problem,
+    resolve_snapshot_from_asset_event,
     transform_schedule,
 )
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
@@ -156,9 +157,15 @@ DEFAULT_PARAMS = {
 record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
-def resolve_traffic_snapshot_run() -> str:
-    """Pin the newest completed Bronze run for every dbt command in this DAG run."""
-    return build_traffic_manifest().latest_publishable_run_id()
+def resolve_traffic_snapshot_run(**context) -> str:
+    """Pin and verify the exact Bronze run that triggered this Asset DAG run."""
+    return resolve_snapshot_from_asset_event(
+        context=context,
+        asset_uri=TRAFFIC_BRONZE_ASSET,
+        source_id=SOURCE_ID,
+        domain=DOMAIN,
+        manifest_factory=build_traffic_manifest,
+    )
 
 
 def run_dbt_phase(
@@ -375,24 +382,13 @@ with DAG(
     publish_dbt_metrics = PythonOperator(
         task_id="publish_dbt_run_metrics",
         python_callable=publish_dbt_run_metrics,
-        trigger_rule=TriggerRule.ALL_DONE,
         on_failure_callback=record_traffic_problem,
-    )
-
-    propagate_transform_failure = PythonOperator(
-        task_id="fail_transform_if_upstream_failed",
-        python_callable=fail_transform_if_upstream_failed,
-        trigger_rule=TriggerRule.ONE_FAILED,
-        retries=0,
-    )
+    ).as_teardown(on_failure_fail_dagrun=False)
 
     transform_tasks = [validate_runtime, resolve_snapshot, *dbt_tasks_in_order]
     pipeline_tasks = [*transform_tasks, publish_dbt_metrics]
     for upstream, downstream in zip(pipeline_tasks, pipeline_tasks[1:]):
         upstream >> downstream
-
-    for transform_task in transform_tasks:
-        transform_task >> propagate_transform_failure
 
 
 enable_lineage_if_configured(dag)

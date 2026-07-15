@@ -17,17 +17,103 @@ def test_snapshot_resolver_delegates_to_the_traffic_manifest(monkeypatch):
     calls = []
 
     class Manifest:
-        def latest_publishable_run_id(self):
-            calls.append("latest")
-            return "traffic-run-42"
+        def require_publishable(self, run_id):
+            calls.append(run_id)
+            return run_id
 
     monkeypatch.setattr(module, "build_traffic_manifest", lambda: Manifest())
 
-    assert module.resolve_traffic_snapshot_run() == "traffic-run-42"
-    assert calls == ["latest"]
+    event = types.SimpleNamespace(
+        extra={
+            "source_id": "seoul_traffic_incident",
+            "bronze_run_id": "traffic-run-42",
+            "bronze_dag_run_id": "traffic-run-42",
+            "event_at": "2026-07-15T12:00:00+09:00",
+            "load_date": "2026-07-15",
+            "row_count": 7,
+            "payload_hash": "a" * 64,
+            "is_publishable": True,
+        }
+    )
+
+    assert module.resolve_traffic_snapshot_run(
+        triggering_asset_events={module.TRAFFIC_BRONZE_ASSET: [event]}
+    ) == "traffic-run-42"
+    assert calls == ["traffic-run-42"]
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "bronze_collection_run_manifest" not in source
-    assert "seoul_traffic_incident" not in source
+
+
+def test_traffic_snapshot_resolver_rejects_missing_asset_events():
+    module = load_transform_module()
+
+    with pytest.raises(FakeAirflowFailException, match="at least one"):
+        module.resolve_traffic_snapshot_run(triggering_asset_events={})
+
+
+def test_traffic_snapshot_resolver_coalesces_older_asset_events(monkeypatch):
+    module = load_transform_module()
+    coalesced = []
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            return run_id
+
+        def coalesce(self, run_id, *, replacement_run_id):
+            coalesced.append((run_id, replacement_run_id))
+
+    monkeypatch.setattr(module, "build_traffic_manifest", lambda: Manifest())
+
+    def event(run_id, event_at):
+        return types.SimpleNamespace(
+            extra={
+                "source_id": "seoul_traffic_incident",
+                "bronze_run_id": run_id,
+                "bronze_dag_run_id": run_id,
+                "event_at": event_at,
+                "load_date": "2026-07-15",
+                "row_count": 7,
+                "payload_hash": "a" * 64,
+                "is_publishable": True,
+            }
+        )
+
+    assert module.resolve_traffic_snapshot_run(
+        triggering_asset_events={
+            module.TRAFFIC_BRONZE_ASSET: [
+                event("traffic-old", "2026-07-15T12:00:00+09:00"),
+                event("traffic-new", "2026-07-15T12:01:00+09:00"),
+            ]
+        }
+    ) == "traffic-new"
+    assert coalesced == [("traffic-old", "traffic-new")]
+
+
+def test_traffic_snapshot_resolver_rejects_manifest_mismatch(monkeypatch):
+    module = load_transform_module()
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            raise RuntimeError(f"not publishable: {run_id}")
+
+    monkeypatch.setattr(module, "build_traffic_manifest", lambda: Manifest())
+    event = types.SimpleNamespace(
+        extra={
+            "source_id": "seoul_traffic_incident",
+            "bronze_run_id": "traffic-run-42",
+            "bronze_dag_run_id": "traffic-run-42",
+            "event_at": "2026-07-15T12:00:00+09:00",
+            "load_date": "2026-07-15",
+            "row_count": 7,
+            "payload_hash": "a" * 64,
+            "is_publishable": True,
+        }
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="publishable"):
+        module.resolve_traffic_snapshot_run(
+            triggering_asset_events={module.TRAFFIC_BRONZE_ASSET: [event]}
+        )
 
 
 def test_traffic_contract_gates_delegate_membership_to_dbt_selectors():
@@ -160,8 +246,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         expected_task_order, expected_task_order[1:]
     ):
         assert dag.task_dict[upstream_task_id].downstream_task_ids == {
-            downstream_task_id,
-            "fail_transform_if_upstream_failed",
+            downstream_task_id
         }
 
     expected_phase_contracts = {
@@ -225,8 +310,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         )
         assert dag.task_dict[task_id].kwargs["op_kwargs"]["silver_persisted"] is False
     assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {
-        "dbt_deps",
-        "fail_transform_if_upstream_failed",
+        "dbt_deps"
     }
     assert (
         dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["snapshot_task_id"]
@@ -257,18 +341,15 @@ def test_contract_gates_are_the_only_path_into_persisted_silver():
     assert dag.task_dict[
         "dbt_test_traffic_bronze_source_contract"
     ].downstream_task_ids == {
-        "dbt_seed_asac_axes",
-        "fail_transform_if_upstream_failed",
+        "dbt_seed_asac_axes"
     }
     assert dag.task_dict[
         "dbt_test_common_admin_dong_dimension"
     ].downstream_task_ids == {
-        "dbt_test_asac_axes_seed_contract",
-        "fail_transform_if_upstream_failed",
+        "dbt_test_asac_axes_seed_contract"
     }
     assert dag.task_dict["dbt_test_asac_axes_seed_contract"].downstream_task_ids == {
-        "dbt_run_silver",
-        "fail_transform_if_upstream_failed",
+        "dbt_run_silver"
     }
     assert dag.task_dict["dbt_run_silver"].upstream_task_ids == {
         "dbt_test_asac_axes_seed_contract",

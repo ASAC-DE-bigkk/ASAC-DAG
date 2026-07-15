@@ -14,6 +14,11 @@ SOURCE_ID = "kma_vilage_fcst"
 STATUS_STARTED = "STARTED"
 STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
+STATUS_COALESCED = "COALESCED"
+
+
+class RunNotPublishableError(RuntimeError):
+    """The requested Weather Bronze snapshot is not publishable."""
 
 __all__ = [
     "MANIFEST_TABLE",
@@ -21,6 +26,8 @@ __all__ = [
     "STATUS_STARTED",
     "STATUS_SUCCESS",
     "STATUS_FAILED",
+    "STATUS_COALESCED",
+    "RunNotPublishableError",
     "WeatherRun",
     "WeatherRunManifest",
     "create_bronze_run_manifest_table",
@@ -87,6 +94,33 @@ class WeatherRunManifest:
             is_publishable=True,
         )
 
+    def require_publishable(self, run_id: str) -> str:
+        cursor, catalog, schema = self._cursor_factory()
+        cursor.execute(
+            f"""
+            SELECT dag_run_id
+            FROM {catalog}.{schema}.{MANIFEST_TABLE}
+            WHERE source_id = {sql_string(SOURCE_ID)}
+              AND status = {sql_string(STATUS_SUCCESS)}
+              AND is_publishable
+              AND dag_run_id = {sql_string(run_id)}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM {catalog}.{schema}.{MANIFEST_TABLE} AS coalesced
+                  WHERE coalesced.source_id = {sql_string(SOURCE_ID)}
+                    AND coalesced.dag_run_id = {sql_string(run_id)}
+                    AND coalesced.status = {sql_string(STATUS_COALESCED)}
+              )
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise RunNotPublishableError(
+                f"Weather snapshot is not publishable: {run_id}"
+            )
+        return str(row[0])
+
     def complete(
         self,
         run: WeatherRun,
@@ -114,6 +148,18 @@ class WeatherRunManifest:
             expected_raw_objects=expected_raw_objects,
             actual_raw_objects=actual_raw_objects,
             failure_reason=None,
+        )
+
+    def coalesce(self, run_id: str, *, replacement_run_id: str) -> str:
+        return self._record(
+            WeatherRun("weather_vilage_fcst_bronze", run_id),
+            status=STATUS_COALESCED,
+            is_publishable=False,
+            expected_rows=None,
+            actual_rows=None,
+            expected_raw_objects=None,
+            actual_raw_objects=None,
+            failure_reason=f"replaced_by={replacement_run_id}",
         )
 
     def fail(

@@ -10,7 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from weather_ingest.run_manifest import (  # noqa: E402
+    RunNotPublishableError,
     STATUS_FAILED,
+    STATUS_COALESCED,
     STATUS_STARTED,
     STATUS_SUCCESS,
     WeatherRun,
@@ -70,6 +72,47 @@ def test_publish_records_one_atomic_publishable_manifest_mutation():
     assert "'SUCCESS'" in mutations[0]
     assert "true" in mutations[0]
     assert "1001, 1001, 2, 2" in mutations[0]
+
+
+def test_require_publishable_returns_the_exact_verified_snapshot_id():
+    cursor = RecordingCursor(rows=[("scheduled__weather-42",)])
+    manifest = WeatherRunManifest(
+        cursor_factory=lambda: (cursor, "iceberg_dev", "weather_traffic_bronze")
+    )
+
+    assert manifest.require_publishable("scheduled__weather-42") == (
+        "scheduled__weather-42"
+    )
+    assert "dag_run_id = 'scheduled__weather-42'" in cursor.statements[0]
+    assert "is_publishable" in cursor.statements[0]
+
+
+def test_require_publishable_fails_when_the_exact_snapshot_is_not_verified():
+    cursor = RecordingCursor()
+    manifest = WeatherRunManifest(
+        cursor_factory=lambda: (cursor, "iceberg_dev", "weather_traffic_bronze")
+    )
+
+    with pytest.raises(RunNotPublishableError, match="not publishable"):
+        manifest.require_publishable("scheduled__weather-missing")
+
+
+def test_coalesce_records_replacement_identity_without_marking_snapshot_publishable():
+    cursor = RecordingCursor()
+    manifest = WeatherRunManifest(
+        cursor_factory=lambda: (cursor, "iceberg_dev", "weather_traffic_bronze")
+    )
+
+    manifest.coalesce(
+        "scheduled__weather-old", replacement_run_id="scheduled__weather-new"
+    )
+
+    mutation = next(
+        statement for statement in cursor.statements if statement.startswith("MERGE ")
+    )
+    assert f"'{STATUS_COALESCED}'" in mutation
+    assert "false" in mutation
+    assert "replaced_by=scheduled__weather-new" in mutation
 
 
 def test_complete_records_subset_repair_success_as_nonpublishable():

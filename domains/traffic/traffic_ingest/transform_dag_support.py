@@ -5,12 +5,97 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from airflow.sdk.exceptions import AirflowFailException
+from airflow.sdk import Asset
+
+from common.assets import TRAFFIC_BRONZE_ASSET
 
 
 TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
+
+
+def resolve_snapshot_from_asset_event(
+    *,
+    context: dict,
+    asset_uri: str,
+    source_id: str,
+    domain: str,
+    manifest_factory: Callable[[], Any],
+) -> str:
+    triggering = context.get("triggering_asset_events") or {}
+    events = []
+    for asset_key, asset_events in triggering.items():
+        key_uri = getattr(asset_key, "uri", None) or str(asset_key)
+        if key_uri == asset_uri:
+            events.extend(
+                asset_events if isinstance(asset_events, (list, tuple)) else [asset_events]
+            )
+    if not events:
+        raise AirflowFailException(
+            f"{domain} transform requires at least one triggering Bronze asset event"
+        )
+
+    required = {
+        "source_id",
+        "bronze_run_id",
+        "bronze_dag_run_id",
+        "event_at",
+        "load_date",
+        "row_count",
+        "payload_hash",
+        "is_publishable",
+    }
+    metadata = []
+    for event in events:
+        extra = getattr(event, "extra", None)
+        if not isinstance(extra, dict) or not required <= extra.keys():
+            raise AirflowFailException(
+                f"{domain} Bronze asset event metadata is incomplete"
+            )
+        run_id = str(extra["bronze_dag_run_id"] or "")
+        if (
+            extra["source_id"] != source_id
+            or not run_id
+            or extra["bronze_run_id"] != run_id
+            or extra["is_publishable"] is not True
+        ):
+            raise AirflowFailException(
+                f"{domain} Bronze asset event does not identify a publishable snapshot"
+            )
+        try:
+            event_datetime = datetime.fromisoformat(
+                str(extra["event_at"]).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError) as exc:
+            raise AirflowFailException(
+                f"{domain} Bronze asset event timestamp is malformed"
+            ) from exc
+        metadata.append((extra, event_datetime))
+
+    selected, _selected_datetime = max(
+        metadata,
+        key=lambda item: (item[1], str(item[0]["bronze_dag_run_id"])),
+    )
+    run_id = str(selected["bronze_dag_run_id"])
+    manifest = manifest_factory()
+    for candidate, _candidate_datetime in metadata:
+        candidate_run_id = str(candidate["bronze_dag_run_id"])
+        if candidate_run_id != run_id:
+            manifest.coalesce(candidate_run_id, replacement_run_id=run_id)
+    try:
+        verified_run_id = manifest.require_publishable(run_id)
+    except Exception as exc:
+        raise AirflowFailException(
+            f"{domain} Bronze snapshot is not publishable: {run_id}"
+        ) from exc
+    if str(verified_run_id) != run_id:
+        raise AirflowFailException(
+            f"{domain} Bronze manifest identity mismatch for snapshot: {run_id}"
+        )
+    return run_id
 
 
 @dataclass(frozen=True)
@@ -28,15 +113,10 @@ class TransformFailurePorts:
     logger: Any
 
 
-def transform_schedule() -> str | None:
+def transform_schedule() -> str | list[Asset] | None:
     if "ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE" in os.environ:
         return os.environ["ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE"] or None
-    return TRAFFIC_TRANSFORM_CRON_KST
-
-
-def fail_transform_if_upstream_failed() -> None:
-    """Leave a failed DAG leaf whenever a transform task fails."""
-    raise AirflowFailException("traffic transform upstream task failed")
+    return [Asset(TRAFFIC_BRONZE_ASSET)]
 
 
 def record_classified_dbt_problem(
@@ -121,7 +201,7 @@ def record_classified_dbt_problem(
 __all__ = [
     "TRAFFIC_TRANSFORM_CRON_KST",
     "TransformFailurePorts",
-    "fail_transform_if_upstream_failed",
+    "resolve_snapshot_from_asset_event",
     "record_classified_dbt_problem",
     "transform_schedule",
 ]
