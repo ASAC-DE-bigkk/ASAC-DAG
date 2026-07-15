@@ -12,7 +12,6 @@ import logging
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -50,10 +49,18 @@ from traffic_dbt_failure import (  # noqa: E402
 )
 import traffic_dbt_execution as traffic_dbt  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
+from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
+from traffic_ingest.transform_specs import (  # noqa: E402
+    DBT_PHASE_SPECS,
+    DBT_PHASE_TASK_IDS,
+    DbtPhaseSpec,
+)
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     TRAFFIC_TRANSFORM_CRON_KST as TRAFFIC_TRANSFORM_CRON_KST,
     TransformFailurePorts,
+    dbt_snapshot_variables,
     fail_transform_if_upstream_failed,
+    pin_optional_flow_snapshot,
     record_classified_dbt_problem,
     transform_schedule,
 )
@@ -66,83 +73,11 @@ DBT_BIN = traffic_dbt.dbt_bin()
 DBT_PROJECT = traffic_dbt.dbt_project_dir()
 DOMAIN = "traffic"
 SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
+FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
 DBT_FAILURE_XCOM_KEY = "traffic_dbt_failure"
 DBT_RUN_RESULTS_RECORD_KEY = "dbt_run_results_path"
 
 
-@dataclass(frozen=True)
-class DbtPhaseSpec:
-    task_id: str
-    dbt_command: str
-    selector: str | None = None
-    silver_persisted: bool = False
-    fresh_parse: bool = False
-
-
-DBT_PHASE_SPECS = (
-    DbtPhaseSpec("dbt_deps", "deps"),
-    DbtPhaseSpec(
-        "dbt_source_freshness",
-        "source freshness",
-        "ask_seoul_traffic_transform_source",
-    ),
-    DbtPhaseSpec(
-        "dbt_test_traffic_incident_availability",
-        "test",
-        "ask_seoul_traffic_transform_availability",
-    ),
-    DbtPhaseSpec(
-        "dbt_test_traffic_bronze_source_contract",
-        "test",
-        "traffic_transform_contract_gate",
-    ),
-    DbtPhaseSpec(
-        "dbt_seed_asac_axes",
-        "seed",
-        "ask_seoul_traffic_transform_asac_axes",
-    ),
-    DbtPhaseSpec(
-        "dbt_run_common_admin_dong_dimension",
-        "run",
-        "ask_seoul_traffic_transform_common_admin",
-    ),
-    DbtPhaseSpec(
-        "dbt_test_common_admin_dong_dimension",
-        "test",
-        "ask_seoul_traffic_transform_common_admin",
-    ),
-    DbtPhaseSpec(
-        "dbt_test_asac_axes_seed_contract",
-        "test",
-        "ask_seoul_traffic_transform_asac_axes_contract",
-    ),
-    DbtPhaseSpec(
-        "dbt_run_silver",
-        "run",
-        "ask_seoul_traffic_transform_silver",
-        fresh_parse=True,
-    ),
-    DbtPhaseSpec(
-        "dbt_test_silver",
-        "test",
-        "ask_seoul_traffic_transform_silver",
-        silver_persisted=True,
-    ),
-    DbtPhaseSpec(
-        "dbt_run_gold",
-        "run",
-        "ask_seoul_traffic_transform_gold",
-        silver_persisted=True,
-    ),
-    DbtPhaseSpec(
-        "dbt_test_gold",
-        "test",
-        "ask_seoul_traffic_transform_gold",
-        silver_persisted=True,
-        fresh_parse=True,
-    ),
-)
-DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
 DBT_RETRY_DELAY = timedelta(minutes=2)
 DEFAULT_PARAMS = {
     "target": Param(
@@ -156,9 +91,17 @@ DEFAULT_PARAMS = {
 record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
-def resolve_traffic_snapshot_run() -> str:
+def resolve_traffic_snapshot_run(**context) -> str:
     """Pin the newest completed Bronze run for every dbt command in this DAG run."""
-    return build_traffic_manifest().latest_publishable_run_id()
+    incident_run_id = build_traffic_manifest().latest_publishable_run_id()
+    task_instance = context.get("ti") or context.get("task_instance")
+    if task_instance is not None:
+        pin_optional_flow_snapshot(
+            task_instance,
+            build_traffic_flow_manifest,
+            FLOW_SNAPSHOT_XCOM_KEY,
+        )
+    return incident_run_id
 
 
 def run_dbt_phase(
@@ -178,6 +121,12 @@ def run_dbt_phase(
     try_number = getattr(ti, "try_number", None)
     params = context.get("params") or {}
     target = params.get("target", "dev")
+    dbt_variables = dbt_snapshot_variables(
+        ti,
+        snapshot_task_id,
+        snapshot_run_id,
+        FLOW_SNAPSHOT_XCOM_KEY,
+    )
     execution = traffic_dbt.execute_dbt_phase(
         dbt_command=dbt_command,
         selector=selector,
@@ -187,7 +136,7 @@ def run_dbt_phase(
         task_id=task_id,
         try_number=try_number,
         target=target,
-        variables=json.dumps({"traffic_snapshot_dag_run_id": snapshot_run_id}),
+        variables=json.dumps(dbt_variables),
         fresh_parse=fresh_parse,
         project_dir=DBT_PROJECT,
         executable=DBT_BIN,
