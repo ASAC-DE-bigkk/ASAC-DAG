@@ -37,6 +37,11 @@ _INFRASTRUCTURE_MARKERS = (
     "connection reset",
     "connection aborted",
 )
+_CATALOG_AVAILABILITY_MARKERS = (
+    "iceberg_catalog_error",
+    "failed to list tables",
+    "nohttpresponseexception",
+)
 _UNSAFE_SEGMENT_CHARS = re.compile(r"[^A-Za-z0-9._=-]")
 
 
@@ -112,8 +117,13 @@ def classify_dbt_failure(
         )
 
     detail = "\n".join(messages).lower()
-    if any(marker in detail for marker in _TRINO_OR_ADAPTER_MARKERS) and any(
-        marker in detail for marker in _INFRASTRUCTURE_MARKERS
+    has_trino_or_adapter_error = any(marker in detail for marker in _TRINO_OR_ADAPTER_MARKERS)
+    has_infrastructure_error = any(marker in detail for marker in _INFRASTRUCTURE_MARKERS)
+    has_catalog_availability_error = all(
+        marker in detail for marker in _CATALOG_AVAILABILITY_MARKERS
+    )
+    if has_trino_or_adapter_error and (
+        has_infrastructure_error or has_catalog_availability_error
     ):
         return DbtFailure(
             classification="retryable-infrastructure-error",
