@@ -79,7 +79,9 @@ def materialize_pending_traffic_incident_snapshots(**context) -> dict[str, objec
     }
 
 
-def acknowledge_materialized_traffic_incident_snapshots(**context) -> list[str]:
+def acknowledge_materialized_traffic_incident_snapshots(
+    context: dict,
+) -> list[str]:
     result = context["ti"].xcom_pull(task_ids=MATERIALIZER_TASK_ID) or {}
     snapshot_run_ids = result.get("snapshot_run_ids") or []
     if not isinstance(snapshot_run_ids, list):

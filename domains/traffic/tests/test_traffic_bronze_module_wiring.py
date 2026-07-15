@@ -338,7 +338,7 @@ def test_traffic_bronze_success_callback_acknowledges_materialized_receipts(
     )
 
     assert scheduled_module.acknowledge_materialized_traffic_incident_snapshots(
-        ti=TI()
+        {"ti": TI()}
     ) == ["snapshot-1", "snapshot-2"]
     assert acknowledged == ["snapshot-1", "snapshot-2"]
 
@@ -358,7 +358,7 @@ def test_traffic_bronze_empty_success_callback_does_not_open_receipt_storage(
     )
 
     assert scheduled_module.acknowledge_materialized_traffic_incident_snapshots(
-        ti=TI()
+        {"ti": TI()}
     ) == []
 
 
