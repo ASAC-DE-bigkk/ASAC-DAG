@@ -49,6 +49,41 @@ def test_classifies_trino_dns_error_as_retryable_infrastructure_failure():
     assert failure.failed_row_count == 0
 
 
+def test_classifies_iceberg_catalog_transport_error_as_retryable_infrastructure_failure():
+    failure = classify_dbt_failure(
+        returncode=1,
+        results=[],
+        artifact_path=None,
+        command_output=(
+            "Database Error\n"
+            "TrinoExternalError(type=EXTERNAL, name=ICEBERG_CATALOG_ERROR, "
+            'message="Error listing materialized views for catalog iceberg_dev: '
+            'Failed to list tables")\n'
+            "NoHttpResponseException while sending request to "
+            "https://catalog.cloudflarestorage.com:443"
+        ),
+    )
+
+    assert failure.classification == "retryable-infrastructure-error"
+    assert failure.retryable is True
+    assert failure.artifact_path is None
+
+
+def test_does_not_retry_catalog_listing_error_without_transport_failure():
+    failure = classify_dbt_failure(
+        returncode=1,
+        results=[],
+        artifact_path=None,
+        command_output=(
+            "TrinoExternalError(type=EXTERNAL, name=ICEBERG_CATALOG_ERROR, "
+            'message="Failed to list tables")'
+        ),
+    )
+
+    assert failure.classification == "model-execution-failed"
+    assert failure.retryable is False
+
+
 def test_classifies_dbt_model_execution_error_as_non_retryable_failure():
     failure = classify_dbt_failure(
         returncode=1,
