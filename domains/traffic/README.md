@@ -58,7 +58,8 @@ Reliability DAG -> Trino + Airflow/R2 evidence -> report -> Discord
 
 ## dbt 선택·manifest·lineage
 
-- 활성 dbt project는 root monoproject `${ASK_SEOUL_DBT_PROJECT_DIR:-/opt/airflow/dbt}`다.
+- 활성 dbt project는 domain-owned monoproject
+  `${ASK_SEOUL_DBT_PROJECT_DIR:-/opt/airflow/dbt/domains/traffic_weather}`다.
 - 도메인별 하위 dbt project를 따로 실행하지 않고 root project 하나만 사용한다.
 - DAG는 모델명을 나열하지 않고 `traffic_incident_transform.py`의 `tag:ask_seoul_traffic_*` 선택자를 호출한다.
 - artifact는 `target/<pipeline>/<run_id>/<task_id>/try<n>/execution/` 아래에 invocation별로 둔다.

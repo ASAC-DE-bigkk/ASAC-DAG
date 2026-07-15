@@ -11,7 +11,7 @@ from typing import Any
 
 DEFAULT_DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DEFAULT_DBT_OL_BIN = "/home/airflow/dbt-venv/bin/dbt-ol"
-DEFAULT_DBT_PROJECT_DIR = "/opt/airflow/dbt"
+DEFAULT_DBT_PROJECT_DIR = "/opt/airflow/dbt/domains/traffic_weather"
 DBT_BIN_ENV = "ASK_SEOUL_DBT_BIN"
 DBT_PROJECT_DIR_ENV = "ASK_SEOUL_DBT_PROJECT_DIR"
 ARTIFACT_RETENTION_ENV = "ASK_SEOUL_DBT_ARTIFACT_RETENTION_RUNS"

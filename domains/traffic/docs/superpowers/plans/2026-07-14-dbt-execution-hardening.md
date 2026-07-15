@@ -12,7 +12,8 @@
 
 - 수정 범위는 `domains/traffic/**`, `domains/weather/**`이며 landing/Bronze 파일은 수정하지 않는다.
 - commit, push, PR 생성은 하지 않는다.
-- root dbt project 기본 경로는 `/opt/airflow/dbt`, override는 `ASK_SEOUL_DBT_PROJECT_DIR`이다.
+- domain-owned dbt project 기본 경로는 `/opt/airflow/dbt/domains/traffic_weather`,
+  override는 `ASK_SEOUL_DBT_PROJECT_DIR`이다.
 - `ASK_SEOUL_DBT_OPENLINEAGE_*` 값은 실제 `dbt-ol` subprocess에서만 표준 `OPENLINEAGE_*`로 변환한다.
 - `ASK_SEOUL_DBT_ARTIFACT_RETENTION_RUNS`는 기본 10이며 1 이상의 정수만 허용한다.
 - Traffic/Weather task graph, callback, retry, pool, W1 isolated schema와 cleanup 순서를 유지한다.

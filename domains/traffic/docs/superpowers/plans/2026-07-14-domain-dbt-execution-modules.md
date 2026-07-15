@@ -30,7 +30,8 @@
 - 수정: `domains/traffic/traffic_incident_transform.py`
 - 수정: `domains/traffic/traffic_snapshot_recovery.py`
 
-1. root project 기본값 `/opt/airflow/dbt`와 env override를 구현한다.
+1. domain-owned project 기본값 `/opt/airflow/dbt/domains/traffic_weather`와 env override를
+   구현한다.
 2. run/task/try별 target/log 경로와 안전한 경로 segment 처리를 구현한다.
 3. named selector/tag 표현, `--indirect-selection=buildable`, non-empty `dbt ls` preflight를 구현한다.
 4. transform/recovery DAG의 explicit membership literal을 phase selector/tag로 교체한다.
