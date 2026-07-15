@@ -50,7 +50,7 @@ def test_traffic_report_fails_and_describes_failed_scheduled_runs(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setattr(
         composition,
-        "collect_airflow_scheduled_run_summary",
+        "collect_scheduled_run_summary",
         lambda *args: {
             "expected": 288,
             "success": 283,
@@ -85,7 +85,7 @@ def test_traffic_report_fails_and_describes_failed_scheduled_runs(monkeypatch):
     message = discord.format_traffic_discord_message(result)
 
     assert result["status"] == "FAIL"
-    assert result["airflow_runs"]["failed"] == 5
+    assert result["scheduled_runs"]["failed"] == 5
     assert "스케줄 수집 상태: 283/288 성공, 5 실패" in message
     assert "실패 수집 공백: 2026-07-12 11:30~11:50 KST (25분)" in message
     assert "11:30 KST | task=record_seoul_traffic_run_started" in message

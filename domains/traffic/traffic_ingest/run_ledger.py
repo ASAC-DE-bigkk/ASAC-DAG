@@ -1,0 +1,274 @@
+"""R2-backed terminal lifecycle evidence for Traffic Bronze runs."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta, timezone
+from typing import Any, Protocol
+
+
+RUN_LEDGER_PREFIX = "traffic-run-ledger"
+STATUS_STARTED = "STARTED"
+STATUS_SUCCESS = "SUCCESS"
+STATUS_FAILED = "FAILED"
+TERMINAL_STATUSES = frozenset({STATUS_SUCCESS, STATUS_FAILED})
+_UNSAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._=-]")
+
+
+class JsonStorage(Protocol):
+    def write_json(self, key: str, value: object) -> None: ...
+
+    def list_keys(self, prefix: str) -> list[str]: ...
+
+    def read_json(self, key: str) -> object: ...
+
+
+def _as_utc_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _safe_segment(value: object) -> str:
+    return _UNSAFE_SEGMENT.sub("-", str(value or "unknown"))
+
+
+def _build_r2_storage() -> JsonStorage:
+    from common.storage import build_storage, r2_env
+
+    return build_storage(
+        "r2",
+        bucket=r2_env("R2_BUCKET_NAME"),
+        endpoint=r2_env("R2_ENDPOINT"),
+        key=r2_env("R2_ACCESS_KEY_ID"),
+        secret=r2_env("R2_SECRET_ACCESS_KEY"),
+        region="auto",
+    )
+
+
+class TrafficRunLedger:
+    """Persist and query the R2 lifecycle evidence owned by Traffic Bronze."""
+
+    def __init__(
+        self,
+        *,
+        storage_factory: Callable[[], JsonStorage] = _build_r2_storage,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self._storage_factory = storage_factory
+        self._clock = clock
+
+    def record(
+        self,
+        *,
+        dag_id: str,
+        run_id: str,
+        status: str,
+        logical_date: datetime | str | None,
+        task_id: str | None = None,
+        error: BaseException | None = None,
+    ) -> str:
+        if status not in {STATUS_STARTED, STATUS_SUCCESS, STATUS_FAILED}:
+            raise ValueError(f"Unsupported Traffic run ledger status: {status}")
+        event_at = _as_utc_datetime(self._clock()) or datetime.now(timezone.utc)
+        logical_at = _as_utc_datetime(logical_date) or event_at
+        document = {
+            "dag_id": str(dag_id),
+            "run_id": str(run_id),
+            "logical_date": logical_at.isoformat(),
+            "status": status,
+            "event_at": event_at.isoformat(),
+            "task_id": str(task_id) if task_id else None,
+            "failure_reason": (
+                f"{type(error).__name__} in {task_id or 'unknown'}"
+                if status == STATUS_FAILED
+                else None
+            ),
+        }
+        key = self._object_key(dag_id=dag_id, run_id=run_id, status=status, event_at=event_at)
+        self._storage_factory().write_json(key, document)
+        return key
+
+    def collect_scheduled_run_summary(
+        self,
+        *,
+        dag_id: str,
+        detected_at: datetime,
+        lookback_hours: int,
+        schedule_interval_minutes: int,
+        stale_after_minutes: int,
+    ) -> dict[str, Any]:
+        detected = _as_utc_datetime(detected_at) or datetime.now(timezone.utc)
+        cutoff = detected - timedelta(hours=int(lookback_hours))
+        storage = self._storage_factory()
+        by_run: dict[str, list[dict[str, Any]]] = {}
+        for key in self._keys_for_dates(storage, dag_id, cutoff, detected):
+            document = storage.read_json(key)
+            if not isinstance(document, Mapping):
+                continue
+            run_id = str(document.get("run_id") or "")
+            logical_date = _as_utc_datetime(document.get("logical_date"))
+            if not run_id.startswith("scheduled__") or logical_date is None:
+                continue
+            if not cutoff <= logical_date <= detected:
+                continue
+            by_run.setdefault(run_id, []).append(dict(document))
+
+        if not by_run:
+            return {
+                "expected": 0,
+                "success": 0,
+                "failed": 0,
+                "running": 0,
+                "failures": [],
+                "reason": "run_ledger_bootstrapping",
+            }
+
+        records = {
+            run_id: self._latest_run_record(events)
+            for run_id, events in by_run.items()
+        }
+        schedule_interval = max(1, int(schedule_interval_minutes))
+        stale_after = max(schedule_interval, int(stale_after_minutes))
+        earliest = min(
+            _as_utc_datetime(record.get("logical_date"))
+            for record in records.values()
+        )
+        assert earliest is not None
+        due_through = detected - timedelta(minutes=stale_after)
+        expected_slots = self._expected_slots(earliest, due_through, schedule_interval)
+        observed_slots = {
+            _as_utc_datetime(record.get("logical_date")) for record in records.values()
+        }
+
+        success = failed = running = 0
+        failures: list[dict[str, str]] = []
+        for run_id, record in records.items():
+            status = str(record.get("status") or "")
+            logical_date = _as_utc_datetime(record.get("logical_date"))
+            if logical_date is None:
+                continue
+            if status == STATUS_SUCCESS:
+                success += 1
+            elif status == STATUS_FAILED:
+                failed += 1
+                failures.append(self._failure_record(run_id, record, logical_date))
+            elif status == STATUS_STARTED:
+                if logical_date <= due_through:
+                    failed += 1
+                    failures.append(
+                        self._failure_record(
+                            run_id,
+                            {"task_id": "unknown", "failure_reason": "run_stalled"},
+                            logical_date,
+                        )
+                    )
+                else:
+                    running += 1
+
+        for slot in expected_slots:
+            if slot in observed_slots:
+                continue
+            failed += 1
+            failures.append(
+                {
+                    "logical_date": slot.isoformat(),
+                    "run_id": f"scheduled__{slot.isoformat()}",
+                    "task_id": "unknown",
+                    "reason": "missing_run_ledger_entry",
+                }
+            )
+        failures.sort(key=lambda item: (item["logical_date"], item["run_id"]))
+        return {
+            "expected": len(expected_slots),
+            "success": success,
+            "failed": failed,
+            "running": running,
+            "failures": failures,
+        }
+
+    def _object_key(
+        self,
+        *,
+        dag_id: str,
+        run_id: str,
+        status: str,
+        event_at: datetime,
+    ) -> str:
+        observed_date = event_at.date().isoformat()
+        return (
+            f"{RUN_LEDGER_PREFIX}/observed_date={observed_date}/"
+            f"dag_id={_safe_segment(dag_id)}/"
+            f"{_safe_segment(run_id)}__{status}.json"
+        )
+
+    @staticmethod
+    def _latest_run_record(events: list[dict[str, Any]]) -> dict[str, Any]:
+        terminal = [event for event in events if event.get("status") in TERMINAL_STATUSES]
+        candidates = terminal or events
+        return max(
+            candidates,
+            key=lambda event: _as_utc_datetime(event.get("event_at"))
+            or datetime.min.replace(tzinfo=timezone.utc),
+        )
+
+    @staticmethod
+    def _failure_record(
+        run_id: str,
+        record: Mapping[str, Any],
+        logical_date: datetime,
+    ) -> dict[str, str]:
+        return {
+            "logical_date": logical_date.isoformat(),
+            "run_id": run_id,
+            "task_id": str(record.get("task_id") or "unknown"),
+            "reason": str(record.get("failure_reason") or "unknown_failure"),
+        }
+
+    def _keys_for_dates(
+        self,
+        storage: JsonStorage,
+        dag_id: str,
+        cutoff: datetime,
+        detected: datetime,
+    ) -> list[str]:
+        dates: set[str] = set()
+        day = cutoff.date()
+        while day <= detected.date():
+            dates.add(day.isoformat())
+            day += timedelta(days=1)
+        keys: list[str] = []
+        for observed_date in sorted(dates):
+            prefix = (
+                f"{RUN_LEDGER_PREFIX}/observed_date={observed_date}/"
+                f"dag_id={_safe_segment(dag_id)}/"
+            )
+            keys.extend(storage.list_keys(prefix))
+        return keys
+
+    @staticmethod
+    def _expected_slots(
+        first_observed: datetime,
+        due_through: datetime,
+        interval_minutes: int,
+    ) -> set[datetime]:
+        interval = interval_minutes * 60
+        first_seconds = int(first_observed.timestamp())
+        slot = datetime.fromtimestamp(
+            first_seconds - (first_seconds % interval), tz=timezone.utc
+        )
+        slots: set[datetime] = set()
+        while slot <= due_through:
+            slots.add(slot)
+            slot += timedelta(minutes=interval_minutes)
+        return slots

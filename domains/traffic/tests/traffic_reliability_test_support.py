@@ -104,11 +104,15 @@ def stub_report_dependencies(monkeypatch):
             "latest_status": "SUCCESS",
             "latest_is_publishable": True,
             "latest_event_at": "2026-07-02 08:55:00+00:00",
+            "latest_terminal_dag_run_id": "scheduled__2026-07-02T08:55:00+00:00",
+            "latest_terminal_status": "SUCCESS",
+            "latest_terminal_is_publishable": True,
+            "latest_terminal_event_at": "2026-07-02 08:55:00+00:00",
         },
     )
     monkeypatch.setattr(
         composition,
-        "collect_airflow_scheduled_run_summary",
+        "collect_scheduled_run_summary",
         lambda *args: {
             "expected": 4,
             "success": 3,

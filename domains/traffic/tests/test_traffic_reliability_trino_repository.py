@@ -28,6 +28,10 @@ def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
                 "SUCCESS",
                 True,
                 datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
+                "scheduled__2026-07-04T08:00:00+00:00",
+                "SUCCESS",
+                True,
+                datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
             )
         ]
     )
@@ -51,6 +55,10 @@ def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
         "latest_status": "SUCCESS",
         "latest_is_publishable": True,
         "latest_event_at": "2026-07-04 08:00:00+00:00",
+        "latest_terminal_dag_run_id": "scheduled__2026-07-04T08:00:00+00:00",
+        "latest_terminal_status": "SUCCESS",
+        "latest_terminal_is_publishable": True,
+        "latest_terminal_event_at": "2026-07-04 08:00:00+00:00",
     }
     statement = cursor.statements[0]
     assert "bronze_collection_run_manifest" in statement
@@ -67,3 +75,4 @@ def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
         "max_by(latest_is_publishable, ROW(latest_event_at, dag_run_id)) "
         "AS latest_is_publishable"
     ) in statement
+    assert "terminal AS" in statement

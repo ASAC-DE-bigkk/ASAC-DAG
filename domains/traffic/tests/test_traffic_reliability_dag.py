@@ -133,7 +133,7 @@ def _traffic_failure_report(task_id="collect-a"):
             "latest_is_publishable": True,
             "latest_event_at": "2026-07-14 00:05:00+00:00",
         },
-        "airflow_runs": {
+        "scheduled_runs": {
             "failed": 1,
             "failures": [
                 {
@@ -156,7 +156,7 @@ def test_traffic_fingerprint_ignores_timestamps_and_distinguishes_failure_identi
     timestamp_only_change["traffic"]["freshness_minutes"] = 10
     timestamp_only_change["traffic"]["last_collected_at"] = "2026-07-14 00:10:00+00:00"
     timestamp_only_change["dag_runs"]["latest_event_at"] = "2026-07-14 00:15:00+00:00"
-    timestamp_only_change["airflow_runs"]["failures"][0]["logical_date"] = (
+    timestamp_only_change["scheduled_runs"]["failures"][0]["logical_date"] = (
         "2026-07-14T00:10:00+00:00"
     )
     different_failure = _traffic_failure_report("collect-b")
@@ -179,6 +179,27 @@ def test_traffic_fingerprint_ignores_timestamps_and_distinguishes_failure_identi
         )
         is True
     )
+
+
+def test_traffic_fingerprint_ignores_new_started_run_when_terminal_failure_is_unchanged():
+    module = load_module()
+    report = _traffic_failure_report()
+    report["publishability_ok"] = False
+    report["dag_runs"].update(
+        latest_dag_run_id="scheduled__started-1",
+        latest_status="STARTED",
+        latest_is_publishable=False,
+        latest_terminal_dag_run_id="scheduled__terminal-failure",
+        latest_terminal_status="FAILED",
+        latest_terminal_is_publishable=False,
+    )
+    newer_started_run = copy.deepcopy(report)
+    newer_started_run["dag_runs"].update(
+        latest_dag_run_id="scheduled__started-2",
+        latest_event_at="2026-07-14T00:20:00+00:00",
+    )
+
+    assert module.notification_fingerprint(newer_started_run) == module.notification_fingerprint(report)
 
 
 def test_traffic_variable_tracking_is_fail_open():
@@ -242,7 +263,7 @@ def test_traffic_records_fingerprint_only_after_successful_send(monkeypatch):
     assert result["notification_state_recorded"] is True
 
 
-def test_traffic_collect_and_notify_passes_current_task_log_url_to_report_builder(
+def test_traffic_collect_and_notify_does_not_depend_on_airflow_task_log_metadata(
     monkeypatch,
 ):
     module = load_module()
@@ -262,9 +283,7 @@ def test_traffic_collect_and_notify_passes_current_task_log_url_to_report_builde
         ),
     )
 
-    assert captured == {
-        "airflow_metadata_log_url": "http://localhost:30585/dags/traffic_bronze_reliability_report/log"
-    }
+    assert captured == {}
 
 
 def test_traffic_failed_send_is_retried_without_recording_state(monkeypatch):

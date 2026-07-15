@@ -54,6 +54,8 @@ from traffic_ingest.bronze_dag_support import (  # noqa: E402
     notify_traffic_bronze_failure,
     notify_traffic_bronze_success as notify_traffic_bronze_success,
     raw_object_keys_from_conf,
+    record_traffic_run_ledger_started as record_traffic_run_ledger_started_callback,
+    record_traffic_run_ledger_success,
     send_traffic_discord as send_traffic_discord,
     short_text as short_text,
     stage_name as stage_name,
@@ -134,6 +136,10 @@ def load_seoul_traffic_bronze(**context) -> dict:
 
 def record_seoul_traffic_run_started(**context) -> str:
     return start_traffic_run(context, manifest_factory=build_traffic_manifest)
+
+
+def record_traffic_run_ledger_started(**context) -> None:
+    return record_traffic_run_ledger_started_callback(context)
 
 
 def record_seoul_traffic_backfill_run_started(**context) -> str:
@@ -218,6 +224,7 @@ def publish_traffic_bronze_asset(**context) -> str:
         "payload_hash": payload_hash,
         "is_publishable": True,
     }
+    record_traffic_run_ledger_success(context)
     return context["run_id"]
 
 
@@ -234,6 +241,10 @@ def build_traffic_bronze_dag(
         on_failure_callback=record_seoul_traffic_run_failed,
         tags=tags,
     ) as built_dag:
+        start_ledger = PythonOperator(
+            task_id="record_traffic_run_ledger_started",
+            python_callable=record_traffic_run_ledger_started,
+        )
         validate_runtime = PythonOperator(
             task_id="validate_dev_runtime",
             python_callable=validate_dev_runtime,
@@ -283,7 +294,8 @@ def build_traffic_bronze_dag(
             outlets=[TRAFFIC_BRONZE_ASSET_REF],
         )
         (
-            validate_runtime
+            start_ledger
+            >> validate_runtime
             >> start_manifest
             >> land_raw
             >> load_bronze

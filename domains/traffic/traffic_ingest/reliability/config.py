@@ -19,6 +19,7 @@ TRAFFIC_BRONZE_DAG_ID = "traffic_incident_bronze"
 # The interval is added to the first-to-last failed slot so the reported window
 # includes the final slot's collection period.
 TRAFFIC_SCHEDULE_INTERVAL_MINUTES = 5
+TRAFFIC_RUN_STALE_MINUTES = 15
 TRAFFIC_TABLE = "bronze_seoul_traffic_incident"
 TRAFFIC_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
 WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "TRAFFIC_DISCORD_WEBHOOK_URL")
@@ -27,10 +28,7 @@ GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 DISCORD_GREEN = 3066993
 DISCORD_YELLOW = 16776960
 DISCORD_RED = 15158332
-AIRFLOW_METADATA_QUERY_MAX_ATTEMPTS = 2
-AIRFLOW_FAILURE_REASON_FALLBACK = "원인 미확인"
-AIRFLOW_FAILURE_REASON_MAX_LENGTH = 240
-PROBLEM_DOCUMENT_PREFIX = "errors"
+SCHEDULED_FAILURE_REASON_FALLBACK = "원인 미확인"
 
 
 @dataclass(frozen=True)
@@ -40,6 +38,8 @@ class TrafficReportConfig:
     lookback_hours: int
     freshness_warn_minutes: int
     freshness_error_minutes: int
+    scheduled_run_interval_minutes: int
+    scheduled_run_stale_minutes: int
 
 
 def is_dev_target(env: Mapping[str, str] = os.environ) -> bool:
@@ -92,5 +92,17 @@ def report_config(env: Mapping[str, str] = os.environ) -> TrafficReportConfig:
         ),
         freshness_error_minutes=int(
             env.get("ASK_SEOUL_REPORT_TRAFFIC_FRESHNESS_ERROR_MINUTES", "30")
+        ),
+        scheduled_run_interval_minutes=int(
+            env.get(
+                "ASK_SEOUL_REPORT_TRAFFIC_SCHEDULE_INTERVAL_MINUTES",
+                str(TRAFFIC_SCHEDULE_INTERVAL_MINUTES),
+            )
+        ),
+        scheduled_run_stale_minutes=int(
+            env.get(
+                "ASK_SEOUL_REPORT_TRAFFIC_RUN_STALE_MINUTES",
+                str(TRAFFIC_RUN_STALE_MINUTES),
+            )
         ),
     )
