@@ -17,6 +17,12 @@ from traffic_ingest.acc_info import KST
 from traffic_ingest.common.runtime import is_dev_target
 from traffic_ingest.errors import TrafficBronzeDeterministicError
 from traffic_ingest.errors import TrafficBronzeConfigurationError
+from traffic_ingest.run_ledger import (
+    STATUS_FAILED,
+    STATUS_STARTED,
+    STATUS_SUCCESS,
+    TrafficRunLedger,
+)
 from traffic_ingest.run_manifest import TrafficRun
 
 
@@ -201,7 +207,38 @@ def start_traffic_backfill_run(context: dict, *, manifest_factory: Callable) -> 
     )
 
 
+def record_traffic_run_ledger_started(context: dict) -> None:
+    _record_traffic_run_ledger(context, status=STATUS_STARTED)
+
+
+def record_traffic_run_ledger_success(context: dict) -> None:
+    _record_traffic_run_ledger(context, status=STATUS_SUCCESS)
+
+
+def _record_traffic_run_ledger(context: dict, *, status: str) -> None:
+    try:
+        task_instance = context.get("ti") or context.get("task_instance")
+        TrafficRunLedger().record(
+            dag_id=current_dag_id(context),
+            run_id=str(context["run_id"]),
+            status=status,
+            logical_date=(
+                context.get("logical_date")
+                or getattr(context.get("dag_run"), "logical_date", None)
+            ),
+            task_id=getattr(task_instance, "task_id", None),
+            error=context.get("exception"),
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to record Traffic run ledger event: status=%s error_type=%s",
+            status,
+            type(exc).__name__,
+        )
+
+
 def fail_traffic_run(context: dict, *, manifest_factory: Callable) -> None:
+    _record_traffic_run_ledger(context, status=STATUS_FAILED)
     try:
         task_instance = context.get("ti") or context.get("task_instance")
         error = context.get("exception") or RuntimeError("Airflow task failed")
@@ -233,6 +270,8 @@ __all__ = [
     "notify_traffic_bronze_failure",
     "notify_traffic_bronze_success",
     "raw_object_keys_from_conf",
+    "record_traffic_run_ledger_started",
+    "record_traffic_run_ledger_success",
     "send_traffic_discord",
     "short_text",
     "stage_name",

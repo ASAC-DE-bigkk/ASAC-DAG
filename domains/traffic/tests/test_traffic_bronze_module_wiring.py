@@ -282,6 +282,17 @@ def test_traffic_bronze_asset_is_owned_by_publish_gate_after_verification():
     assert publish.task_id in verify.downstream_task_ids
 
 
+def test_traffic_bronze_records_r2_lifecycle_before_validation_and_after_publish():
+    started = dag_module.dag.get_task("record_traffic_run_ledger_started")
+    validate = dag_module.dag.get_task("validate_dev_runtime")
+    publish = dag_module.dag.get_task("publish_traffic_bronze_asset")
+
+    assert started.python_callable is dag_module.record_traffic_run_ledger_started
+    assert validate.task_id in started.downstream_task_ids
+    assert dag_module.record_seoul_traffic_run_failed is dag_module.dag.on_failure_callback
+    assert publish.python_callable is dag_module.publish_traffic_bronze_asset
+
+
 def test_traffic_bronze_has_no_weather_runtime_dependency():
     source = (
         Path(__file__).resolve().parents[1] / "traffic_incident_bronze.py"

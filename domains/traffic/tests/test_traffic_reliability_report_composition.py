@@ -47,6 +47,10 @@ def test_build_traffic_report_passes_for_fresh_complete_data(monkeypatch):
         "latest_status": "SUCCESS",
         "latest_is_publishable": True,
         "latest_event_at": "2026-07-02 08:55:00+00:00",
+        "latest_terminal_dag_run_id": "scheduled__2026-07-02T08:55:00+00:00",
+        "latest_terminal_status": "SUCCESS",
+        "latest_terminal_is_publishable": True,
+        "latest_terminal_event_at": "2026-07-02 08:55:00+00:00",
         "publishability_ok": True,
     }
     assert result["traffic"]["parsed_row_count"] == 25
@@ -87,6 +91,10 @@ def test_traffic_report_does_not_borrow_older_publishable_run(
             "latest_status": latest_status,
             "latest_is_publishable": latest_is_publishable,
             "latest_event_at": "2026-07-04 08:59:00+00:00",
+            "latest_terminal_dag_run_id": "scheduled__2026-07-04T08:55:00+00:00",
+            "latest_terminal_status": latest_status,
+            "latest_terminal_is_publishable": latest_is_publishable,
+            "latest_terminal_event_at": "2026-07-04 08:59:00+00:00",
         },
     )
     cursor = RecordingCursor(
@@ -182,14 +190,14 @@ def test_traffic_report_has_logical_load_date_bound_without_claiming_partition_p
     assert "load_date >= '2026-06-30'" in cursor.statements[0]
 
 
-def test_traffic_report_fails_safely_when_airflow_summary_query_fails(monkeypatch):
+def test_traffic_report_fails_safely_when_run_ledger_query_fails(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
 
     def fail_summary(*_args):
         raise RuntimeError("credential=must-not-be-in-report")
 
     monkeypatch.setattr(
-        composition, "collect_airflow_scheduled_run_summary", fail_summary
+        composition, "collect_scheduled_run_summary", fail_summary
     )
     cursor = RecordingCursor(
         rows=[
@@ -200,13 +208,50 @@ def test_traffic_report_fails_safely_when_airflow_summary_query_fails(monkeypatc
     result = report.build_traffic_reliability_report(
         cursor=cursor,
         detected_at=datetime(2026, 7, 13, 9, 0, tzinfo=report.KST),
-        airflow_metadata_log_url="http://localhost:30585/log?token=must-not-be-in-report",
     )
     message = report.format_traffic_discord_message(result)
 
     assert result["status"] == "FAIL"
-    assert result["airflow_runs"]["reason"] == "airflow_metadata_query_failed"
-    assert result["airflow_runs"]["error_type"] == "RuntimeError"
+    assert result["scheduled_runs"]["reason"] == "run_ledger_query_failed"
+    assert result["scheduled_runs"]["error_type"] == "RuntimeError"
     assert "must-not-be-in-report" not in json.dumps(result, ensure_ascii=False)
-    assert "diagnostic_log_url=" in message
-    assert "must-not-be-in-report" not in message
+    assert "run_ledger_query_failed" in message
+
+
+def test_traffic_report_keeps_publishability_when_latest_manifest_is_running(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setattr(
+        composition,
+        "collect_dag_run_summary",
+        lambda *_args: {
+            "dag_id": "traffic_incident_bronze",
+            "success": 3,
+            "failed": 0,
+            "running": 1,
+            "last_success_at": "2026-07-15 04:20:00+00:00",
+            "last_publishable_at": "2026-07-15 04:20:00+00:00",
+            "latest_dag_run_id": "scheduled__2026-07-15T04:25:00+00:00",
+            "latest_status": "STARTED",
+            "latest_is_publishable": False,
+            "latest_event_at": "2026-07-15 04:25:00+00:00",
+            "latest_terminal_dag_run_id": "scheduled__2026-07-15T04:20:00+00:00",
+            "latest_terminal_status": "SUCCESS",
+            "latest_terminal_is_publishable": True,
+            "latest_terminal_event_at": "2026-07-15 04:20:00+00:00",
+        },
+    )
+    cursor = RecordingCursor(
+        rows=[
+            (1, 25, 25, 1000, 0, datetime(2026, 7, 15, 4, 25, tzinfo=timezone.utc)),
+        ]
+    )
+
+    result = report.build_traffic_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 15, 4, 30, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "PASS"
+    assert result["publishability_ok"] is True
+    assert result["dag_runs"]["latest_status"] == "STARTED"
+    assert result["dag_runs"]["latest_terminal_status"] == "SUCCESS"

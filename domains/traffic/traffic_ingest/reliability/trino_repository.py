@@ -196,6 +196,11 @@ def collect_dag_run_summary(
             WHERE dag_id = {_sql_string(dag_id)}
               AND event_at >= {_sql_timestamp_utc(cutoff)}
             GROUP BY dag_run_id
+        ),
+        terminal AS (
+            SELECT *
+            FROM latest
+            WHERE latest_status IN ('SUCCESS', 'FAILED')
         )
         SELECT
             coalesce(sum(CASE WHEN latest_status = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS success,
@@ -208,7 +213,15 @@ def collect_dag_run_summary(
             max_by(dag_run_id, ROW(latest_event_at, dag_run_id)) AS latest_dag_run_id,
             max_by(latest_status, ROW(latest_event_at, dag_run_id)) AS latest_status,
             max_by(latest_is_publishable, ROW(latest_event_at, dag_run_id)) AS latest_is_publishable,
-            max_by(latest_event_at, ROW(latest_event_at, dag_run_id)) AS latest_event_at
+            max_by(latest_event_at, ROW(latest_event_at, dag_run_id)) AS latest_event_at,
+            (SELECT max_by(dag_run_id, ROW(latest_event_at, dag_run_id)) FROM terminal)
+                AS latest_terminal_dag_run_id,
+            (SELECT max_by(latest_status, ROW(latest_event_at, dag_run_id)) FROM terminal)
+                AS latest_terminal_status,
+            (SELECT max_by(latest_is_publishable, ROW(latest_event_at, dag_run_id)) FROM terminal)
+                AS latest_terminal_is_publishable,
+            (SELECT max_by(latest_event_at, ROW(latest_event_at, dag_run_id)) FROM terminal)
+                AS latest_terminal_event_at
         FROM latest
         """,
     )
@@ -223,6 +236,10 @@ def collect_dag_run_summary(
         "latest_status": None,
         "latest_is_publishable": None,
         "latest_event_at": None,
+        "latest_terminal_dag_run_id": None,
+        "latest_terminal_status": None,
+        "latest_terminal_is_publishable": None,
+        "latest_terminal_event_at": None,
     }
     if row:
         summary.update(
@@ -235,5 +252,9 @@ def collect_dag_run_summary(
             latest_status=str(row[6]) if row[6] is not None else None,
             latest_is_publishable=bool(row[7]) if row[7] is not None else None,
             latest_event_at=str(row[8]) if row[8] is not None else None,
+            latest_terminal_dag_run_id=str(row[9]) if row[9] is not None else None,
+            latest_terminal_status=str(row[10]) if row[10] is not None else None,
+            latest_terminal_is_publishable=bool(row[11]) if row[11] is not None else None,
+            latest_terminal_event_at=str(row[12]) if row[12] is not None else None,
         )
     return summary

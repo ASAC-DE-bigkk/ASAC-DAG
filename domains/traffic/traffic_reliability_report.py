@@ -41,7 +41,7 @@ def notification_fingerprint(report: dict) -> str:
     """Hash status and stable failure identity, excluding observation timestamps."""
     traffic = report.get("traffic") or {}
     dag_runs = report.get("dag_runs") or {}
-    airflow_runs = report.get("airflow_runs") or {}
+    scheduled_runs = report.get("scheduled_runs") or {}
     identity = {"status": str(report.get("status") or "FAIL")}
     if traffic.get("status") != "PASS":
         identity["traffic"] = {
@@ -53,18 +53,18 @@ def notification_fingerprint(report: dict) -> str:
     if dag_runs.get("reason") or not bool(report.get("publishability_ok")):
         identity["manifest"] = {
             "reason": dag_runs.get("reason"),
-            "dag_run_id": dag_runs.get("latest_dag_run_id"),
-            "status": dag_runs.get("latest_status"),
-            "is_publishable": dag_runs.get("latest_is_publishable"),
+            "dag_run_id": dag_runs.get("latest_terminal_dag_run_id"),
+            "status": dag_runs.get("latest_terminal_status"),
+            "is_publishable": dag_runs.get("latest_terminal_is_publishable"),
         }
-    airflow_failures = sorted(
+    scheduled_failures = sorted(
         (
             {
                 "run_id": failure.get("run_id"),
                 "task_id": failure.get("task_id"),
                 "reason": failure.get("reason"),
             }
-            for failure in airflow_runs.get("failures") or []
+            for failure in scheduled_runs.get("failures") or []
         ),
         key=lambda failure: (
             str(failure.get("run_id") or ""),
@@ -72,15 +72,15 @@ def notification_fingerprint(report: dict) -> str:
             str(failure.get("reason") or ""),
         ),
     )
-    airflow_failed_count = int(airflow_runs.get("failed") or 0)
-    if airflow_runs.get("reason") or airflow_failed_count:
-        identity["airflow"] = {
-            "reason": airflow_runs.get("reason"),
-            "error_type": airflow_runs.get("error_type"),
-            "failures": airflow_failures,
+    scheduled_failed_count = int(scheduled_runs.get("failed") or 0)
+    if scheduled_runs.get("reason") or scheduled_failed_count:
+        identity["scheduled_runs"] = {
+            "reason": scheduled_runs.get("reason"),
+            "error_type": scheduled_runs.get("error_type"),
+            "failures": scheduled_failures,
         }
-        if not airflow_failures:
-            identity["airflow"]["failed_count"] = airflow_failed_count
+        if not scheduled_failures:
+            identity["scheduled_runs"]["failed_count"] = scheduled_failed_count
     payload = json.dumps(
         identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
@@ -104,27 +104,9 @@ def record_delivered_fingerprint(fingerprint: str, *, set=Variable.set) -> bool:
         return False
 
 
-def task_log_url(context: dict) -> str | None:
-    """Return the current task log location without making notification fail."""
-    task_instance = context.get("ti")
-    if task_instance is None:
-        return None
-    try:
-        value = getattr(task_instance, "log_url", None)
-        return str(value) if value else None
-    except Exception:
-        return None
-
-
 @track(layer="bronze", domain="traffic")
 def collect_and_notify(**context) -> dict:
-    airflow_metadata_log_url = task_log_url(context)
-    if airflow_metadata_log_url:
-        report = build_traffic_reliability_report(
-            airflow_metadata_log_url=airflow_metadata_log_url,
-        )
-    else:
-        report = build_traffic_reliability_report()
+    report = build_traffic_reliability_report()
     fingerprint = notification_fingerprint(report)
     should_notify = should_notify_fingerprint(fingerprint)
     discord_sent = False

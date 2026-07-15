@@ -7,9 +7,9 @@ import urllib.request
 from collections.abc import Mapping
 from typing import Any
 
-from .airflow_evidence import _as_utc_datetime
+from ..run_ledger import _as_utc_datetime
 from .config import (
-    AIRFLOW_FAILURE_REASON_FALLBACK,
+    SCHEDULED_FAILURE_REASON_FALLBACK,
     DISCORD_GREEN,
     DISCORD_RED,
     DISCORD_YELLOW,
@@ -42,14 +42,14 @@ def _status_label(status: str) -> str:
     return {"PASS": "성공", "WARN": "경고", "FAIL": "실패"}.get(status, "실패")
 
 
-def _airflow_failure_time(value: Any) -> str:
+def _scheduled_failure_time(value: Any) -> str:
     timestamp = _as_utc_datetime(value)
     if timestamp is None:
         return "unknown time"
     return timestamp.astimezone(KST).strftime("%H:%M KST")
 
 
-def _airflow_failure_window(
+def _scheduled_failure_window(
     failures: list[Mapping[str, Any]],
     schedule_interval_minutes: int = TRAFFIC_SCHEDULE_INTERVAL_MINUTES,
 ) -> str | None:
@@ -84,7 +84,7 @@ def _airflow_failure_window(
 
 def format_traffic_discord_message(report: dict[str, Any]) -> str:
     traffic = report["traffic"]
-    airflow_runs = report.get("airflow_runs") or {}
+    scheduled_runs = report.get("scheduled_runs") or {}
     detected_date = str(report["detected_at"])[:10]
     target = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
     report_status = str(report["status"])
@@ -93,12 +93,15 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
     freshness_ok = freshness == "PASS"
     publishability_ok = bool(report.get("publishability_ok"))
     dag_ok = not bool(report["dag_runs"].get("reason"))
-    airflow_query_ok = not bool(airflow_runs.get("reason"))
-    airflow_failures_ok = int(airflow_runs.get("failed") or 0) == 0
-    scheduled_ok = airflow_query_ok and airflow_failures_ok
-    expected = airflow_runs.get("expected")
-    success = int(airflow_runs.get("success") or 0)
-    failed = int(airflow_runs.get("failed") or 0)
+    scheduled_query_ok = scheduled_runs.get("reason") in {
+        None,
+        "run_ledger_bootstrapping",
+    }
+    scheduled_failures_ok = int(scheduled_runs.get("failed") or 0) == 0
+    scheduled_ok = scheduled_query_ok and scheduled_failures_ok
+    expected = scheduled_runs.get("expected")
+    success = int(scheduled_runs.get("success") or 0)
+    failed = int(scheduled_runs.get("failed") or 0)
     expected_text = str(expected) if expected is not None else "unknown"
     lines = [
         f"서울시 돌발정보 Bronze 신뢰성 리포트 - {detected_date} (target={target})",
@@ -133,23 +136,22 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
         ),
         f"{_icon(scheduled_ok)} 스케줄 수집 상태: {success}/{expected_text} 성공, {failed} 실패",
     ]
-    failure_window = _airflow_failure_window(list(airflow_runs.get("failures") or []))
+    failure_window = _scheduled_failure_window(list(scheduled_runs.get("failures") or []))
     if failure_window:
         lines.extend([f"실패 수집 공백: {failure_window}", "실패 내역:"])
-        for failure in airflow_runs.get("failures") or []:
-            time_text = _airflow_failure_time(failure.get("logical_date"))
+        for failure in scheduled_runs.get("failures") or []:
+            time_text = _scheduled_failure_time(failure.get("logical_date"))
             task_id = str(failure.get("task_id") or "unknown")
-            reason = str(failure.get("reason") or AIRFLOW_FAILURE_REASON_FALLBACK)
+            reason = str(failure.get("reason") or SCHEDULED_FAILURE_REASON_FALLBACK)
             run_id = str(failure.get("run_id") or "unknown")
             lines.append(f"- {time_text} | task={task_id} | {reason} | run_id={run_id}")
-    elif airflow_runs.get("reason"):
+    elif scheduled_runs.get("reason") == "run_ledger_bootstrapping":
+        lines.append("scheduled_run_ledger=BOOTSTRAPPING")
+    elif scheduled_runs.get("reason"):
         lines.append(
-            f"스케줄 수집 상태 조회 실패: {airflow_runs.get('reason')}"
-            f" (error_type={airflow_runs.get('error_type', 'unknown')})"
+            f"스케줄 수집 상태 조회 실패: {scheduled_runs.get('reason')}"
+            f" (error_type={scheduled_runs.get('error_type', 'unknown')})"
         )
-        diagnostic_log_url = airflow_runs.get("diagnostic_log_url")
-        if diagnostic_log_url:
-            lines.append(f"diagnostic_log_url={diagnostic_log_url}")
     lines.extend(
         [
             "",
@@ -158,7 +160,7 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
             f"{_icon(freshness_ok)} traffic_freshness={_format_bool(freshness_ok)}",
             f"{_icon(publishability_ok)} traffic_publishability={_format_bool(publishability_ok)}",
             f"{_icon(dag_ok)} dag_run_summary={_format_bool(dag_ok)}",
-            f"{_icon(scheduled_ok)} airflow_scheduled_runs={_format_bool(scheduled_ok)}",
+            f"{_icon(scheduled_ok)} scheduled_run_ledger={_format_bool(scheduled_ok)}",
             "",
             "Blast radius:",
         ]
