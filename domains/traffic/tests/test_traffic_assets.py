@@ -95,6 +95,24 @@ def test_airflow_three_materializer_schedule_combines_raw_asset_and_time_fallbac
     }
 
 
+def test_airflow_three_materializer_schedule_is_serializable():
+    import airflow
+
+    if int(airflow.__version__.split(".", 1)[0]) < 3:
+        pytest.skip("AssetOrTimeSchedule is available in the deployed Airflow 3 runtime")
+
+    from traffic_ingest import assets
+
+    schedule = assets.materializer_schedule(
+        env={"ASK_SEOUL_TARGET": "dev"},
+        airflow_version=airflow.__version__,
+    )
+
+    serialized = schedule.serialize()
+
+    assert serialized["timetable"]["__var"]["timezone"] == "Asia/Seoul"
+
+
 def test_materializer_schedule_can_be_disabled_and_has_local_airflow_fallback():
     from traffic_ingest import assets
 
