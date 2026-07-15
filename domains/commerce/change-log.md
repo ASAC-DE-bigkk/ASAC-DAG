@@ -24,8 +24,9 @@ response:
   (UPDATE 78행).
 - **파이프라인 편승(commerce_load_silver)**: SILVER_SELECT 에 entity 2종 추가(Cosmos ref 체인
   자동 순서) + `build_detail_catalog`·`load_details`(마킹 **뒤** — detail 실패가 run 마킹을 막지
-  않음, 자체 워터마크 재개) + **`maintain_gold_tables`**(신설 테이블 optimize/expire/orphan —
-  스냅샷/메타 무한 축적 방지, #226 확장·승인분) 태스크 신설. silver 리포트에 "원형 detail 적재
+  않음, 자체 워터마크 재개) 태스크 신설. **유지보수(expire 등) 편입은 사용자 지시로 취소** —
+  실버 스냅샷은 테이블 단위 생성 데이터로 보존, **중복적재 방지(문장 원자성·워터마크 스냅샷·
+  defend)만** 적용. (신설 테이블은 #226 유지보수 대상 아님 — 스냅샷 축적 모니터링만.) silver 리포트에 "원형 detail 적재
   N객체·신규 M행" 섹션 추가.
 - **commerce_load_gold = 집계 전용 재작성**: dbt_gold(dong_summary run+test) → report_gold
   (집계 현황 행수·미빌드 실패색). build_catalog/load_details 제거. refresh DAG 는 원형+집계

@@ -225,22 +225,6 @@ def commerce_load_silver():
         return {"loaded": loaded, "objects": len(loaded), "rows": sum(loaded.values()),
                 "catalog_version": version}
 
-    @task
-    def maintain_gold_tables() -> list[dict]:
-        """신설 Iceberg 테이블 유지보수(#226 확장) — optimize/expire/orphan.
-
-        대상: 원형 정리본(entity 2종)+detail(카탈로그 동적)+meta_detail_catalog+gold 집계.
-        매일 delete/append 커밋이 쌓이므로 빠지면 스냅샷/메타 무한 축적 → R2 Data Catalog
-        메타 불일치(실측 원인 — bronze/maintenance.py 참조)."""
-        from bronze import maintenance
-        from gold import loader
-
-        details, _ = loader.read_catalog()
-        tables = tuple(["silver_license_entity", "silver_license_entity_history",
-                        "meta_detail_catalog", "gold_license_dong_summary"]
-                       + [d["object"] for d in details])
-        return maintenance.run_table_maintenance(tables)
-
     @task(trigger_rule="all_done")
     def report_silver(**ctx) -> dict:
         """DAG 완료 리포트(#218, PROJECT.md §2) — **이번 실행이 silver 로 적재한 신규분만**
@@ -269,7 +253,7 @@ def commerce_load_silver():
     [enrich_admin_dong_ref(), enrich_fill_jibun(), ensure_silver_marker()] >> seed
     # 원형 파이프라인 편승(#70): dbt(원형 4모델) → 마킹 → detail(카탈로그 구동) → 유지보수 → 리포트
     (seed >> dbt_silver >> notify_masked_address_summary() >> mark_silver_done()
-     >> build_detail_catalog() >> load_details() >> maintain_gold_tables() >> report_silver())
+     >> build_detail_catalog() >> load_details() >> report_silver())
 
 
 commerce_load_silver()
