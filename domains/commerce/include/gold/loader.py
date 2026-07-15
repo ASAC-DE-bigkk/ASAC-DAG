@@ -34,6 +34,43 @@ DETAIL_KEY_COLUMNS = ("dataset", "opnsfteamcode", "mgtno", "collected_at", "cont
 # 멤버 행수가 이를 넘으면 content_hash 버킷 서브청크(json 추출 heap 바운드). env 로 조정.
 _BUCKET_ROWS = int(os.getenv("COMMERCE_GOLD_DETAIL_BUCKET_ROWS", "600000"))
 
+# 메타 파일 보존 정책(사용자 확정 2026-07-15): **스냅샷·데이터는 절대 삭제하지 않는다**(expire
+# 미사용). 대신 오래된 metadata.json **파일 사본**만 자동 정리 — 최신 metadata.json 안에 전체
+# 스냅샷 목록(타임트래블 이력)이 있어 사본 정리는 데이터/이력 무손실. 커밋 = 새 메타 버전이라는
+# Iceberg 원자성 설계상 생성 자체는 못 끄므로, 사본 상한(50)으로 무한 축적만 차단한다.
+METADATA_RETENTION_PROPS = {
+    "write.metadata.delete-after-commit.enabled": "true",
+    "write.metadata.previous-versions-max": os.getenv("COMMERCE_METADATA_VERSIONS_MAX", "50"),
+}
+
+
+def ensure_metadata_retention(table_names: list[str]) -> dict:
+    """대상 테이블에 메타 사본 보존 속성을 ensure(무손실 — 스냅샷/데이터 불변).
+
+    Trino 는 이 속성 설정을 막으므로 PyIceberg(REST)로 넣는다. dbt table materialization 이
+    재생성 시 속성을 떨굴 수 있어 **매 실행 ensure**(이미 설정돼 있으면 skip). 실패는 경고만
+    (fail-open — 속성이 없으면 기본값(무제한 보존)일 뿐 데이터 영향 없음)."""
+    from bronze.warehouse import _pyiceberg_catalog
+
+    _, schema, _ = _qualified()
+    cat = _pyiceberg_catalog()
+    done = skipped = failed = 0
+    for name in table_names:
+        assert_identifier(name, field="table name")
+        try:
+            t = cat.load_table(f"{schema}.{name}")
+            if all(t.properties.get(k) == v for k, v in METADATA_RETENTION_PROPS.items()):
+                skipped += 1
+                continue
+            with t.transaction() as tx:
+                tx.set_properties(METADATA_RETENTION_PROPS)
+            done += 1
+        except Exception as exc:  # noqa: BLE001 — 속성 실패가 적재를 못 막게
+            failed += 1
+            log.warning("메타 보존 속성 설정 실패(무시) %s: %s", name, type(exc).__name__)
+    log.info("메타 보존 속성: 설정 %d · 기존 %d · 실패 %d", done, skipped, failed)
+    return {"set": done, "already": skipped, "failed": failed}
+
 
 def _assert_detail_safe(detail: dict) -> None:
     """detail 의 객체명·payload·member 를 SQL 식별자 게이트에 통과(§20 소비 경계 방어선).
@@ -187,6 +224,11 @@ def run_load_details(details: list[dict], *, force_full: bool = False) -> dict:
     돌아가므로 같은 증분문이 전량을 옮긴다 — 문장 원자성 그대로).
     """
     catalog, schema, qschema = _qualified()
+    # 메타 사본 상한 ensure(무손실) — detail + 코어/집계/카탈로그. 실패해도 적재는 진행.
+    ensure_metadata_retention(
+        [d["object"] for d in details]
+        + ["silver_license_entity", "silver_license_entity_history",
+           "gold_license_dong_summary", CATALOG_TABLE])
     conn = _connect(catalog, schema)
     loaded: dict[str, int] = {}
     try:
