@@ -66,6 +66,7 @@ from traffic_ingest.common.runtime import (  # noqa: E402
     download_raw_object,
     trino_cursor,
 )
+from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from traffic_ingest.errors import TrafficBronzeConfigurationError  # noqa: E402
 from traffic_ingest.landing import (  # noqa: E402
     RunIdentity,
@@ -258,6 +259,7 @@ def build_traffic_bronze_dag(
         load_bronze = PythonOperator(
             task_id=LOAD_TRAFFIC_BRONZE_TASK_ID,
             python_callable=load_seoul_traffic_bronze,
+            pool=TRINO_HEAVY_POOL,
             retries=3,
             retry_delay=timedelta(minutes=1),
             retry_exponential_backoff=True,
@@ -269,6 +271,7 @@ def build_traffic_bronze_dag(
         verify_bronze = PythonOperator(
             task_id="verify_seoul_traffic_bronze_runtime",
             python_callable=verify_seoul_traffic_bronze_runtime,
+            pool=TRINO_HEAVY_POOL,
             on_failure_callback=[
                 record_and_notify_seoul_traffic_run_failed,
                 record_traffic_problem,
@@ -323,6 +326,7 @@ def build_traffic_bronze_backfill_dag():
         load_bronze = PythonOperator(
             task_id=LOAD_TRAFFIC_BRONZE_TASK_ID,
             python_callable=load_seoul_traffic_bronze,
+            pool=TRINO_HEAVY_POOL,
             retries=3,
             retry_delay=timedelta(minutes=1),
             retry_exponential_backoff=True,
@@ -334,6 +338,7 @@ def build_traffic_bronze_backfill_dag():
         verify_bronze = PythonOperator(
             task_id="verify_seoul_traffic_bronze_runtime",
             python_callable=verify_seoul_traffic_bronze_runtime,
+            pool=TRINO_HEAVY_POOL,
             on_failure_callback=[
                 record_and_notify_seoul_traffic_run_failed,
                 record_traffic_problem,
