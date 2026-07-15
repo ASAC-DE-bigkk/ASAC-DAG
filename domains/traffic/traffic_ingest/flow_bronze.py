@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from traffic_ingest.common.runtime import (
@@ -103,83 +103,46 @@ def _validate_descriptor(descriptor: dict[str, Any]) -> None:
         )
 
 
-def insert_seoul_traffic_flow_request_audit(
+def _audit_values(
     *,
-    cursor,
-    qualified_table: str,
     descriptor: dict[str, Any],
     metadata: dict[str, Any],
     dag_run_id: str,
-) -> None:
-    audit_table = request_audit_table_for(qualified_table)
+) -> str:
     link_id = descriptor["link_id"]
     collected_at = datetime.fromisoformat(str(descriptor["collected_at"]))
     load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
-    cursor.execute(
-        f"""
-        DELETE FROM {audit_table}
-        WHERE source_id = {sql_string(SOURCE_ID)}
-          AND dag_run_id = {sql_string(dag_run_id)}
-          AND link_id = {sql_string(link_id)}
-        """
-    )
-    cursor.execute(
-        f"""
-        INSERT INTO {audit_table} (
-            request_id, source_id, request_params_json, link_id, raw_object_key,
-            payload_hash, http_status, result_code, result_msg, list_total_count,
-            row_count, collected_at, load_date, dag_run_id
-        ) VALUES (
-            {sql_string(descriptor['request_id'])},
-            {sql_string(SOURCE_ID)},
-            {sql_string(request_params_json(link_id))},
-            {sql_string(link_id)},
-            {sql_string(descriptor['raw_object_key'])},
-            {sql_string(descriptor['raw_hash'])},
-            {sql_int(descriptor['http_status'])},
-            {sql_string(metadata.get('result_code'))},
-            {sql_string(metadata.get('result_msg'))},
-            {sql_int(metadata.get('list_total_count'))},
-            {sql_int(metadata.get('row_count'))},
-            {sql_timestamp(collected_at)},
-            {sql_string(load_date)},
-            {sql_string(dag_run_id)}
+    return "(" + ", ".join(
+        (
+            sql_string(descriptor["request_id"]),
+            sql_string(SOURCE_ID),
+            sql_string(request_params_json(link_id)),
+            sql_string(link_id),
+            sql_string(descriptor["raw_object_key"]),
+            sql_string(descriptor["raw_hash"]),
+            sql_int(descriptor["http_status"]),
+            sql_string(metadata.get("result_code")),
+            sql_string(metadata.get("result_msg")),
+            sql_int(metadata.get("list_total_count")),
+            sql_int(metadata.get("row_count")),
+            sql_timestamp(collected_at),
+            sql_string(load_date),
+            sql_string(dag_run_id),
         )
-        """
-    )
+    ) + ")"
 
 
-def insert_seoul_traffic_flow_rows(
+def _flow_row_values(
     *,
-    cursor,
-    qualified_table: str,
     descriptor: dict[str, Any],
     metadata: dict[str, Any],
     rows: list[dict[str, Any]],
     dag_run_id: str,
-) -> int:
+) -> list[str]:
     link_id = descriptor["link_id"]
     collected_at = datetime.fromisoformat(str(descriptor["collected_at"]))
-    insert_seoul_traffic_flow_request_audit(
-        cursor=cursor,
-        qualified_table=qualified_table,
-        descriptor=descriptor,
-        metadata=metadata,
-        dag_run_id=dag_run_id,
-    )
-    cursor.execute(
-        f"""
-        DELETE FROM {qualified_table}
-        WHERE source_id = {sql_string(SOURCE_ID)}
-          AND dag_run_id = {sql_string(dag_run_id)}
-          AND link_id = {sql_string(link_id)}
-        """
-    )
-    if not rows:
-        return 0
-
     load_date = collected_at.astimezone(KST).strftime("%Y-%m-%d")
-    values = []
+    values: list[str] = []
     for row in rows:
         values.append(
             "(" + ", ".join(
@@ -203,16 +166,7 @@ def insert_seoul_traffic_flow_rows(
                 )
             ) + ")"
         )
-    cursor.execute(
-        f"""
-        INSERT INTO {qualified_table} (
-            request_id, source_id, request_params_json, link_id, prcs_spd,
-            prcs_trv_time, raw_object_key, payload_hash, http_status, result_code,
-            result_msg, list_total_count, row_count, collected_at, load_date, dag_run_id
-        ) VALUES {', '.join(values)}
-        """
-    )
-    return len(rows)
+    return values
 
 
 def load_traffic_flow_batch(
@@ -226,7 +180,7 @@ def load_traffic_flow_batch(
     raw_objects = raw_result.get("raw_objects") or []
     cursor, catalog, schema = cursor_factory()
     qualified_table = create_table(cursor, catalog, schema)
-    inserted = 0
+    prepared: list[tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = []
     for descriptor in raw_objects:
         _validate_descriptor(descriptor)
         payload = download_raw_object(
@@ -245,14 +199,59 @@ def load_traffic_flow_batch(
                 "Traffic flow raw row_count mismatch: "
                 f"link_id={descriptor['link_id']}"
             )
-        inserted += insert_seoul_traffic_flow_rows(
-            cursor=cursor,
-            qualified_table=qualified_table,
-            descriptor=descriptor,
-            metadata=metadata,
-            rows=rows,
-            dag_run_id=dag_run_id,
+        prepared.append((descriptor, metadata, rows))
+
+    if prepared:
+        link_ids = ", ".join(sql_string(item[0]["link_id"]) for item in prepared)
+        audit_table = request_audit_table_for(qualified_table)
+        where = (
+            f"source_id = {sql_string(SOURCE_ID)} "
+            f"AND dag_run_id = {sql_string(dag_run_id)} "
+            f"AND link_id IN ({link_ids})"
         )
+        cursor.execute(f"DELETE FROM {audit_table} WHERE {where}")
+        cursor.execute(f"DELETE FROM {qualified_table} WHERE {where}")
+
+        audit_values = [
+            _audit_values(
+                descriptor=descriptor,
+                metadata=metadata,
+                dag_run_id=dag_run_id,
+            )
+            for descriptor, metadata, _rows in prepared
+        ]
+        cursor.execute(
+            f"""
+            INSERT INTO {audit_table} (
+                request_id, source_id, request_params_json, link_id, raw_object_key,
+                payload_hash, http_status, result_code, result_msg, list_total_count,
+                row_count, collected_at, load_date, dag_run_id
+            ) VALUES {', '.join(audit_values)}
+            """
+        )
+
+        flow_values = [
+            value
+            for descriptor, metadata, rows in prepared
+            for value in _flow_row_values(
+                descriptor=descriptor,
+                metadata=metadata,
+                rows=rows,
+                dag_run_id=dag_run_id,
+            )
+        ]
+        if flow_values:
+            cursor.execute(
+                f"""
+                INSERT INTO {qualified_table} (
+                    request_id, source_id, request_params_json, link_id, prcs_spd,
+                    prcs_trv_time, raw_object_key, payload_hash, http_status, result_code,
+                    result_msg, list_total_count, row_count, collected_at, load_date, dag_run_id
+                ) VALUES {', '.join(flow_values)}
+                """
+            )
+
+    inserted = sum(len(rows) for _descriptor, _metadata, rows in prepared)
     return {
         "source_id": SOURCE_ID,
         "raw_object_keys": [item["raw_object_key"] for item in raw_objects],

@@ -63,6 +63,61 @@ def test_flow_bronze_load_deletes_same_run_link_before_insert():
     assert any("INSERT INTO iceberg_dev.ask_seoul.bronze_seoul_traffic_flow" in stmt for stmt in cursor.statements)
 
 
+def test_flow_bronze_load_batches_dml_for_multiple_links_and_zero_rows():
+    cursor = Cursor()
+    payload = _payload()
+    import hashlib
+
+    first = {
+        "request_id": "request-1",
+        "link_id": "1220003800",
+        "raw_object_key": "raw/traffic_flow/one.json",
+        "raw_hash": hashlib.sha256(payload).hexdigest(),
+        "http_status": 200,
+        "collected_at": "2026-07-15T01:02:03+00:00",
+        "row_count": 1,
+    }
+    zero_payload = json.dumps(
+        {
+            "TrafficInfo": {
+                "list_total_count": 0,
+                "RESULT": {"CODE": "INFO-200", "MESSAGE": "no data"},
+            }
+        }
+    ).encode("utf-8")
+    second = {
+        "request_id": "request-2",
+        "link_id": "1220003900",
+        "raw_object_key": "raw/traffic_flow/two.json",
+        "raw_hash": hashlib.sha256(zero_payload).hexdigest(),
+        "http_status": 200,
+        "collected_at": "2026-07-15T01:02:03+00:00",
+        "row_count": 0,
+    }
+
+    load_traffic_flow_batch(
+        raw_result={"raw_objects": [first, second], "expected_rows": 1},
+        dag_run_id="manual__flow",
+        cursor_factory=lambda: (cursor, "iceberg_dev", "ask_seoul"),
+        create_table=lambda _cursor, catalog, schema: (
+            f"{catalog}.{schema}.bronze_seoul_traffic_flow"
+        ),
+        download_raw_object=lambda key, _label: (
+            payload if key == first["raw_object_key"] else zero_payload
+        ),
+    )
+
+    assert len(cursor.statements) == 4
+    assert sum("DELETE FROM" in stmt for stmt in cursor.statements) == 2
+    assert sum("INSERT INTO" in stmt for stmt in cursor.statements) == 2
+    assert all(link_id in cursor.statements[0] for link_id in (first["link_id"], second["link_id"]))
+    assert all(link_id in cursor.statements[1] for link_id in (first["link_id"], second["link_id"]))
+    assert "request-1" in cursor.statements[2]
+    assert "request-2" in cursor.statements[2]
+    assert "request-1" in cursor.statements[3]
+    assert "request-2" not in cursor.statements[3]
+
+
 class VerifyCursor:
     def __init__(self):
         self._row = None
