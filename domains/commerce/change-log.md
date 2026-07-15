@@ -7,6 +7,36 @@
 
 ## 2026-07-15
 
+### 72. gold 인사이트 소진 탐색 — 신규 14모델 실증(총 집계 20종) + 명단 정본화
+
+request:
+- silver 결과 테이블로 gold 로 뽑을 수 있는 **모든 의미있는 지표**를 소진 탐색·실증하라
+  (공통 조건 집계면 무엇이든, 지역 축 포함, 더 없을 때까지 계속 발굴·반영).
+
+response:
+- **다각도 discovery**(8렌즈 병렬 + 비평) → 후보 104+α → 자체 랭킹으로 실증. **신규 14모델**
+  (전부 실빌드 + 실데이터 유의미성 검증):
+  survival: lifespan(즉석판매 조기폐업 69.5%)·cohort_survival(2018 보건 5년 38.9%) ·
+  temporal: seasonality(개업 성수기 1·3·4월) · stock: stock_age_band ·
+  geo: gu_specialization(성동 축산 LQ 5.77)·dong_category_matrix·geo_grid(top 격자=가산·선릉·강남역) ·
+  churn: churn_yearly(2024 food 18.9%)·address_succession(food→food 9.9만, 중위 8일) ·
+  quality: data_quality · change: status_transition(씨앗)·change_activity(씨앗) ·
+  detail: detail_area_profile(23-way union, 음식점 116㎡)·multi_site(동물약국 74.6%).
+- **drop 판정(사유 기록)**: yoy(flow 파생쿼리)·dtl_status_mix(dataset 스코프)·suspension_episode
+  (3.7K 희소)·HHI(LQ 갈음)·요일 패턴(행정처리일 왜곡)·단일 dataset 특수지표(범용성).
+- **명단 정본화**: report.AGG_TABLES 1곳 → DAG select(정기/refresh)·유지보수·메타 사본 상한이
+  전부 소비. 총 gold 집계 20종.
+- 검증: pytest 359 · security PASS · DAG/dbt parse 0 · 씨앗 지표(전이/개명)는 이력 축적
+  (6/30 수집 개시)에 따라 성장함을 문서 명시.
+- **최종 소진 라운드(비평 재판정)**: 확실 2건 추가 구축 — `gold_license_phone_succession`
+  (연쇄창업: 동일 전화 폐업→개업 업종전환, food→food 2.0만·중위 90일) ·
+  `gold_detail_uptae_mix`(업태 축 — 일반음식점 내 한식 5.1만, 19-way union). 조건부
+  colocation 은 geo_grid(업종 차원 보유) self-join 파생쿼리라 drop. **총 gold 집계 22종 —
+  엔티티 축(시간·공간·업종·상태·면적·식별자연결) 실질 소진 판정.**
+- **부수 발견(후속 조치 대상)**: 카탈로그 재측정으로 payload 가 확장돼도 기존 detail 테이블에
+  ALTER ADD COLUMN 이 없어 **카탈로그-실물 스키마 드리프트** 발생(silver_lodging_detail 의
+  uptaenm 부재 실측) — loader 에 컬럼 동기화 ensure 필요.
+
 ### 71. gold 인사이트 집계 세트 + 메타 사본 상한(무손실) + 유지보수 재승인 복원
 
 request:

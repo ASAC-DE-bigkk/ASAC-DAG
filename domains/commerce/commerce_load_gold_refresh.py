@@ -51,8 +51,31 @@ DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domain
 DBT_BIN = os.getenv("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
 DBT_TARGET = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
 # 전량 재구축 대상: 원형 정리본(silver_entity 2종, #70 편승분)+집계(gold_dong_summary).
-GOLD_SELECT = ["silver_license_entity", "silver_license_entity_history",
-               "gold_license_dong_summary", "gold_license_flow_daily", "gold_license_flow_monthly", "gold_license_flow_yearly", "gold_license_status_duration", "gold_env_facility_operation"]
+GOLD_SELECT = [
+    "silver_license_entity", "silver_license_entity_history",
+    "gold_license_dong_summary",
+    "gold_license_flow_daily",
+    "gold_license_flow_monthly",
+    "gold_license_flow_yearly",
+    "gold_license_status_duration",
+    "gold_env_facility_operation",
+    "gold_license_lifespan",
+    "gold_license_cohort_survival",
+    "gold_license_seasonality",
+    "gold_license_stock_age_band",
+    "gold_license_gu_specialization",
+    "gold_license_churn_yearly",
+    "gold_license_data_quality",
+    "gold_license_status_transition",
+    "gold_license_dong_category_matrix",
+    "gold_license_change_activity",
+    "gold_detail_area_profile",
+    "gold_license_multi_site",
+    "gold_license_geo_grid",
+    "gold_license_address_succession",
+    "gold_license_phone_succession",
+    "gold_detail_uptae_mix",
+]
 
 _profile_config = ProfileConfig(
     profile_name="commerce",

@@ -225,12 +225,12 @@ def run_load_details(details: list[dict], *, force_full: bool = False) -> dict:
     """
     catalog, schema, qschema = _qualified()
     # 메타 사본 상한 ensure(무손실) — detail + 코어/집계/카탈로그. 실패해도 적재는 진행.
+    from gold.report import AGG_TABLES   # gold 집계 명단 정본(1곳 관리)
+
     ensure_metadata_retention(
         [d["object"] for d in details]
-        + ["silver_license_entity", "silver_license_entity_history",
-           "gold_license_dong_summary", "gold_license_flow_daily",
-           "gold_license_flow_monthly", "gold_license_flow_yearly",
-           "gold_license_status_duration", "gold_env_facility_operation", CATALOG_TABLE])
+        + ["silver_license_entity", "silver_license_entity_history", CATALOG_TABLE]
+        + list(AGG_TABLES))
     conn = _connect(catalog, schema)
     loaded: dict[str, int] = {}
     try:

@@ -236,11 +236,10 @@ def commerce_load_silver():
         from gold import loader
 
         details, _ = loader.read_catalog()
-        gold_aggs = ["gold_license_dong_summary", "gold_license_flow_daily",
-                     "gold_license_flow_monthly", "gold_license_flow_yearly",
-                     "gold_license_status_duration", "gold_env_facility_operation"]
+        from gold.report import AGG_TABLES   # gold 집계 명단 정본(1곳 관리)
+
         tables = tuple(["silver_license_entity", "silver_license_entity_history",
-                        "meta_detail_catalog"] + gold_aggs + [d["object"] for d in details])
+                        "meta_detail_catalog"] + list(AGG_TABLES) + [d["object"] for d in details])
         return maintenance.run_table_maintenance(tables)
 
     @task(trigger_rule="all_done")
