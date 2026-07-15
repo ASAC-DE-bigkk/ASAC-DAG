@@ -12,6 +12,7 @@ SOURCE_ID = "seoul_traffic_incident"
 STATUS_STARTED = "STARTED"
 STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
+STATUS_COALESCED = "COALESCED"
 
 
 class RunNotPublishableError(RuntimeError):
@@ -95,6 +96,18 @@ class TrafficRunManifest:
             failure_reason=f"{type(error).__name__} in {task_id}",
         )
 
+    def coalesce(self, run_id: str, *, replacement_run_id: str) -> str:
+        return self._record(
+            TrafficRun("traffic_incident_bronze", run_id),
+            status=STATUS_COALESCED,
+            is_publishable=False,
+            expected_rows=None,
+            actual_rows=None,
+            expected_raw_objects=None,
+            actual_raw_objects=None,
+            failure_reason=f"replaced_by={replacement_run_id}",
+        )
+
     def require_publishable(self, run_id: str) -> str:
         cursor, catalog, schema = self._cursor_factory()
         cursor.execute(
@@ -105,6 +118,13 @@ class TrafficRunManifest:
               AND status = {_sql_string(STATUS_SUCCESS)}
               AND is_publishable
               AND dag_run_id = {_sql_string(run_id)}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM {catalog}.{schema}.{MANIFEST_TABLE} AS coalesced
+                  WHERE coalesced.source_id = {_sql_string(SOURCE_ID)}
+                    AND coalesced.dag_run_id = {_sql_string(run_id)}
+                    AND coalesced.status = {_sql_string(STATUS_COALESCED)}
+              )
             LIMIT 1
             """
         )
@@ -119,12 +139,19 @@ class TrafficRunManifest:
         cursor, catalog, schema = self._cursor_factory()
         cursor.execute(
             f"""
-            SELECT dag_run_id
-            FROM {catalog}.{schema}.{MANIFEST_TABLE}
-            WHERE source_id = {_sql_string(SOURCE_ID)}
-              AND status = {_sql_string(STATUS_SUCCESS)}
-              AND is_publishable
-            ORDER BY event_at DESC, dag_run_id DESC
+            SELECT successful.dag_run_id
+            FROM {catalog}.{schema}.{MANIFEST_TABLE} AS successful
+            WHERE successful.source_id = {_sql_string(SOURCE_ID)}
+              AND successful.status = {_sql_string(STATUS_SUCCESS)}
+              AND successful.is_publishable
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM {catalog}.{schema}.{MANIFEST_TABLE} AS coalesced
+                  WHERE coalesced.source_id = successful.source_id
+                    AND coalesced.dag_run_id = successful.dag_run_id
+                    AND coalesced.status = {_sql_string(STATUS_COALESCED)}
+              )
+            ORDER BY successful.event_at DESC, successful.dag_run_id DESC
             LIMIT 1
             """
         )
