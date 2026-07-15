@@ -30,22 +30,22 @@ def test_strict_cluster_and_singles():
     # 명확한 겹침(3종·공유9) → cluster 1개, 도메인 명명 적용
     assert len(by_kind["detail_cluster"]) == 1
     cl = by_kind["detail_cluster"][0]
-    assert cl["object"] == "commerce_food_sanitation_business_detail"
+    assert cl["object"] == "silver_food_sanitation_business_detail"
     assert cl["members"] == ["bakery", "food_mfg", "general_restaurant"]
     # payload = 비공통 합집합 lowercase(공통코어 제외)
     assert "food0" in cl["payload"] and "gr_only" in cl["payload"]
     assert not any(c.startswith("common") for c in cl["payload"])
     # 나머지는 전부 단독
     singles = {d["object"] for d in by_kind["detail_single"]}
-    assert singles == {"commerce_pharmacy_detail", "commerce_optical_shop_detail"}
+    assert singles == {"silver_pharmacy_detail", "silver_optical_shop_detail"}
 
 
 def test_dataset_map_branching():
     cat = cr.build_catalog(_fields(), _meta())
     m = cat["dataset_map"]
-    assert m["bakery"]["detail_table"] == "commerce_food_sanitation_business_detail"
+    assert m["bakery"]["detail_table"] == "silver_food_sanitation_business_detail"
     assert m["bakery"]["entity_type"] == "food_sanitation_business"
-    assert m["pharmacy"]["detail_table"] == "commerce_pharmacy_detail"
+    assert m["pharmacy"]["detail_table"] == "silver_pharmacy_detail"
 
 
 def test_version_deterministic_and_drift():

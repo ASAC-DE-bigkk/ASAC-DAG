@@ -1,10 +1,10 @@
 """gold 적재(Iceberg) — silver → gold **Iceberg 카탈로그**(서빙 Postgres 폐기, PROJECT.md §4).
 
 구조(재심의 2026-07-14 — 기존 RDB 관계형 모델링을 Iceberg 로 승계):
-- **코어**(공통 컬럼): gold_license_entity / gold_license_entity_history / gold_license_dong_summary
+- **원형 정리본**(silver): silver_license_entity / silver_license_entity_history · **집계**(gold): gold_license_dong_summary
   — dbt 모델(정적, commerce_load_gold 의 Cosmos 가 실행). 이 모듈 담당 아님.
-- **detail**(API 별 상이 컬럼 평탄화): 카탈로그 구동 — `gold_catalog`(Iceberg) 에 스펙을 두고
-  detail 테이블(`commerce_<domain>_detail`)을 DDL ensure + 증분 적재한다. **이 모듈 담당.**
+- **detail**(API 별 상이 컬럼 평탄화): 카탈로그 구동 — `meta_detail_catalog`(Iceberg) 에 스펙을 두고
+  detail 테이블(`silver_<domain>_detail`)을 DDL ensure + 증분 적재한다. **이 모듈 담당.**
   각 API 의 비공통 필드가 서빙 가능한 단위(테이블·컬럼)로 뽑히는 계층 — record_json 은 silver 정본.
 
 Postgres 시절과의 차이:
@@ -28,11 +28,48 @@ from security.dbio import assert_identifier
 
 log = logging.getLogger(__name__)
 
-CATALOG_TABLE = "gold_catalog"
+CATALOG_TABLE = "meta_detail_catalog"   # silver detail 생성용 스펙(파생 과정 — 별도 meta_ 단위)
 # detail 키 컬럼(자연키 + 버전 식별) — silver_license_history grain 승계.
 DETAIL_KEY_COLUMNS = ("dataset", "opnsfteamcode", "mgtno", "collected_at", "content_hash")
 # 멤버 행수가 이를 넘으면 content_hash 버킷 서브청크(json 추출 heap 바운드). env 로 조정.
 _BUCKET_ROWS = int(os.getenv("COMMERCE_GOLD_DETAIL_BUCKET_ROWS", "600000"))
+
+# 메타 파일 보존 정책(사용자 확정 2026-07-15): **스냅샷·데이터는 절대 삭제하지 않는다**(expire
+# 미사용). 대신 오래된 metadata.json **파일 사본**만 자동 정리 — 최신 metadata.json 안에 전체
+# 스냅샷 목록(타임트래블 이력)이 있어 사본 정리는 데이터/이력 무손실. 커밋 = 새 메타 버전이라는
+# Iceberg 원자성 설계상 생성 자체는 못 끄므로, 사본 상한(50)으로 무한 축적만 차단한다.
+METADATA_RETENTION_PROPS = {
+    "write.metadata.delete-after-commit.enabled": "true",
+    "write.metadata.previous-versions-max": os.getenv("COMMERCE_METADATA_VERSIONS_MAX", "50"),
+}
+
+
+def ensure_metadata_retention(table_names: list[str]) -> dict:
+    """대상 테이블에 메타 사본 보존 속성을 ensure(무손실 — 스냅샷/데이터 불변).
+
+    Trino 는 이 속성 설정을 막으므로 PyIceberg(REST)로 넣는다. dbt table materialization 이
+    재생성 시 속성을 떨굴 수 있어 **매 실행 ensure**(이미 설정돼 있으면 skip). 실패는 경고만
+    (fail-open — 속성이 없으면 기본값(무제한 보존)일 뿐 데이터 영향 없음)."""
+    from bronze.warehouse import _pyiceberg_catalog
+
+    _, schema, _ = _qualified()
+    cat = _pyiceberg_catalog()
+    done = skipped = failed = 0
+    for name in table_names:
+        assert_identifier(name, field="table name")
+        try:
+            t = cat.load_table(f"{schema}.{name}")
+            if all(t.properties.get(k) == v for k, v in METADATA_RETENTION_PROPS.items()):
+                skipped += 1
+                continue
+            with t.transaction() as tx:
+                tx.set_properties(METADATA_RETENTION_PROPS)
+            done += 1
+        except Exception as exc:  # noqa: BLE001 — 속성 실패가 적재를 못 막게
+            failed += 1
+            log.warning("메타 보존 속성 설정 실패(무시) %s: %s", name, type(exc).__name__)
+    log.info("메타 보존 속성: 설정 %d · 기존 %d · 실패 %d", done, skipped, failed)
+    return {"set": done, "already": skipped, "failed": failed}
 
 
 def _assert_detail_safe(detail: dict) -> None:
@@ -121,16 +158,34 @@ def detail_ddl(qschema: str, detail: dict) -> str:
             f"WITH (format = 'PARQUET')")
 
 
-def _member_watermark_sql(qschema: str, obj: str) -> str:
-    """멤버별 워터마크 — detail 테이블 자체가 상태(마커 테이블 없음)."""
-    return (f"(SELECT coalesce(max(collected_at), timestamp '1970-01-01') "
-            f"FROM {qschema}.{obj} WHERE dataset = ?)")
+def member_watermark(cur, qschema: str, obj: str, member: str):
+    """멤버별 워터마크 **스냅샷** — detail 테이블 자체가 상태(마커 테이블 없음).
+
+    반드시 버킷 루프 **시작 전에 1회** 조회해 전 버킷이 같은 창을 쓰게 한다. correlated
+    서브쿼리로 문마다 재평가하면 버킷0 커밋이 워터마크를 전진시켜 버킷1~k 의 행이
+    조용히 걸러진다(2026-07-15 실측: mail_order_sale 75%·general_restaurant 50% 유실)."""
+    cur.execute(  # security: allow-sql - 검증 식별자, 값 바인딩
+        f"SELECT max(collected_at) FROM {qschema}.{obj} WHERE dataset = ?", (member,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def defend_member(cur, qschema: str, obj: str, member: str, wm) -> None:
+    """중단 방어(PROJECT.md §3) — 이전 실행이 버킷 도중 죽었을 때 남은 부분 버킷 잔재
+    (워터마크 초과분)를 선삭제해 append 멱등을 만든다. wm=None 이면 전량 삭제."""
+    if wm is None:
+        cur.execute(  # security: allow-sql
+            f"DELETE FROM {qschema}.{obj} WHERE dataset = ?", (member,))
+    else:
+        cur.execute(  # security: allow-sql
+            f"DELETE FROM {qschema}.{obj} WHERE dataset = ? AND collected_at > ?", (member, wm))
+    cur.fetchall()
 
 
 def detail_insert_sql(qschema: str, detail: dict, *, bucket: tuple[int, int] | None = None) -> str:
     """멤버 1개 증분 적재문 — silver history 에서 payload 를 json 추출해 append.
 
-    바인딩 순서: (member, member) — WHERE dataset=? 와 워터마크 서브쿼리의 dataset=?.
+    바인딩 순서: (member, wm) — wm 은 member_watermark() **스냅샷**(전 버킷 공통 창).
     bucket=(b,k) 면 content_hash 버킷 서브청크(대형 멤버 heap 바운드)."""
     _assert_detail_safe(detail)
     payload_exprs = "".join(
@@ -143,7 +198,8 @@ def detail_insert_sql(qschema: str, detail: dict, *, bucket: tuple[int, int] | N
     return (f"INSERT INTO {qschema}.{detail['object']} ({cols}) "
             f"SELECT dataset, opnsfteamcode, mgtno, collected_at, content_hash{payload_exprs} "
             f"FROM {qschema}.silver_license_history "
-            f"WHERE dataset = ? AND collected_at > {_member_watermark_sql(qschema, detail['object'])}"
+            f"WHERE dataset = ? "
+            f"AND collected_at > coalesce(CAST(? AS timestamp(6)), timestamp '1970-01-01')"
             f"{part_pred}")
 
 
@@ -168,6 +224,13 @@ def run_load_details(details: list[dict], *, force_full: bool = False) -> dict:
     돌아가므로 같은 증분문이 전량을 옮긴다 — 문장 원자성 그대로).
     """
     catalog, schema, qschema = _qualified()
+    # 메타 사본 상한 ensure(무손실) — detail + 코어/집계/카탈로그. 실패해도 적재는 진행.
+    ensure_metadata_retention(
+        [d["object"] for d in details]
+        + ["silver_license_entity", "silver_license_entity_history",
+           "gold_license_dong_summary", "gold_license_flow_daily",
+           "gold_license_flow_monthly", "gold_license_flow_yearly",
+           "gold_license_status_duration", "gold_env_facility_operation", CATALOG_TABLE])
     conn = _connect(catalog, schema)
     loaded: dict[str, int] = {}
     try:
@@ -182,12 +245,17 @@ def run_load_details(details: list[dict], *, force_full: bool = False) -> dict:
             counts = _member_counts(cur, qschema, d["members"])
             n = 0
             for m in d["members"]:
+                # 워터마크는 멤버당 **1회 스냅샷**(전 버킷 공통 창 — 버킷 간 재평가 금지) 후
+                # 중단 방어(이전 부분 버킷 잔재 선삭제) → k개 버킷 INSERT 는 전부 같은 창.
+                wm = member_watermark(cur, qschema, d["object"], m)
+                defend_member(cur, qschema, d["object"], m, wm)
+                wm_param = str(wm) if wm is not None else None
                 rows = counts.get(m, 0)
                 k = max(1, -(-rows // _BUCKET_ROWS))          # ceil — 대형 멤버만 버킷 분할
                 for b in range(k):
                     _pace(f"{d['object']}:{m}" + (f" {b + 1}/{k}" if k > 1 else ""))
                     sql = detail_insert_sql(qschema, d, bucket=(b, k) if k > 1 else None)
-                    cur.execute(sql, (m, m))  # security: allow-sql - 식별자 검증·값 바인딩
+                    cur.execute(sql, (m, wm_param))  # security: allow-sql - 식별자 검증·값 바인딩
                     res = cur.fetchall()
                     n += int(res[0][0]) if res and res[0] and res[0][0] is not None else 0
             loaded[d["object"]] = n

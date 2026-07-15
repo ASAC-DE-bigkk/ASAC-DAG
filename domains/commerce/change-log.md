@@ -5,6 +5,84 @@
 
 ---
 
+## 2026-07-15
+
+### 71. gold 인사이트 집계 세트 + 메타 사본 상한(무손실) + 유지보수 재승인 복원
+
+request:
+- 메타가 왜 계속 쌓이나 — 메타는 통합하고 본 데이터를 합치며 관리 못 하나(OOM 위험?).
+- silver(원형)에서 뽑을 수 있는 인사이트를 전부 gold 집계로: 업종별 일/월/연 단위(**이미 적재된
+  기간은 재적재하지 않는 증분**), 기간 조건 추이, 지역 3축(시군구/행정동/법정동), 영업시간·
+  영업요일 축, 이력 상태 변화의 지속기간(분야별 비교). 향후 D1(SQLite) 적재 시 중복 없는 조치.
+
+response:
+- **메타/데이터 관리(질의 대응)**: ① "메타 통합+데이터 병합" = expire_snapshots+optimize 가
+  정확히 그것(데이터 행 0 삭제 — history 가 동일 정책으로 매일 관리되며 6/30 부터 전량 보존 실증).
+  OOM 근거: 최중량 history(289만×record_json) 일일 optimize 무사고 → `maintain_gold_tables`
+  복원(재승인). ② metadata.json **파일 사본** 상한: PyIceberg 로
+  write.metadata.delete-after-commit+previous-versions-max=50 — 82테이블 적용(set 81·fail 0,
+  스냅샷 수 불변 실증). Trino 는 해당 속성 차단 → ensure_metadata_retention()이 매 실행 ensure.
+- **인사이트 gold 5모델(dbt·Iceberg — 전부 실빌드 검증)**:
+  - `gold_license_flow_daily/monthly/yearly` — 개업/폐업 흐름 × 업종 3단(taxonomy) × 지역 3축.
+    **완결 기간만**(당일/당월/당해 제외) + 지연보정 창(90일/3개월/1연도) delete+insert —
+    "이미 적재된 기간 재적재 없음·중복 불가"를 dbt 증분으로 구현. 빌드 291만/134만/44.6만 행,
+    grain 유니크 3/3, **재실행 = 창만 교체·총행수 불변** 실증. D1 적재는 D1 max(기간키) 초과분만
+    append(문서 계약).
+  - `gold_license_status_duration` — 이력 상태 전이 세그먼트의 지속일 요약(업종·상태군·진행중,
+    avg/p50/p90/max). 591행. 예: mail_order_sale 휴업 평균 117일.
+  - `gold_env_facility_operation` — 가동 시간·일수 축(환경 v2 2종). **영업시간/영업요일 필드는
+    LOCALDATA 원천 전체에 부재(실측 0건)** — 실존 축만 제공, 타 업종은 외부 원천 결합 후속 과제.
+  - 워터마크 버그 1건 수정: 전 행 date 변환이 원천 무효 날짜(2006-02-29)에서 폭발 → 문자열
+    max 후 1건만 변환.
+- 배선: GOLD_SELECT 6모델(정기/refresh)·report AGG_TABLES·유지보수·메타 상한 대상 확장.
+  pytest 359 · security PASS · dbt parse·DAG exit 0.
+
+### 70. 레이어 재분류 — 원형은 silver(파이프라인 편승)·gold 는 집계 전용 + 명칭 전면 정리
+
+request:
+- 레이어 정의 확정: Raw/Bronze=원본, **Silver=결측 처리·표준화·중복 제거·테이블 단위 정리·JOIN
+  모델링(원형)**, **Gold=업무 목적 집계·지표·인사이트만**, Serve=조회 최적화(D1). 현재 gold 에
+  있던 테이블 원형을 silver 로 내리고, 집계형만 gold 유지. 원형 생성용 파생 테이블은 별도 단위
+  관리. **명칭만이 아니라 수집 파이프라인도 silver 에 편승**시킬 것. (선행 지시: gold_ 접두 통일
+  → 재분류로 silver_/meta_ 확정)
+
+response:
+- **물리 리네임(총 81, 실패 0 — Iceberg REST RENAME 지원 실측)**: detail 78
+  `commerce_*_detail`→(경유 `gold_*`)→**`silver_*_detail`** · `gold_license_entity(+_history)`→
+  **`silver_license_entity(+_history)`** · `gold_catalog`→**`meta_detail_catalog`**(파생 과정 메타,
+  별도 meta_ 단위). 집계 `gold_license_dong_summary` 만 gold 유지. 카탈로그 rows object 도 치환
+  (UPDATE 78행).
+- **파이프라인 편승(commerce_load_silver)**: SILVER_SELECT 에 entity 2종 추가(Cosmos ref 체인
+  자동 순서) + `build_detail_catalog`·`load_details`(마킹 **뒤** — detail 실패가 run 마킹을 막지
+  않음, 자체 워터마크 재개) 태스크 신설. **유지보수(expire 등) 편입은 사용자 지시로 취소** —
+  실버 스냅샷은 테이블 단위 생성 데이터로 보존, **중복적재 방지(문장 원자성·워터마크 스냅샷·
+  defend)만** 적용. (신설 테이블은 #226 유지보수 대상 아님 — 스냅샷 축적 모니터링만.) silver 리포트에 "원형 detail 적재
+  N객체·신규 M행" 섹션 추가.
+- **commerce_load_gold = 집계 전용 재작성**: dbt_gold(dong_summary run+test) → report_gold
+  (집계 현황 행수·미빌드 실패색). build_catalog/load_details 제거. refresh DAG 는 원형+집계
+  전량 재구축 진입점으로 유지(docstring 명시).
+- 코드 정리: catalog_rules 명명 silver_ · loader CATALOG_TABLE=meta_detail_catalog ·
+  report.py 집계 전용 재작성. dbt 모델 gold/→silver/ 이동(+dong_summary ref 갱신).
+- 문서: PROJECT.md §4.1 을 사용자 4계층 정의로 대체(+§4.3 명칭), 집계 쿼리 문서 명칭 전면 치환.
+- **검증**: 리네임 후 증분 스모크 +0(워터마크 생존) · 카탈로그 78 specs(silver_) · pytest 359
+  전건 · security PASS · dbt parse·DAG 3종 exit 0.
+
+### 69. gold detail 버킷 적재 유실 수정 — 워터마크 스냅샷 + 중단 방어(defend)
+
+request:
+- 현행 DB 상태에서 detail 로 최신 버전 상태값 확보 가능 여부 확인(사용자 질의) 중 발견.
+
+response:
+- **버그(실측)**: detail 버킷 적재(멤버 행수 > COMMERCE_GOLD_DETAIL_BUCKET_ROWS)에서 워터마크가
+  correlated 서브쿼리라 **버킷0 커밋 후 재평가** → 버킷1~k 행이 조용히 걸러짐. mail_order_sale
+  75%(93.5만→23.4만)·general_restaurant 50%(53.6만→26.8만) 유실. k=1 멤버는 무영향.
+- **수정(loader.py)**: `member_watermark()` — 멤버당 **1회 스냅샷** 후 전 버킷이 같은 창을
+  바인딩 파라미터로 공유(서브쿼리 제거). `defend_member()` — 적재 전 워터마크 초과 잔재 선삭제
+  (이전 실행이 버킷 도중 죽은 경우의 부분 커밋 정리, PROJECT.md §3 중단 방어 패턴).
+- **백필**: 영향 dataset 2개 행 삭제 후 재적재 — 정합 검증 **detail 78 합계 = history 총행수
+  (2,898,579 = 2,898,579)**. entity ⋈ detail 현재 버전 조인 커버리지 100%·팬아웃 0 실측.
+- 테스트: 스냅샷 바인딩 계약 + 버킷 간 동일 창 회귀 테스트로 고정.
+
 ## 2026-07-14
 
 ### 68. 서빙 레이어 전면 개편 — gold=Iceberg(RDB 모델링 승계) · 서빙 Postgres 폐기 · D1(SQLite) 예정

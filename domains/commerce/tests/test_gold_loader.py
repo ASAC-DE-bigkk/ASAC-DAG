@@ -10,13 +10,13 @@ import pytest
 from gold import loader
 
 _Q = "iceberg_dev.commerce"
-_DETAIL = {"object": "commerce_food_detail", "kind": "detail_cluster",
+_DETAIL = {"object": "silver_food_detail", "kind": "detail_cluster",
            "members": ["bakery", "general_restaurant"], "payload": ["sitearea", "uptaenm"]}
 
 
 def test_detail_ddl_natural_key_no_bigserial():
     ddl = loader.detail_ddl(_Q, _DETAIL)
-    assert "CREATE TABLE IF NOT EXISTS iceberg_dev.commerce.commerce_food_detail" in ddl
+    assert "CREATE TABLE IF NOT EXISTS iceberg_dev.commerce.silver_food_detail" in ddl
     for col in loader.DETAIL_KEY_COLUMNS:          # 자연키+버전 키 전부 포함
         assert col in ddl
     assert "sitearea varchar" in ddl and "uptaenm varchar" in ddl
@@ -24,16 +24,26 @@ def test_detail_ddl_natural_key_no_bigserial():
     assert "PARQUET" in ddl
 
 
-def test_detail_insert_sql_member_watermark_and_json_extract():
+def test_detail_insert_sql_snapshot_watermark_and_json_extract():
     sql = loader.detail_insert_sql(_Q, _DETAIL)
-    # 멤버별 워터마크 = detail 테이블 자체 max(collected_at) — 별도 마커 없음
+    # 워터마크는 **바인딩 파라미터**(member_watermark 스냅샷) — correlated 서브쿼리 금지.
+    # 서브쿼리면 버킷0 커밋이 워터마크를 전진시켜 버킷1~k 가 유실된다(2026-07-15 실측 버그).
     assert "WHERE dataset = ?" in sql
-    assert "FROM iceberg_dev.commerce.commerce_food_detail WHERE dataset = ?" in sql
-    assert "collected_at > (SELECT coalesce(max(collected_at)" in sql
+    assert "collected_at > coalesce(CAST(? AS timestamp(6)), timestamp '1970-01-01')" in sql
+    assert "SELECT coalesce(max(collected_at)" not in sql          # 재평가 서브쿼리 부재(회귀 방지)
     # payload 는 record_json json 추출(대문자 키)
     assert "json_extract_scalar(record_json, '$.SITEAREA')" in sql
     assert "json_extract_scalar(record_json, '$.UPTAENM')" in sql
     assert "FROM iceberg_dev.commerce.silver_license_history" in sql
+
+
+def test_bucketed_inserts_share_one_watermark_window():
+    # k개 버킷 문이 전부 같은 창(같은 바인딩 자리)을 쓰는지 — 버킷별 SQL 차이는 bucket 술어뿐.
+    base = loader.detail_insert_sql(_Q, _DETAIL, bucket=(0, 3))
+    for b in range(1, 3):
+        s = loader.detail_insert_sql(_Q, _DETAIL, bucket=(b, 3))
+        assert s.replace(f", 3) = {b}", ", 3) = 0") == base
+        assert s.count("?") == 2                                    # (member, wm) 고정
 
 
 def test_detail_insert_sql_bucket_pred():
