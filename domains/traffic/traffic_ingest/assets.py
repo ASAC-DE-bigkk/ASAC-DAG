@@ -136,7 +136,8 @@ def _airflow_three_schedule(*, cron: str, asset: Asset, timezone: ZoneInfo):
     from airflow.timetables.trigger import CronTriggerTimetable
 
     return AssetOrTimeSchedule(
-        timetable=CronTriggerTimetable(cron, timezone=timezone),
+        # Airflow parses timezone names into its serializable Pendulum type.
+        timetable=CronTriggerTimetable(cron, timezone=str(timezone)),
         assets=asset,
     )
 
