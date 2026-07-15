@@ -78,6 +78,7 @@ def test_traffic_lineage_opt_in_fails_explicitly_without_provider(monkeypatch):
 def test_only_target_traffic_weather_dags_reference_domain_lineage_helpers():
     expected = {
         DOMAIN_DIR / "traffic_incident_bronze.py": "traffic_lineage",
+        DOMAIN_DIR / "traffic_flow_bronze.py": "traffic_lineage",
         DOMAIN_DIR / "traffic_incident_transform.py": "traffic_lineage",
         DOMAIN_DIR / "traffic_snapshot_recovery.py": "traffic_lineage",
         DOMAIN_DIR / "traffic_reliability_report.py": "traffic_lineage",

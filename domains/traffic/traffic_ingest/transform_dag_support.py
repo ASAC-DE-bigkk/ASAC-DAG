@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from airflow.sdk.exceptions import AirflowFailException
 from airflow.sdk import Asset
+from airflow.sdk.exceptions import AirflowFailException
 
 from common.assets import TRAFFIC_BRONZE_ASSET
+from traffic_ingest.run_manifest import RunNotPublishableError
 
 
 TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
@@ -119,6 +120,36 @@ def transform_schedule() -> str | list[Asset] | None:
     return [Asset(TRAFFIC_BRONZE_ASSET)]
 
 
+def pin_optional_flow_snapshot(task_instance, manifest_factory: Callable, xcom_key: str) -> None:
+    """Pin the latest flow run when available without blocking incident transforms."""
+    try:
+        flow_run_id = manifest_factory().latest_publishable_run_id()
+    except RunNotPublishableError:
+        flow_run_id = None
+    task_instance.xcom_push(key=xcom_key, value=flow_run_id)
+
+
+def dbt_snapshot_variables(
+    task_instance,
+    snapshot_task_id: str,
+    incident_run_id: str,
+    flow_xcom_key: str,
+) -> dict[str, object]:
+    variables: dict[str, object] = {"traffic_snapshot_dag_run_id": incident_run_id}
+    try:
+        flow_run_id = task_instance.xcom_pull(
+            task_ids=snapshot_task_id,
+            key=flow_xcom_key,
+        )
+    except TypeError:
+        flow_run_id = None
+    if flow_run_id:
+        variables["traffic_flow_snapshot_dag_run_id"] = flow_run_id
+    return variables
+
+
+
+
 def record_classified_dbt_problem(
     context: dict,
     *,
@@ -201,6 +232,8 @@ def record_classified_dbt_problem(
 __all__ = [
     "TRAFFIC_TRANSFORM_CRON_KST",
     "TransformFailurePorts",
+    "dbt_snapshot_variables",
+    "pin_optional_flow_snapshot",
     "resolve_snapshot_from_asset_event",
     "record_classified_dbt_problem",
     "transform_schedule",

@@ -35,8 +35,14 @@ class TrafficRun:
 
 
 class TrafficRunManifest:
-    def __init__(self, cursor_factory: CursorFactory) -> None:
+    def __init__(
+        self,
+        cursor_factory: CursorFactory,
+        *,
+        source_id: str = SOURCE_ID,
+    ) -> None:
         self._cursor_factory = cursor_factory
+        self._source_id = source_id
 
     def start(
         self,
@@ -114,14 +120,14 @@ class TrafficRunManifest:
             f"""
             SELECT dag_run_id
             FROM {catalog}.{schema}.{MANIFEST_TABLE}
-            WHERE source_id = {_sql_string(SOURCE_ID)}
+            WHERE source_id = {_sql_string(self._source_id)}
               AND status = {_sql_string(STATUS_SUCCESS)}
               AND is_publishable
               AND dag_run_id = {_sql_string(run_id)}
               AND NOT EXISTS (
                   SELECT 1
                   FROM {catalog}.{schema}.{MANIFEST_TABLE} AS coalesced
-                  WHERE coalesced.source_id = {_sql_string(SOURCE_ID)}
+                  WHERE coalesced.source_id = {_sql_string(self._source_id)}
                     AND coalesced.dag_run_id = {_sql_string(run_id)}
                     AND coalesced.status = {_sql_string(STATUS_COALESCED)}
               )
@@ -141,7 +147,7 @@ class TrafficRunManifest:
             f"""
             SELECT successful.dag_run_id
             FROM {catalog}.{schema}.{MANIFEST_TABLE} AS successful
-            WHERE successful.source_id = {_sql_string(SOURCE_ID)}
+            WHERE successful.source_id = {_sql_string(self._source_id)}
               AND successful.status = {_sql_string(STATUS_SUCCESS)}
               AND successful.is_publishable
               AND NOT EXISTS (
@@ -203,7 +209,7 @@ class TrafficRunManifest:
         event_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
         values = ", ".join(
             (
-                _sql_string(SOURCE_ID),
+                _sql_string(self._source_id),
                 _sql_string(run.dag_id),
                 _sql_string(run.run_id),
                 _sql_string(status),
