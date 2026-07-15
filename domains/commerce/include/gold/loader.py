@@ -228,7 +228,9 @@ def run_load_details(details: list[dict], *, force_full: bool = False) -> dict:
     ensure_metadata_retention(
         [d["object"] for d in details]
         + ["silver_license_entity", "silver_license_entity_history",
-           "gold_license_dong_summary", CATALOG_TABLE])
+           "gold_license_dong_summary", "gold_license_flow_daily",
+           "gold_license_flow_monthly", "gold_license_flow_yearly",
+           "gold_license_status_duration", "gold_env_facility_operation", CATALOG_TABLE])
     conn = _connect(catalog, schema)
     loaded: dict[str, int] = {}
     try:

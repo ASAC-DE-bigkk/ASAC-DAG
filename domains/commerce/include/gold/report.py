@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 _DOMAIN = "commerce"
 
 # gold 집계 테이블(#70 — 원형은 silver 소속). 집계 모델 추가 시 여기 등록.
-AGG_TABLES = ("gold_license_dong_summary",)
+AGG_TABLES = ("gold_license_dong_summary", "gold_license_flow_daily", "gold_license_flow_monthly", "gold_license_flow_yearly", "gold_license_status_duration", "gold_env_facility_operation")
 
 
 def agg_counts() -> dict[str, int]:

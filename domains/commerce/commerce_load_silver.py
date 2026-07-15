@@ -225,6 +225,24 @@ def commerce_load_silver():
         return {"loaded": loaded, "objects": len(loaded), "rows": sum(loaded.values()),
                 "catalog_version": version}
 
+    @task
+    def maintain_gold_tables() -> list[dict]:
+        """신설 Iceberg 테이블 유지보수(#226 확장, 사용자 확정 2026-07-15 재승인) —
+        **메타 통합(expire: 옛 버전 포인터 정리) + 본 데이터 병합(optimize: 소파일 컴팩션)
+        + orphan 청소**. 데이터 행은 0 삭제(실증: history 가 동일 정책으로 매일 관리되며
+        6/30 부터 전량 보존). OOM 근거: 최중량 silver_license_history(289만×record_json)의
+        일일 optimize 가 이 박스에서 무사고 — 신설 테이블은 그보다 좁음."""
+        from bronze import maintenance
+        from gold import loader
+
+        details, _ = loader.read_catalog()
+        gold_aggs = ["gold_license_dong_summary", "gold_license_flow_daily",
+                     "gold_license_flow_monthly", "gold_license_flow_yearly",
+                     "gold_license_status_duration", "gold_env_facility_operation"]
+        tables = tuple(["silver_license_entity", "silver_license_entity_history",
+                        "meta_detail_catalog"] + gold_aggs + [d["object"] for d in details])
+        return maintenance.run_table_maintenance(tables)
+
     @task(trigger_rule="all_done")
     def report_silver(**ctx) -> dict:
         """DAG 완료 리포트(#218, PROJECT.md §2) — **이번 실행이 silver 로 적재한 신규분만**
@@ -253,7 +271,7 @@ def commerce_load_silver():
     [enrich_admin_dong_ref(), enrich_fill_jibun(), ensure_silver_marker()] >> seed
     # 원형 파이프라인 편승(#70): dbt(원형 4모델) → 마킹 → detail(카탈로그 구동) → 유지보수 → 리포트
     (seed >> dbt_silver >> notify_masked_address_summary() >> mark_silver_done()
-     >> build_detail_catalog() >> load_details() >> report_silver())
+     >> build_detail_catalog() >> load_details() >> maintain_gold_tables() >> report_silver())
 
 
 commerce_load_silver()

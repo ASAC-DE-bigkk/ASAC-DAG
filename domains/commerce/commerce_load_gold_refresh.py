@@ -51,7 +51,8 @@ DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domain
 DBT_BIN = os.getenv("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
 DBT_TARGET = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
 # 전량 재구축 대상: 원형 정리본(silver_entity 2종, #70 편승분)+집계(gold_dong_summary).
-GOLD_SELECT = ["silver_license_entity", "silver_license_entity_history", "gold_license_dong_summary"]
+GOLD_SELECT = ["silver_license_entity", "silver_license_entity_history",
+               "gold_license_dong_summary", "gold_license_flow_daily", "gold_license_flow_monthly", "gold_license_flow_yearly", "gold_license_status_duration", "gold_env_facility_operation"]
 
 _profile_config = ProfileConfig(
     profile_name="commerce",

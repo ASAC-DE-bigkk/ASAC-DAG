@@ -153,6 +153,9 @@ Serve       API·화면 조회 최적화 최종 결과 = D1(SQLite) 선별 expor
 | `meta_detail_catalog` | Python(Trino) | detail 스펙 정본(파생 과정 — 별도 meta_ 단위) | ❌ (내부 메타) |
 | `silver_<domain>_detail` ×N | Python(Trino) | **API 별 상이(비공통) 컬럼 평탄화** — 카탈로그 구동(원형=silver) | 대상별 선별 후보 |
 | `gold_license_dong_summary` | dbt | 행정동별 업소/영업/폐업 집계(소형) | ✅ 1순위 |
+| `gold_license_flow_daily/monthly/yearly` | dbt | 개업/폐업 흐름 × 업종 3단 × 지역 3축 — **완결 기간만+지연보정 창**(이미 적재된 기간 재적재 없음, 중복 불가) | ✅ 기간 키 증분 |
+| `gold_license_status_duration` | dbt | 상태 전이 지속기간 요약(업종·상태군·진행중) — 이력 기반 | ✅ (소형) |
+| `gold_env_facility_operation` | dbt | 가동 시간·일수 축(환경 2종 — **영업시간/요일 필드는 원천 부재** 실측) | 후보 |
 
 - **서빙 단위 추출** = 코어(entity) ⋈ detail(자연키 조인) — D1 export 는 이 조합에서 대상별
   필터·컬럼 축소로 뽑는다(§4.2 원칙).

@@ -7,6 +7,36 @@
 
 ## 2026-07-15
 
+### 71. gold 인사이트 집계 세트 + 메타 사본 상한(무손실) + 유지보수 재승인 복원
+
+request:
+- 메타가 왜 계속 쌓이나 — 메타는 통합하고 본 데이터를 합치며 관리 못 하나(OOM 위험?).
+- silver(원형)에서 뽑을 수 있는 인사이트를 전부 gold 집계로: 업종별 일/월/연 단위(**이미 적재된
+  기간은 재적재하지 않는 증분**), 기간 조건 추이, 지역 3축(시군구/행정동/법정동), 영업시간·
+  영업요일 축, 이력 상태 변화의 지속기간(분야별 비교). 향후 D1(SQLite) 적재 시 중복 없는 조치.
+
+response:
+- **메타/데이터 관리(질의 대응)**: ① "메타 통합+데이터 병합" = expire_snapshots+optimize 가
+  정확히 그것(데이터 행 0 삭제 — history 가 동일 정책으로 매일 관리되며 6/30 부터 전량 보존 실증).
+  OOM 근거: 최중량 history(289만×record_json) 일일 optimize 무사고 → `maintain_gold_tables`
+  복원(재승인). ② metadata.json **파일 사본** 상한: PyIceberg 로
+  write.metadata.delete-after-commit+previous-versions-max=50 — 82테이블 적용(set 81·fail 0,
+  스냅샷 수 불변 실증). Trino 는 해당 속성 차단 → ensure_metadata_retention()이 매 실행 ensure.
+- **인사이트 gold 5모델(dbt·Iceberg — 전부 실빌드 검증)**:
+  - `gold_license_flow_daily/monthly/yearly` — 개업/폐업 흐름 × 업종 3단(taxonomy) × 지역 3축.
+    **완결 기간만**(당일/당월/당해 제외) + 지연보정 창(90일/3개월/1연도) delete+insert —
+    "이미 적재된 기간 재적재 없음·중복 불가"를 dbt 증분으로 구현. 빌드 291만/134만/44.6만 행,
+    grain 유니크 3/3, **재실행 = 창만 교체·총행수 불변** 실증. D1 적재는 D1 max(기간키) 초과분만
+    append(문서 계약).
+  - `gold_license_status_duration` — 이력 상태 전이 세그먼트의 지속일 요약(업종·상태군·진행중,
+    avg/p50/p90/max). 591행. 예: mail_order_sale 휴업 평균 117일.
+  - `gold_env_facility_operation` — 가동 시간·일수 축(환경 v2 2종). **영업시간/영업요일 필드는
+    LOCALDATA 원천 전체에 부재(실측 0건)** — 실존 축만 제공, 타 업종은 외부 원천 결합 후속 과제.
+  - 워터마크 버그 1건 수정: 전 행 date 변환이 원천 무효 날짜(2006-02-29)에서 폭발 → 문자열
+    max 후 1건만 변환.
+- 배선: GOLD_SELECT 6모델(정기/refresh)·report AGG_TABLES·유지보수·메타 상한 대상 확장.
+  pytest 359 · security PASS · dbt parse·DAG exit 0.
+
 ### 70. 레이어 재분류 — 원형은 silver(파이프라인 편승)·gold 는 집계 전용 + 명칭 전면 정리
 
 request:
