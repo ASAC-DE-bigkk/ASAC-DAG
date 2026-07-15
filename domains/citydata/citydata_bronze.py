@@ -196,7 +196,7 @@ with DAG(
     schedule="*/5 * * * *",
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 3, "retry_delay": timedelta(minutes=1)},
+    default_args={"retries": 1, "retry_delay": timedelta(minutes=1)},
     params=DEFAULT_PARAMS,
     tags=["ingest", "citydata", "population", "bronze", "r2", "iceberg"],
 ) as dag:

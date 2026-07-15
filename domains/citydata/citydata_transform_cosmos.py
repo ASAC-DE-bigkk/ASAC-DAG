@@ -52,26 +52,17 @@ DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata", dbt_project_dir=DBT_PROJECT)
 
-# 티어별 모델 — 골드의 "자연 주기"로 배치.
-# fast(5분): 실시간 grain(현재 스냅샷·시간대별) + 시간 grain 크로스(날씨·교통돌발). commerce
-#   는 view 라 재생성이 순간이라 fast 에 둔다(항상 최신·R2 write 없음).
-# slow(10분): 일 grain 집계(daily) — 하루치라 5분마다 재계산할 필요 없음 + 무거운 cmrcl/air silver.
-FAST_SELECT = [
-    "dim_admin_dong", "dim_seoul_area",
-    "silver_citydata_ppltn", "silver_citydata_transit_ppltn", "silver_citydata_sbike",
-    "gold_citydata_ppltn_by_time", "gold_citydata_place_latest",
-    "gold_citydata_ppltn_x_weather_hourly", "gold_citydata_ppltn_x_commerce_dong",
-    "gold_citydata_transit_x_incident_hourly",
-    # 챗봇용 신규 골드 — 전부 view(즉시)/경량 cross. "지금 상태" 라 5분 tier.
-    "gold_citydata_ppltn_anomaly", "gold_citydata_ppltn_trend",
-    "gold_citydata_place_scorecard", "gold_citydata_hot_commerce",
-    "gold_citydata_ppltn_forecast", "gold_citydata_ppltn_x_transit_hourly",
-]
-SLOW_SELECT = [
-    "silver_citydata_cmrcl", "silver_citydata_cmrcl_rsb", "silver_citydata_air",
-    "gold_citydata_ppltn_daily", "gold_citydata_cmrcl_daily",
-    "gold_citydata_purchasing_power_daily", "gold_citydata_ppltn_x_culture_daily",
-]
+# 티어는 dbt **태그**로 관리 — 모델명 하드코딩 리스트 대신. 각 모델의 tier 는 그 모델
+# schema.yml `config: tags: [fast|slow]` 에 있고(SQL=비즈니스로직 / yml=문서·메타 분리
+# 원칙), 패키지 모델 dim_admin_dong 은 dbt_project.yml 에서 태깅한다. 모델을 추가할 때
+# **태그만 붙이면 이 DAG 는 안 고쳐도 됨** → 리스트-모델 드리프트 0, 단일 진실원천.
+# `dbt run --select tag:fast` 수동 실행도 동일 결과(cosmos ↔ 수동 일관).
+# 티어 배치 근거(골드의 "자연 주기"):
+#   fast(5분): 실시간 grain(현재 스냅샷·시간대별) + 시간 grain 크로스(날씨·교통돌발).
+#   slow(10분): 일 grain 집계(daily, 5분마다 재계산 불필요) + 무거운 cmrcl/air silver.
+# 주의: 태그는 manifest 에 반영돼야 선택됨 → 모델/태그 변경 시 manifest 재생성 필요.
+FAST_SELECT = ["tag:fast"]
+SLOW_SELECT = ["tag:slow"]
 
 # DBT_MANIFEST 로드 — 파싱 시점에 dbt 를 돌리지 않고 target/manifest.json 을 읽어 그래프를
 # 만든다. dbt 가 전용 venv 에만 있어(메인 env 에 dbt-trino 없음) DBT_LS(in-process ls)가
@@ -116,8 +107,11 @@ def _tier_group(group_id: str, select: list[str]) -> DbtTaskGroup:
         # cosmos 는 모델 실행 시 프로젝트를 tmp 로 복사하는데 dbt_packages(asac_axes)를 안
         # 가져온다 → 각 태스크가 dbt deps 를 먼저 돌려 패키지를 설치하게 한다.
         operator_args={"install_deps": True},
-        default_args={"retries": 1, "retry_delay": timedelta(minutes=2),
-                      "on_failure_callback": record_citydata_problem},
+        # retries=0 — silver 는 incremental delete+insert(table 은 전체 재빌드가 5분 예산 초과라
+        # 불가)라 재시도가 R2 비원자성으로 이중삽입 중복을 유발한다. 재시도 대신 다음 5분 run 의
+        # 룩백이 실패 window 를 재계산해 self-heal 한다. gold 는 table 이라 재시도 무관.
+        # 대가: 일시 race(seed 재빌드 등)마다 알림이 뜰 수 있으나 self-clearing 이다.
+        default_args={"retries": 0, "on_failure_callback": record_citydata_problem},
     )
 
 
