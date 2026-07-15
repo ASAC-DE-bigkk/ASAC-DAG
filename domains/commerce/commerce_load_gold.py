@@ -48,7 +48,26 @@ DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domain
 DBT_BIN = os.getenv("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
 DBT_TARGET = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
 # gold = 집계·지표만(#70). 원형(entity/detail)은 silver DAG 소속.
-GOLD_SELECT = ["gold_license_dong_summary", "gold_license_flow_daily", "gold_license_flow_monthly", "gold_license_flow_yearly", "gold_license_status_duration", "gold_env_facility_operation"]
+GOLD_SELECT = [
+    "gold_license_dong_summary",
+    "gold_license_flow_daily",
+    "gold_license_flow_monthly",
+    "gold_license_flow_yearly",
+    "gold_license_status_duration",
+    "gold_env_facility_operation",
+    "gold_license_lifespan",
+    "gold_license_cohort_survival",
+    "gold_license_seasonality",
+    "gold_license_stock_age_band",
+    "gold_license_gu_specialization",
+    "gold_license_churn_yearly",
+    "gold_license_data_quality",
+    "gold_license_status_transition",
+    "gold_license_dong_category_matrix",
+    "gold_license_change_activity",
+    "gold_detail_area_profile",
+    "gold_license_multi_site",
+]
 
 _profile_config = ProfileConfig(
     profile_name="commerce",
