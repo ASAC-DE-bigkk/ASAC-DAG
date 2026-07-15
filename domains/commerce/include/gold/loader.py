@@ -121,16 +121,34 @@ def detail_ddl(qschema: str, detail: dict) -> str:
             f"WITH (format = 'PARQUET')")
 
 
-def _member_watermark_sql(qschema: str, obj: str) -> str:
-    """멤버별 워터마크 — detail 테이블 자체가 상태(마커 테이블 없음)."""
-    return (f"(SELECT coalesce(max(collected_at), timestamp '1970-01-01') "
-            f"FROM {qschema}.{obj} WHERE dataset = ?)")
+def member_watermark(cur, qschema: str, obj: str, member: str):
+    """멤버별 워터마크 **스냅샷** — detail 테이블 자체가 상태(마커 테이블 없음).
+
+    반드시 버킷 루프 **시작 전에 1회** 조회해 전 버킷이 같은 창을 쓰게 한다. correlated
+    서브쿼리로 문마다 재평가하면 버킷0 커밋이 워터마크를 전진시켜 버킷1~k 의 행이
+    조용히 걸러진다(2026-07-15 실측: mail_order_sale 75%·general_restaurant 50% 유실)."""
+    cur.execute(  # security: allow-sql - 검증 식별자, 값 바인딩
+        f"SELECT max(collected_at) FROM {qschema}.{obj} WHERE dataset = ?", (member,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def defend_member(cur, qschema: str, obj: str, member: str, wm) -> None:
+    """중단 방어(PROJECT.md §3) — 이전 실행이 버킷 도중 죽었을 때 남은 부분 버킷 잔재
+    (워터마크 초과분)를 선삭제해 append 멱등을 만든다. wm=None 이면 전량 삭제."""
+    if wm is None:
+        cur.execute(  # security: allow-sql
+            f"DELETE FROM {qschema}.{obj} WHERE dataset = ?", (member,))
+    else:
+        cur.execute(  # security: allow-sql
+            f"DELETE FROM {qschema}.{obj} WHERE dataset = ? AND collected_at > ?", (member, wm))
+    cur.fetchall()
 
 
 def detail_insert_sql(qschema: str, detail: dict, *, bucket: tuple[int, int] | None = None) -> str:
     """멤버 1개 증분 적재문 — silver history 에서 payload 를 json 추출해 append.
 
-    바인딩 순서: (member, member) — WHERE dataset=? 와 워터마크 서브쿼리의 dataset=?.
+    바인딩 순서: (member, wm) — wm 은 member_watermark() **스냅샷**(전 버킷 공통 창).
     bucket=(b,k) 면 content_hash 버킷 서브청크(대형 멤버 heap 바운드)."""
     _assert_detail_safe(detail)
     payload_exprs = "".join(
@@ -143,7 +161,8 @@ def detail_insert_sql(qschema: str, detail: dict, *, bucket: tuple[int, int] | N
     return (f"INSERT INTO {qschema}.{detail['object']} ({cols}) "
             f"SELECT dataset, opnsfteamcode, mgtno, collected_at, content_hash{payload_exprs} "
             f"FROM {qschema}.silver_license_history "
-            f"WHERE dataset = ? AND collected_at > {_member_watermark_sql(qschema, detail['object'])}"
+            f"WHERE dataset = ? "
+            f"AND collected_at > coalesce(CAST(? AS timestamp(6)), timestamp '1970-01-01')"
             f"{part_pred}")
 
 
@@ -182,12 +201,17 @@ def run_load_details(details: list[dict], *, force_full: bool = False) -> dict:
             counts = _member_counts(cur, qschema, d["members"])
             n = 0
             for m in d["members"]:
+                # 워터마크는 멤버당 **1회 스냅샷**(전 버킷 공통 창 — 버킷 간 재평가 금지) 후
+                # 중단 방어(이전 부분 버킷 잔재 선삭제) → k개 버킷 INSERT 는 전부 같은 창.
+                wm = member_watermark(cur, qschema, d["object"], m)
+                defend_member(cur, qschema, d["object"], m, wm)
+                wm_param = str(wm) if wm is not None else None
                 rows = counts.get(m, 0)
                 k = max(1, -(-rows // _BUCKET_ROWS))          # ceil — 대형 멤버만 버킷 분할
                 for b in range(k):
                     _pace(f"{d['object']}:{m}" + (f" {b + 1}/{k}" if k > 1 else ""))
                     sql = detail_insert_sql(qschema, d, bucket=(b, k) if k > 1 else None)
-                    cur.execute(sql, (m, m))  # security: allow-sql - 식별자 검증·값 바인딩
+                    cur.execute(sql, (m, wm_param))  # security: allow-sql - 식별자 검증·값 바인딩
                     res = cur.fetchall()
                     n += int(res[0][0]) if res and res[0] and res[0][0] is not None else 0
             loaded[d["object"]] = n

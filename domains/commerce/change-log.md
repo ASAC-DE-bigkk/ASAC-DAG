@@ -5,6 +5,24 @@
 
 ---
 
+## 2026-07-15
+
+### 69. gold detail 버킷 적재 유실 수정 — 워터마크 스냅샷 + 중단 방어(defend)
+
+request:
+- 현행 DB 상태에서 detail 로 최신 버전 상태값 확보 가능 여부 확인(사용자 질의) 중 발견.
+
+response:
+- **버그(실측)**: detail 버킷 적재(멤버 행수 > COMMERCE_GOLD_DETAIL_BUCKET_ROWS)에서 워터마크가
+  correlated 서브쿼리라 **버킷0 커밋 후 재평가** → 버킷1~k 행이 조용히 걸러짐. mail_order_sale
+  75%(93.5만→23.4만)·general_restaurant 50%(53.6만→26.8만) 유실. k=1 멤버는 무영향.
+- **수정(loader.py)**: `member_watermark()` — 멤버당 **1회 스냅샷** 후 전 버킷이 같은 창을
+  바인딩 파라미터로 공유(서브쿼리 제거). `defend_member()` — 적재 전 워터마크 초과 잔재 선삭제
+  (이전 실행이 버킷 도중 죽은 경우의 부분 커밋 정리, PROJECT.md §3 중단 방어 패턴).
+- **백필**: 영향 dataset 2개 행 삭제 후 재적재 — 정합 검증 **detail 78 합계 = history 총행수
+  (2,898,579 = 2,898,579)**. entity ⋈ detail 현재 버전 조인 커버리지 100%·팬아웃 0 실측.
+- 테스트: 스냅샷 바인딩 계약 + 버킷 간 동일 창 회귀 테스트로 고정.
+
 ## 2026-07-14
 
 ### 68. 서빙 레이어 전면 개편 — gold=Iceberg(RDB 모델링 승계) · 서빙 Postgres 폐기 · D1(SQLite) 예정
