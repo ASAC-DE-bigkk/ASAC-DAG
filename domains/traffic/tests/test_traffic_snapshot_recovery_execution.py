@@ -49,7 +49,7 @@ def test_recovery_dbt_phase_scopes_its_artifact_and_pins_the_validated_snapshot(
 
     result = module.run_recovery_dbt_phase(
         dbt_command="run",
-        selection="tag:ask_seoul_traffic_recovery_silver",
+        selector="ask_seoul_traffic_recovery_silver",
         snapshot_task_id="validate_publishable_snapshot",
         recovery_silver_persisted=False,
         ti=TaskInstance(),
@@ -63,6 +63,7 @@ def test_recovery_dbt_phase_scopes_its_artifact_and_pins_the_validated_snapshot(
         run_id="manual__recovery",
         task_id="dbt_run_recovery_silver",
         try_number=2,
+        invocation_id="dbt_run_recovery_silver",
         dbt_command="run",
     )
     assert result == {
@@ -78,17 +79,16 @@ def test_recovery_dbt_phase_scopes_its_artifact_and_pins_the_validated_snapshot(
         "ls",
         "--resource-type",
         "model",
-        "--select",
+        "--selector",
     ]
-    assert "tag:ask_seoul_traffic_recovery_silver" in ls_command
+    assert "ask_seoul_traffic_recovery_silver" in ls_command
     assert run_command[:4] == [
         "/home/airflow/dbt-venv/bin/dbt",
         "run",
-        "--select",
-        "tag:ask_seoul_traffic_recovery_silver",
+        "--selector",
+        "ask_seoul_traffic_recovery_silver",
     ]
     assert run_command[4:] == [
-        "--indirect-selection=buildable",
         "--target",
         "dev",
         "--no-use-colors",
@@ -98,13 +98,13 @@ def test_recovery_dbt_phase_scopes_its_artifact_and_pins_the_validated_snapshot(
         (
             f"{module.DBT_PROJECT.replace(chr(92), '/')}/target/"
             "traffic-snapshot-recovery/manual__recovery/"
-            "dbt_run_recovery_silver/try2/execution"
+            "dbt_run_recovery_silver/try2/dbt_run_recovery_silver/execution"
         ),
         "--log-path",
         (
             f"{module.DBT_PROJECT.replace(chr(92), '/')}/logs/"
             "traffic-snapshot-recovery/manual__recovery/"
-            "dbt_run_recovery_silver/try2/execution"
+            "dbt_run_recovery_silver/try2/dbt_run_recovery_silver/execution"
         ),
     ]
     assert observed[-1][1]["cwd"] == module.DBT_PROJECT
@@ -170,7 +170,7 @@ def test_recovery_dbt_contract_failure_records_the_recovery_snapshot(
     with pytest.raises(FakeAirflowFailException, match="data-contract-violation"):
         module.run_recovery_dbt_phase(
             dbt_command="test",
-            selection="tag:ask_seoul_traffic_recovery_silver",
+            selector="ask_seoul_traffic_recovery_silver",
             snapshot_task_id="validate_publishable_snapshot",
             recovery_silver_persisted=True,
             ti=ti,

@@ -59,7 +59,7 @@ DBT_RETRY_DELAY = timedelta(minutes=2)
 class DbtPhaseSpec:
     task_id: str
     dbt_command: str
-    selection: str | None = None
+    selector: str | None = None
     recovery_silver_persisted: bool = False
 
 
@@ -68,30 +68,30 @@ RECOVERY_DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_run_recovery_silver",
         "run",
-        "tag:ask_seoul_traffic_recovery_silver",
+        "ask_seoul_traffic_recovery_silver",
     ),
     DbtPhaseSpec(
         "dbt_run_recovery_metadata",
         "run",
-        "tag:ask_seoul_traffic_recovery_metadata",
+        "ask_seoul_traffic_recovery_metadata",
         recovery_silver_persisted=True,
     ),
     DbtPhaseSpec(
         "dbt_test_recovery_silver",
         "test",
-        "tag:ask_seoul_traffic_recovery_silver",
+        "ask_seoul_traffic_recovery_silver",
         recovery_silver_persisted=True,
     ),
     DbtPhaseSpec(
         "dbt_run_recovery_gold",
         "run",
-        "tag:ask_seoul_traffic_recovery_gold",
+        "ask_seoul_traffic_recovery_gold",
         recovery_silver_persisted=True,
     ),
     DbtPhaseSpec(
         "dbt_test_recovery_gold",
         "test",
-        "tag:ask_seoul_traffic_recovery_gold",
+        "ask_seoul_traffic_recovery_gold",
         recovery_silver_persisted=True,
     ),
 )
@@ -149,7 +149,7 @@ def recovery_silver_persisted_from_results(
 def run_recovery_dbt_phase(
     *,
     dbt_command: str,
-    selection: str | None,
+    selector: str | None,
     snapshot_task_id: str,
     recovery_silver_persisted: bool,
     **context,
@@ -163,7 +163,8 @@ def run_recovery_dbt_phase(
     target = (context.get("params") or {}).get("target", "dev")
     execution = traffic_dbt.execute_dbt_phase(
         dbt_command=dbt_command,
-        selection=selection,
+        selector=selector,
+        invocation_id=task_id or dbt_command.replace(" ", "-"),
         pipeline="traffic-snapshot-recovery",
         run_id=run_id,
         task_id=task_id,
@@ -359,7 +360,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
         python_callable=run_recovery_dbt_phase,
         op_kwargs={
             "dbt_command": spec.dbt_command,
-            "selection": spec.selection,
+            "selector": spec.selector,
             "snapshot_task_id": SNAPSHOT_TASK_ID,
             "recovery_silver_persisted": spec.recovery_silver_persisted,
         },

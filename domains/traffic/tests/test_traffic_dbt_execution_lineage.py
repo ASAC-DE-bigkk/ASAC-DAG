@@ -22,6 +22,7 @@ def test_attempt_paths_separate_preflight_execution_and_command_artifacts(tmp_pa
         run_id="manual/run",
         task_id="dbt_run_silver",
         try_number=1,
+        invocation_id="run",
         dbt_command="run",
     )
     source_paths = module.attempt_paths(
@@ -30,6 +31,7 @@ def test_attempt_paths_separate_preflight_execution_and_command_artifacts(tmp_pa
         run_id="manual/run",
         task_id="dbt_source_freshness",
         try_number=1,
+        invocation_id="source",
         dbt_command="source freshness",
     )
     deps_paths = module.attempt_paths(
@@ -38,13 +40,14 @@ def test_attempt_paths_separate_preflight_execution_and_command_artifacts(tmp_pa
         run_id="manual/run",
         task_id="dbt_deps",
         try_number=1,
+        invocation_id="deps",
         dbt_command="deps",
     )
 
     assert run_paths.preflight_target_path != run_paths.execution_target_path
     assert run_paths.preflight_log_path != run_paths.execution_log_path
-    assert run_paths.preflight_target_path.endswith("try1/preflight")
-    assert run_paths.execution_target_path.endswith("try1/execution")
+    assert run_paths.preflight_target_path.endswith("try1/run/preflight")
+    assert run_paths.execution_target_path.endswith("try1/run/execution")
     package_parts = Path(run_paths.packages_path).relative_to(tmp_path).parts
     assert package_parts[:2] == ("target", "traffic-transform")
     assert package_parts[-1] == "dbt_packages"
@@ -67,11 +70,13 @@ def test_attempt_paths_falls_back_to_unknown_for_blank_segments(tmp_path):
         run_id="",
         task_id=None,
         try_number=None,
+        invocation_id="unknown-segments",
         dbt_command="run",
     )
 
-    assert "/unknown/unknown/tryunknown/" in paths.execution_target_path.replace(
-        "\\", "/"
+    assert (
+        "/unknown/unknown/tryunknown/unknown-segments/"
+        in paths.execution_target_path.replace("\\", "/")
     )
 
 
@@ -84,6 +89,7 @@ def test_attempt_paths_do_not_collapse_distinct_run_ids(tmp_path):
         run_id="manual/run",
         task_id="dbt_run",
         try_number=1,
+        invocation_id="slash",
         dbt_command="run",
     )
     dash = module.attempt_paths(
@@ -92,6 +98,7 @@ def test_attempt_paths_do_not_collapse_distinct_run_ids(tmp_path):
         run_id="manual-run",
         task_id="dbt_run",
         try_number=1,
+        invocation_id="dash",
         dbt_command="run",
     )
 
@@ -110,6 +117,7 @@ def test_attempt_paths_reject_reserved_segments(tmp_path, reserved):
             run_id=reserved,
             task_id="dbt_run",
             try_number=1,
+            invocation_id="reserved",
             dbt_command="run",
         )
 
@@ -124,6 +132,7 @@ def test_attempt_paths_bound_unicode_and_long_segments_without_collisions(tmp_pa
         run_id=prefix + "-first",
         task_id="dbt_run",
         try_number=1,
+        invocation_id="first",
         dbt_command="run",
     )
     second = module.attempt_paths(
@@ -132,6 +141,7 @@ def test_attempt_paths_bound_unicode_and_long_segments_without_collisions(tmp_pa
         run_id=prefix + "-second",
         task_id="dbt_run",
         try_number=1,
+        invocation_id="second",
         dbt_command="run",
     )
 
@@ -148,6 +158,7 @@ def test_attempt_paths_remain_inside_project_artifact_roots(tmp_path):
         run_id="manual/run",
         task_id="dbt/run",
         try_number=1,
+        invocation_id="inside-roots",
         dbt_command="run",
     )
 
@@ -186,7 +197,8 @@ def test_openlineage_enabled_routes_only_materialization_to_dbt_ol(
 
     execution = module.execute_dbt_phase(
         dbt_command="run",
-        selection="tag:ask_seoul_traffic_transform_silver",
+        selector="ask_seoul_traffic_transform_silver",
+        invocation_id="silver",
         pipeline="traffic-transform",
         run_id="manual__1",
         task_id="dbt_run_silver",
@@ -214,9 +226,8 @@ def test_openlineage_enabled_routes_only_materialization_to_dbt_ol(
     assert actual_command[1] == "run"
     assert actual_command[1:] == [
         "run",
-        "--select",
-        "tag:ask_seoul_traffic_transform_silver",
-        "--indirect-selection=buildable",
+        "--selector",
+        "ask_seoul_traffic_transform_silver",
         "--target",
         "dev",
         "--no-use-colors",
@@ -273,7 +284,8 @@ def test_materialization_commands_use_dbt_ol_when_enabled(
 
     module.execute_dbt_phase(
         dbt_command=dbt_command,
-        selection="tag:selected",
+        selector="selected",
+        invocation_id=f"{dbt_command}-materialization",
         pipeline="traffic-transform",
         run_id="manual__1",
         task_id=f"dbt_{dbt_command}",
@@ -323,7 +335,8 @@ def test_non_materialization_commands_stay_on_raw_dbt(
 
     execution = module.execute_dbt_phase(
         dbt_command=dbt_command,
-        selection=("tag:source" if dbt_command == "source freshness" else None),
+        selector=("source" if dbt_command == "source freshness" else None),
+        invocation_id=f"{dbt_command}-raw",
         pipeline="traffic-transform",
         run_id="manual__1",
         task_id="dbt_raw_phase",
@@ -342,3 +355,121 @@ def test_non_materialization_commands_stay_on_raw_dbt(
         assert execution.existing_run_results_path is None
     else:
         assert execution.paths.manifest_path is None
+
+
+def test_named_selector_is_used_for_preflight_and_actual_without_indirect_selection(
+    tmp_path,
+):
+    module = load_execution_module()
+    observed = []
+
+    def runner(command, **_kwargs):
+        observed.append(command)
+        if command[1] == "ls":
+            return completed(
+                command,
+                stdout='{"unique_id":"model.asac_seoul.silver","resource_type":"model"}\n',
+            )
+        write_actual_artifacts(command)
+        return completed(command)
+
+    module.execute_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        invocation_id="silver-run",
+        pipeline="traffic-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        target="dev",
+        variables=None,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=runner,
+        environ={},
+    )
+
+    assert [option(command, "--selector") for command in observed] == [
+        "ask_seoul_traffic_transform_silver",
+        "ask_seoul_traffic_transform_silver",
+    ]
+    assert all("--select" not in command for command in observed)
+    assert all("--indirect-selection=buildable" not in command for command in observed)
+
+
+@pytest.mark.parametrize("selector", ["tag:selected", "models/traffic", " "])
+def test_invalid_selector_fails_before_runner(selector, tmp_path):
+    module = load_execution_module()
+    observed = []
+
+    with pytest.raises(ValueError, match="named dbt selector"):
+        module.execute_dbt_phase(
+            dbt_command="run",
+            selector=selector,
+            invocation_id="invalid-selector",
+            pipeline="traffic-transform",
+            run_id="manual__1",
+            task_id="dbt_run_silver",
+            try_number=1,
+            target="dev",
+            variables=None,
+            project_dir=str(tmp_path),
+            executable=RAW_DBT,
+            runner=lambda command, **_kwargs: observed.append(command),
+            environ={},
+        )
+
+    assert observed == []
+
+
+def test_threads_apply_only_to_actual_materialization(tmp_path):
+    module = load_execution_module()
+    observed = []
+
+    def runner(command, **_kwargs):
+        observed.append(command)
+        if command[1] == "ls":
+            return completed(
+                command,
+                stdout='{"unique_id":"model.asac_seoul.silver","resource_type":"model"}\n',
+            )
+        write_actual_artifacts(command)
+        return completed(command)
+
+    module.execute_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        invocation_id="threaded-run",
+        pipeline="traffic-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        target="dev",
+        variables=None,
+        threads=3,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=runner,
+        environ={},
+    )
+
+    assert "--threads" not in observed[0]
+    assert option(observed[1], "--threads") == "3"
+
+
+def test_invocation_identity_separates_artifact_paths(tmp_path):
+    module = load_execution_module()
+    common = {
+        "project_dir": str(tmp_path),
+        "pipeline": "traffic-transform",
+        "run_id": "manual__1",
+        "task_id": "dbt_run_silver",
+        "try_number": 1,
+        "dbt_command": "run",
+    }
+
+    first = module.attempt_paths(invocation_id="first", **common)
+    second = module.attempt_paths(invocation_id="second", **common)
+
+    assert first.execution_target_path != second.execution_target_path
+    assert first.execution_log_path != second.execution_log_path

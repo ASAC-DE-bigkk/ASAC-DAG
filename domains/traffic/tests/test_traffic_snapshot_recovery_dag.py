@@ -44,7 +44,7 @@ def test_recovery_dag_is_manual_and_uses_only_recovery_selectors():
     phase_contracts = {
         task_id: (
             dag.task_dict[task_id].kwargs["op_kwargs"]["dbt_command"],
-            dag.task_dict[task_id].kwargs["op_kwargs"]["selection"],
+            dag.task_dict[task_id].kwargs["op_kwargs"]["selector"],
         )
         for task_id in expected_task_order
         if task_id.startswith("dbt_")
@@ -53,23 +53,23 @@ def test_recovery_dag_is_manual_and_uses_only_recovery_selectors():
         "dbt_deps": ("deps", None),
         "dbt_run_recovery_silver": (
             "run",
-            "tag:ask_seoul_traffic_recovery_silver",
+            "ask_seoul_traffic_recovery_silver",
         ),
         "dbt_run_recovery_metadata": (
             "run",
-            "tag:ask_seoul_traffic_recovery_metadata",
+            "ask_seoul_traffic_recovery_metadata",
         ),
         "dbt_test_recovery_silver": (
             "test",
-            "tag:ask_seoul_traffic_recovery_silver",
+            "ask_seoul_traffic_recovery_silver",
         ),
         "dbt_run_recovery_gold": (
             "run",
-            "tag:ask_seoul_traffic_recovery_gold",
+            "ask_seoul_traffic_recovery_gold",
         ),
         "dbt_test_recovery_gold": (
             "test",
-            "tag:ask_seoul_traffic_recovery_gold",
+            "ask_seoul_traffic_recovery_gold",
         ),
     }
     assert module.RECOVERY_DBT_TASK_IDS == tuple(phase_contracts)
@@ -77,7 +77,7 @@ def test_recovery_dag_is_manual_and_uses_only_recovery_selectors():
         module.RECOVERY_DBT_TASK_IDS
     )
     assert {
-        spec.task_id: (spec.dbt_command, spec.selection)
+        spec.task_id: (spec.dbt_command, spec.selector)
         for spec in module.RECOVERY_DBT_PHASE_SPECS
     } == phase_contracts
     assert list(module.recovery_dbt_tasks) == list(phase_contracts)

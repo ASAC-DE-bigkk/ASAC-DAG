@@ -36,12 +36,11 @@ def test_traffic_contract_gates_delegate_membership_to_dbt_selectors():
     seed_task = module.dag.task_dict["dbt_test_asac_axes_seed_contract"]
     assert source_task.kwargs["op_kwargs"]["dbt_command"] == "test"
     assert (
-        source_task.kwargs["op_kwargs"]["selection"]
-        == "traffic_transform_contract_gate"
+        source_task.kwargs["op_kwargs"]["selector"] == "traffic_transform_contract_gate"
     )
     assert seed_task.kwargs["op_kwargs"]["dbt_command"] == "test"
-    assert seed_task.kwargs["op_kwargs"]["selection"] == (
-        "tag:ask_seoul_traffic_transform_asac_axes_contract"
+    assert seed_task.kwargs["op_kwargs"]["selector"] == (
+        "ask_seoul_traffic_transform_asac_axes_contract"
     )
     assert not hasattr(module, "TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS")
     assert not hasattr(module, "ASAC_AXES_SEED_CONTRACT_TESTS")
@@ -73,7 +72,7 @@ def test_contract_gate_runs_non_empty_dbt_ls_before_dbt_test(tmp_path, monkeypat
     monkeypatch.setattr(module.subprocess, "run", fake_run)
     result = module.run_dbt_phase(
         dbt_command="test",
-        selection="traffic_transform_contract_gate",
+        selector="traffic_transform_contract_gate",
         snapshot_task_id=module.SNAPSHOT_TASK_ID,
         silver_persisted=False,
         ti=ti,
@@ -92,7 +91,7 @@ def test_contract_gate_runs_non_empty_dbt_ls_before_dbt_test(tmp_path, monkeypat
     assert commands[1][1:3] == ["test", "--selector"]
     assert commands[1][3] == "traffic_transform_contract_gate"
     for command in commands:
-        assert "--indirect-selection=buildable" in command
+        assert "--indirect-selection=buildable" not in command
         assert "--target-path" in command
         assert "--log-path" in command
         variables = command[command.index("--vars") + 1]
@@ -123,7 +122,7 @@ def test_contract_gate_does_not_run_dbt_test_after_empty_selection(monkeypatch):
     with pytest.raises(FakeAirflowFailException, match="model-execution-failed"):
         module.run_dbt_phase(
             dbt_command="test",
-            selection="traffic_transform_contract_gate",
+            selector="traffic_transform_contract_gate",
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             silver_persisted=False,
             ti=ti,
@@ -169,11 +168,11 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_deps": ("deps", None),
         "dbt_source_freshness": (
             "source freshness",
-            "tag:ask_seoul_traffic_transform_source",
+            "ask_seoul_traffic_transform_source",
         ),
         "dbt_test_traffic_incident_availability": (
             "test",
-            "tag:ask_seoul_traffic_transform_availability",
+            "ask_seoul_traffic_transform_availability",
         ),
         "dbt_test_traffic_bronze_source_contract": (
             "test",
@@ -181,40 +180,40 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         ),
         "dbt_seed_asac_axes": (
             "seed",
-            "tag:ask_seoul_traffic_transform_asac_axes",
+            "ask_seoul_traffic_transform_asac_axes",
         ),
         "dbt_run_common_admin_dong_dimension": (
             "run",
-            "tag:ask_seoul_traffic_transform_common_admin",
+            "ask_seoul_traffic_transform_common_admin",
         ),
         "dbt_test_common_admin_dong_dimension": (
             "test",
-            "tag:ask_seoul_traffic_transform_common_admin",
+            "ask_seoul_traffic_transform_common_admin",
         ),
         "dbt_test_asac_axes_seed_contract": (
             "test",
-            "tag:ask_seoul_traffic_transform_asac_axes_contract",
+            "ask_seoul_traffic_transform_asac_axes_contract",
         ),
-        "dbt_run_silver": ("run", "tag:ask_seoul_traffic_transform_silver"),
-        "dbt_test_silver": ("test", "tag:ask_seoul_traffic_transform_silver"),
-        "dbt_run_gold": ("run", "tag:ask_seoul_traffic_transform_gold"),
-        "dbt_test_gold": ("test", "tag:ask_seoul_traffic_transform_gold"),
+        "dbt_run_silver": ("run", "ask_seoul_traffic_transform_silver"),
+        "dbt_test_silver": ("test", "ask_seoul_traffic_transform_silver"),
+        "dbt_run_gold": ("run", "ask_seoul_traffic_transform_gold"),
+        "dbt_test_gold": ("test", "ask_seoul_traffic_transform_gold"),
     }
     assert module.DBT_PHASE_TASK_IDS == tuple(expected_phase_contracts)
     assert tuple(spec.task_id for spec in module.DBT_PHASE_SPECS) == (
         module.DBT_PHASE_TASK_IDS
     )
     assert {
-        spec.task_id: (spec.dbt_command, spec.selection)
+        spec.task_id: (spec.dbt_command, spec.selector)
         for spec in module.DBT_PHASE_SPECS
     } == expected_phase_contracts
     assert list(module.dbt_phase_tasks) == list(expected_phase_contracts)
     with pytest.raises(AttributeError):
         module.DBT_PHASE_SPECS[0].task_id = "mutated"
-    for task_id, (dbt_command, selection) in expected_phase_contracts.items():
+    for task_id, (dbt_command, selector) in expected_phase_contracts.items():
         op_kwargs = dag.task_dict[task_id].kwargs["op_kwargs"]
         assert op_kwargs["dbt_command"] == dbt_command
-        assert op_kwargs["selection"] == selection
+        assert op_kwargs["selector"] == selector
         assert "dbt_args" not in op_kwargs
     for task_id in (
         "dbt_run_common_admin_dong_dimension",
@@ -313,7 +312,7 @@ def test_gold_contract_test_fresh_parses_in_same_task_artifact(tmp_path, monkeyp
 
     result = module.run_dbt_phase(
         dbt_command="test",
-        selection="tag:ask_seoul_traffic_transform_gold",
+        selector="ask_seoul_traffic_transform_gold",
         snapshot_task_id=module.SNAPSHOT_TASK_ID,
         silver_persisted=True,
         fresh_parse=True,
@@ -339,12 +338,13 @@ def test_gold_contract_test_fresh_parses_in_same_task_artifact(tmp_path, monkeyp
     assert parse_target.parent == test_target.parent
     assert test_target == Path(result["run_results_path"]).parent
     assert commands[2][commands[2].index("--log-path") + 1].endswith(
-        "traffic-transform/manual__a/dbt_test_gold/try2/execution"
+        "traffic-transform/manual__a/dbt_test_gold/try2/dbt_test_gold/execution"
     )
-    assert Path(result["run_results_path"]).parts[-5:] == (
+    assert Path(result["run_results_path"]).parts[-6:] == (
         "manual__a",
         "dbt_test_gold",
         "try2",
+        "dbt_test_gold",
         "execution",
         "run_results.json",
     )
@@ -385,7 +385,7 @@ def test_gold_contract_parse_failure_stops_before_test_and_records_task_artifact
     with pytest.raises(FakeAirflowFailException, match="model-execution-failed"):
         module.run_dbt_phase(
             dbt_command="test",
-            selection="tag:ask_seoul_traffic_transform_gold",
+            selector="ask_seoul_traffic_transform_gold",
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             silver_persisted=True,
             fresh_parse=True,

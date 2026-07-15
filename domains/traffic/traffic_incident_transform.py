@@ -74,7 +74,7 @@ DBT_RUN_RESULTS_RECORD_KEY = "dbt_run_results_path"
 class DbtPhaseSpec:
     task_id: str
     dbt_command: str
-    selection: str | None = None
+    selector: str | None = None
     silver_persisted: bool = False
     fresh_parse: bool = False
 
@@ -84,12 +84,12 @@ DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_source_freshness",
         "source freshness",
-        "tag:ask_seoul_traffic_transform_source",
+        "ask_seoul_traffic_transform_source",
     ),
     DbtPhaseSpec(
         "dbt_test_traffic_incident_availability",
         "test",
-        "tag:ask_seoul_traffic_transform_availability",
+        "ask_seoul_traffic_transform_availability",
     ),
     DbtPhaseSpec(
         "dbt_test_traffic_bronze_source_contract",
@@ -99,45 +99,45 @@ DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_seed_asac_axes",
         "seed",
-        "tag:ask_seoul_traffic_transform_asac_axes",
+        "ask_seoul_traffic_transform_asac_axes",
     ),
     DbtPhaseSpec(
         "dbt_run_common_admin_dong_dimension",
         "run",
-        "tag:ask_seoul_traffic_transform_common_admin",
+        "ask_seoul_traffic_transform_common_admin",
     ),
     DbtPhaseSpec(
         "dbt_test_common_admin_dong_dimension",
         "test",
-        "tag:ask_seoul_traffic_transform_common_admin",
+        "ask_seoul_traffic_transform_common_admin",
     ),
     DbtPhaseSpec(
         "dbt_test_asac_axes_seed_contract",
         "test",
-        "tag:ask_seoul_traffic_transform_asac_axes_contract",
+        "ask_seoul_traffic_transform_asac_axes_contract",
     ),
     DbtPhaseSpec(
         "dbt_run_silver",
         "run",
-        "tag:ask_seoul_traffic_transform_silver",
+        "ask_seoul_traffic_transform_silver",
         fresh_parse=True,
     ),
     DbtPhaseSpec(
         "dbt_test_silver",
         "test",
-        "tag:ask_seoul_traffic_transform_silver",
+        "ask_seoul_traffic_transform_silver",
         silver_persisted=True,
     ),
     DbtPhaseSpec(
         "dbt_run_gold",
         "run",
-        "tag:ask_seoul_traffic_transform_gold",
+        "ask_seoul_traffic_transform_gold",
         silver_persisted=True,
     ),
     DbtPhaseSpec(
         "dbt_test_gold",
         "test",
-        "tag:ask_seoul_traffic_transform_gold",
+        "ask_seoul_traffic_transform_gold",
         silver_persisted=True,
         fresh_parse=True,
     ),
@@ -164,7 +164,7 @@ def resolve_traffic_snapshot_run() -> str:
 def run_dbt_phase(
     *,
     dbt_command: str,
-    selection: str | None,
+    selector: str | None,
     snapshot_task_id: str,
     silver_persisted: bool,
     fresh_parse: bool = False,
@@ -180,7 +180,8 @@ def run_dbt_phase(
     target = params.get("target", "dev")
     execution = traffic_dbt.execute_dbt_phase(
         dbt_command=dbt_command,
-        selection=selection,
+        selector=selector,
+        invocation_id=task_id or dbt_command.replace(" ", "-"),
         pipeline="traffic-transform",
         run_id=run_id,
         task_id=task_id,
@@ -283,7 +284,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
         python_callable=run_dbt_phase,
         op_kwargs={
             "dbt_command": spec.dbt_command,
-            "selection": spec.selection,
+            "selector": spec.selector,
             "snapshot_task_id": SNAPSHOT_TASK_ID,
             "silver_persisted": spec.silver_persisted,
             "fresh_parse": spec.fresh_parse,

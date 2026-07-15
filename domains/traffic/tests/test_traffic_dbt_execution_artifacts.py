@@ -41,7 +41,8 @@ def test_deps_actual_omits_unsupported_target_path_but_keeps_runtime_context(tmp
 
     execution = module.execute_dbt_phase(
         dbt_command="deps",
-        selection=None,
+        selector=None,
+        invocation_id="deps",
         pipeline="traffic-transform",
         run_id="manual__deps",
         task_id="dbt_deps",
@@ -100,7 +101,8 @@ def test_openlineage_configuration_fails_closed_before_actual(
     with pytest.raises(RuntimeError, match=message):
         module.execute_dbt_phase(
             dbt_command="run",
-            selection="tag:selected",
+            selector="selected",
+            invocation_id="openlineage-config",
             pipeline="traffic-transform",
             run_id="manual__1",
             task_id="dbt_run_silver",
@@ -133,7 +135,8 @@ def test_missing_dbt_ol_fails_closed_before_actual(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="dbt-ol"):
         module.execute_dbt_phase(
             dbt_command="run",
-            selection="tag:selected",
+            selector="selected",
+            invocation_id="missing-dbt-ol",
             pipeline="traffic-transform",
             run_id="manual__1",
             task_id="dbt_run_silver",
@@ -163,6 +166,7 @@ def test_actual_reset_removes_only_current_execution_and_reports_fresh_failure_a
         run_id="manual__1",
         task_id="dbt_test_gold",
         try_number=2,
+        invocation_id="actual-reset",
         dbt_command="test",
     )
     stale = Path(paths.run_results_path)
@@ -184,7 +188,8 @@ def test_actual_reset_removes_only_current_execution_and_reports_fresh_failure_a
 
     execution = module.execute_dbt_phase(
         dbt_command="test",
-        selection="tag:gold",
+        selector="gold",
+        invocation_id="actual-reset",
         pipeline="traffic-transform",
         run_id="manual__1",
         task_id="dbt_test_gold",
@@ -212,6 +217,7 @@ def test_preflight_failure_never_reports_stale_execution_artifacts(tmp_path):
         run_id="manual__1",
         task_id="dbt_test_gold",
         try_number=2,
+        invocation_id="preflight-failure",
         dbt_command="test",
     )
     stale = Path(paths.run_results_path)
@@ -220,7 +226,8 @@ def test_preflight_failure_never_reports_stale_execution_artifacts(tmp_path):
 
     execution = module.execute_dbt_phase(
         dbt_command="test",
-        selection="tag:gold",
+        selector="gold",
+        invocation_id="preflight-failure",
         pipeline="traffic-transform",
         run_id="manual__1",
         task_id="dbt_test_gold",
@@ -257,7 +264,8 @@ def test_deps_success_prunes_only_same_pipeline_run_directories(tmp_path):
 
     module.execute_dbt_phase(
         dbt_command="deps",
-        selection=None,
+        selector=None,
+        invocation_id="retention",
         pipeline="traffic-transform",
         run_id="current-run",
         task_id="dbt_deps",
@@ -289,7 +297,8 @@ def test_invalid_retention_configuration_fails_before_deps(value, tmp_path):
     with pytest.raises(RuntimeError, match="ASK_SEOUL_DBT_ARTIFACT_RETENTION_RUNS"):
         module.execute_dbt_phase(
             dbt_command="deps",
-            selection=None,
+            selector=None,
+            invocation_id="invalid-retention",
             pipeline="traffic-transform",
             run_id="current-run",
             task_id="dbt_deps",

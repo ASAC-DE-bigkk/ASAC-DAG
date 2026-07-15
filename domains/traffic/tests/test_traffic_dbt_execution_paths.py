@@ -76,11 +76,17 @@ def test_traffic_reset_rejects_ancestor_symlink_escape(tmp_path):
         run_id="scheduled__1",
         task_id="dbt_run_silver",
         try_number=1,
+        invocation_id="ancestor-symlink",
         dbt_command="run",
     )
     outside_pipeline = tmp_path / "outside-target"
     escaped_execution = (
-        outside_pipeline / "scheduled__1" / "dbt_run_silver" / "try1" / "execution"
+        outside_pipeline
+        / "scheduled__1"
+        / "dbt_run_silver"
+        / "try1"
+        / "ancestor-symlink"
+        / "execution"
     )
     escaped_execution.mkdir(parents=True)
     sentinel = escaped_execution / "keep.txt"
@@ -124,6 +130,7 @@ def test_traffic_reset_rejects_trusted_artifact_root_symlink(tmp_path):
         run_id="scheduled__root",
         task_id="dbt_run_silver",
         try_number=1,
+        invocation_id="root-symlink",
         dbt_command="run",
     )
     outside_target = tmp_path / "outside-target-root"
@@ -133,6 +140,7 @@ def test_traffic_reset_rejects_trusted_artifact_root_symlink(tmp_path):
         / "scheduled__root"
         / "dbt_run_silver"
         / "try1"
+        / "root-symlink"
         / "execution"
     )
     escaped_execution.mkdir(parents=True)

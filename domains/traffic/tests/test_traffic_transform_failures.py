@@ -40,7 +40,7 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
         assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
         assert task.kwargs["on_failure_callback"] is module.record_traffic_dbt_problem
         assert "dbt_command" in task.kwargs["op_kwargs"]
-        assert "selection" in task.kwargs["op_kwargs"]
+        assert "selector" in task.kwargs["op_kwargs"]
 
 
 def test_dbt_deps_and_selected_phases_use_only_supported_isolated_paths(
@@ -72,13 +72,13 @@ def test_dbt_deps_and_selected_phases_use_only_supported_isolated_paths(
 
     monkeypatch.setattr(module.subprocess, "run", run)
 
-    for dbt_command, selection in (
+    for dbt_command, selector in (
         ("deps", None),
-        ("run", "tag:ask_seoul_traffic_transform_silver"),
+        ("run", "ask_seoul_traffic_transform_silver"),
     ):
         module.run_dbt_phase(
             dbt_command=dbt_command,
-            selection=selection,
+            selector=selector,
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             silver_persisted=False,
             ti=ti,
@@ -145,7 +145,7 @@ def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
     with pytest.raises(FakeAirflowFailException):
         module.run_dbt_phase(
             dbt_command="test",
-            selection="tag:ask_seoul_traffic_transform_silver",
+            selector="ask_seoul_traffic_transform_silver",
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             silver_persisted=True,
             ti=ti,
@@ -211,7 +211,7 @@ def test_failed_silver_run_reports_the_model_that_already_persisted(
     with pytest.raises(FakeAirflowFailException):
         module.run_dbt_phase(
             dbt_command="run",
-            selection="tag:ask_seoul_traffic_transform_silver",
+            selector="ask_seoul_traffic_transform_silver",
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             silver_persisted=False,
             ti=ti,
@@ -263,7 +263,7 @@ def test_trino_dns_failure_retries_with_the_same_pinned_snapshot(tmp_path, monke
     with pytest.raises(FakeAirflowException):
         module.run_dbt_phase(
             dbt_command="test",
-            selection="tag:ask_seoul_traffic_transform_silver",
+            selector="ask_seoul_traffic_transform_silver",
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             silver_persisted=True,
             ti=ti,
@@ -313,7 +313,7 @@ def test_model_execution_failure_skips_airflow_retry(monkeypatch):
     with pytest.raises(FakeAirflowFailException):
         module.run_dbt_phase(
             dbt_command="run",
-            selection="tag:ask_seoul_traffic_transform_silver",
+            selector="ask_seoul_traffic_transform_silver",
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             silver_persisted=False,
             ti=ti,

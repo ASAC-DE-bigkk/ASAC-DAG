@@ -28,13 +28,15 @@ from .paths import (
 def execute_dbt_phase(
     *,
     dbt_command: str,
-    selection: str | None,
+    selector: str | None,
+    invocation_id: str,
     pipeline: str,
     run_id: str | None,
     task_id: str | None,
     try_number: int | None,
     target: str,
     variables: str | None,
+    threads: int | None = None,
     fresh_parse: bool = False,
     project_dir: str | None = None,
     executable: str | None = None,
@@ -51,6 +53,7 @@ def execute_dbt_phase(
         run_id=run_id,
         task_id=task_id,
         try_number=try_number,
+        invocation_id=invocation_id,
         dbt_command=dbt_command,
     )
     raw_env = environment.raw_environment(
@@ -66,7 +69,8 @@ def execute_dbt_phase(
     for stage, command in phase_commands(
         executable=resolved_executable,
         dbt_command=dbt_command,
-        selection=selection,
+        selector=selector,
+        threads=threads,
         target=target,
         paths=paths,
         variables=variables,
@@ -105,7 +109,7 @@ def execute_dbt_phase(
                     stdout=completed.stdout or "",
                     stderr=(
                         f"dbt selection resolved to no {resource_type(dbt_command)} nodes: "
-                        f"{selection}"
+                        f"{selector}"
                     ),
                 )
                 break
