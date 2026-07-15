@@ -279,14 +279,20 @@ def verify_seoul_traffic_flow_bronze_runtime(
     )
     cursor.execute(
         f"""
-        SELECT count(*) AS table_rows, count(DISTINCT raw_object_key) AS raw_objects
+        SELECT count(*) AS table_rows
         FROM {qualified_table}
         WHERE {where}
         """
     )
-    table_rows, raw_objects = cursor.fetchone()
-    cursor.execute(f"SELECT count(*) FROM {audit_table} WHERE {where}")
-    audit_rows = cursor.fetchone()[0]
+    table_rows = cursor.fetchone()[0]
+    cursor.execute(
+        f"""
+        SELECT count(DISTINCT raw_object_key) AS raw_objects, count(*) AS audit_rows
+        FROM {audit_table}
+        WHERE {where}
+        """
+    )
+    raw_objects, audit_rows = cursor.fetchone()
     if int(table_rows) != int(expected_rows):
         raise TrafficCompletenessError(
             f"Traffic flow bronze row count mismatch: expected={expected_rows}, actual={table_rows}"

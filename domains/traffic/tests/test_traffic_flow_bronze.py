@@ -1,6 +1,9 @@
 import json
 
-from traffic_ingest.flow_bronze import load_traffic_flow_batch
+from traffic_ingest.flow_bronze import (
+    load_traffic_flow_batch,
+    verify_seoul_traffic_flow_bronze_runtime,
+)
 
 
 class Cursor:
@@ -58,3 +61,30 @@ def test_flow_bronze_load_deletes_same_run_link_before_insert():
     assert result["page_count"] == 1
     assert any("DELETE FROM iceberg_dev.ask_seoul.bronze_seoul_traffic_flow" in stmt for stmt in cursor.statements)
     assert any("INSERT INTO iceberg_dev.ask_seoul.bronze_seoul_traffic_flow" in stmt for stmt in cursor.statements)
+
+
+class VerifyCursor:
+    def __init__(self):
+        self._row = None
+
+    def execute(self, statement):
+        if "bronze_seoul_traffic_flow_request_audit" in statement:
+            self._row = (9, 9)
+        elif "count(*) AS table_rows" in statement:
+            self._row = (6,)
+        else:
+            raise AssertionError(f"unexpected SQL: {statement}")
+
+    def fetchone(self):
+        return self._row
+
+
+def test_flow_bronze_verify_counts_zero_row_responses_from_audit_raw_keys():
+    cursor = VerifyCursor()
+
+    assert verify_seoul_traffic_flow_bronze_runtime(
+        dag_run_id="scheduled__flow",
+        expected_rows=6,
+        expected_raw_objects=9,
+        cursor_factory=lambda: (cursor, "iceberg_dev", "ask_seoul"),
+    ) == 6
