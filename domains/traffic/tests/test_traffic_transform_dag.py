@@ -1,23 +1,20 @@
 import types
 
-import pytest
-
 from traffic_transform_test_support import (
-    FakeAirflowFailException,
-    FakeTriggerRule,
     load_transform_module,
 )
 from traffic_transform_test_support import restore_airflow_modules_after_dag_import  # noqa: F401
 
 
-def test_traffic_transform_defaults_to_hourly_cron_after_bronze_completion_window(
+def test_traffic_transform_subscribes_to_bronze_asset_by_default(
     monkeypatch,
 ):
     monkeypatch.delenv("ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE", raising=False)
     module = load_transform_module()
 
     assert module.TRAFFIC_TRANSFORM_CRON_KST == "12 * * * *"
-    assert module.dag.kwargs["schedule"] == module.TRAFFIC_TRANSFORM_CRON_KST
+    assert len(module.dag.kwargs["schedule"]) == 1
+    assert module.dag.kwargs["schedule"][0].uri == module.TRAFFIC_BRONZE_ASSET
 
 
 def test_traffic_transform_validates_dev_runtime_before_dbt():
@@ -29,8 +26,7 @@ def test_traffic_transform_validates_dev_runtime_before_dbt():
         "requested_target": "{{ params.target }}",
     }
     assert guard.downstream_task_ids == {
-        "resolve_traffic_snapshot_run",
-        "fail_transform_if_upstream_failed",
+        "resolve_traffic_snapshot_run"
     }
 
 
@@ -48,51 +44,20 @@ def test_traffic_transform_publishes_dbt_run_metrics_after_terminal_test():
 
     task = module.dag.task_dict["publish_dbt_run_metrics"]
 
-    assert task.kwargs["trigger_rule"] == "all_done"
+    assert task.kwargs["trigger_rule"] == "all_done_setup_success"
+    assert task.is_teardown is True
+    assert task.on_failure_fail_dagrun is False
     assert module.dag.task_dict["dbt_test_gold"].downstream_task_ids == {
-        "publish_dbt_run_metrics",
-        "fail_transform_if_upstream_failed",
+        "publish_dbt_run_metrics"
     }
 
 
-def test_traffic_transform_has_independent_failure_propagating_leaf():
+def test_traffic_transform_has_no_failure_propagating_fanout_leaf():
     module = load_transform_module()
     dag = module.dag
-    transform_task_ids = {
-        "validate_dev_runtime",
-        "resolve_traffic_snapshot_run",
-        "dbt_deps",
-        "dbt_source_freshness",
-        "dbt_test_traffic_incident_availability",
-        "dbt_test_traffic_bronze_source_contract",
-        "dbt_seed_asac_axes",
-        "dbt_run_common_admin_dong_dimension",
-        "dbt_test_common_admin_dong_dimension",
-        "dbt_test_asac_axes_seed_contract",
-        "dbt_run_silver",
-        "dbt_test_silver",
-        "dbt_run_gold",
-        "dbt_test_gold",
-    }
-
     metrics = dag.task_dict["publish_dbt_run_metrics"]
-    watcher = dag.task_dict["fail_transform_if_upstream_failed"]
-
-    assert metrics.kwargs["trigger_rule"] == FakeTriggerRule.ALL_DONE
-    assert watcher.kwargs["trigger_rule"] == FakeTriggerRule.ONE_FAILED
-    assert watcher.kwargs["retries"] == 0
     assert metrics.downstream_task_ids == set()
-    assert watcher.downstream_task_ids == set()
-    assert watcher.upstream_task_ids == transform_task_ids
-
-
-def test_traffic_failure_propagation_callable_always_fails():
-    module = load_transform_module()
-
-    with pytest.raises(
-        FakeAirflowFailException, match="traffic transform upstream task failed"
-    ):
-        module.fail_transform_if_upstream_failed()
+    assert "fail_transform_if_upstream_failed" not in dag.task_ids
 
 
 def test_traffic_metrics_use_latest_current_run_dbt_artifact_path():

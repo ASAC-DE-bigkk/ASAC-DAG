@@ -86,6 +86,12 @@ class FakePythonOperator:
         other.upstream_task_ids.add(self.task_id)
         return other
 
+    def as_teardown(self, setups=None, on_failure_fail_dagrun=False):
+        self.is_teardown = True
+        self.on_failure_fail_dagrun = on_failure_fail_dagrun
+        self.kwargs["trigger_rule"] = "all_done_setup_success"
+        return self
+
 
 class FakeParam:
     def __init__(self, default=None, **schema):

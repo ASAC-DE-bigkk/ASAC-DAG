@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timedelta
+from hashlib import sha256
 
 from airflow import DAG
+from airflow.exceptions import AirflowFailException, AirflowSkipException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
 
@@ -92,6 +94,7 @@ EXPECTED_RAW_OBJECT_COUNT_KEY = "expected_raw_object_count"
 record_weather_problem = problem_failure_callback(
     domain="weather", source_system=SOURCE_ID
 )
+WEATHER_BRONZE_ASSET_REF = Asset(WEATHER_BRONZE_ASSET)
 
 
 @fail_fast_weather_bronze
@@ -208,6 +211,56 @@ def verify_kma_bronze_runtime(**context) -> int:
     return verified_rows
 
 
+def publish_weather_bronze_asset(**context) -> str:
+    ingest_result = context["ti"].xcom_pull(task_ids="load_kma_bronze") or {}
+    if not bool(ingest_result.get("is_publishable", True)):
+        raise AirflowSkipException("weather Bronze run is not publishable")
+
+    raw_result = pull_kma_raw_result(context) or {}
+    raw_objects = raw_result.get("raw_objects") or []
+    if not raw_objects:
+        raise AirflowFailException(
+            "weather Bronze asset event requires at least one raw object"
+        )
+
+    collected_at_values = [str(item["collected_at"]) for item in raw_objects]
+    event_at = max(
+        collected_at_values,
+        key=lambda value: datetime.fromisoformat(value.replace("Z", "+00:00")),
+    )
+    payload_hashes = sorted(
+        str(item["raw_hash"])
+        for item in raw_objects
+        if item.get("raw_hash")
+    )
+    if not payload_hashes:
+        raise AirflowFailException(
+            "weather Bronze asset event requires raw payload hashes"
+        )
+    payload_hash = (
+        payload_hashes[0]
+        if len(payload_hashes) == 1
+        else sha256("|".join(payload_hashes).encode("utf-8")).hexdigest()
+    )
+    outlet_events = context.get("outlet_events")
+    if outlet_events is None:
+        raise AirflowFailException("weather Bronze outlet event is unavailable")
+    outlet_event = outlet_events[WEATHER_BRONZE_ASSET_REF]
+
+    event_datetime = datetime.fromisoformat(event_at.replace("Z", "+00:00"))
+    outlet_event.extra = {
+        "source_id": SOURCE_ID,
+        "bronze_run_id": context["run_id"],
+        "bronze_dag_run_id": context["run_id"],
+        "event_at": event_at,
+        "load_date": event_datetime.astimezone(KST).date().isoformat(),
+        "row_count": int(ingest_result["inserted"]),
+        "payload_hash": payload_hash,
+        "is_publishable": True,
+    }
+    return context["run_id"]
+
+
 def build_kma_bronze_dag(
     dag_id: str, schedule: str | None, description: str, tags: list[str]
 ):
@@ -270,10 +323,21 @@ def build_kma_bronze_dag(
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
             ],
-            outlets=[Asset(WEATHER_BRONZE_ASSET)],
+        )
+        publish_bronze_asset = PythonOperator(
+            task_id="publish_weather_bronze_asset",
+            python_callable=publish_weather_bronze_asset,
+            outlets=[WEATHER_BRONZE_ASSET_REF],
         )
 
-        validate_runtime >> start_manifest >> land_raw >> load_bronze >> verify_bronze
+        (
+            validate_runtime
+            >> start_manifest
+            >> land_raw
+            >> load_bronze
+            >> verify_bronze
+            >> publish_bronze_asset
+        )
     return enable_lineage_if_configured(built_dag)
 
 
@@ -334,10 +398,21 @@ def build_kma_bronze_backfill_dag():
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
             ],
-            outlets=[Asset(WEATHER_BRONZE_ASSET)],
+        )
+        publish_bronze_asset = PythonOperator(
+            task_id="publish_weather_bronze_asset",
+            python_callable=publish_weather_bronze_asset,
+            outlets=[WEATHER_BRONZE_ASSET_REF],
         )
 
-        validate_runtime >> start_manifest >> land_raw >> load_bronze >> verify_bronze
+        (
+            validate_runtime
+            >> start_manifest
+            >> land_raw
+            >> load_bronze
+            >> verify_bronze
+            >> publish_bronze_asset
+        )
     return enable_lineage_if_configured(built_dag)
 
 

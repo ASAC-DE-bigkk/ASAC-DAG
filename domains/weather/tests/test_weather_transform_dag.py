@@ -1,3 +1,5 @@
+import types
+import types
 from pathlib import Path
 
 import pytest
@@ -45,6 +47,7 @@ def test_weather_dbt_factory_preserves_phase_contracts():
             "dbt_command": dbt_command,
             "selector": selector,
             "include_project_vars": include_project_vars,
+            "snapshot_task_id": module.SNAPSHOT_TASK_ID,
         }
         assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
         assert task.kwargs["retries"] == 1
@@ -60,8 +63,11 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
     dag = module.dag
 
     expected_task_order = [
-        task_id
-        for task_id, _dbt_command, _selector, _include_vars in EXPECTED_DBT_PHASES
+        "resolve_weather_snapshot_run",
+        *(
+            task_id
+            for task_id, _dbt_command, _selector, _include_vars in EXPECTED_DBT_PHASES
+        ),
     ]
 
     assert set(expected_task_order) <= set(dag.task_ids)
@@ -222,7 +228,7 @@ def test_weather_transform_validates_dev_runtime_before_dbt():
         "domain": "weather",
         "requested_target": "{{ params.target }}",
     }
-    assert guard.downstream_task_ids == {"dbt_deps"}
+    assert guard.downstream_task_ids == {"resolve_weather_snapshot_run"}
 
 
 def test_weather_transform_limits_target_param_to_dev_or_prod():
@@ -252,6 +258,42 @@ def test_weather_transform_publishes_dbt_run_metrics_as_non_gating_teardown():
     assert metrics.downstream_task_ids == set()
     assert "fail_transform_if_upstream_failed" not in dag.task_ids
     assert "on_success_callback" not in dag.kwargs
+
+
+def test_weather_transform_resolves_the_exact_triggering_snapshot(monkeypatch):
+    module = load_transform_module()
+    calls = []
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            calls.append(run_id)
+            return run_id
+
+    monkeypatch.setattr(module, "build_weather_manifest", lambda: Manifest())
+    event = types.SimpleNamespace(
+        extra={
+            "source_id": "kma_vilage_fcst",
+            "bronze_run_id": "weather-run-42",
+            "bronze_dag_run_id": "weather-run-42",
+            "event_at": "2026-07-15T12:00:00+09:00",
+            "load_date": "2026-07-15",
+            "row_count": 3,
+            "payload_hash": "b" * 64,
+            "is_publishable": True,
+        }
+    )
+
+    assert module.resolve_weather_snapshot_run(
+        triggering_asset_events={module.WEATHER_BRONZE_ASSET: [event]}
+    ) == "weather-run-42"
+    assert calls == ["weather-run-42"]
+
+
+def test_weather_snapshot_resolver_rejects_missing_asset_event():
+    module = load_transform_module()
+
+    with pytest.raises(module.AirflowFailException, match="at least one"):
+        module.resolve_weather_snapshot_run(triggering_asset_events={})
 
 
 def test_weather_publish_dbt_run_metrics_forwards_domain_and_target(

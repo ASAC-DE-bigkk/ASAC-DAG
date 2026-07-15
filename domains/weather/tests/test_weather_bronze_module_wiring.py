@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+from airflow.exceptions import AirflowSkipException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -226,3 +228,73 @@ def test_verify_records_subset_backfill_as_success_nonpublishable(monkeypatch):
             },
         )
     ]
+
+
+def test_publish_weather_bronze_asset_records_snapshot_identity_without_secrets():
+    class OutletEvent:
+        extra = None
+
+    event = OutletEvent()
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            if task_ids == "load_kma_bronze":
+                return {"inserted": 3, "is_publishable": True}
+            return {
+                "raw_objects": [
+                    {
+                        "raw_hash": "b" * 64,
+                        "collected_at": "2026-07-15T12:00:00+09:00",
+                    }
+                ]
+            }
+
+    result = dag_module.publish_weather_bronze_asset(
+        run_id="scheduled__weather-1",
+        ti=TI(),
+        outlet_events={dag_module.WEATHER_BRONZE_ASSET_REF: event},
+    )
+
+    assert result == "scheduled__weather-1"
+    assert event.extra == {
+        "source_id": "kma_vilage_fcst",
+        "bronze_run_id": "scheduled__weather-1",
+        "bronze_dag_run_id": "scheduled__weather-1",
+        "event_at": "2026-07-15T12:00:00+09:00",
+        "load_date": "2026-07-15",
+        "row_count": 3,
+        "payload_hash": "b" * 64,
+        "is_publishable": True,
+    }
+    assert "serviceKey" not in repr(event.extra)
+
+
+def test_publish_weather_bronze_asset_does_not_emit_nonpublishable_event():
+    class OutletEvent:
+        extra = None
+
+    event = OutletEvent()
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            if task_ids == "load_kma_bronze":
+                return {"inserted": 3, "is_publishable": False}
+            return {"raw_objects": []}
+
+    with pytest.raises(AirflowSkipException, match="not publishable"):
+        dag_module.publish_weather_bronze_asset(
+            run_id="manual__subset",
+            ti=TI(),
+            outlet_events={dag_module.WEATHER_BRONZE_ASSET_REF: event},
+        )
+
+    assert event.extra is None
+
+
+def test_weather_bronze_asset_is_owned_by_publish_gate_after_verification():
+    verify = dag_module.dag.get_task("verify_kma_bronze_runtime")
+    publish = dag_module.dag.get_task("publish_weather_bronze_asset")
+
+    assert verify.outlets == []
+    assert publish.outlets == [dag_module.WEATHER_BRONZE_ASSET_REF]
+    assert publish.task_id in verify.downstream_task_ids

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from traffic_ingest.run_manifest import (  # noqa: E402
     STATUS_FAILED,
+    STATUS_COALESCED,
     STATUS_STARTED,
     STATUS_SUCCESS,
     RunNotPublishableError,
@@ -153,6 +154,22 @@ def test_require_publishable_returns_the_exact_verified_snapshot_id():
     assert "dag_run_id = 'scheduled__verified'" in statement
 
 
+def test_coalesce_records_replacement_identity_without_marking_snapshot_publishable():
+    cursor = RecordingCursor()
+    manifest = TrafficRunManifest(
+        cursor_factory=lambda: (cursor, "iceberg_dev", "weather_traffic_bronze")
+    )
+
+    manifest.coalesce("scheduled__old", replacement_run_id="scheduled__new")
+
+    mutation = next(
+        statement for statement in cursor.statements if statement.startswith("MERGE ")
+    )
+    assert f"'{STATUS_COALESCED}'" in mutation
+    assert "false" in mutation
+    assert "replaced_by=scheduled__new" in mutation
+
+
 def test_latest_publishable_run_id_uses_deterministic_latest_ordering():
     cursor = RecordingCursor(rows=[("scheduled__latest",)])
     manifest = TrafficRunManifest(
@@ -165,7 +182,7 @@ def test_latest_publishable_run_id_uses_deterministic_latest_ordering():
     assert "source_id = 'seoul_traffic_incident'" in statement
     assert "status = 'SUCCESS'" in statement
     assert "is_publishable" in statement
-    assert "ORDER BY event_at DESC, dag_run_id DESC" in statement
+    assert "ORDER BY successful.event_at DESC, successful.dag_run_id DESC" in statement
     assert statement.endswith("LIMIT 1")
 
 

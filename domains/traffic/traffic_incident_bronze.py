@@ -5,10 +5,13 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timedelta
+from hashlib import sha256
 
 from airflow import DAG
+from airflow.exceptions import AirflowSkipException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
+from airflow.sdk.exceptions import AirflowFailException
 
 
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +27,11 @@ if DAGS_ROOT_DIR not in sys.path:
 from common.assets import TRAFFIC_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
-from traffic_ingest.acc_info import KST, resolve_acc_info_page_window  # noqa: E402
+from traffic_ingest.acc_info import (  # noqa: E402
+    KST,
+    SOURCE_ID,
+    resolve_acc_info_page_window,
+)
 from traffic_ingest.bronze import (  # noqa: E402
     create_seoul_traffic_bronze_table,
     insert_seoul_traffic_bronze_rows,
@@ -76,6 +83,7 @@ from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 record_traffic_problem = problem_failure_callback(
     domain="traffic", source_system="seoul_topis"
 )
+TRAFFIC_BRONZE_ASSET_REF = Asset(TRAFFIC_BRONZE_ASSET)
 
 
 @fail_fast_traffic_bronze
@@ -162,6 +170,56 @@ def verify_seoul_traffic_bronze_runtime(**context) -> int:
     return verified_rows
 
 
+def publish_traffic_bronze_asset(**context) -> str:
+    ingest_result = context["ti"].xcom_pull(task_ids=LOAD_TRAFFIC_BRONZE_TASK_ID) or {}
+    if not bool(ingest_result.get("is_publishable", True)):
+        raise AirflowSkipException("traffic Bronze run is not publishable")
+
+    raw_result = context["ti"].xcom_pull(task_ids="land_seoul_traffic_raw") or {}
+    raw_objects = raw_result.get("raw_objects") or []
+    if not raw_objects:
+        raise AirflowFailException(
+            "traffic Bronze asset event requires at least one raw object"
+        )
+
+    collected_at_values = [str(item["collected_at"]) for item in raw_objects]
+    event_at = max(
+        collected_at_values,
+        key=lambda value: datetime.fromisoformat(value.replace("Z", "+00:00")),
+    )
+    payload_hashes = sorted(
+        str(item["raw_hash"])
+        for item in raw_objects
+        if item.get("raw_hash")
+    )
+    if not payload_hashes:
+        raise AirflowFailException(
+            "traffic Bronze asset event requires raw payload hashes"
+        )
+    payload_hash = (
+        payload_hashes[0]
+        if len(payload_hashes) == 1
+        else sha256("|".join(payload_hashes).encode("utf-8")).hexdigest()
+    )
+    outlet_events = context.get("outlet_events")
+    if outlet_events is None:
+        raise AirflowFailException("traffic Bronze outlet event is unavailable")
+    outlet_event = outlet_events[TRAFFIC_BRONZE_ASSET_REF]
+
+    event_datetime = datetime.fromisoformat(event_at.replace("Z", "+00:00"))
+    outlet_event.extra = {
+        "source_id": SOURCE_ID,
+        "bronze_run_id": context["run_id"],
+        "bronze_dag_run_id": context["run_id"],
+        "event_at": event_at,
+        "load_date": event_datetime.astimezone(KST).date().isoformat(),
+        "row_count": int(ingest_result["inserted"]),
+        "payload_hash": payload_hash,
+        "is_publishable": True,
+    }
+    return context["run_id"]
+
+
 def build_traffic_bronze_dag(
     dag_id: str, schedule: str | None, description: str, tags: list[str]
 ):
@@ -215,9 +273,20 @@ def build_traffic_bronze_dag(
                 record_and_notify_seoul_traffic_run_failed,
                 record_traffic_problem,
             ],
-            outlets=[Asset(TRAFFIC_BRONZE_ASSET)],
         )
-        validate_runtime >> start_manifest >> land_raw >> load_bronze >> verify_bronze
+        publish_bronze_asset = PythonOperator(
+            task_id="publish_traffic_bronze_asset",
+            python_callable=publish_traffic_bronze_asset,
+            outlets=[TRAFFIC_BRONZE_ASSET_REF],
+        )
+        (
+            validate_runtime
+            >> start_manifest
+            >> land_raw
+            >> load_bronze
+            >> verify_bronze
+            >> publish_bronze_asset
+        )
     return enable_lineage_if_configured(built_dag)
 
 
@@ -269,9 +338,20 @@ def build_traffic_bronze_backfill_dag():
                 record_and_notify_seoul_traffic_run_failed,
                 record_traffic_problem,
             ],
-            outlets=[Asset(TRAFFIC_BRONZE_ASSET)],
         )
-        validate_runtime >> start_manifest >> land_raw >> load_bronze >> verify_bronze
+        publish_bronze_asset = PythonOperator(
+            task_id="publish_traffic_bronze_asset",
+            python_callable=publish_traffic_bronze_asset,
+            outlets=[TRAFFIC_BRONZE_ASSET_REF],
+        )
+        (
+            validate_runtime
+            >> start_manifest
+            >> land_raw
+            >> load_bronze
+            >> verify_bronze
+            >> publish_bronze_asset
+        )
     return enable_lineage_if_configured(built_dag)
 
 

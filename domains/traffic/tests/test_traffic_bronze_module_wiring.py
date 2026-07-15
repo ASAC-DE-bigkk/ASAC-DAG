@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from airflow.exceptions import AirflowSkipException
 from airflow.sdk.exceptions import AirflowFailException
 
 
@@ -205,6 +206,80 @@ def test_window_run_is_verified_against_window_count_and_not_published(monkeypat
             "is_publishable": False,
         }
     ]
+
+
+def test_publish_traffic_bronze_asset_records_snapshot_identity_without_secrets():
+    class OutletEvent:
+        extra = None
+
+    event = OutletEvent()
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            if task_ids == dag_module.LOAD_TRAFFIC_BRONZE_TASK_ID:
+                return {
+                    "raw_object_keys": ["raw/traffic/page.xml"],
+                    "inserted": 7,
+                    "is_publishable": True,
+                }
+            return {
+                "raw_objects": [
+                    {
+                        "raw_hash": "a" * 64,
+                        "collected_at": "2026-07-15T12:00:00+09:00",
+                    }
+                ]
+            }
+
+    result = dag_module.publish_traffic_bronze_asset(
+        run_id="scheduled__traffic-1",
+        ti=TI(),
+        outlet_events={dag_module.TRAFFIC_BRONZE_ASSET_REF: event},
+    )
+
+    assert result == "scheduled__traffic-1"
+    assert event.extra == {
+        "source_id": "seoul_traffic_incident",
+        "bronze_run_id": "scheduled__traffic-1",
+        "bronze_dag_run_id": "scheduled__traffic-1",
+        "event_at": "2026-07-15T12:00:00+09:00",
+        "load_date": "2026-07-15",
+        "row_count": 7,
+        "payload_hash": "a" * 64,
+        "is_publishable": True,
+    }
+    assert "serviceKey" not in repr(event.extra)
+
+
+def test_publish_traffic_bronze_asset_does_not_emit_nonpublishable_event():
+    class OutletEvent:
+        extra = None
+
+    event = OutletEvent()
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            if task_ids == dag_module.LOAD_TRAFFIC_BRONZE_TASK_ID:
+                return {"inserted": 10, "is_publishable": False}
+            return {"raw_objects": []}
+
+    with pytest.raises(AirflowSkipException, match="not publishable"):
+        dag_module.publish_traffic_bronze_asset(
+            run_id="manual__window",
+            ti=TI(),
+            outlet_events={dag_module.TRAFFIC_BRONZE_ASSET_REF: event},
+        )
+
+    assert event.extra is None
+
+
+def test_traffic_bronze_asset_is_owned_by_publish_gate_after_verification():
+    verify = dag_module.dag.get_task("verify_seoul_traffic_bronze_runtime")
+    publish = dag_module.dag.get_task("publish_traffic_bronze_asset")
+
+    assert verify.outlets == []
+    assert publish.outlets == [dag_module.TRAFFIC_BRONZE_ASSET_REF]
+    assert publish.task_id in verify.downstream_task_ids
 
 
 def test_traffic_bronze_has_no_weather_runtime_dependency():
