@@ -38,6 +38,7 @@ def test_weather_attempt_paths_match_command_artifact_ownership(tmp_path):
         run_id="scheduled__1",
         task_id="dbt_run_silver",
         try_number=1,
+        invocation_id="run-silver",
         dbt_command="run",
     )
     source_paths = module.attempt_paths(
@@ -46,6 +47,7 @@ def test_weather_attempt_paths_match_command_artifact_ownership(tmp_path):
         run_id="scheduled__1",
         task_id="dbt_source_freshness",
         try_number=1,
+        invocation_id="source-freshness",
         dbt_command="source freshness",
     )
     deps_paths = module.attempt_paths(
@@ -54,11 +56,12 @@ def test_weather_attempt_paths_match_command_artifact_ownership(tmp_path):
         run_id="scheduled__1",
         task_id="dbt_deps",
         try_number=1,
+        invocation_id="dependencies",
         dbt_command="deps",
     )
 
-    assert run_paths.preflight_target_path.endswith("try1/preflight")
-    assert run_paths.execution_target_path.endswith("try1/execution")
+    assert run_paths.preflight_target_path.endswith("try1/run-silver/preflight")
+    assert run_paths.execution_target_path.endswith("try1/run-silver/execution")
     assert run_paths.preflight_target_path != run_paths.execution_target_path
     assert run_paths.preflight_log_path != run_paths.execution_log_path
     assert run_paths.packages_path.endswith(
@@ -75,6 +78,28 @@ def test_weather_attempt_paths_match_command_artifact_ownership(tmp_path):
     assert deps_paths.manifest_path is None
 
 
+def test_weather_attempt_paths_separate_invocations_within_one_task_attempt(tmp_path):
+    module = load_execution_module()
+    common = {
+        "project_dir": str(tmp_path),
+        "pipeline": "weather-recovery",
+        "run_id": "manual__1",
+        "task_id": "execute_recovery",
+        "try_number": 1,
+        "dbt_command": "run",
+    }
+
+    first = module.attempt_paths(invocation_id="window-0001", **common)
+    second = module.attempt_paths(invocation_id="window-0002", **common)
+
+    assert first.preflight_target_path != second.preflight_target_path
+    assert first.execution_target_path != second.execution_target_path
+    assert first.preflight_log_path != second.preflight_log_path
+    assert first.execution_log_path != second.execution_log_path
+    assert "/window-0001/" in first.execution_target_path.replace("\\", "/")
+    assert "/window-0002/" in second.execution_target_path.replace("\\", "/")
+
+
 def test_weather_attempt_paths_are_collision_resistant_and_contained(tmp_path):
     module = load_execution_module()
     common = {
@@ -82,6 +107,7 @@ def test_weather_attempt_paths_are_collision_resistant_and_contained(tmp_path):
         "pipeline": "weather/transform",
         "task_id": "dbt/run",
         "try_number": 1,
+        "invocation_id": "silver/models",
         "dbt_command": "run",
     }
 
@@ -114,6 +140,7 @@ def test_weather_attempt_paths_reject_reserved_segments(tmp_path, reserved):
             run_id=reserved,
             task_id="dbt_run",
             try_number=1,
+            invocation_id="silver-models",
             dbt_command="run",
         )
 
@@ -128,6 +155,7 @@ def test_weather_attempt_paths_bound_long_unicode_segments(tmp_path):
         run_id=prefix + "-first",
         task_id="dbt_run",
         try_number=1,
+        invocation_id="silver-models",
         dbt_command="run",
     )
     second = module.attempt_paths(
@@ -136,6 +164,7 @@ def test_weather_attempt_paths_bound_long_unicode_segments(tmp_path):
         run_id=prefix + "-second",
         task_id="dbt_run",
         try_number=1,
+        invocation_id="silver-models",
         dbt_command="run",
     )
 
@@ -188,11 +217,17 @@ def test_weather_reset_rejects_ancestor_symlink_escape(tmp_path):
         run_id="scheduled__1",
         task_id="dbt_run_silver",
         try_number=1,
+        invocation_id="silver-models",
         dbt_command="run",
     )
     outside_pipeline = tmp_path / "outside-target"
     escaped_execution = (
-        outside_pipeline / "scheduled__1" / "dbt_run_silver" / "try1" / "execution"
+        outside_pipeline
+        / "scheduled__1"
+        / "dbt_run_silver"
+        / "try1"
+        / "silver-models"
+        / "execution"
     )
     escaped_execution.mkdir(parents=True)
     sentinel = escaped_execution / "keep.txt"
@@ -236,6 +271,7 @@ def test_weather_reset_rejects_trusted_artifact_root_symlink(tmp_path):
         run_id="scheduled__root",
         task_id="dbt_run_silver",
         try_number=1,
+        invocation_id="silver-models",
         dbt_command="run",
     )
     outside_target = tmp_path / "outside-target-root"
@@ -245,6 +281,7 @@ def test_weather_reset_rejects_trusted_artifact_root_symlink(tmp_path):
         / "scheduled__root"
         / "dbt_run_silver"
         / "try1"
+        / "silver-models"
         / "execution"
     )
     escaped_execution.mkdir(parents=True)

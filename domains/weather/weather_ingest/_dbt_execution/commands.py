@@ -3,15 +3,30 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 
-from .contracts import INDIRECT_SELECTION, DbtAttemptPaths, command_name
+from .contracts import MATERIALIZATION_COMMANDS, DbtAttemptPaths, command_name
 
 
-def _selection_args(selection: str) -> list[str]:
-    if selection.startswith("tag:"):
-        return ["--select", selection]
-    return ["--selector", selection]
+NAMED_SELECTOR_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _selector_args(selector: str) -> list[str]:
+    if not NAMED_SELECTOR_PATTERN.fullmatch(selector):
+        raise ValueError(
+            "selector must be a named dbt selector containing only letters, "
+            "numbers, underscores, or hyphens"
+        )
+    return ["--selector", selector]
+
+
+def _threads_args(threads: int | None) -> list[str]:
+    if threads is None:
+        return []
+    if isinstance(threads, bool) or not isinstance(threads, int) or threads <= 0:
+        raise ValueError("threads must be a positive integer")
+    return ["--threads", str(threads)]
 
 
 def resource_type(dbt_command: str) -> str:
@@ -46,12 +61,15 @@ def phase_commands(
     *,
     executable: str,
     dbt_command: str,
-    selection: str | None,
+    selector: str | None,
+    threads: int | None,
     target: str,
     paths: DbtAttemptPaths,
     variables: str | None,
     fresh_parse: bool,
 ) -> list[tuple[str, list[str]]]:
+    phase = command_name(dbt_command)
+    threads_args = _threads_args(threads)
     preflight_args = _runtime_args(
         target=target,
         target_path=paths.preflight_target_path,
@@ -63,15 +81,15 @@ def phase_commands(
         target_path=paths.execution_target_path,
         log_path=paths.execution_log_path,
         variables=variables,
-        include_target_path=command_name(dbt_command) != "deps",
+        include_target_path=phase != "deps",
     )
     commands: list[tuple[str, list[str]]] = []
     if fresh_parse:
         commands.append(
             ("parse", [executable, "parse", "--no-partial-parse", *preflight_args])
         )
-    if selection is not None:
-        selection_args = _selection_args(selection)
+    if selector is not None:
+        selector_args = _selector_args(selector)
         commands.append(
             (
                 "ls",
@@ -80,13 +98,12 @@ def phase_commands(
                     "ls",
                     "--resource-type",
                     resource_type(dbt_command),
-                    *selection_args,
+                    *selector_args,
                     "--output",
                     "json",
                     "--output-keys",
                     "unique_id",
                     "resource_type",
-                    INDIRECT_SELECTION,
                     *preflight_args,
                 ],
             )
@@ -94,12 +111,17 @@ def phase_commands(
         actual_args = [
             executable,
             *shlex.split(dbt_command),
-            *selection_args,
-            INDIRECT_SELECTION,
+            *selector_args,
+            *(threads_args if phase in MATERIALIZATION_COMMANDS else []),
             *execution_args,
         ]
     else:
-        actual_args = [executable, *shlex.split(dbt_command), *execution_args]
+        actual_args = [
+            executable,
+            *shlex.split(dbt_command),
+            *(threads_args if phase in MATERIALIZATION_COMMANDS else []),
+            *execution_args,
+        ]
     commands.append(("command", actual_args))
     return commands
 

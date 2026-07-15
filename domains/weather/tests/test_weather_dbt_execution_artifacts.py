@@ -39,6 +39,7 @@ def test_weather_preflight_failure_ignores_stale_execution_artifacts(tmp_path):
         run_id="scheduled__1",
         task_id="dbt_test_gold",
         try_number=2,
+        invocation_id="gold-contract-tests",
         dbt_command="test",
     )
     stale = Path(paths.run_results_path)
@@ -47,7 +48,8 @@ def test_weather_preflight_failure_ignores_stale_execution_artifacts(tmp_path):
 
     execution = module.execute_dbt_phase(
         dbt_command="test",
-        selection="tag:gold",
+        selector="ask_seoul_weather_transform_gold",
+        invocation_id="gold-contract-tests",
         pipeline="weather-transform",
         run_id="scheduled__1",
         task_id="dbt_test_gold",
@@ -77,6 +79,7 @@ def test_weather_actual_resets_only_current_execution_directory(tmp_path):
         run_id="scheduled__1",
         task_id="dbt_test_gold",
         try_number=2,
+        invocation_id="gold-contract-tests",
         dbt_command="test",
     )
     stale = Path(paths.run_results_path)
@@ -98,7 +101,8 @@ def test_weather_actual_resets_only_current_execution_directory(tmp_path):
 
     execution = module.execute_dbt_phase(
         dbt_command="test",
-        selection="tag:gold",
+        selector="ask_seoul_weather_transform_gold",
+        invocation_id="gold-contract-tests",
         pipeline="weather-transform",
         run_id="scheduled__1",
         task_id="dbt_test_gold",
@@ -129,7 +133,8 @@ def test_weather_deps_retention_preserves_current_and_other_pipeline(tmp_path):
 
     module.execute_dbt_phase(
         dbt_command="deps",
-        selection=None,
+        selector=None,
+        invocation_id="dependencies",
         pipeline="weather-transform",
         run_id="current-run",
         task_id="dbt_deps",
@@ -159,7 +164,8 @@ def test_weather_invalid_retention_fails_fast(value, tmp_path):
     with pytest.raises(RuntimeError, match="ASK_SEOUL_DBT_ARTIFACT_RETENTION_RUNS"):
         module.execute_dbt_phase(
             dbt_command="deps",
-            selection=None,
+            selector=None,
+            invocation_id="dependencies",
             pipeline="weather-transform",
             run_id="current-run",
             task_id="dbt_deps",

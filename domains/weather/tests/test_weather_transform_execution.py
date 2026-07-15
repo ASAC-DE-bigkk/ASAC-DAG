@@ -40,7 +40,7 @@ def test_weather_dbt_deps_uses_isolated_runtime_paths_without_project_vars(
 
     assert module.run_dbt_phase(
         dbt_command="deps",
-        selection=None,
+        selector=None,
         include_project_vars=False,
         ti=ti,
         run_id="manual__1",
@@ -97,7 +97,7 @@ def test_weather_dbt_model_command_writes_isolated_artifact(tmp_path, monkeypatc
 
     result = module.run_dbt_phase(
         dbt_command="run",
-        selection="tag:ask_seoul_weather_transform_silver",
+        selector="ask_seoul_weather_transform_silver",
         ti=ti,
         run_id="scheduled/2026:07",
         params={"target": "dev"},
@@ -109,6 +109,7 @@ def test_weather_dbt_model_command_writes_isolated_artifact(tmp_path, monkeypatc
         run_id="scheduled/2026:07",
         task_id="dbt_run_silver",
         try_number=2,
+        invocation_id="dbt_run_silver",
         dbt_command="run",
     )
     ls_command, command = [item[0] for item in captured]
@@ -116,11 +117,12 @@ def test_weather_dbt_model_command_writes_isolated_artifact(tmp_path, monkeypatc
     assert command[:4] == [
         module.DBT_BIN,
         "run",
-        "--select",
-        "tag:ask_seoul_weather_transform_silver",
+        "--selector",
+        "ask_seoul_weather_transform_silver",
     ]
-    assert "--indirect-selection=buildable" in ls_command
-    assert "--indirect-selection=buildable" in command
+    assert "--selector" in ls_command
+    assert "--indirect-selection=buildable" not in ls_command
+    assert "--indirect-selection=buildable" not in command
     assert command[command.index("--target") + 1] == "dev"
     assert command[command.index("--vars") + 1] == json.dumps(
         module.WEATHER_DBT_CONTRACT_VARS,
@@ -161,6 +163,7 @@ def test_weather_dbt_attempt_overwrites_artifact_xcom_when_process_cannot_start(
         run_id="manual__spawn_failure",
         task_id=ti.task_id,
         try_number=ti.try_number,
+        invocation_id=ti.task_id,
         dbt_command="run",
     )
     stale_artifact = Path(paths.run_results_path)
@@ -175,7 +178,7 @@ def test_weather_dbt_attempt_overwrites_artifact_xcom_when_process_cannot_start(
     with pytest.raises(OSError, match="could not start"):
         module.run_dbt_phase(
             dbt_command="run",
-            selection="tag:ask_seoul_weather_transform_silver",
+            selector="ask_seoul_weather_transform_silver",
             ti=ti,
             run_id="manual__spawn_failure",
             params={"target": "dev"},
@@ -197,6 +200,7 @@ def test_weather_failed_dbt_command_pushes_existing_artifact_before_raising(
         run_id="manual__failed",
         task_id=ti.task_id,
         try_number=ti.try_number,
+        invocation_id=ti.task_id,
         dbt_command="test",
     )
     artifact = Path(paths.run_results_path)
@@ -226,7 +230,7 @@ def test_weather_failed_dbt_command_pushes_existing_artifact_before_raising(
     with pytest.raises(FakeAirflowFailException, match="weather dbt command failed"):
         module.run_dbt_phase(
             dbt_command="test",
-            selection="tag:ask_seoul_weather_transform_silver",
+            selector="ask_seoul_weather_transform_silver",
             ti=ti,
             run_id="manual__failed",
             params={"target": "dev"},
@@ -251,7 +255,7 @@ def test_weather_empty_selection_stops_before_phase_and_raises(monkeypatch):
     with pytest.raises(FakeAirflowFailException, match="weather dbt command failed"):
         module.run_dbt_phase(
             dbt_command="test",
-            selection="tag:ask_seoul_weather_transform_gold",
+            selector="ask_seoul_weather_transform_gold",
             ti=ti,
             run_id="manual__empty",
             params={"target": "dev"},
@@ -297,7 +301,7 @@ def test_weather_dbt_test_contract_failure_is_not_retried(tmp_path, monkeypatch)
     with pytest.raises(FakeAirflowFailException, match="data-contract-violation"):
         module.run_dbt_phase(
             dbt_command="test",
-            selection="tag:ask_seoul_weather_transform_silver",
+            selector="ask_seoul_weather_transform_silver",
             ti=ti,
             run_id="manual__contract",
             params={"target": "dev"},
@@ -323,7 +327,7 @@ def test_weather_missing_current_attempt_artifact_is_not_retried(tmp_path, monke
     with pytest.raises(FakeAirflowFailException, match="artifact-contract-violation"):
         module.run_dbt_phase(
             dbt_command="run",
-            selection="tag:ask_seoul_weather_transform_silver",
+            selector="ask_seoul_weather_transform_silver",
             ti=ti,
             run_id="manual__missing-artifact",
             params={"target": "dev"},
@@ -355,7 +359,7 @@ def test_weather_transient_trino_failure_remains_retryable(tmp_path, monkeypatch
     ) as raised:
         module.run_dbt_phase(
             dbt_command="run",
-            selection="tag:ask_seoul_weather_transform_silver",
+            selector="ask_seoul_weather_transform_silver",
             ti=ti,
             run_id="manual__transient",
             params={"target": "dev"},

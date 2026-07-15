@@ -39,7 +39,8 @@ def test_weather_openlineage_env_exists_only_on_dbt_ol_actual(tmp_path, monkeypa
 
     execution = module.execute_dbt_phase(
         dbt_command="test",
-        selection="tag:ask_seoul_weather_transform_gold",
+        selector="ask_seoul_weather_transform_gold",
+        invocation_id="gold-contract-tests",
         pipeline="weather-transform",
         run_id="scheduled__1",
         task_id="dbt_test_gold",
@@ -102,13 +103,16 @@ def test_weather_materialization_commands_use_dbt_ol(
 
     module.execute_dbt_phase(
         dbt_command=dbt_command,
-        selection="tag:selected",
+        selector="selected",
+        threads=1,
+        invocation_id=f"{dbt_command}-selected",
         pipeline="weather-transform",
         run_id="scheduled__1",
         task_id=f"dbt_{dbt_command}",
         try_number=1,
         target="dev",
         variables=None,
+        fresh_parse=True,
         project_dir=str(tmp_path),
         executable=RAW_DBT,
         runner=runner,
@@ -120,6 +124,17 @@ def test_weather_materialization_commands_use_dbt_ol(
     )
 
     assert observed[-1][:2] == [DBT_OL, dbt_command]
+    assert option(observed[-1], "--selector") == "selected"
+    assert option(observed[-1], "--threads") == "1"
+    assert option(observed[-2], "--selector") == "selected"
+    assert observed[0][1] == "parse"
+    assert "--threads" not in observed[0]
+    assert "--threads" not in observed[-2]
+    assert not any(
+        argument.startswith("--indirect-selection")
+        for command in observed
+        for argument in command
+    )
 
 
 @pytest.mark.parametrize("dbt_command", ["deps", "source freshness"])
@@ -149,7 +164,13 @@ def test_weather_deps_and_source_freshness_stay_raw(dbt_command, tmp_path, monke
 
     execution = module.execute_dbt_phase(
         dbt_command=dbt_command,
-        selection=("tag:weather-source" if dbt_command == "source freshness" else None),
+        selector=(
+            "ask_seoul_weather_transform_source"
+            if dbt_command == "source freshness"
+            else None
+        ),
+        threads=1,
+        invocation_id="raw-phase",
         pipeline="weather-transform",
         run_id="scheduled__1",
         task_id="dbt_raw",
@@ -163,6 +184,7 @@ def test_weather_deps_and_source_freshness_stay_raw(dbt_command, tmp_path, monke
     )
 
     assert all(command[0] == RAW_DBT for command in observed)
+    assert all("--threads" not in command for command in observed)
     if dbt_command == "source freshness":
         assert execution.existing_sources_path == execution.paths.sources_path
     else:
@@ -179,7 +201,9 @@ def test_weather_deps_omits_unsupported_target_path_and_keeps_log_path(tmp_path)
 
     execution = module.execute_dbt_phase(
         dbt_command="deps",
-        selection=None,
+        selector=None,
+        threads=1,
+        invocation_id="dependencies",
         pipeline="weather-transform",
         run_id="scheduled__deps",
         task_id="dbt_deps",
@@ -195,6 +219,7 @@ def test_weather_deps_omits_unsupported_target_path_and_keeps_log_path(tmp_path)
     command = observed["command"]
     assert command[:2] == [RAW_DBT, "deps"]
     assert "--target-path" not in command
+    assert "--threads" not in command
     assert option(command, "--log-path") == execution.paths.execution_log_path
     assert option(command, "--target") == "dev"
     assert observed["kwargs"]["env"]["DBT_PACKAGES_INSTALL_PATH"] == (
@@ -232,7 +257,8 @@ def test_weather_openlineage_missing_required_config_fails_before_actual(
     with pytest.raises(RuntimeError, match="ASK_SEOUL_DBT_OPENLINEAGE"):
         module.execute_dbt_phase(
             dbt_command="run",
-            selection="tag:weather",
+            selector="ask_seoul_weather_transform_silver",
+            invocation_id="silver-models",
             pipeline="weather-transform",
             run_id="scheduled__1",
             task_id="dbt_run_silver",
@@ -246,6 +272,96 @@ def test_weather_openlineage_missing_required_config_fails_before_actual(
         )
 
     assert [command[1] for command in observed] == ["ls"]
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "tag:ask_seoul_weather_transform_silver",
+        "models/weather/silver.sql",
+        r"models\weather\silver.sql",
+        "weather selector",
+        "   ",
+    ],
+)
+def test_weather_rejects_non_named_selectors_before_runner(selector, tmp_path):
+    module = load_execution_module()
+    calls = []
+
+    with pytest.raises(ValueError, match="named dbt selector"):
+        module.execute_dbt_phase(
+            dbt_command="run",
+            selector=selector,
+            invocation_id="invalid-selector",
+            pipeline="weather-transform",
+            run_id="scheduled__1",
+            task_id="dbt_run_silver",
+            try_number=1,
+            target="dev",
+            variables=None,
+            project_dir=str(tmp_path),
+            executable=RAW_DBT,
+            runner=lambda command, **_kwargs: calls.append(command),
+            environ={},
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("threads", [0, -1, True, 1.5, "2"])
+def test_weather_rejects_invalid_threads_before_runner(threads, tmp_path):
+    module = load_execution_module()
+    calls = []
+
+    with pytest.raises(ValueError, match="threads must be a positive integer"):
+        module.execute_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_weather_transform_silver",
+            threads=threads,
+            invocation_id="invalid-threads",
+            pipeline="weather-transform",
+            run_id="scheduled__1",
+            task_id="dbt_run_silver",
+            try_number=1,
+            target="dev",
+            variables=None,
+            project_dir=str(tmp_path),
+            executable=RAW_DBT,
+            runner=lambda command, **_kwargs: calls.append(command),
+            environ={},
+        )
+
+    assert calls == []
+
+
+def test_weather_empty_selector_result_skips_actual_command(tmp_path):
+    module = load_execution_module()
+    observed = []
+
+    def runner(command, **_kwargs):
+        observed.append(command)
+        return completed(command, stdout="")
+
+    execution = module.execute_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_weather_transform_silver",
+        invocation_id="empty-silver-selection",
+        pipeline="weather-transform",
+        run_id="scheduled__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        target="dev",
+        variables=None,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=runner,
+        environ={},
+    )
+
+    assert [command[1] for command in observed] == ["ls"]
+    assert execution.actual_attempted is False
+    assert execution.completed.returncode == 2
+    assert "resolved to no model nodes" in execution.completed.stderr
 
 
 def test_weather_execution_module_has_no_traffic_dependency():

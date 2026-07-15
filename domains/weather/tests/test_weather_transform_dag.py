@@ -18,7 +18,7 @@ def test_weather_dbt_factory_preserves_phase_contracts():
     module = load_transform_module()
     expected_task_ids = tuple(
         task_id
-        for task_id, _dbt_command, _selection, _include_vars in EXPECTED_DBT_PHASES
+        for task_id, _dbt_command, _selector, _include_vars in EXPECTED_DBT_PHASES
     )
 
     assert module.DBT_PHASE_TASK_IDS == expected_task_ids
@@ -27,7 +27,7 @@ def test_weather_dbt_factory_preserves_phase_contracts():
             (
                 spec.task_id,
                 spec.dbt_command,
-                spec.selection,
+                spec.selector,
                 spec.include_project_vars,
             )
             for spec in module.DBT_PHASE_SPECS
@@ -37,13 +37,13 @@ def test_weather_dbt_factory_preserves_phase_contracts():
     assert list(module.dbt_phase_tasks) == list(expected_task_ids)
     with pytest.raises(AttributeError):
         module.DBT_PHASE_SPECS[0].task_id = "mutated"
-    for task_id, dbt_command, selection, include_project_vars in EXPECTED_DBT_PHASES:
+    for task_id, dbt_command, selector, include_project_vars in EXPECTED_DBT_PHASES:
         task = module.dag.task_dict[task_id]
         assert isinstance(task, FakePythonOperator)
         assert task.python_callable is module.run_dbt_phase
         assert task.kwargs["op_kwargs"] == {
             "dbt_command": dbt_command,
-            "selection": selection,
+            "selector": selector,
             "include_project_vars": include_project_vars,
         }
         assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
@@ -61,7 +61,7 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
 
     expected_task_order = [
         task_id
-        for task_id, _dbt_command, _selection, _include_vars in EXPECTED_DBT_PHASES
+        for task_id, _dbt_command, _selector, _include_vars in EXPECTED_DBT_PHASES
     ]
 
     assert set(expected_task_order) <= set(dag.task_ids)

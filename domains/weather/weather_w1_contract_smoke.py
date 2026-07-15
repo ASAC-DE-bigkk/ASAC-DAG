@@ -95,7 +95,7 @@ def cleanup_weather_w1_smoke_schema(
 
 
 def run_dbt_smoke_phase(
-    *, dbt_command: str, selection: str | None, **context
+    *, dbt_command: str, selector: str | None, **context
 ) -> dict[str, object]:
     """Run one W1 phase in the current run's isolated schema and artifacts."""
     ti = context["ti"]
@@ -106,7 +106,8 @@ def run_dbt_smoke_phase(
     environ["ASAC_AXES_SCHEMA"] = schema
     execution = weather_dbt.execute_dbt_phase(
         dbt_command=dbt_command,
-        selection=selection,
+        selector=selector,
+        invocation_id=getattr(ti, "task_id", None) or dbt_command.replace(" ", "-"),
         pipeline="weather-w1-contract-smoke",
         run_id=context.get("run_id"),
         task_id=getattr(ti, "task_id", None),
@@ -147,12 +148,12 @@ def run_dbt_smoke_phase(
 
 
 def dbt_smoke_task(
-    task_id: str, dbt_command: str, selection: str | None = None
+    task_id: str, dbt_command: str, selector: str | None = None
 ) -> PythonOperator:
     return PythonOperator(
         task_id=task_id,
         python_callable=run_dbt_smoke_phase,
-        op_kwargs={"dbt_command": dbt_command, "selection": selection},
+        op_kwargs={"dbt_command": dbt_command, "selector": selector},
         pool=TRINO_HEAVY_POOL,
         on_failure_callback=record_weather_problem,
     )
@@ -185,21 +186,21 @@ with DAG(
     dbt_deps = dbt_smoke_task("dbt_deps", "deps")
 
     dbt_seed_bridge_inputs = dbt_smoke_task(
-        "dbt_seed_bridge_inputs", "seed", "tag:ask_seoul_weather_w1_inputs"
+        "dbt_seed_bridge_inputs", "seed", "ask_seoul_weather_w1_inputs"
     )
 
     dbt_run_common_admin_dong_dimension = dbt_smoke_task(
         "dbt_run_common_admin_dong_dimension",
         "run",
-        "tag:ask_seoul_weather_transform_common_admin",
+        "ask_seoul_weather_transform_common_admin",
     )
 
     dbt_run_bridge = dbt_smoke_task(
-        "dbt_run_bridge", "run", "tag:ask_seoul_weather_w1_bridge"
+        "dbt_run_bridge", "run", "ask_seoul_weather_w1_bridge"
     )
 
     dbt_test_bridge_contract = dbt_smoke_task(
-        "dbt_test_bridge_contract", "test", "tag:ask_seoul_weather_w1_bridge"
+        "dbt_test_bridge_contract", "test", "ask_seoul_weather_w1_bridge"
     )
 
     cleanup_isolated_schema = PythonOperator(

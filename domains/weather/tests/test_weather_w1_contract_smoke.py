@@ -115,6 +115,9 @@ def load_module():
     airflow_trigger = types.ModuleType("airflow.utils.trigger_rule")
     airflow_trigger.TriggerRule = TriggerRule
     weather_ingest = types.ModuleType("weather_ingest")
+    weather_ingest.__path__ = [
+        str(Path(__file__).resolve().parents[1] / "weather_ingest")
+    ]
     weather_ingest_common = types.ModuleType("weather_ingest.common")
     weather_ingest_runtime = types.ModuleType("weather_ingest.common.runtime")
     weather_ingest_runtime.trino_cursor = lambda: (None, "iceberg_dev", "weather")
@@ -238,31 +241,31 @@ def test_smoke_dag_runs_bridge_contract_then_always_cleans_up():
 
     expected_phases = {
         "dbt_deps": ("deps", None),
-        "dbt_seed_bridge_inputs": ("seed", "tag:ask_seoul_weather_w1_inputs"),
+        "dbt_seed_bridge_inputs": ("seed", "ask_seoul_weather_w1_inputs"),
         "dbt_run_common_admin_dong_dimension": (
             "run",
-            "tag:ask_seoul_weather_transform_common_admin",
+            "ask_seoul_weather_transform_common_admin",
         ),
-        "dbt_run_bridge": ("run", "tag:ask_seoul_weather_w1_bridge"),
-        "dbt_test_bridge_contract": ("test", "tag:ask_seoul_weather_w1_bridge"),
+        "dbt_run_bridge": ("run", "ask_seoul_weather_w1_bridge"),
+        "dbt_test_bridge_contract": ("test", "ask_seoul_weather_w1_bridge"),
     }
-    for task_id, (dbt_command, selection) in expected_phases.items():
+    for task_id, (dbt_command, selector) in expected_phases.items():
         task = dag.task_dict[task_id]
         assert isinstance(task, FakePythonOperator)
         assert task.python_callable is module.run_dbt_smoke_phase
         assert task.kwargs["op_kwargs"] == {
             "dbt_command": dbt_command,
-            "selection": selection,
+            "selector": selector,
         }
         assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
         assert task.kwargs["on_failure_callback"] is module.record_weather_problem
 
     assert {
-        selection for _command, selection in expected_phases.values() if selection
+        selector for _command, selector in expected_phases.values() if selector
     } == {
-        "tag:ask_seoul_weather_w1_inputs",
-        "tag:ask_seoul_weather_transform_common_admin",
-        "tag:ask_seoul_weather_w1_bridge",
+        "ask_seoul_weather_w1_inputs",
+        "ask_seoul_weather_transform_common_admin",
+        "ask_seoul_weather_w1_bridge",
     }
 
     assert module.DBT_PROJECT == "/opt/airflow/dbt"
@@ -300,7 +303,7 @@ def test_run_dbt_smoke_phase_preserves_schema_vars_and_attempt_identity(monkeypa
 
     result = module.run_dbt_smoke_phase(
         dbt_command="run",
-        selection="tag:ask_seoul_weather_w1_bridge",
+        selector="ask_seoul_weather_w1_bridge",
         ti=ti,
         run_id="manual__w1",
         params={"target": "dev"},
@@ -310,6 +313,8 @@ def test_run_dbt_smoke_phase_preserves_schema_vars_and_attempt_identity(monkeypa
     assert captured["run_id"] == "manual__w1"
     assert captured["task_id"] == "dbt_run_bridge"
     assert captured["try_number"] == 2
+    assert captured["invocation_id"] == "dbt_run_bridge"
+    assert captured["selector"] == "ask_seoul_weather_w1_bridge"
     assert captured["project_dir"] == module.DBT_PROJECT
     assert captured["executable"] == module.DBT_BIN
     assert captured["target"] == "dev"
@@ -357,7 +362,7 @@ def test_run_dbt_smoke_phase_fails_when_success_artifacts_are_missing(monkeypatc
     with pytest.raises(FakeAirflowException, match="missing expected dbt artifacts"):
         module.run_dbt_smoke_phase(
             dbt_command="run",
-            selection="tag:ask_seoul_weather_w1_bridge",
+            selector="ask_seoul_weather_w1_bridge",
             ti=ti,
             run_id="manual__missing",
             params={"target": "dev"},

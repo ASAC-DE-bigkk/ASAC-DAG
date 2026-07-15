@@ -56,7 +56,7 @@ WEATHER_DBT_RUN_RESULTS_XCOM_KEY = "weather_dbt_run_results_path"
 class DbtPhaseSpec:
     task_id: str
     dbt_command: str
-    selection: str | None = None
+    selector: str | None = None
     include_project_vars: bool = True
 
 
@@ -65,62 +65,62 @@ DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_source_freshness",
         "source freshness",
-        "tag:ask_seoul_weather_transform_source",
+        "ask_seoul_weather_transform_source",
     ),
     DbtPhaseSpec(
         "dbt_seed_asac_axes",
         "seed",
-        "tag:ask_seoul_weather_transform_asac_axes",
+        "ask_seoul_weather_transform_asac_axes",
     ),
     DbtPhaseSpec(
         "dbt_run_common_admin_dong_dimension",
         "run",
-        "tag:ask_seoul_weather_transform_common_admin",
+        "ask_seoul_weather_transform_common_admin",
     ),
     DbtPhaseSpec(
         "dbt_test_common_admin_dong_dimension",
         "test",
-        "tag:ask_seoul_weather_transform_common_admin",
+        "ask_seoul_weather_transform_common_admin",
     ),
     DbtPhaseSpec(
         "dbt_seed_place_mapping",
         "seed",
-        "tag:ask_seoul_weather_transform_place_mapping",
+        "ask_seoul_weather_transform_place_mapping",
     ),
     DbtPhaseSpec(
         "dbt_test_place_mapping_seed",
         "test",
-        "tag:ask_seoul_weather_transform_place_mapping",
+        "ask_seoul_weather_transform_place_mapping",
     ),
     DbtPhaseSpec(
         "dbt_run_silver",
         "run",
-        "tag:ask_seoul_weather_transform_silver",
+        "ask_seoul_weather_transform_silver",
     ),
     DbtPhaseSpec(
         "dbt_test_silver",
         "test",
-        "tag:ask_seoul_weather_transform_silver",
+        "ask_seoul_weather_transform_silver",
     ),
     DbtPhaseSpec(
         "dbt_run_gold",
         "run",
-        "tag:ask_seoul_weather_transform_gold",
+        "ask_seoul_weather_transform_gold",
     ),
     DbtPhaseSpec(
         "dbt_test_gold",
         "test",
-        "tag:ask_seoul_weather_transform_gold",
+        "ask_seoul_weather_transform_gold",
     ),
     DbtPhaseSpec(
         "dbt_run_place_mart",
         "run",
-        "tag:ask_seoul_weather_transform_place_mart",
+        "ask_seoul_weather_transform_place_mart",
     ),
     DbtPhaseSpec(
         "dbt_test_place_mart",
         "test",
-        "tag:ask_seoul_weather_transform_place_mart",
+        "ask_seoul_weather_transform_place_mart",
     ),
 )
 DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
@@ -234,22 +234,24 @@ def transform_schedule() -> str | list[Asset] | None:
 def run_dbt_phase(
     *,
     dbt_command: str,
-    selection: str | None,
+    selector: str | None,
     include_project_vars: bool = True,
     **context,
 ) -> dict[str, object]:
     """Run one dbt phase with an artifact path isolated to this task attempt."""
     ti = context["ti"]
+    task_id = getattr(ti, "task_id", None)
     is_deps = dbt_command == "deps"
     target = (context.get("params") or {}).get("target", "dev")
     run_results_path = None
     try:
         execution = weather_dbt.execute_dbt_phase(
             dbt_command=dbt_command,
-            selection=selection,
+            selector=selector,
+            invocation_id=task_id or dbt_command.replace(" ", "-"),
             pipeline="weather-transform",
             run_id=context.get("run_id"),
-            task_id=getattr(ti, "task_id", None),
+            task_id=task_id,
             try_number=getattr(ti, "try_number", None),
             target=target,
             variables=(
@@ -308,7 +310,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
         python_callable=run_dbt_phase,
         op_kwargs={
             "dbt_command": spec.dbt_command,
-            "selection": spec.selection,
+            "selector": spec.selector,
             "include_project_vars": spec.include_project_vars,
         },
         pool=TRINO_HEAVY_POOL,

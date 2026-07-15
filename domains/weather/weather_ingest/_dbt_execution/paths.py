@@ -25,8 +25,11 @@ def attempt_paths(
     run_id: str | None,
     task_id: str | None,
     try_number: int | None,
+    invocation_id: str,
     dbt_command: str,
 ) -> DbtAttemptPaths:
+    if not isinstance(invocation_id, str) or not invocation_id.strip():
+        raise ValueError("invocation_id must be a non-empty string")
     root = PurePosixPath(project_dir.replace("\\", "/"))
     safe_pipeline = safe_path_segment(pipeline)
     safe_run_id = safe_path_segment(run_id)
@@ -35,6 +38,7 @@ def attempt_paths(
         safe_run_id,
         safe_path_segment(task_id),
         f"try{try_number if try_number is not None else 'unknown'}",
+        safe_path_segment(invocation_id),
     )
     target_attempt = root / "target"
     log_attempt = root / "logs"
@@ -137,7 +141,7 @@ def _safe_remove_tree(
 
 def _execution_artifact_root(candidate: Path, *, expected_name: str) -> Path:
     try:
-        artifact_root = candidate.parents[4]
+        artifact_root = candidate.parents[5]
     except IndexError as exc:
         raise RuntimeError(f"unsafe dbt execution directory: {candidate}") from exc
     if artifact_root.name != expected_name:
