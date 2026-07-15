@@ -1,4 +1,7 @@
+import json
+import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -6,15 +9,33 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from weather_ingest import w2_recovery as recovery_contracts  # noqa: E402
 from weather_ingest.w2_recovery import (  # noqa: E402
     checkpoint_payload,
     completed_window_labels,
-    dbt_cli_options,
     preparation_dbt_vars,
     select_windows_with_publishable_anchors,
     split_repair_windows,
     window_dbt_vars,
 )
+from weather_w2_recovery_test_support import (  # noqa: E402
+    FakeAirflowFailException,
+    FakeDAG,
+    FakePythonOperator,
+    MODULE_NAMES,
+    load_recovery_module,
+)
+
+
+@pytest.fixture(autouse=True)
+def restore_modules_after_recovery_import():
+    originals = {name: sys.modules.get(name) for name in MODULE_NAMES}
+    yield
+    for name, module in originals.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
 
 
 def test_splits_inclusive_range_into_six_hour_windows():
@@ -29,11 +50,15 @@ def test_splits_inclusive_range_into_six_hour_windows():
         "2026-07-02 12:00:00.000000__2026-07-02 17:59:59.999999",
         "2026-07-02 18:00:00.000000__2026-07-02 23:59:59.999999",
     ]
-    assert all(window.duration_microseconds <= 6 * 60 * 60 * 1_000_000 for window in windows)
+    assert all(
+        window.duration_microseconds <= 6 * 60 * 60 * 1_000_000 for window in windows
+    )
 
 
 def test_rejects_reversed_repair_range():
-    with pytest.raises(ValueError, match="start_at must be before or equal to cutoff_at"):
+    with pytest.raises(
+        ValueError, match="start_at must be before or equal to cutoff_at"
+    ):
         split_repair_windows(
             "2026-07-03 00:00:00.000000",
             "2026-07-02 23:59:59.999999",
@@ -82,14 +107,58 @@ def test_selects_only_windows_that_have_publishable_manifest_anchors():
     ]
 
 
-def test_only_dbt_execution_commands_receive_single_thread_option():
-    variables = {"weather_w2_canonical_revision_date": "2025-04-01"}
+def test_phase_plan_owns_only_named_selectors_and_stable_invocation_identity():
+    preparation = recovery_contracts.preparation_phase_plan()
+    window = recovery_contracts.window_phase_plan(3)
+    lineage = tuple(
+        recovery_contracts.lineage_phase(3, bucket_index)
+        for bucket_index in range(recovery_contracts.LINEAGE_RUN_BUCKET_COUNT)
+    )
 
-    deps_options = dbt_cli_options("deps", target="dev", variables=variables)
-    run_options = dbt_cli_options("run", target="dev", variables=variables)
-
-    assert "--threads" not in deps_options
-    assert run_options[2:4] == ("--threads", "1")
+    assert preparation == (
+        recovery_contracts.DbtPhase("deps", None, "prepare-dependencies"),
+        recovery_contracts.DbtPhase(
+            "seed", "ask_seoul_weather_w1_inputs", "prepare-w1-inputs"
+        ),
+        recovery_contracts.DbtPhase(
+            "run",
+            "ask_seoul_weather_transform_common_admin",
+            "prepare-common-admin",
+        ),
+        recovery_contracts.DbtPhase(
+            "run", "ask_seoul_weather_w1_bridge", "prepare-w1-bridge"
+        ),
+        recovery_contracts.DbtPhase(
+            "test", "ask_seoul_weather_w1_bridge", "prepare-w1-contract"
+        ),
+    )
+    assert window == (
+        recovery_contracts.DbtPhase(
+            "run",
+            "ask_seoul_weather_w2_recovery_window_models",
+            "window-0003-models",
+        ),
+        recovery_contracts.DbtPhase(
+            "test",
+            "ask_seoul_weather_w2_recovery_window_contracts",
+            "window-0003-contracts",
+        ),
+    )
+    assert lineage == tuple(
+        recovery_contracts.DbtPhase(
+            "test",
+            "ask_seoul_weather_w2_recovery_lineage_contract",
+            f"window-0003-lineage-{bucket_index}",
+        )
+        for bucket_index in range(4)
+    )
+    assert recovery_contracts.final_phase() == recovery_contracts.DbtPhase(
+        "test",
+        "ask_seoul_weather_w2_recovery_final_contract",
+        "final-contract",
+    )
+    with pytest.raises(AttributeError):
+        preparation[0].selector = "mutated"
 
 
 def test_checkpoint_rejects_a_different_requested_range():
@@ -110,7 +179,9 @@ def test_checkpoint_rejects_a_different_requested_range():
         "2026-07-03 00:00:00.000000",
         "2026-07-03 23:59:59.999999",
     )
-    with pytest.raises(ValueError, match="checkpoint range does not match requested repair range"):
+    with pytest.raises(
+        ValueError, match="checkpoint range does not match requested repair range"
+    ):
         completed_window_labels(payload, other_windows)
 
     assert completed_window_labels(payload, windows) == {windows[0].label}
@@ -126,9 +197,7 @@ def test_checkpoint_migrates_completed_legacy_daily_window_to_subwindows():
             "start_at": "2026-07-02 00:00:00.000000",
             "cutoff_at": "2026-07-02 23:59:59.999999",
         },
-        "completed_windows": [
-            "2026-07-02 00:00:00.000000__2026-07-02 23:59:59.999999"
-        ],
+        "completed_windows": ["2026-07-02 00:00:00.000000__2026-07-02 23:59:59.999999"],
     }
 
     assert completed_window_labels(payload, windows) == {
@@ -136,58 +205,186 @@ def test_checkpoint_migrates_completed_legacy_daily_window_to_subwindows():
     }
 
 
-def test_manual_recovery_dag_serializes_w2_writers_and_runs_final_reconciliation():
-    source = (
-        Path(__file__).resolve().parents[1] / "weather_w2_observation_recovery.py"
-    ).read_text(encoding="utf-8")
-
-    assert 'DAG_ID = "weather_w2_observation_recovery"' in source
-    assert "schedule=None" in source
-    assert "max_active_runs=1" in source
-    assert 'task_id="recover_observation_windows"' in source
-    assert "pool=TRINO_HEAVY_POOL" in source
-    assert "pool_slots=1" in source
-    assert "dbt_cli_options(args[0]" in source
-    assert "preparation_dbt_vars" in source
-    assert (
-        "preparation_variables = preparation_dbt_vars(\n"
-        "        selected_windows[0], selected_windows[-1]\n"
-        "    )"
-    ) in source
-    assert "assert_weather_observation_publishable_and_counts_reconcile" in source
-    assert "run_dbt(FINAL_DBT_ARGS, target=target, variables=preparation_variables)" in source
+def _successful_execution():
+    completed = subprocess.CompletedProcess(
+        args=["dbt"], returncode=0, stdout="ok\n", stderr=""
+    )
+    return types.SimpleNamespace(
+        attempts=(completed,),
+        completed=completed,
+        missing_expected_artifacts=(),
+        existing_run_results_path="/tmp/run_results.json",
+        existing_sources_path=None,
+        existing_manifest_path="/tmp/manifest.json",
+        selected_unique_ids=("model.asac_seoul.selected",),
+    )
 
 
-def test_manual_recovery_only_executes_windows_with_publishable_manifest_anchors():
-    source = (
-        Path(__file__).resolve().parents[1] / "weather_w2_observation_recovery.py"
-    ).read_text(encoding="utf-8")
+def _recovery_context():
+    return {
+        "params": {
+            "target": "dev",
+            "repair_start_at": "2026-07-02 00:00:00.000000",
+            "repair_cutoff_at": "2026-07-02 05:59:59.999999",
+            "checkpoint_id": "issue-196",
+        },
+        "run_id": "manual__w2",
+        "ti": types.SimpleNamespace(
+            task_id="recover_observation_windows", try_number=2
+        ),
+    }
 
-    assert "publishable_window_indexes" in source
-    assert "select_windows_with_publishable_anchors" in source
-    assert "manifest_status = 'SUCCESS'" in source
-    assert "is_publishable" in source
-    assert "selected_windows" in source
-    assert "skipped_windows" in source
+
+def test_manual_recovery_dag_shape_is_serial_dev_only_and_domain_pooled():
+    module = load_recovery_module()
+    dag = module.dag
+
+    assert isinstance(dag, FakeDAG)
+    assert dag.dag_id == "weather_w2_observation_recovery"
+    assert dag.kwargs["schedule"] is None
+    assert dag.kwargs["max_active_runs"] == 1
+    assert dag.kwargs["params"]["target"].schema["enum"] == ["dev"]
+    assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
+        "recover_observation_windows"
+    }
+    recover_task = dag.task_dict["recover_observation_windows"]
+    assert isinstance(recover_task, FakePythonOperator)
+    assert recover_task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+    assert recover_task.kwargs["pool_slots"] == 1
+    assert recover_task.kwargs["retries"] == 1
+    assert recover_task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
 
 
-def test_manual_recovery_runs_only_bounded_w2_data_test_per_window():
-    source = (
-        Path(__file__).resolve().parents[1] / "weather_w2_observation_recovery.py"
-    ).read_text(encoding="utf-8")
-    window_args = source[
-        source.index("WINDOW_DBT_ARGS =") : source.index("LINEAGE_DBT_ARGS =")
+def test_recovery_executes_selector_phases_in_order_and_checkpoints_before_final(
+    monkeypatch,
+):
+    module = load_recovery_module()
+    events = []
+    calls = []
+    monkeypatch.setattr(module, "publishable_window_indexes", lambda _windows: {0})
+    monkeypatch.setattr(
+        module.Variable,
+        "get",
+        staticmethod(lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        module.Variable,
+        "set",
+        staticmethod(lambda *_args, **_kwargs: events.append("checkpoint")),
+    )
+
+    def execute_dbt_phase(**kwargs):
+        calls.append(kwargs)
+        events.append(kwargs["invocation_id"])
+        return _successful_execution()
+
+    monkeypatch.setattr(module.weather_dbt, "execute_dbt_phase", execute_dbt_phase)
+
+    result = module.recover_observation_windows(**_recovery_context())
+
+    assert [call["selector"] for call in calls] == [
+        None,
+        "ask_seoul_weather_w1_inputs",
+        "ask_seoul_weather_transform_common_admin",
+        "ask_seoul_weather_w1_bridge",
+        "ask_seoul_weather_w1_bridge",
+        "ask_seoul_weather_w2_recovery_window_models",
+        "ask_seoul_weather_w2_recovery_window_contracts",
+        *["ask_seoul_weather_w2_recovery_lineage_contract"] * 4,
+        "ask_seoul_weather_w2_recovery_final_contract",
     ]
+    assert [call["invocation_id"] for call in calls] == [
+        "prepare-dependencies",
+        "prepare-w1-inputs",
+        "prepare-common-admin",
+        "prepare-w1-bridge",
+        "prepare-w1-contract",
+        "window-0000-models",
+        "window-0000-contracts",
+        "window-0000-lineage-0",
+        "window-0000-lineage-1",
+        "window-0000-lineage-2",
+        "window-0000-lineage-3",
+        "final-contract",
+    ]
+    assert events[-2:] == ["checkpoint", "final-contract"]
+    assert all(call["threads"] == 1 for call in calls)
+    assert all("project_dir" not in call for call in calls)
+    assert all("executable" not in call for call in calls)
+    assert all(call["pipeline"] == "weather-w2-observation-recovery" for call in calls)
+    assert all(call["run_id"] == "manual__w2" for call in calls)
+    assert all(call["task_id"] == "recover_observation_windows" for call in calls)
+    assert all(call["try_number"] == 2 for call in calls)
+    assert all("runner" not in call for call in calls)
+    assert all(isinstance(json.loads(call["variables"]), dict) for call in calls)
+    lineage_calls = calls[7:11]
+    assert [
+        json.loads(call["variables"])["weather_w2_lineage_run_bucket_index"]
+        for call in lineage_calls
+    ] == [
+        "0",
+        "1",
+        "2",
+        "3",
+    ]
+    assert result["completed_windows"] == 1
 
-    assert "assert_gold_weather_forecast_by_admin_dong_repair_reconciles" in window_args
-    assert "assert_gold_weather_forecast_by_admin_dong_repair_window_no_extra_rows" in window_args
-    assert "weather_w2_observation_recovery_lineage_workset" in window_args
-    assert "assert_gold_weather_forecast_by_admin_dong_repair_window_lineage" not in window_args
-    assert "assert_weather_observation_grain_unique" not in window_args
-    assert "assert_weather_grid_selection_reconciles" not in window_args
-    assert "assert_weather_grid_selected_observation_exists" not in window_args
-    assert "assert_gold_weather_forecast_by_admin_dong_repair_no_downgrade" not in window_args
-    assert "LINEAGE_RUN_BUCKET_COUNT = 4" in source
-    assert "for lineage_bucket_index in range(LINEAGE_RUN_BUCKET_COUNT):" in source
-    assert '"weather_w2_lineage_run_bucket_count": str(LINEAGE_RUN_BUCKET_COUNT)' in source
-    assert '"weather_w2_lineage_run_bucket_index": str(lineage_bucket_index)' in source
+
+def test_recovery_failure_stops_later_buckets_checkpoint_and_final(monkeypatch):
+    module = load_recovery_module()
+    events = []
+    monkeypatch.setattr(module, "publishable_window_indexes", lambda _windows: {0})
+    monkeypatch.setattr(
+        module.Variable, "get", staticmethod(lambda *_args, **_kwargs: None)
+    )
+    monkeypatch.setattr(
+        module.Variable,
+        "set",
+        staticmethod(lambda *_args, **_kwargs: events.append("checkpoint")),
+    )
+
+    def execute_dbt_phase(**kwargs):
+        events.append(kwargs["invocation_id"])
+        if kwargs["invocation_id"] == "window-0000-lineage-2":
+            completed = subprocess.CompletedProcess(
+                args=["dbt"], returncode=1, stdout="", stderr="contract failed"
+            )
+            return types.SimpleNamespace(
+                attempts=(completed,),
+                completed=completed,
+                missing_expected_artifacts=(),
+                existing_run_results_path=None,
+                existing_sources_path=None,
+                existing_manifest_path=None,
+                selected_unique_ids=("test.asac_seoul.lineage",),
+            )
+        return _successful_execution()
+
+    monkeypatch.setattr(module.weather_dbt, "execute_dbt_phase", execute_dbt_phase)
+
+    with pytest.raises(FakeAirflowFailException, match="data-contract-violation"):
+        module.recover_observation_windows(**_recovery_context())
+
+    assert events[-1] == "window-0000-lineage-2"
+    assert "window-0000-lineage-3" not in events
+    assert "checkpoint" not in events
+    assert "final-contract" not in events
+
+
+def test_recovery_dag_contains_no_raw_dbt_or_node_selection_ownership():
+    source = (
+        Path(__file__).resolve().parents[1] / "weather_w2_observation_recovery.py"
+    ).read_text(encoding="utf-8")
+
+    for forbidden in (
+        "_".join(("DBT", "BIN")),
+        "_".join(("DBT", "PROJECT")),
+        ".".join(("subprocess", "run")),
+        "--" + "select",
+        "tag" + ":",
+        "_".join(("silver", "kma", "vilage", "fcst", "observation")),
+        "_".join(("gold", "weather", "forecast", "by", "admin", "dong")),
+        "_".join(("assert", "gold", "weather")),
+        "/".join(("", "opt", "airflow", "dbt", "domains", "weather")),
+    ):
+        assert forbidden not in source

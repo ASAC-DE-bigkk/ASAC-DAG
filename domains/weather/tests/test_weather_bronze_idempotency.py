@@ -1,4 +1,5 @@
-import ast
+"""KMA Bronze idempotent Trino write tests."""
+
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,176 +7,25 @@ from pathlib import Path
 import pytest
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "domains" / "weather"))
 
-import weather_ingest.bronze as bronze  # noqa: E402
+from weather_bronze_test_support import RecordingCursor  # noqa: E402
 from weather_ingest.bronze import (  # noqa: E402
-    append_kma_bronze_row_batches_pyiceberg,
-    create_kma_bronze_table,
     insert_kma_bronze_row_batches,
     insert_kma_bronze_rows,
 )
+from weather_ingest.bronze_contract import KMA_BRONZE_COLUMNS  # noqa: E402
 
 
-class RecordingCursor:
-    def __init__(self):
-        self.statements = []
+def test_trino_bronze_insert_has_one_canonical_serializer_and_column_owner():
+    source = (
+        Path(__file__).resolve().parents[1] / "weather_ingest" / "bronze_trino.py"
+    ).read_text(encoding="utf-8")
 
-    def execute(self, sql):
-        self.statements.append(" ".join(sql.split()))
-
-
-class VerificationCursor(RecordingCursor):
-    def __init__(self, row):
-        super().__init__()
-        self.row = row
-
-    def fetchone(self):
-        return self.row
-
-
-class RecordingTransaction:
-    def __init__(self):
-        self.events = []
-        self.commits = 0
-
-    def __enter__(self):
-        self.events.append(("enter", None))
-        return self
-
-    def __exit__(self, exc_type, _exc, _tb):
-        if exc_type is None:
-            self.commits += 1
-        self.events.append(("exit", exc_type))
-
-    def delete(self, predicate):
-        self.events.append(("delete", predicate))
-
-    def append(self, arrow_table):
-        self.events.append(("append", arrow_table))
-
-
-class RecordingTable:
-    def __init__(self):
-        self.txn = RecordingTransaction()
-
-    def transaction(self):
-        return self.txn
-
-
-def test_kma_verify_count_mismatch_is_permanent_validation_error(monkeypatch):
-    cursor = VerificationCursor((4, 1, None))
-    monkeypatch.setattr(bronze, "trino_cursor", lambda: (cursor, "iceberg_dev", "weather"))
-
-    with pytest.raises(bronze.BronzeValidationError, match="expected_rows=5, actual_rows=4"):
-        bronze.verify_kma_bronze_runtime(expected_rows=5)
-
-
-def test_kma_verify_connection_error_remains_retryable(monkeypatch):
-    connection_error = ConnectionError("temporary Trino DNS failure")
-
-    def fail_to_connect():
-        raise connection_error
-
-    monkeypatch.setattr(bronze, "trino_cursor", fail_to_connect)
-
-    with pytest.raises(ConnectionError) as raised:
-        bronze.verify_kma_bronze_runtime(expected_rows=5)
-
-    assert raised.value is connection_error
-
-
-def test_airflow_wrapper_marks_only_validation_errors_non_retryable():
-    dag_path = Path(__file__).resolve().parents[1] / "weather_vilage_fcst_bronze.py"
-    tree = ast.parse(dag_path.read_text(encoding="utf-8"), filename=str(dag_path))
-    wrapper = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "verify_kma_bronze_runtime"
-    )
-    validation_handler = next(
-        (
-            handler
-            for handler in ast.walk(wrapper)
-            if isinstance(handler, ast.ExceptHandler)
-            and isinstance(handler.type, ast.Name)
-            and handler.type.id == "BronzeValidationError"
-        ),
-        None,
-    )
-
-    assert validation_handler is not None
-    assert any(
-        isinstance(node, ast.Raise)
-        and isinstance(node.exc, ast.Call)
-        and isinstance(node.exc.func, ast.Name)
-        and node.exc.func.id == "AirflowFailException"
-        for node in ast.walk(validation_handler)
-    )
-
-
-def test_kma_create_table_uses_load_date_partitioning_for_fresh_tables():
-    cursor = RecordingCursor()
-
-    qualified_table = create_kma_bronze_table(cursor, "iceberg_dev", "weather_traffic_bronze")
-
-    assert qualified_table == "iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst"
-    assert len(cursor.statements) == 5
-    assert cursor.statements[0] == "CREATE SCHEMA IF NOT EXISTS iceberg_dev.weather_traffic_bronze"
-    assert "CREATE TABLE IF NOT EXISTS iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst" in cursor.statements[1]
-    assert "partitioning = ARRAY['load_date']" in cursor.statements[1]
-
-
-def test_kma_pyiceberg_batches_delete_and_appends_in_one_transaction(monkeypatch):
-    table = RecordingTable()
-    monkeypatch.setattr(bronze, "_kma_pyiceberg_delete_filter", lambda run_id: ("same-run", run_id))
-    monkeypatch.setattr(bronze, "_arrow_table", lambda rows: [dict(row) for row in rows])
-
-    inserted = append_kma_bronze_row_batches_pyiceberg(
-        schema="weather_traffic_bronze",
-        dag_run_id="manual__pyiceberg",
-        chunk_rows=2,
-        table=table,
-        row_batches=[
-            {
-                "metadata": {"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 3, "row_count": 3},
-                "rows": [
-                    {
-                        "baseDate": "20260701",
-                        "baseTime": "0800",
-                        "nx": "60",
-                        "ny": "127",
-                        "category": category,
-                        "fcstDate": "20260701",
-                        "fcstTime": "0900",
-                        "fcstValue": "25",
-                    }
-                    for category in ("TMP", "REH", "WSD")
-                ],
-                "request_id": "request-page-1",
-                "place_id": "seoul-test-grid",
-                "base_date": "20260701",
-                "base_time": "0800",
-                "nx": 60,
-                "ny": 127,
-                "raw_object_key": "raw/weather/kma/request-1.json",
-                "raw_hash": "abc",
-                "http_status": 200,
-                "collected_at": datetime(2026, 7, 1, 0, 20, tzinfo=timezone.utc),
-                "page_no": 1,
-                "num_of_rows": 1000,
-            }
-        ],
-    )
-
-    appends = [event for event in table.txn.events if event[0] == "append"]
-    assert inserted == 3
-    assert table.txn.commits == 1
-    assert table.txn.events[1] == ("delete", ("same-run", "manual__pyiceberg"))
-    assert len(appends) == 2
-    assert len(appends[0][1]) == 2
-    assert len(appends[1][1]) == 1
-    assert all(record["page_no"] == 1 for record in appends[0][1] + appends[1][1])
+    assert source.count("INSERT INTO {qualified_table}") == 1
+    assert source.count("sql_string(row.get") == 0
 
 
 def test_kma_insert_replaces_same_retry_scope_before_append():
@@ -196,7 +46,12 @@ def test_kma_insert_replaces_same_retry_scope_before_append():
                 "fcstValue": "25",
             }
         ],
-        metadata={"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 1, "row_count": 1},
+        metadata={
+            "result_code": "00",
+            "result_msg": "NORMAL_SERVICE",
+            "total_count": 1,
+            "row_count": 1,
+        },
         request_id="request-1",
         place_id="seoul-test-grid",
         base_date="20260701",
@@ -213,14 +68,21 @@ def test_kma_insert_replaces_same_retry_scope_before_append():
     assert inserted == 1
     assert len(cursor.statements) == 2
     delete_sql, insert_sql = cursor.statements
-    assert delete_sql.startswith("DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst WHERE")
+    assert delete_sql.startswith(
+        "DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst WHERE"
+    )
     assert "source_id = 'kma_vilage_fcst'" in delete_sql
     assert "dag_run_id = 'scheduled__2026-07-01T08:20:00+09:00'" in delete_sql
     assert "base_date = '20260701'" in delete_sql
     assert "base_time = '0800'" in delete_sql
     assert "nx = 60" in delete_sql
     assert "ny = 127" in delete_sql
-    assert insert_sql.startswith("INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst")
+    assert insert_sql.startswith(
+        "INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst"
+    )
+    for column in KMA_BRONZE_COLUMNS:
+        assert column in insert_sql
+    assert "dag_run_id, page_no" in insert_sql
 
 
 def test_kma_insert_batches_chunks_large_insert_without_repeating_delete():
@@ -233,7 +95,12 @@ def test_kma_insert_batches_chunks_large_insert_without_repeating_delete():
         max_insert_query_chars=1400,
         row_batches=[
             {
-                "metadata": {"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 4, "row_count": 4},
+                "metadata": {
+                    "result_code": "00",
+                    "result_msg": "NORMAL_SERVICE",
+                    "total_count": 4,
+                    "row_count": 4,
+                },
                 "rows": [
                     {
                         "baseDate": "20260701",
@@ -289,7 +156,12 @@ def test_kma_insert_fails_before_delete_when_response_is_partial():
                     "fcstValue": "25",
                 }
             ],
-            metadata={"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 2, "row_count": 1},
+            metadata={
+                "result_code": "00",
+                "result_msg": "NORMAL_SERVICE",
+                "total_count": 2,
+                "row_count": 1,
+            },
             request_id="request-1",
             place_id="seoul-test-grid",
             base_date="20260701",
@@ -324,7 +196,12 @@ def test_kma_insert_allows_partial_page_only_when_dag_aggregate_was_checked():
                 "fcstValue": "25",
             }
         ],
-        metadata={"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 1001, "row_count": 1},
+        metadata={
+            "result_code": "00",
+            "result_msg": "NORMAL_SERVICE",
+            "total_count": 1001,
+            "row_count": 1,
+        },
         request_id="request-page-2",
         place_id="seoul-test-grid",
         base_date="20260701",
@@ -344,7 +221,9 @@ def test_kma_insert_allows_partial_page_only_when_dag_aggregate_was_checked():
 
     assert inserted == 1
     assert len(cursor.statements) == 1
-    assert cursor.statements[0].startswith("INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst")
+    assert cursor.statements[0].startswith(
+        "INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst"
+    )
     assert '"pageNo": "2"' in cursor.statements[0]
     assert '"numOfRows": "1000"' in cursor.statements[0]
 
@@ -358,7 +237,12 @@ def test_kma_insert_batches_deletes_once_and_inserts_all_rows():
         dag_run_id="manual__batch",
         row_batches=[
             {
-                "metadata": {"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 2, "row_count": 2},
+                "metadata": {
+                    "result_code": "00",
+                    "result_msg": "NORMAL_SERVICE",
+                    "total_count": 2,
+                    "row_count": 2,
+                },
                 "rows": [
                     {
                         "baseDate": "20260701",
@@ -395,7 +279,12 @@ def test_kma_insert_batches_deletes_once_and_inserts_all_rows():
                 "num_of_rows": 1000,
             },
             {
-                "metadata": {"result_code": "00", "result_msg": "NORMAL_SERVICE", "total_count": 2, "row_count": 1},
+                "metadata": {
+                    "result_code": "00",
+                    "result_msg": "NORMAL_SERVICE",
+                    "total_count": 2,
+                    "row_count": 1,
+                },
                 "rows": [
                     {
                         "baseDate": "20260701",
@@ -427,7 +316,9 @@ def test_kma_insert_batches_deletes_once_and_inserts_all_rows():
     assert inserted == 3
     assert len(cursor.statements) == 2
     delete_sql, insert_sql = cursor.statements
-    assert delete_sql.startswith("DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst WHERE")
+    assert delete_sql.startswith(
+        "DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst WHERE"
+    )
     assert "source_id = 'kma_vilage_fcst'" in delete_sql
     assert "dag_run_id = 'manual__batch'" in delete_sql
     assert "base_date = '20260701'" in delete_sql
@@ -437,4 +328,6 @@ def test_kma_insert_batches_deletes_once_and_inserts_all_rows():
     assert "((base_date = '20260701'" in delete_sql
     assert "nx = 60" in delete_sql
     assert "ny = 127" in delete_sql
-    assert insert_sql.startswith("INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst")
+    assert insert_sql.startswith(
+        "INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_kma_vilage_fcst"
+    )

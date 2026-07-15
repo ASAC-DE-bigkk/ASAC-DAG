@@ -20,7 +20,7 @@ class DbtFailure:
     retryable: bool
     failed_test_names: list[str]
     failed_row_count: int
-    artifact_path: str
+    artifact_path: str | None
 
 
 _TRINO_OR_ADAPTER_MARKERS = (
@@ -47,20 +47,42 @@ def load_dbt_results(path: str | Path) -> list[dict[str, Any]]:
     except (OSError, ValueError, TypeError):
         return []
     results = document.get("results") if isinstance(document, dict) else None
-    return [result for result in results if isinstance(result, dict)] if isinstance(results, list) else []
+    return (
+        [result for result in results if isinstance(result, dict)]
+        if isinstance(results, list)
+        else []
+    )
 
 
-def silver_persisted_from_results(results: Iterable[dict[str, Any]], *, default: bool) -> bool:
-    """Report partial Silver persistence from dbt's per-model result artifact."""
+def silver_persisted_from_results(
+    results: Iterable[dict[str, Any]],
+    *,
+    selected_unique_ids: Iterable[str],
+    default: bool,
+) -> bool:
+    """Report persistence for any model selected by this exact invocation."""
+    selected_models = {
+        str(unique_id)
+        for unique_id in selected_unique_ids
+        if str(unique_id).startswith("model.")
+    }
     for result in results:
-        if (result.get("unique_id") == "model.ask_seoul.silver_seoul_traffic_incident"
-                and str(result.get("status") or "").lower() in {"success", "pass"}):
+        unique_id = str(result.get("unique_id") or "")
+        if unique_id in selected_models and str(result.get("status") or "").lower() in {
+            "success",
+            "pass",
+        }:
             return True
     return default
 
 
-def classify_dbt_failure(*, returncode: int, results: Iterable[dict[str, Any]],
-                         artifact_path: str, command_output: str = "") -> DbtFailure:
+def classify_dbt_failure(
+    *,
+    returncode: int,
+    results: Iterable[dict[str, Any]],
+    artifact_path: str | None,
+    command_output: str = "",
+) -> DbtFailure:
     """Classify dbt's result artifact without retrying a data-contract failure."""
     failed_test_names: list[str] = []
     failed_row_count = 0
@@ -90,8 +112,9 @@ def classify_dbt_failure(*, returncode: int, results: Iterable[dict[str, Any]],
         )
 
     detail = "\n".join(messages).lower()
-    if (any(marker in detail for marker in _TRINO_OR_ADAPTER_MARKERS)
-            and any(marker in detail for marker in _INFRASTRUCTURE_MARKERS)):
+    if any(marker in detail for marker in _TRINO_OR_ADAPTER_MARKERS) and any(
+        marker in detail for marker in _INFRASTRUCTURE_MARKERS
+    ):
         return DbtFailure(
             classification="retryable-infrastructure-error",
             retryable=True,
@@ -109,10 +132,17 @@ def classify_dbt_failure(*, returncode: int, results: Iterable[dict[str, Any]],
     )
 
 
-def build_recovery_record(failure: DbtFailure, *, traffic_snapshot_dag_run_id: str | None,
-                          dag_id: str | None, task_id: str | None, run_id: str | None,
-                          try_number: int | None, silver_persisted: bool,
-                          occurred_at: datetime) -> dict[str, Any]:
+def build_recovery_record(
+    failure: DbtFailure,
+    *,
+    traffic_snapshot_dag_run_id: str | None,
+    dag_id: str | None,
+    task_id: str | None,
+    run_id: str | None,
+    try_number: int | None,
+    silver_persisted: bool,
+    occurred_at: datetime,
+) -> dict[str, Any]:
     """Build the durable operator record for a failed, pinned dbt invocation."""
     return {
         "schema_version": "v1",
@@ -162,13 +192,19 @@ def _safe_segment(value: Any) -> str:
 class R2RecoveryRecordSink:
     """Store a per-failure recovery record beside the existing R2 Problem objects."""
 
-    def __init__(self, *, prefix: str = "recovery",
-                 put_object: Callable[[str, bytes], None] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        prefix: str = "recovery",
+        put_object: Callable[[str, bytes], None] | None = None,
+    ) -> None:
         self.prefix = prefix
         self._put_object = put_object
 
     def object_key(self, record: dict[str, Any]) -> str:
-        occurred = datetime.fromisoformat(str(record["occurred_at"])).astimezone(timezone.utc)
+        occurred = datetime.fromisoformat(str(record["occurred_at"])).astimezone(
+            timezone.utc
+        )
         date = occurred.date().isoformat()
         return (
             f"{self.prefix}/observed_date={date}/domain=traffic"
@@ -181,7 +217,9 @@ class R2RecoveryRecordSink:
     def write(self, record: dict[str, Any]) -> str:
         object_key = self.object_key(record)
         refresh_env_secrets()
-        payload = json.dumps(redact(record), ensure_ascii=False, sort_keys=True).encode("utf-8")
+        payload = json.dumps(redact(record), ensure_ascii=False, sort_keys=True).encode(
+            "utf-8"
+        )
         if self._put_object is not None:
             self._put_object(object_key, payload)
         else:

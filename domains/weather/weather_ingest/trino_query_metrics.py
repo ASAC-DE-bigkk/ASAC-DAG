@@ -5,6 +5,7 @@ bounded query history.  This module therefore discovers exposed columns at
 runtime and falls back to the completed DB-API cursor's statistics.  Missing
 data is deliberately represented as ``None``—never as a zero-cost query.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -51,6 +52,7 @@ CURSOR_STAT_MAP = {
 }
 
 _QUALIFIED_TABLE_PART = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+UNAVAILABLE_REASONS_KEY = "unavailable_reasons"
 
 
 def sql_string(value: str) -> str:
@@ -92,7 +94,7 @@ def _blank(query_id: str | None) -> dict[str, Any]:
         query_id=query_id,
         metric_source="unavailable",
         unavailable_metrics=list(METRIC_COLUMNS[1:]),
-        unavailable_reasons=[],
+        **{UNAVAILABLE_REASONS_KEY: []},
     )
     return result
 
@@ -108,7 +110,9 @@ def _mark_unavailable_metrics(result: dict[str, Any]) -> None:
     ]
 
 
-def _apply_cursor_stats(result: dict[str, Any], fallback_stats: Mapping[str, Any] | None) -> bool:
+def _apply_cursor_stats(
+    result: dict[str, Any], fallback_stats: Mapping[str, Any] | None
+) -> bool:
     """Fill only unavailable metrics from DB-API statistics.
 
     System connector values remain authoritative when present.  The return
@@ -138,14 +142,14 @@ def collect_query_metrics(
     try:
         available = _runtime_columns(cursor)
     except Exception as exc:  # runtime connector/version is optional evidence
-        result["unavailable_reasons"].append(
+        result[UNAVAILABLE_REASONS_KEY].append(
             f"system_runtime_queries_unavailable:{type(exc).__name__}"
         )
         _apply_cursor_stats(result, fallback_stats)
         if any(result[name] is not None for name in METRIC_COLUMNS[1:]):
             result["metric_source"] = "cursor.stats"
         else:
-            result["unavailable_reasons"].append("no_cursor_stats_available")
+            result[UNAVAILABLE_REASONS_KEY].append("no_cursor_stats_available")
         _mark_unavailable_metrics(result)
         return result
 
@@ -161,7 +165,7 @@ def collect_query_metrics(
             row = cursor.fetchone()
         except Exception as exc:  # query history may disappear between statements
             row = None
-            result["unavailable_reasons"].append(
+            result[UNAVAILABLE_REASONS_KEY].append(
                 f"system_runtime_query_lookup_failed:{type(exc).__name__}"
             )
         if row is not None:
@@ -174,23 +178,27 @@ def collect_query_metrics(
                 result["metric_source"] = "system.runtime.queries+cursor.stats"
             _mark_unavailable_metrics(result)
             return result
-        result["unavailable_reasons"].append("query_not_found_in_system_runtime")
+        result[UNAVAILABLE_REASONS_KEY].append("query_not_found_in_system_runtime")
     else:
-        result["unavailable_reasons"].append("query_id_column_unavailable")
+        result[UNAVAILABLE_REASONS_KEY].append("query_id_column_unavailable")
 
     _apply_cursor_stats(result, fallback_stats)
     if any(result[name] is not None for name in METRIC_COLUMNS[1:]):
         result["metric_source"] = "cursor.stats"
     else:
-        result["unavailable_reasons"].append("no_cursor_stats_available")
+        result[UNAVAILABLE_REASONS_KEY].append("no_cursor_stats_available")
     _mark_unavailable_metrics(result)
     return result
 
 
 def _metadata_table(qualified_table: str, suffix: str) -> str:
     parts = qualified_table.split(".")
-    if len(parts) != 3 or not all(_QUALIFIED_TABLE_PART.fullmatch(part) for part in parts):
-        raise ValueError("qualified_table must be catalog.schema.table with safe identifiers")
+    if len(parts) != 3 or not all(
+        _QUALIFIED_TABLE_PART.fullmatch(part) for part in parts
+    ):
+        raise ValueError(
+            "qualified_table must be catalog.schema.table with safe identifiers"
+        )
     catalog, schema, table = parts
     return f'{catalog}.{schema}."{table}${suffix}"'
 
@@ -208,8 +216,7 @@ def collect_iceberg_fingerprint(cursor: Any, qualified_table: str) -> dict[str, 
     files_table = _metadata_table(qualified_table, "files")
     cursor.execute(
         "SELECT count(*), coalesce(sum(file_size_in_bytes), 0), "
-        "coalesce(sum(record_count), 0) FROM "
-        + files_table
+        "coalesce(sum(record_count), 0) FROM " + files_table
     )
     files = cursor.fetchone() or (0, 0, 0)
 
@@ -257,7 +264,7 @@ class TelemetryCursor:
         query_id = query_id_from_cursor(self._workload_cursor)
         if query_id is None:
             result = _blank(None)
-            result["unavailable_reasons"] = ["missing_query_id"]
+            result[UNAVAILABLE_REASONS_KEY] = ["missing_query_id"]
         else:
             stats = getattr(self._workload_cursor, "stats", None)
             result = collect_query_metrics(

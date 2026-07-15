@@ -6,7 +6,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from weather_ingest.kma import build_kma_url, kma_page_numbers, load_kma_grids, request_params_json  # noqa: E402
+from weather_ingest.kma import (
+    build_kma_url,
+    kma_page_numbers,
+    load_kma_grids,
+    request_params_json,
+)  # noqa: E402
 
 
 def write_grid_csv(path: Path, rows: list[tuple[str, int, int]]) -> None:
@@ -33,7 +38,9 @@ def test_kma_grid_expected_count_can_be_overridden_for_custom_csv(tmp_path):
     path = tmp_path / "grids.csv"
     write_grid_csv(path, [("a", 60, 127)])
 
-    assert load_kma_grids(str(path), expected_grid_count=1) == [{"place_id": "a", "nx": 60, "ny": 127}]
+    assert load_kma_grids(str(path), expected_grid_count=1) == [
+        {"place_id": "a", "nx": 60, "ny": 127}
+    ]
 
 
 def test_kma_page_numbers_cover_total_count_over_default_page_size():
@@ -44,7 +51,9 @@ def test_kma_page_numbers_cover_total_count_over_default_page_size():
 
 
 def test_kma_request_metadata_and_url_include_explicit_page():
-    params_json = request_params_json("20260705", "1700", 56, 130, page_no=2, num_of_rows=1000)
+    params_json = request_params_json(
+        "20260705", "1700", 56, 130, page_no=2, num_of_rows=1000
+    )
 
     assert '"pageNo": "2"' in params_json
     assert '"numOfRows": "1000"' in params_json

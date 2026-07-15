@@ -39,7 +39,12 @@ def test_traffic_insert_replaces_same_retry_scope_before_append():
                 "acc_road_code": "ROAD-1",
             }
         ],
-        metadata={"result_code": "INFO-000", "result_msg": "OK", "list_total_count": 1, "row_count": 1},
+        metadata={
+            "result_code": "INFO-000",
+            "result_msg": "OK",
+            "list_total_count": 1,
+            "row_count": 1,
+        },
         request_id="request-1",
         start_index=1,
         end_index=1000,
@@ -59,9 +64,13 @@ def test_traffic_insert_replaces_same_retry_scope_before_append():
     assert audit_insert_sql.startswith(
         "INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit"
     )
-    assert delete_sql.startswith("DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident WHERE")
+    assert delete_sql.startswith(
+        "DELETE FROM iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident WHERE"
+    )
     assert f"source_id = '{SOURCE_ID}'" in delete_sql
     assert "dag_run_id = 'scheduled__2026-07-01T09:15:00+09:00'" in delete_sql
     assert "start_index = 1" in delete_sql
     assert "end_index = 1000" in delete_sql
-    assert insert_sql.startswith("INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident")
+    assert insert_sql.startswith(
+        "INSERT INTO iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident"
+    )

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import os
 import sys
+
 import pendulum
-from datetime import timedelta
 
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
@@ -14,7 +15,12 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-from weather_ingest.iceberg_maintenance import run_maintenance, _normalize_tables
+from weather_ingest.iceberg_maintenance import (  # noqa: E402
+    _normalize_tables,
+    run_maintenance,
+)
+from weather_ingest.run_manifest import MANIFEST_TABLE  # noqa: E402
+from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
 KST = "Asia/Seoul"
 
@@ -25,7 +31,7 @@ DEFAULT_PARAMS = {
         "bronze_kma_vilage_fcst",
         "bronze_seoul_traffic_incident",
         "bronze_seoul_traffic_incident_request_audit",
-        "bronze_collection_run_manifest",
+        MANIFEST_TABLE,
         "silver_kma_vilage_fcst",
         "gold_weather_forecast_summary",
         "dim_weather_place",
@@ -44,7 +50,11 @@ def _maintain(**context) -> None:
     results = run_maintenance(target=target, retention=retention, tables=tables)
     for table, status in results.items():
         print(f"[iceberg maintenance] {table}: {status}")
-    failed = [table for table, status in results.items() if status != "ok" and not status.startswith("skipped")]
+    failed = [
+        table
+        for table, status in results.items()
+        if status != "ok" and not status.startswith("skipped")
+    ]
     if failed:
         raise RuntimeError(f"Iceberg maintenance failed for: {', '.join(failed)}")
 
@@ -64,9 +74,21 @@ with DAG(
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=10)},
     params=DEFAULT_PARAMS,
-    tags=["maintenance", "ask_seoul", "iceberg", "weather", "traffic", "bronze", "silver", "gold"],
+    tags=[
+        "maintenance",
+        "ask_seoul",
+        "iceberg",
+        "weather",
+        "traffic",
+        "bronze",
+        "silver",
+        "gold",
+    ],
 ) as dag:
     PythonOperator(
         task_id="maintain",
         python_callable=_maintain,
     )
+
+
+enable_lineage_if_configured(dag)

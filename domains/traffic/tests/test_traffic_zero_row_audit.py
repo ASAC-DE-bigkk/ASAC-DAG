@@ -32,7 +32,10 @@ def test_create_bronze_table_also_creates_request_audit_table():
         schema="weather_traffic_bronze",
     )
 
-    assert qualified_table == "iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident"
+    assert (
+        qualified_table
+        == "iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident"
+    )
     assert any(
         "CREATE TABLE IF NOT EXISTS iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit"
         in statement
@@ -47,7 +50,12 @@ def test_zero_row_insert_writes_request_audit_without_incident_rows():
         cursor=cursor,
         qualified_table="iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident",
         rows=[],
-        metadata={"result_code": "INFO-000", "result_msg": "OK", "list_total_count": 0, "row_count": 0},
+        metadata={
+            "result_code": "INFO-000",
+            "result_msg": "OK",
+            "list_total_count": 0,
+            "row_count": 0,
+        },
         request_id="request-1",
         start_index=1,
         end_index=1000,
@@ -83,7 +91,12 @@ def test_reported_total_with_no_parsed_rows_fails():
             cursor=cursor,
             qualified_table="iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident",
             rows=[],
-            metadata={"result_code": "INFO-000", "result_msg": "OK", "list_total_count": 3, "row_count": 0},
+            metadata={
+                "result_code": "INFO-000",
+                "result_msg": "OK",
+                "list_total_count": 3,
+                "row_count": 0,
+            },
             request_id="request-1",
             start_index=1,
             end_index=1000,
@@ -111,7 +124,8 @@ def test_verify_zero_rows_requires_request_audit(monkeypatch):
 
     assert row_count == 0
     assert any(
-        "FROM iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit" in statement
+        "FROM iceberg_dev.weather_traffic_bronze.bronze_seoul_traffic_incident_request_audit"
+        in statement
         for statement in cursor.statements
     )
 

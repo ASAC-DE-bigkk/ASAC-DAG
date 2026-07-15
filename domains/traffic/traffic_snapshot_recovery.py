@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
-import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import PurePosixPath
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -27,43 +28,76 @@ DAGS_ROOT_DIR = os.path.dirname(DOMAINS_DIR)
 if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
-from weather.bronze_run_manifest import MANIFEST_TABLE, STATUS_SUCCESS  # noqa: E402
 from common.discord import COLOR_FAIL, COLOR_OK, first_notice_for_run, send_embed  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
-from traffic_ingest.common.runtime import sql_string, trino_cursor  # noqa: E402
+from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from traffic_dbt_failure import (  # noqa: E402
     R2RecoveryRecordSink,
     build_failure_notification,
     build_recovery_record,
     classify_dbt_failure,
     load_dbt_results,
+    silver_persisted_from_results,
 )
+import traffic_dbt_execution as traffic_dbt  # noqa: E402
+from traffic_ingest.run_manifest import RunNotPublishableError  # noqa: E402
+from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
+from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 
 
 KST = ZoneInfo("Asia/Seoul")
-TRAFFIC_SOURCE_ID = "seoul_traffic_incident"
+LOGGER = logging.getLogger(__name__)
 SNAPSHOT_TASK_ID = "validate_publishable_snapshot"
-DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
-DBT_PROJECT = "/opt/airflow/dbt/domains/traffic"
+DBT_BIN = traffic_dbt.dbt_bin()
+DBT_PROJECT = traffic_dbt.dbt_project_dir()
 DBT_FAILURE_XCOM_KEY = "traffic_dbt_failure"
 DBT_RETRY_DELAY = timedelta(minutes=2)
-RECOVERY_SILVER_MODEL_ID = "model.traffic.recovery_silver_seoul_traffic_incident"
-RECOVERY_DBT_TASK_IDS = (
-    "dbt_deps",
-    "dbt_run_recovery_silver",
-    "dbt_run_recovery_metadata",
-    "dbt_test_recovery_silver",
-    "dbt_run_recovery_gold",
-    "dbt_test_recovery_gold",
+
+
+@dataclass(frozen=True)
+class DbtPhaseSpec:
+    task_id: str
+    dbt_command: str
+    selector: str | None = None
+    recovery_silver_persisted: bool = False
+
+
+RECOVERY_DBT_PHASE_SPECS = (
+    DbtPhaseSpec("dbt_deps", "deps"),
+    DbtPhaseSpec(
+        "dbt_run_recovery_silver",
+        "run",
+        "ask_seoul_traffic_recovery_silver",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_recovery_metadata",
+        "run",
+        "ask_seoul_traffic_recovery_metadata",
+        recovery_silver_persisted=True,
+    ),
+    DbtPhaseSpec(
+        "dbt_test_recovery_silver",
+        "test",
+        "ask_seoul_traffic_recovery_silver",
+        recovery_silver_persisted=True,
+    ),
+    DbtPhaseSpec(
+        "dbt_run_recovery_gold",
+        "run",
+        "ask_seoul_traffic_recovery_gold",
+        recovery_silver_persisted=True,
+    ),
+    DbtPhaseSpec(
+        "dbt_test_recovery_gold",
+        "test",
+        "ask_seoul_traffic_recovery_gold",
+        recovery_silver_persisted=True,
+    ),
 )
+RECOVERY_DBT_TASK_IDS = tuple(spec.task_id for spec in RECOVERY_DBT_PHASE_SPECS)
 RECOVERY_ARTIFACT_TASK_IDS = tuple(
-    task_id for task_id in RECOVERY_DBT_TASK_IDS if task_id != "dbt_deps"
-)
-RECOVERY_RELATIONS = (
-    "recovery_silver_seoul_traffic_incident",
-    "recovery_traffic_snapshot_metadata",
-    "recovery_gold_traffic_incident_summary",
+    spec.task_id for spec in RECOVERY_DBT_PHASE_SPECS if spec.dbt_command != "deps"
 )
 RECOVERY_PURPOSE = "historical-snapshot-validation"
 record_traffic_problem = problem_failure_callback(domain="traffic")
@@ -90,108 +124,90 @@ def validate_publishable_snapshot(**context) -> str:
     if not snapshot_run_id:
         raise AirflowFailException("snapshot_dag_run_id is required")
 
-    cursor, catalog, schema = trino_cursor()
-    cursor.execute(
-        f"""
-        SELECT CAST(dag_run_id AS varchar)
-        FROM {catalog}.{schema}.{MANIFEST_TABLE}
-        WHERE source_id = {sql_string(TRAFFIC_SOURCE_ID)}
-          AND status = {sql_string(STATUS_SUCCESS)}
-          AND is_publishable
-          AND CAST(dag_run_id AS varchar) = {sql_string(snapshot_run_id)}
-        LIMIT 1
-        """
-    )
-    if not cursor.fetchone():
+    try:
+        return build_traffic_manifest().require_publishable(snapshot_run_id)
+    except RunNotPublishableError as exc:
         raise AirflowFailException(
             f"snapshot_dag_run_id is not publishable: {snapshot_run_id}"
-        )
-    return snapshot_run_id
-
-
-def _artifact_path(*, run_id: str | None, task_id: str | None, try_number: int | None) -> str:
-    def safe(value: str | None) -> str:
-        return "".join(char if char.isalnum() or char in "._=-" else "-" for char in value or "unknown")
-
-    return str(
-        PurePosixPath(DBT_PROJECT)
-        / "target"
-        / "traffic-snapshot-recovery"
-        / safe(run_id)
-        / safe(task_id)
-        / f"try{try_number if try_number is not None else 'unknown'}"
-        / "run_results.json"
-    )
+        ) from exc
 
 
 def recovery_silver_persisted_from_results(
-    results: Iterable[dict[str, Any]], *, default: bool
+    results: Iterable[dict[str, Any]],
+    *,
+    selected_unique_ids: Iterable[str],
+    default: bool,
 ) -> bool:
-    """Report recovery Silver persistence from one dbt artifact."""
-    for result in results:
-        if (
-            result.get("unique_id") == RECOVERY_SILVER_MODEL_ID
-            and str(result.get("status") or "").lower() in {"success", "pass"}
-        ):
-            return True
-    return default
+    """Apply the selected-model persistence contract to recovery."""
+    return silver_persisted_from_results(
+        results,
+        selected_unique_ids=selected_unique_ids,
+        default=default,
+    )
 
 
 def run_recovery_dbt_phase(
     *,
-    dbt_args: str,
+    dbt_command: str,
+    selector: str | None,
     snapshot_task_id: str,
     recovery_silver_persisted: bool,
     **context,
-) -> dict[str, str | None]:
+) -> dict[str, object]:
     """Run one recovery-only dbt phase against the preflight-validated snapshot."""
     ti = context["ti"]
     snapshot_run_id = ti.xcom_pull(task_ids=snapshot_task_id)
     run_id = context.get("run_id")
     task_id = getattr(ti, "task_id", None)
     try_number = getattr(ti, "try_number", None)
-    artifact_path = _artifact_path(run_id=run_id, task_id=task_id, try_number=try_number)
     target = (context.get("params") or {}).get("target", "dev")
-    command = [
-        DBT_BIN,
-        *shlex.split(dbt_args),
-        "--target",
-        target,
-        "--no-use-colors",
-        "--vars",
-        f'{{"traffic_snapshot_dag_run_id": "{snapshot_run_id}"}}',
-    ]
-    if shlex.split(dbt_args)[0] != "deps":
-        command.extend(["--target-path", str(PurePosixPath(artifact_path).parent)])
-    env = os.environ.copy()
-    env["DBT_PROFILES_DIR"] = DBT_PROJECT
-    env["DBT_PROJECT_DIR"] = DBT_PROJECT
-    completed = subprocess.run(
-        command,
-        cwd=DBT_PROJECT,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
+    execution = traffic_dbt.execute_dbt_phase(
+        dbt_command=dbt_command,
+        selector=selector,
+        invocation_id=task_id or dbt_command.replace(" ", "-"),
+        pipeline="traffic-snapshot-recovery",
+        run_id=run_id,
+        task_id=task_id,
+        try_number=try_number,
+        target=target,
+        variables=json.dumps({"traffic_snapshot_dag_run_id": snapshot_run_id}),
+        project_dir=DBT_PROJECT,
+        executable=DBT_BIN,
+        runner=subprocess.run,
     )
-    if completed.stdout:
-        print(completed.stdout, end="")
-    if completed.stderr:
-        print(completed.stderr, end="", file=sys.stderr)
-    if completed.returncode == 0:
+    for completed in execution.attempts:
+        if completed.stdout:
+            print(completed.stdout, end="")
+        if completed.stderr:
+            print(completed.stderr, end="", file=sys.stderr)
+    completed = execution.completed
+    missing_artifact_error = (
+        "missing expected dbt artifacts: "
+        + ", ".join(execution.missing_expected_artifacts)
+        if completed.returncode == 0 and execution.missing_expected_artifacts
+        else ""
+    )
+    if completed.returncode == 0 and not missing_artifact_error:
         return {
             "status": "success",
-            "artifact_path": (
-                None if shlex.split(dbt_args)[0] == "deps" else artifact_path
-            ),
+            "run_results_path": execution.existing_run_results_path,
+            "sources_path": execution.existing_sources_path,
+            "manifest_path": execution.existing_manifest_path,
+            "selected_unique_ids": list(execution.selected_unique_ids),
         }
 
-    results = load_dbt_results(artifact_path)
+    results = (
+        load_dbt_results(execution.existing_run_results_path)
+        if execution.existing_run_results_path
+        else []
+    )
     failure = classify_dbt_failure(
-        returncode=completed.returncode,
+        returncode=completed.returncode or 2,
         results=results,
-        artifact_path=artifact_path,
-        command_output=f"{completed.stdout}\n{completed.stderr}",
+        artifact_path=execution.primary_artifact_path,
+        command_output=(
+            f"{completed.stdout}\n{completed.stderr}\n{missing_artifact_error}"
+        ),
     )
     record = build_recovery_record(
         failure,
@@ -201,12 +217,24 @@ def run_recovery_dbt_phase(
         run_id=run_id,
         try_number=try_number if isinstance(try_number, int) else None,
         silver_persisted=recovery_silver_persisted_from_results(
-            results, default=recovery_silver_persisted
+            results,
+            selected_unique_ids=execution.selected_unique_ids,
+            default=recovery_silver_persisted,
         ),
         occurred_at=datetime.now(timezone.utc),
     )
+    record.update(
+        {
+            "dbt_run_results_path": execution.existing_run_results_path,
+            "dbt_sources_path": execution.existing_sources_path,
+            "dbt_manifest_path": execution.existing_manifest_path,
+        }
+    )
     ti.xcom_push(key=DBT_FAILURE_XCOM_KEY, value=record)
-    message = f"traffic recovery dbt {failure.classification}: artifact={artifact_path}"
+    message = (
+        f"traffic recovery dbt {failure.classification}: "
+        f"artifact={execution.primary_artifact_path or 'unknown'}"
+    )
     if failure.retryable:
         raise AirflowException(message)
     raise AirflowFailException(message)
@@ -219,7 +247,11 @@ def record_recovery_dbt_problem(context: dict[str, Any]) -> None:
         record = ti.xcom_pull(
             task_ids=getattr(ti, "task_id", None), key=DBT_FAILURE_XCOM_KEY
         )
-    except Exception:  # noqa: BLE001 - fall back to the shared Problem record
+    except Exception as exc:  # noqa: BLE001 - fall back to shared Problem record
+        LOGGER.warning(
+            "traffic recovery failure XCom lookup failed: %s",
+            type(exc).__name__,
+        )
         record = None
     if not isinstance(record, dict):
         record_traffic_problem(context)
@@ -227,8 +259,11 @@ def record_recovery_dbt_problem(context: dict[str, Any]) -> None:
 
     try:
         R2RecoveryRecordSink().write(record)
-    except Exception:  # noqa: BLE001 - a record failure must not hide the task failure
-        pass
+    except Exception as exc:  # noqa: BLE001 - preserve the original task failure
+        LOGGER.warning(
+            "traffic recovery record write failed: %s",
+            type(exc).__name__,
+        )
     try:
         if first_notice_for_run(record.get("dag_id"), record.get("run_id")):
             title, description, footer = build_failure_notification(record)
@@ -239,13 +274,19 @@ def record_recovery_dbt_problem(context: dict[str, Any]) -> None:
                 footer=footer,
                 domain="traffic",
             )
-    except Exception:  # noqa: BLE001 - a notification failure must not hide the task failure
-        pass
+    except Exception as exc:  # noqa: BLE001 - preserve the original task failure
+        LOGGER.warning(
+            "traffic recovery failure notification failed: %s",
+            type(exc).__name__,
+        )
 
 
-def _recovery_phase_evidence(ti: Any) -> tuple[dict[str, str], dict[str, str]]:
+def _recovery_phase_evidence(
+    ti: Any,
+) -> tuple[dict[str, str], dict[str, str], list[str]]:
     artifacts: dict[str, str] = {}
     statuses: dict[str, str] = {}
+    selected_relations: set[str] = set()
     for task_id in RECOVERY_DBT_TASK_IDS:
         result = ti.xcom_pull(task_ids=task_id)
         if not isinstance(result, dict) or not result.get("status"):
@@ -253,14 +294,20 @@ def _recovery_phase_evidence(ti: Any) -> tuple[dict[str, str], dict[str, str]]:
                 f"recovery dbt phase evidence is unavailable: {task_id}"
             )
         statuses[task_id] = str(result.get("status") or "unknown")
+        selected_unique_ids = result.get("selected_unique_ids") or []
+        selected_relations.update(
+            str(unique_id).rsplit(".", 1)[-1]
+            for unique_id in selected_unique_ids
+            if str(unique_id).startswith("model.")
+        )
         if task_id in RECOVERY_ARTIFACT_TASK_IDS:
-            artifact_path = result.get("artifact_path")
-            if not artifact_path:
+            run_results_path = result.get("run_results_path")
+            if not run_results_path:
                 raise AirflowFailException(
                     f"recovery dbt artifact is unavailable: {task_id}"
                 )
-            artifacts[task_id] = str(artifact_path)
-    return artifacts, statuses
+            artifacts[task_id] = str(run_results_path)
+    return artifacts, statuses, sorted(selected_relations)
 
 
 def record_recovery_completion(**context: Any) -> dict[str, Any]:
@@ -270,7 +317,7 @@ def record_recovery_completion(**context: Any) -> dict[str, Any]:
     if not snapshot_dag_run_id:
         raise AirflowFailException("validated recovery snapshot is unavailable")
 
-    artifacts, statuses = _recovery_phase_evidence(ti)
+    artifacts, statuses, recovery_relations = _recovery_phase_evidence(ti)
     record = {
         "schema_version": "v1",
         "occurred_at": datetime.now(timezone.utc).isoformat(),
@@ -282,7 +329,7 @@ def record_recovery_completion(**context: Any) -> dict[str, Any]:
         "traffic_snapshot_dag_run_id": str(snapshot_dag_run_id),
         "recovery_purpose": RECOVERY_PURPOSE,
         "recovery_status": "success",
-        "recovery_relations": list(RECOVERY_RELATIONS),
+        "recovery_relations": recovery_relations,
         "dbt_task_statuses": statuses,
         "dbt_artifacts": artifacts,
     }
@@ -293,7 +340,7 @@ def record_recovery_completion(**context: Any) -> dict[str, Any]:
             (
                 f"snapshot_dag_run_id={record['traffic_snapshot_dag_run_id']}",
                 f"purpose={RECOVERY_PURPOSE}",
-                f"relations={', '.join(RECOVERY_RELATIONS)}",
+                f"relations={', '.join(recovery_relations)}",
                 *(f"{task_id}={path}" for task_id, path in artifacts.items()),
             )
         )
@@ -307,19 +354,19 @@ def record_recovery_completion(**context: Any) -> dict[str, Any]:
     return record
 
 
-def dbt_task(
-    task_id: str, dbt_args: str, *, recovery_silver_persisted: bool = False
-) -> PythonOperator:
+def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
     return PythonOperator(
-        task_id=task_id,
+        task_id=spec.task_id,
         python_callable=run_recovery_dbt_phase,
         op_kwargs={
-            "dbt_args": dbt_args,
+            "dbt_command": spec.dbt_command,
+            "selector": spec.selector,
             "snapshot_task_id": SNAPSHOT_TASK_ID,
-            "recovery_silver_persisted": recovery_silver_persisted,
+            "recovery_silver_persisted": spec.recovery_silver_persisted,
         },
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=record_recovery_dbt_problem,
     )
 
@@ -345,53 +392,24 @@ with DAG(
         python_callable=validate_publishable_snapshot,
         on_failure_callback=record_traffic_problem,
     )
-    dbt_deps = dbt_task("dbt_deps", "deps")
-    dbt_run_recovery_silver = dbt_task(
-        "dbt_run_recovery_silver", "run --select recovery_silver_seoul_traffic_incident"
-    )
-    dbt_run_recovery_metadata = dbt_task(
-        "dbt_run_recovery_metadata",
-        "run --select recovery_traffic_snapshot_metadata",
-        recovery_silver_persisted=True,
-    )
-    dbt_test_recovery_silver = dbt_task(
-        "dbt_test_recovery_silver",
-        (
-            "test --select recovery_traffic_snapshot_metadata "
-            "recovery_silver_seoul_traffic_incident "
-            "assert_recovery_silver_traffic_snapshot_matches_bronze"
-        ),
-        recovery_silver_persisted=True,
-    )
-    dbt_run_recovery_gold = dbt_task(
-        "dbt_run_recovery_gold",
-        "run --select recovery_gold_traffic_incident_summary",
-        recovery_silver_persisted=True,
-    )
-    dbt_test_recovery_gold = dbt_task(
-        "dbt_test_recovery_gold",
-        (
-            "test --select recovery_traffic_snapshot_metadata "
-            "recovery_silver_seoul_traffic_incident "
-            "recovery_gold_traffic_incident_summary "
-            "assert_recovery_gold_traffic_counts_match_silver"
-        ),
-        recovery_silver_persisted=True,
-    )
+    recovery_dbt_tasks = {
+        spec.task_id: dbt_task(spec) for spec in RECOVERY_DBT_PHASE_SPECS
+    }
+    recovery_dbt_tasks_in_order = list(recovery_dbt_tasks.values())
     record_completion = PythonOperator(
         task_id="record_recovery_completion",
         python_callable=record_recovery_completion,
         on_failure_callback=record_traffic_problem,
     )
 
-    (
-        validate_runtime
-        >> validate_snapshot
-        >> dbt_deps
-        >> dbt_run_recovery_silver
-        >> dbt_run_recovery_metadata
-        >> dbt_test_recovery_silver
-        >> dbt_run_recovery_gold
-        >> dbt_test_recovery_gold
-        >> record_completion
-    )
+    recovery_tasks = [
+        validate_runtime,
+        validate_snapshot,
+        *recovery_dbt_tasks_in_order,
+        record_completion,
+    ]
+    for upstream, downstream in zip(recovery_tasks, recovery_tasks[1:]):
+        upstream >> downstream
+
+
+enable_lineage_if_configured(dag)
