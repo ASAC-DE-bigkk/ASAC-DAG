@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
+from urllib.parse import quote
 
 
 RUN_LEDGER_PREFIX = "traffic-run-ledger"
@@ -13,7 +13,6 @@ STATUS_STARTED = "STARTED"
 STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
 TERMINAL_STATUSES = frozenset({STATUS_SUCCESS, STATUS_FAILED})
-_UNSAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._=-]")
 
 
 class JsonStorage(Protocol):
@@ -40,7 +39,7 @@ def _as_utc_datetime(value: Any) -> datetime | None:
 
 
 def _safe_segment(value: object) -> str:
-    return _UNSAFE_SEGMENT.sub("-", str(value or "unknown"))
+    return quote(str(value or "unknown"), safe="-._~")
 
 
 def _build_r2_storage() -> JsonStorage:
@@ -130,6 +129,7 @@ class TrafficRunLedger:
                 "success": 0,
                 "failed": 0,
                 "running": 0,
+                "grace": 0,
                 "failures": [],
                 "reason": "run_ledger_bootstrapping",
             }
@@ -146,14 +146,43 @@ class TrafficRunLedger:
         )
         assert earliest is not None
         due_through = detected - timedelta(minutes=stale_after)
-        expected_slots = self._expected_slots(earliest, due_through, schedule_interval)
-        observed_slots = {
-            _as_utc_datetime(record.get("logical_date")) for record in records.values()
-        }
-
-        success = failed = running = 0
-        failures: list[dict[str, str]] = []
+        expected_slots = self._expected_slots(earliest, detected, schedule_interval)
+        records_by_slot: dict[datetime, tuple[str, dict[str, Any]]] = {}
         for run_id, record in records.items():
+            logical_date = _as_utc_datetime(record.get("logical_date"))
+            if logical_date is None:
+                continue
+            slot = self._slot_for(logical_date, schedule_interval)
+            current = records_by_slot.get(slot)
+            if current is None or (
+                _as_utc_datetime(record.get("event_at"))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            ) > (
+                _as_utc_datetime(current[1].get("event_at"))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            ):
+                records_by_slot[slot] = (run_id, record)
+
+        success = failed = running = grace = 0
+        failures: list[dict[str, str]] = []
+        for slot in sorted(expected_slots):
+            observed = records_by_slot.get(slot)
+            if observed is None:
+                if slot <= due_through:
+                    failed += 1
+                    failures.append(
+                        {
+                            "logical_date": slot.isoformat(),
+                            "run_id": f"scheduled__{slot.isoformat()}",
+                            "task_id": "unknown",
+                            "reason": "missing_run_ledger_entry",
+                        }
+                    )
+                else:
+                    grace += 1
+                continue
+
+            run_id, record = observed
             status = str(record.get("status") or "")
             logical_date = _as_utc_datetime(record.get("logical_date"))
             if logical_date is None:
@@ -175,25 +204,13 @@ class TrafficRunLedger:
                     )
                 else:
                     running += 1
-
-        for slot in expected_slots:
-            if slot in observed_slots:
-                continue
-            failed += 1
-            failures.append(
-                {
-                    "logical_date": slot.isoformat(),
-                    "run_id": f"scheduled__{slot.isoformat()}",
-                    "task_id": "unknown",
-                    "reason": "missing_run_ledger_entry",
-                }
-            )
         failures.sort(key=lambda item: (item["logical_date"], item["run_id"]))
         return {
             "expected": len(expected_slots),
             "success": success,
             "failed": failed,
             "running": running,
+            "grace": grace,
             "failures": failures,
         }
 
@@ -272,3 +289,9 @@ class TrafficRunLedger:
             slots.add(slot)
             slot += timedelta(minutes=interval_minutes)
         return slots
+
+    @staticmethod
+    def _slot_for(value: datetime, interval_minutes: int) -> datetime:
+        interval = interval_minutes * 60
+        seconds = int(value.timestamp())
+        return datetime.fromtimestamp(seconds - (seconds % interval), tz=timezone.utc)

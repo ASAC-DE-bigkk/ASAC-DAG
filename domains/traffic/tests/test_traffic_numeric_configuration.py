@@ -10,8 +10,9 @@ from airflow.sdk.exceptions import AirflowFailException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import traffic_incident_bronze as dag_module  # noqa: E402
+import traffic_ingest.manual_incident as dag_module  # noqa: E402
 import traffic_ingest.common.runtime as runtime  # noqa: E402
+import traffic_incident_bronze as scheduled_module  # noqa: E402
 from traffic_ingest.errors import TrafficBronzeConfigurationError  # noqa: E402
 
 
@@ -86,3 +87,17 @@ def test_traffic_live_load_boundary_preserves_trino_connection_failure(monkeypat
         )
 
     assert raised.value is error
+
+
+@pytest.mark.parametrize("raw_limit", ["not-an-integer", "0", "-1"])
+def test_traffic_materializer_batch_limit_rejects_invalid_configuration(
+    monkeypatch,
+    raw_limit,
+):
+    monkeypatch.setenv("ASK_SEOUL_TRAFFIC_MATERIALIZER_BATCH_SIZE", raw_limit)
+
+    with pytest.raises(
+        TrafficBronzeConfigurationError,
+        match="ASK_SEOUL_TRAFFIC_MATERIALIZER_BATCH_SIZE",
+    ):
+        scheduled_module._materializer_batch_limit()

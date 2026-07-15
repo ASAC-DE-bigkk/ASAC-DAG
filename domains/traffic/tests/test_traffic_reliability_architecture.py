@@ -32,10 +32,13 @@ OWNERS = {
         "trino_cursor",
     },
     "ledger.py": {"collect_scheduled_run_summary"},
+    "backlog.py": {"collect_materialization_backlog"},
     "report.py": {"build_traffic_reliability_report"},
     "discord.py": {
         "_scheduled_failure_time",
-        "_scheduled_failure_window",
+        "_format_failure_group",
+        "_group_scheduled_failures",
+        "_scheduled_failure_windows",
         "_discord_payload",
         "_format_bool",
         "_format_minutes",
@@ -43,6 +46,7 @@ OWNERS = {
         "_status_icon",
         "_status_label",
         "format_traffic_discord_message",
+        "scheduled_failure_identities",
         "send_discord_message",
     },
 }
@@ -51,7 +55,8 @@ ALLOWED_INTERNAL_IMPORTS = {
     "config.py": set(),
     "trino_repository.py": {"config"},
     "ledger.py": {"config"},
-    "report.py": {"config", "ledger", "trino_repository"},
+    "backlog.py": {"config"},
+    "report.py": {"backlog", "config", "ledger", "trino_repository"},
     "discord.py": {"config"},
 }
 
@@ -67,6 +72,7 @@ PUBLIC_API = {
     "SCHEDULE_ENV",
     "TRAFFIC_AUDIT_TABLE",
     "TRAFFIC_BRONZE_DAG_ID",
+    "TRAFFIC_LANDING_DAG_ID",
     "TRAFFIC_RUN_STALE_MINUTES",
     "TRAFFIC_SCHEDULE_INTERVAL_MINUTES",
     "TRAFFIC_TABLE",
@@ -84,6 +90,7 @@ PUBLIC_API = {
     "report_config",
     "report_dag_schedule",
     "send_discord_message",
+    "scheduled_failure_identities",
     "sql_identifier",
     "trino_catalog",
     "trino_cursor",

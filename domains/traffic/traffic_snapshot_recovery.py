@@ -14,8 +14,8 @@ from zoneinfo import ZoneInfo
 
 from airflow import DAG
 from airflow.exceptions import AirflowException
-from airflow.models.param import Param
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import Param
 from airflow.sdk.exceptions import AirflowFailException
 
 DOMAIN_DIR = os.path.dirname(os.path.abspath(__file__))

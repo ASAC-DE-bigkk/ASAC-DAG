@@ -148,7 +148,7 @@ def _traffic_failure_report(task_id="collect-a"):
     }
 
 
-def test_traffic_fingerprint_ignores_timestamps_and_distinguishes_failure_identity():
+def test_traffic_fingerprint_ignores_observation_timestamps_and_distinguishes_failure_identity():
     module = load_module()
     first = _traffic_failure_report()
     timestamp_only_change = copy.deepcopy(first)
@@ -156,9 +156,6 @@ def test_traffic_fingerprint_ignores_timestamps_and_distinguishes_failure_identi
     timestamp_only_change["traffic"]["freshness_minutes"] = 10
     timestamp_only_change["traffic"]["last_collected_at"] = "2026-07-14 00:10:00+00:00"
     timestamp_only_change["dag_runs"]["latest_event_at"] = "2026-07-14 00:15:00+00:00"
-    timestamp_only_change["scheduled_runs"]["failures"][0]["logical_date"] = (
-        "2026-07-14T00:10:00+00:00"
-    )
     different_failure = _traffic_failure_report("collect-b")
 
     first_fingerprint = module.notification_fingerprint(first)
@@ -179,6 +176,34 @@ def test_traffic_fingerprint_ignores_timestamps_and_distinguishes_failure_identi
         )
         is True
     )
+
+
+def test_traffic_fingerprint_is_stable_when_same_contiguous_gap_expands():
+    module = load_module()
+    first = _traffic_failure_report()
+    expanded = copy.deepcopy(first)
+    expanded["scheduled_runs"]["failed"] = 2
+    expanded["scheduled_runs"]["failures"].append(
+        {
+            "logical_date": "2026-07-14T00:05:00+00:00",
+            "run_id": "scheduled__2026-07-14T00:05:00+00:00",
+            "task_id": "collect-a",
+            "reason": "source timeout",
+        }
+    )
+    discontiguous = copy.deepcopy(expanded)
+    discontiguous["scheduled_runs"]["failed"] = 3
+    discontiguous["scheduled_runs"]["failures"].append(
+        {
+            "logical_date": "2026-07-14T00:15:00+00:00",
+            "run_id": "scheduled__2026-07-14T00:15:00+00:00",
+            "task_id": "collect-a",
+            "reason": "source timeout",
+        }
+    )
+
+    assert module.notification_fingerprint(expanded) == module.notification_fingerprint(first)
+    assert module.notification_fingerprint(discontiguous) != module.notification_fingerprint(first)
 
 
 def test_traffic_fingerprint_ignores_new_started_run_when_terminal_failure_is_unchanged():

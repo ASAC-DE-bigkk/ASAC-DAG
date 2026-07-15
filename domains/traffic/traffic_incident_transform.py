@@ -17,8 +17,8 @@ from zoneinfo import ZoneInfo
 
 from airflow import DAG
 from airflow.exceptions import AirflowException
-from airflow.models.param import Param
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import Param
 from airflow.sdk.exceptions import AirflowFailException
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
@@ -33,7 +33,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa: E402
-from common.assets import TRAFFIC_BRONZE_ASSET  # noqa: E402
+from common.assets import TRAFFIC_BRONZE_ASSET as TRAFFIC_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
@@ -48,9 +48,11 @@ from traffic_dbt_failure import (  # noqa: E402
     silver_persisted_from_results,
 )
 import traffic_dbt_execution as traffic_dbt  # noqa: E402
-from traffic_ingest.acc_info import SOURCE_ID  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
+from traffic_ingest.assets import (  # noqa: E402
+    TRAFFIC_FLOW_BRONZE_ASSET as TRAFFIC_FLOW_BRONZE_ASSET,
+)
 from traffic_ingest.transform_specs import (  # noqa: E402
     DBT_PHASE_SPECS,
     DBT_PHASE_TASK_IDS,
@@ -60,9 +62,8 @@ from traffic_ingest.transform_dag_support import (  # noqa: E402
     TRAFFIC_TRANSFORM_CRON_KST as TRAFFIC_TRANSFORM_CRON_KST,
     TransformFailurePorts,
     dbt_snapshot_variables,
-    pin_optional_flow_snapshot,
     record_classified_dbt_problem,
-    resolve_snapshot_from_asset_event,
+    resolve_transform_snapshot_pair,
     transform_schedule,
 )
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
@@ -93,22 +94,19 @@ record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
 def resolve_traffic_snapshot_run(**context) -> str:
-    """Pin the triggering incident Bronze run and optional flow snapshot."""
-    incident_run_id = resolve_snapshot_from_asset_event(
+    """Pin a non-regressing Incident/Flow snapshot pair."""
+    pair = resolve_transform_snapshot_pair(
         context=context,
-        asset_uri=TRAFFIC_BRONZE_ASSET,
-        source_id=SOURCE_ID,
-        domain=DOMAIN,
-        manifest_factory=build_traffic_manifest,
+        incident_manifest_factory=build_traffic_manifest,
+        flow_manifest_factory=build_traffic_flow_manifest,
     )
     task_instance = context.get("ti") or context.get("task_instance")
     if task_instance is not None:
-        pin_optional_flow_snapshot(
-            task_instance,
-            build_traffic_flow_manifest,
-            FLOW_SNAPSHOT_XCOM_KEY,
+        task_instance.xcom_push(
+            key=FLOW_SNAPSHOT_XCOM_KEY,
+            value=pair.flow_run_id,
         )
-    return incident_run_id
+    return pair.incident_run_id
 
 
 def run_dbt_phase(

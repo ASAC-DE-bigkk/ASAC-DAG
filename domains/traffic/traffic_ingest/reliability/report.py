@@ -7,9 +7,11 @@ from .config import (
     KST,
     TRAFFIC_AUDIT_TABLE,
     TRAFFIC_BRONZE_DAG_ID,
+    TRAFFIC_LANDING_DAG_ID,
     TRAFFIC_TABLE,
     report_config,
 )
+from .backlog import collect_materialization_backlog
 from .ledger import collect_scheduled_run_summary
 from .trino_repository import (
     _qualified,
@@ -51,7 +53,7 @@ def build_traffic_reliability_report(
         }
     try:
         scheduled_runs = collect_scheduled_run_summary(
-            TRAFFIC_BRONZE_DAG_ID,
+            TRAFFIC_LANDING_DAG_ID,
             detected_at,
             config,
         )
@@ -61,8 +63,23 @@ def build_traffic_reliability_report(
             "success": 0,
             "failed": 0,
             "running": 0,
+            "grace": 0,
             "failures": [],
             "reason": "run_ledger_query_failed",
+            "error_type": type(exc).__name__,
+        }
+    try:
+        materialization_backlog = collect_materialization_backlog(
+            detected_at,
+            config,
+        )
+    except Exception as exc:
+        materialization_backlog = {
+            "count": None,
+            "oldest_snapshot_at": None,
+            "oldest_age_minutes": None,
+            "status": "FAIL",
+            "reason": "receipt_backlog_query_failed",
             "error_type": type(exc).__name__,
         }
 
@@ -84,11 +101,14 @@ def build_traffic_reliability_report(
         or not scheduled_query_ok
         or not scheduled_failures_ok
         or not publishability_ok
+        or materialization_backlog.get("status") == "FAIL"
     ):
         status = "FAIL"
     else:
         status = str(traffic.get("status") or "FAIL")
         if status == "PASS" and scheduled_reason == "run_ledger_bootstrapping":
+            status = "WARN"
+        if status == "PASS" and materialization_backlog.get("status") == "WARN":
             status = "WARN"
 
     return {
@@ -101,6 +121,7 @@ def build_traffic_reliability_report(
         "traffic": traffic,
         "dag_runs": dag_runs,
         "scheduled_runs": scheduled_runs,
+        "materialization_backlog": materialization_backlog,
         "publishability_ok": publishability_ok,
         "late_publishability": late_publishability,
         "blast_radius": [

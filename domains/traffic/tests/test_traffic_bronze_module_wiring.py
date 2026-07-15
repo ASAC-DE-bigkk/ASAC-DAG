@@ -5,13 +5,13 @@ import sys
 from pathlib import Path
 
 import pytest
-from airflow.exceptions import AirflowSkipException
-from airflow.sdk.exceptions import AirflowFailException
+from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import traffic_incident_bronze as dag_module  # noqa: E402
+import traffic_incident_bronze as scheduled_module  # noqa: E402
+import traffic_ingest.manual_incident as dag_module  # noqa: E402
 from traffic_ingest.landing import (  # noqa: E402
     RawObjectIntegrityError,
     RunIdentity,
@@ -39,7 +39,9 @@ class Result:
 
 def test_load_bronze_task_id_has_one_entrypoint_owner():
     entrypoint_source = (
-        Path(__file__).resolve().parents[1] / "traffic_incident_bronze.py"
+        Path(__file__).resolve().parents[1]
+        / "traffic_ingest"
+        / "manual_incident.py"
     ).read_text(encoding="utf-8")
     support_source = (
         Path(__file__).resolve().parents[1] / "traffic_ingest" / "bronze_dag_support.py"
@@ -273,24 +275,103 @@ def test_publish_traffic_bronze_asset_does_not_emit_nonpublishable_event():
     assert event.extra is None
 
 
-def test_traffic_bronze_asset_is_owned_by_publish_gate_after_verification():
-    verify = dag_module.dag.get_task("verify_seoul_traffic_bronze_runtime")
-    publish = dag_module.dag.get_task("publish_traffic_bronze_asset")
+def test_traffic_bronze_scheduled_dag_is_one_heavy_receipt_materializer():
+    assert scheduled_module.dag.task_ids == [
+        "materialize_pending_traffic_incident_snapshots"
+    ]
+    materialize = scheduled_module.dag.get_task(
+        "materialize_pending_traffic_incident_snapshots"
+    )
 
-    assert verify.outlets == []
-    assert publish.outlets == [dag_module.TRAFFIC_BRONZE_ASSET_REF]
-    assert publish.task_id in verify.downstream_task_ids
+    assert materialize.pool == scheduled_module.TRINO_HEAVY_POOL
+    assert materialize.outlets == [
+        scheduled_module.TRAFFIC_INCIDENT_MATERIALIZED_ALIAS
+    ]
+    assert scheduled_module.dag.max_active_runs == 1
 
 
-def test_traffic_bronze_records_r2_lifecycle_before_validation_and_after_publish():
-    started = dag_module.dag.get_task("record_traffic_run_ledger_started")
-    validate = dag_module.dag.get_task("validate_dev_runtime")
-    publish = dag_module.dag.get_task("publish_traffic_bronze_asset")
+def test_traffic_bronze_empty_fallback_does_not_publish_or_skip(monkeypatch):
+    class Result:
+        processed_count = 0
+        snapshot_run_ids = ()
+        latest_asset_metadata = None
 
-    assert started.python_callable is dag_module.record_traffic_run_ledger_started
-    assert validate.task_id in started.downstream_task_ids
-    assert dag_module.record_seoul_traffic_run_failed is dag_module.dag.on_failure_callback
-    assert publish.python_callable is dag_module.publish_traffic_bronze_asset
+    class Materializer:
+        def run(self, **_kwargs):
+            return Result()
+
+    class Accessor:
+        def add(self, *_args, **_kwargs):
+            pytest.fail("empty fallback must not publish an Asset")
+
+    monkeypatch.setattr(
+        scheduled_module, "build_incident_materializer", lambda: Materializer()
+    )
+
+    assert scheduled_module.materialize_pending_traffic_incident_snapshots(
+        dag=Dag(),
+        run_id="scheduled__fallback",
+        outlet_events={
+            scheduled_module.TRAFFIC_INCIDENT_MATERIALIZED_ALIAS: Accessor()
+        },
+    ) == {"processed": 0, "snapshot_run_ids": []}
+
+
+def test_traffic_bronze_success_callback_acknowledges_materialized_receipts(
+    monkeypatch,
+):
+    acknowledged: list[str] = []
+
+    class Receipts:
+        def acknowledge_materialized(self, snapshot_run_id):
+            acknowledged.append(snapshot_run_id)
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            assert task_ids == scheduled_module.MATERIALIZER_TASK_ID
+            return {"snapshot_run_ids": ["snapshot-1", "snapshot-2"]}
+
+    monkeypatch.setattr(
+        scheduled_module,
+        "build_traffic_snapshot_receipts",
+        lambda: Receipts(),
+    )
+
+    assert scheduled_module.acknowledge_materialized_traffic_incident_snapshots(
+        ti=TI()
+    ) == ["snapshot-1", "snapshot-2"]
+    assert acknowledged == ["snapshot-1", "snapshot-2"]
+
+
+def test_traffic_bronze_empty_success_callback_does_not_open_receipt_storage(
+    monkeypatch,
+):
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            assert task_ids == scheduled_module.MATERIALIZER_TASK_ID
+            return {"snapshot_run_ids": []}
+
+    monkeypatch.setattr(
+        scheduled_module,
+        "build_traffic_snapshot_receipts",
+        lambda: pytest.fail("empty fallback has nothing to acknowledge"),
+    )
+
+    assert scheduled_module.acknowledge_materialized_traffic_incident_snapshots(
+        ti=TI()
+    ) == []
+
+
+def test_traffic_bronze_ack_runs_only_as_success_callback():
+    materialize = scheduled_module.dag.get_task(scheduled_module.MATERIALIZER_TASK_ID)
+    callbacks = materialize.on_success_callback
+    if not isinstance(callbacks, (list, tuple)):
+        callbacks = [callbacks]
+
+    assert (
+        scheduled_module.acknowledge_materialized_traffic_incident_snapshots
+        in callbacks
+    )
 
 
 def test_traffic_bronze_has_no_weather_runtime_dependency():

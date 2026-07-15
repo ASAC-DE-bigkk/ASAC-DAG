@@ -17,6 +17,9 @@ def test_snapshot_resolver_delegates_to_the_traffic_manifest(monkeypatch):
     calls = []
 
     class Manifest:
+        def latest_publishable_run_id(self):
+            return "traffic-run-42"
+
         def require_publishable(self, run_id):
             calls.append(run_id)
             return run_id
@@ -56,6 +59,9 @@ def test_traffic_snapshot_resolver_coalesces_older_asset_events(monkeypatch):
     coalesced = []
 
     class Manifest:
+        def latest_publishable_run_id(self):
+            return "traffic-new"
+
         def require_publishable(self, run_id):
             return run_id
 
@@ -93,6 +99,9 @@ def test_traffic_snapshot_resolver_rejects_manifest_mismatch(monkeypatch):
     module = load_transform_module()
 
     class Manifest:
+        def latest_publishable_run_id(self):
+            return "traffic-run-42"
+
         def require_publishable(self, run_id):
             raise RuntimeError(f"not publishable: {run_id}")
 
@@ -114,6 +123,101 @@ def test_traffic_snapshot_resolver_rejects_manifest_mismatch(monkeypatch):
         module.resolve_traffic_snapshot_run(
             triggering_asset_events={module.TRAFFIC_BRONZE_ASSET: [event]}
         )
+
+
+def test_flow_asset_pins_exact_incident_and_flow_pair(monkeypatch):
+    module = load_transform_module()
+    incident_calls = []
+    flow_calls = []
+    pushed = []
+
+    class IncidentManifest:
+        def latest_publishable_run_id(self):
+            return "incident-42"
+
+        def require_publishable(self, run_id):
+            incident_calls.append(run_id)
+            return run_id
+
+        def coalesce(self, *_args, **_kwargs):
+            pass
+
+    class FlowManifest:
+        def require_publishable(self, run_id):
+            flow_calls.append(run_id)
+            return run_id
+
+    monkeypatch.setattr(module, "build_traffic_manifest", lambda: IncidentManifest())
+    monkeypatch.setattr(module, "build_traffic_flow_manifest", lambda: FlowManifest())
+    flow_event = types.SimpleNamespace(
+        extra={
+            "source_id": "seoul_traffic_flow",
+            "flow_run_id": "flow-42",
+            "flow_dag_run_id": "flow-42",
+            "parent_incident_run_id": "incident-42",
+            "event_at": "2026-07-16T00:06:00+00:00",
+            "load_date": "2026-07-16",
+            "row_count": 1,
+            "payload_hash": "b" * 64,
+            "is_publishable": True,
+        }
+    )
+    ti = types.SimpleNamespace(
+        xcom_push=lambda key, value: pushed.append((key, value))
+    )
+
+    assert module.resolve_traffic_snapshot_run(
+        ti=ti,
+        triggering_asset_events={module.TRAFFIC_FLOW_BRONZE_ASSET: [flow_event]},
+    ) == "incident-42"
+    assert incident_calls == ["incident-42"]
+    assert flow_calls == ["flow-42"]
+    assert pushed == [(module.FLOW_SNAPSHOT_XCOM_KEY, "flow-42")]
+
+
+def test_stale_flow_asset_falls_forward_to_latest_incident_without_flow(monkeypatch):
+    module = load_transform_module()
+    pushed = []
+
+    class IncidentManifest:
+        def latest_publishable_run_id(self):
+            return "incident-new"
+
+        def require_publishable(self, run_id):
+            assert run_id == "incident-new"
+            return run_id
+
+        def coalesce(self, *_args, **_kwargs):
+            pass
+
+    class FlowManifest:
+        def require_publishable(self, _run_id):
+            pytest.fail("stale Flow must not be selected")
+
+    monkeypatch.setattr(module, "build_traffic_manifest", lambda: IncidentManifest())
+    monkeypatch.setattr(module, "build_traffic_flow_manifest", lambda: FlowManifest())
+    flow_event = types.SimpleNamespace(
+        extra={
+            "source_id": "seoul_traffic_flow",
+            "flow_run_id": "flow-old",
+            "flow_dag_run_id": "flow-old",
+            "parent_incident_run_id": "incident-old",
+            "event_at": "2026-07-16T00:06:00+00:00",
+            "load_date": "2026-07-16",
+            "row_count": 1,
+            "payload_hash": "b" * 64,
+            "is_publishable": True,
+        }
+    )
+    ti = types.SimpleNamespace(
+        xcom_push=lambda key, value: pushed.append((key, value))
+    )
+
+    assert module.resolve_traffic_snapshot_run(
+        ti=ti,
+        triggering_asset_events={module.TRAFFIC_FLOW_BRONZE_ASSET: [flow_event]},
+    ) == "incident-new"
+    assert pushed == [(module.FLOW_SNAPSHOT_XCOM_KEY, None)]
 
 
 def test_traffic_contract_gates_delegate_membership_to_dbt_selectors():

@@ -5,98 +5,100 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
-from airflow.sdk import Asset
 from airflow.sdk.exceptions import AirflowFailException
 
-from common.assets import TRAFFIC_BRONZE_ASSET
-from traffic_ingest.run_manifest import RunNotPublishableError
+from traffic_ingest.assets import (
+    TRAFFIC_FLOW_BRONZE_ASSET,
+    TRAFFIC_INCIDENT_BRONZE_ASSET,
+    TrafficAssetContractError,
+    flow_bronze_events,
+    incident_bronze_events,
+    schedule_asset,
+)
 
 
 TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
 
 
-def resolve_snapshot_from_asset_event(
-    *,
-    context: dict,
-    asset_uri: str,
-    source_id: str,
-    domain: str,
-    manifest_factory: Callable[[], Any],
-) -> str:
-    triggering = context.get("triggering_asset_events") or {}
-    events = []
-    for asset_key, asset_events in triggering.items():
-        key_uri = getattr(asset_key, "uri", None) or str(asset_key)
-        if key_uri == asset_uri:
-            events.extend(
-                asset_events if isinstance(asset_events, (list, tuple)) else [asset_events]
-            )
-    if not events:
-        raise AirflowFailException(
-            f"{domain} transform requires at least one triggering Bronze asset event"
-        )
+@dataclass(frozen=True)
+class SnapshotPair:
+    incident_run_id: str
+    flow_run_id: str | None = None
 
-    required = {
-        "source_id",
-        "bronze_run_id",
-        "bronze_dag_run_id",
-        "event_at",
-        "load_date",
-        "row_count",
-        "payload_hash",
-        "is_publishable",
-    }
-    metadata = []
-    for event in events:
-        extra = getattr(event, "extra", None)
-        if not isinstance(extra, dict) or not required <= extra.keys():
-            raise AirflowFailException(
-                f"{domain} Bronze asset event metadata is incomplete"
-            )
-        run_id = str(extra["bronze_dag_run_id"] or "")
-        if (
-            extra["source_id"] != source_id
-            or not run_id
-            or extra["bronze_run_id"] != run_id
-            or extra["is_publishable"] is not True
-        ):
-            raise AirflowFailException(
-                f"{domain} Bronze asset event does not identify a publishable snapshot"
-            )
-        try:
-            event_datetime = datetime.fromisoformat(
-                str(extra["event_at"]).replace("Z", "+00:00")
-            )
-        except (TypeError, ValueError) as exc:
-            raise AirflowFailException(
-                f"{domain} Bronze asset event timestamp is malformed"
-            ) from exc
-        metadata.append((extra, event_datetime))
 
-    selected, _selected_datetime = max(
-        metadata,
-        key=lambda item: (item[1], str(item[0]["bronze_dag_run_id"])),
-    )
-    run_id = str(selected["bronze_dag_run_id"])
-    manifest = manifest_factory()
-    for candidate, _candidate_datetime in metadata:
-        candidate_run_id = str(candidate["bronze_dag_run_id"])
-        if candidate_run_id != run_id:
-            manifest.coalesce(candidate_run_id, replacement_run_id=run_id)
+def _require_publishable(manifest, run_id: str, *, domain: str) -> str:
     try:
-        verified_run_id = manifest.require_publishable(run_id)
+        verified = manifest.require_publishable(run_id)
     except Exception as exc:
         raise AirflowFailException(
             f"{domain} Bronze snapshot is not publishable: {run_id}"
         ) from exc
-    if str(verified_run_id) != run_id:
+    if str(verified) != run_id:
         raise AirflowFailException(
             f"{domain} Bronze manifest identity mismatch for snapshot: {run_id}"
         )
     return run_id
+
+
+def resolve_transform_snapshot_pair(
+    *,
+    context: dict,
+    incident_manifest_factory: Callable[[], Any],
+    flow_manifest_factory: Callable[[], Any],
+) -> SnapshotPair:
+    """Select a non-regressing Incident/Flow pair from triggering Assets."""
+
+    try:
+        incident_events = incident_bronze_events(context)
+        flow_events = flow_bronze_events(context)
+    except TrafficAssetContractError as exc:
+        raise AirflowFailException(str(exc)) from exc
+    if not incident_events and not flow_events:
+        raise AirflowFailException(
+            "traffic transform requires at least one triggering Bronze asset event"
+        )
+
+    incident_manifest = incident_manifest_factory()
+    try:
+        latest_incident_run_id = str(
+            incident_manifest.latest_publishable_run_id()
+        )
+    except Exception as exc:
+        raise AirflowFailException(
+            "No publishable Traffic Incident Bronze snapshot is available"
+        ) from exc
+    _require_publishable(
+        incident_manifest,
+        latest_incident_run_id,
+        domain="traffic",
+    )
+
+    for event in incident_events:
+        candidate_run_id = str(event["bronze_dag_run_id"])
+        if candidate_run_id != latest_incident_run_id:
+            incident_manifest.coalesce(
+                candidate_run_id,
+                replacement_run_id=latest_incident_run_id,
+            )
+
+    if flow_events:
+        selected_flow = flow_events[-1]
+        parent_incident_run_id = str(selected_flow["parent_incident_run_id"])
+        if parent_incident_run_id == latest_incident_run_id:
+            flow_run_id = str(selected_flow["flow_dag_run_id"])
+            _require_publishable(
+                flow_manifest_factory(),
+                flow_run_id,
+                domain="traffic flow",
+            )
+            return SnapshotPair(
+                incident_run_id=latest_incident_run_id,
+                flow_run_id=flow_run_id,
+            )
+
+    return SnapshotPair(incident_run_id=latest_incident_run_id)
 
 
 @dataclass(frozen=True)
@@ -114,19 +116,12 @@ class TransformFailurePorts:
     logger: Any
 
 
-def transform_schedule() -> str | list[Asset] | None:
+def transform_schedule():
     if "ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE" in os.environ:
         return os.environ["ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE"] or None
-    return [Asset(TRAFFIC_BRONZE_ASSET)]
-
-
-def pin_optional_flow_snapshot(task_instance, manifest_factory: Callable, xcom_key: str) -> None:
-    """Pin the latest flow run when available without blocking incident transforms."""
-    try:
-        flow_run_id = manifest_factory().latest_publishable_run_id()
-    except RunNotPublishableError:
-        flow_run_id = None
-    task_instance.xcom_push(key=xcom_key, value=flow_run_id)
+    return schedule_asset(TRAFFIC_INCIDENT_BRONZE_ASSET) | schedule_asset(
+        TRAFFIC_FLOW_BRONZE_ASSET
+    )
 
 
 def dbt_snapshot_variables(
@@ -146,8 +141,6 @@ def dbt_snapshot_variables(
     if flow_run_id:
         variables["traffic_flow_snapshot_dag_run_id"] = flow_run_id
     return variables
-
-
 
 
 def record_classified_dbt_problem(
@@ -231,10 +224,10 @@ def record_classified_dbt_problem(
 
 __all__ = [
     "TRAFFIC_TRANSFORM_CRON_KST",
+    "SnapshotPair",
     "TransformFailurePorts",
     "dbt_snapshot_variables",
-    "pin_optional_flow_snapshot",
-    "resolve_snapshot_from_asset_event",
+    "resolve_transform_snapshot_pair",
     "record_classified_dbt_problem",
     "transform_schedule",
 ]

@@ -5,6 +5,7 @@ import os
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import Any
 
 from ..run_ledger import _as_utc_datetime
@@ -49,37 +50,108 @@ def _scheduled_failure_time(value: Any) -> str:
     return timestamp.astimezone(KST).strftime("%H:%M KST")
 
 
-def _scheduled_failure_window(
+def _group_scheduled_failures(
     failures: list[Mapping[str, Any]],
     schedule_interval_minutes: int = TRAFFIC_SCHEDULE_INTERVAL_MINUTES,
-) -> str | None:
-    """Format a KST failure window, including the final scheduled slot.
+) -> list[list[tuple[Mapping[str, Any], Any]]]:
+    try:
+        interval_minutes = max(1, int(schedule_interval_minutes))
+    except (TypeError, ValueError):
+        interval_minutes = TRAFFIC_SCHEDULE_INTERVAL_MINUTES
+    ordered = sorted(
+        (
+            (failure, timestamp)
+            for failure in failures
+            if (timestamp := _as_utc_datetime(failure.get("logical_date"))) is not None
+        ),
+        key=lambda item: item[1],
+    )
+    groups: list[list[tuple[Mapping[str, Any], Any]]] = []
+    interval = timedelta(minutes=interval_minutes)
+    for item in ordered:
+        if not groups or item[1] - groups[-1][-1][1] != interval:
+            groups.append([item])
+        else:
+            groups[-1].append(item)
+    return groups
 
-    Traffic Bronze's five-minute schedule means failures at 11:30 and 11:50
-    cover 25 minutes (20 minutes between timestamps plus the final 5-minute
-    slot). Keeping the interval as an argument makes the calculation testable
-    and allows a future schedule contract to override it without changing the
-    timestamp logic.
-    """
-    timestamps = [
-        timestamp.astimezone(KST)
-        for failure in failures
-        if (timestamp := _as_utc_datetime(failure.get("logical_date"))) is not None
-    ]
-    if not timestamps:
-        return None
-    first = min(timestamps)
-    last = max(timestamps)
+
+def _format_failure_group(
+    group: list[tuple[Mapping[str, Any], Any]],
+    schedule_interval_minutes: int,
+) -> str:
+    first = group[0][1].astimezone(KST)
+    last = group[-1][1].astimezone(KST)
     if first.date() == last.date():
         window = f"{first:%Y-%m-%d %H:%M}~{last:%H:%M} KST"
     else:
         window = f"{first:%Y-%m-%d %H:%M}~{last:%Y-%m-%d %H:%M} KST"
+    elapsed_minutes = max(0, int((last - first).total_seconds() // 60))
+    return f"{window} ({elapsed_minutes + schedule_interval_minutes}분)"
+
+
+def _scheduled_failure_windows(
+    failures: list[Mapping[str, Any]],
+    schedule_interval_minutes: int = TRAFFIC_SCHEDULE_INTERVAL_MINUTES,
+) -> list[str]:
     try:
-        interval_minutes = max(0, int(schedule_interval_minutes))
+        interval_minutes = max(1, int(schedule_interval_minutes))
     except (TypeError, ValueError):
         interval_minutes = TRAFFIC_SCHEDULE_INTERVAL_MINUTES
-    elapsed_minutes = max(0, int((last - first).total_seconds() // 60))
-    return f"{window} ({elapsed_minutes + interval_minutes}분)"
+    return [
+        _format_failure_group(group, interval_minutes)
+        for group in _group_scheduled_failures(failures, interval_minutes)
+    ]
+
+
+def scheduled_failure_identities(
+    failures: list[Mapping[str, Any]],
+    schedule_interval_minutes: int = TRAFFIC_SCHEDULE_INTERVAL_MINUTES,
+) -> list[dict[str, str]]:
+    """Return stable incident identities; extending one gap does not change it."""
+
+    try:
+        interval_minutes = max(1, int(schedule_interval_minutes))
+    except (TypeError, ValueError):
+        interval_minutes = TRAFFIC_SCHEDULE_INTERVAL_MINUTES
+    interval = timedelta(minutes=interval_minutes)
+    ordered = sorted(
+        failures,
+        key=lambda failure: (
+            _as_utc_datetime(failure.get("logical_date"))
+            or _as_utc_datetime("1970-01-01T00:00:00+00:00"),
+            str(failure.get("run_id") or ""),
+        ),
+    )
+    incidents: list[dict[str, str]] = []
+    previous_time = None
+    previous_identity = None
+    for failure in ordered:
+        timestamp = _as_utc_datetime(failure.get("logical_date"))
+        task_id = str(failure.get("task_id") or "unknown")
+        reason = str(failure.get("reason") or SCHEDULED_FAILURE_REASON_FALLBACK)
+        identity = (task_id, reason)
+        contiguous = (
+            timestamp is not None
+            and previous_time is not None
+            and timestamp - previous_time == interval
+            and identity == previous_identity
+        )
+        if not contiguous:
+            incidents.append(
+                {
+                    "window_start": (
+                        timestamp.isoformat()
+                        if timestamp is not None
+                        else f"unknown:{failure.get('run_id') or 'run'}"
+                    ),
+                    "task_id": task_id,
+                    "reason": reason,
+                }
+            )
+        previous_time = timestamp
+        previous_identity = identity
+    return incidents
 
 
 def format_traffic_discord_message(report: dict[str, Any]) -> str:
@@ -102,6 +174,8 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
     expected = scheduled_runs.get("expected")
     success = int(scheduled_runs.get("success") or 0)
     failed = int(scheduled_runs.get("failed") or 0)
+    running = int(scheduled_runs.get("running") or 0)
+    grace = int(scheduled_runs.get("grace") or 0)
     expected_text = str(expected) if expected is not None else "unknown"
     lines = [
         f"서울시 돌발정보 Bronze 신뢰성 리포트 - {detected_date} (target={target})",
@@ -134,11 +208,18 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
             f"{report.get('late_publishability', {}).get('status', 'NOT_EVALUATED')} "
             f"({report.get('late_publishability', {}).get('reason', 'unknown')})"
         ),
-        f"{_icon(scheduled_ok)} 스케줄 수집 상태: {success}/{expected_text} 성공, {failed} 실패",
+        (
+            f"{_icon(scheduled_ok)} 스케줄 수집 상태: {success}/{expected_text} 성공, "
+            f"{failed} 실패, {running} 실행중, {grace} grace"
+        ),
     ]
-    failure_window = _scheduled_failure_window(list(scheduled_runs.get("failures") or []))
-    if failure_window:
-        lines.extend([f"실패 수집 공백: {failure_window}", "실패 내역:"])
+    failure_windows = _scheduled_failure_windows(
+        list(scheduled_runs.get("failures") or [])
+    )
+    if failure_windows:
+        lines.append("실패 수집 공백:")
+        lines.extend(f"- {window}" for window in failure_windows)
+        lines.append("실패 내역:")
         for failure in scheduled_runs.get("failures") or []:
             time_text = _scheduled_failure_time(failure.get("logical_date"))
             task_id = str(failure.get("task_id") or "unknown")
@@ -152,6 +233,13 @@ def format_traffic_discord_message(report: dict[str, Any]) -> str:
             f"스케줄 수집 상태 조회 실패: {scheduled_runs.get('reason')}"
             f" (error_type={scheduled_runs.get('error_type', 'unknown')})"
         )
+    backlog = report.get("materialization_backlog") or {}
+    lines.append(
+        "Materialization backlog: "
+        f"count={backlog.get('count', 'unknown')} "
+        f"oldest_age={_format_minutes(backlog.get('oldest_age_minutes'))} "
+        f"status={backlog.get('status', 'FAIL')}"
+    )
     lines.extend(
         [
             "",

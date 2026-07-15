@@ -64,6 +64,12 @@ def test_traffic_report_fails_and_describes_failed_scheduled_runs(monkeypatch):
                     "reason": "TrinoConnectionError: trino DNS 이름 해석 실패",
                 },
                 {
+                    "logical_date": datetime(2026, 7, 12, 2, 35, tzinfo=timezone.utc),
+                    "run_id": "scheduled__2026-07-12T02:35:00+00:00",
+                    "task_id": "record_seoul_traffic_run_started",
+                    "reason": "TrinoConnectionError: trino DNS 이름 해석 실패",
+                },
+                {
                     "logical_date": datetime(2026, 7, 12, 2, 50, tzinfo=timezone.utc),
                     "run_id": "scheduled__2026-07-12T02:50:00+00:00",
                     "task_id": "record_seoul_traffic_run_started",
@@ -87,7 +93,10 @@ def test_traffic_report_fails_and_describes_failed_scheduled_runs(monkeypatch):
     assert result["status"] == "FAIL"
     assert result["scheduled_runs"]["failed"] == 5
     assert "스케줄 수집 상태: 283/288 성공, 5 실패" in message
-    assert "실패 수집 공백: 2026-07-12 11:30~11:50 KST (25분)" in message
+    assert "실패 수집 공백:" in message
+    assert "2026-07-12 11:30~11:35 KST (10분)" in message
+    assert "2026-07-12 11:50~11:50 KST (5분)" in message
+    assert "11:30~11:50 KST (25분)" not in message
     assert "11:30 KST | task=record_seoul_traffic_run_started" in message
     assert "TrinoConnectionError" in message
 

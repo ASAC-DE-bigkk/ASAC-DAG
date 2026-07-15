@@ -5,22 +5,25 @@
 
 ## 가장 먼저 읽을 파일
 
-1. 수집 흐름: `traffic_incident_bronze.py`
-2. 변환 흐름과 dbt tag: `traffic_incident_transform.py`
-3. landing 계약: `traffic_ingest/landing.py`
-4. 수집 manifest 계약: `traffic_ingest/run_manifest.py`
-5. dbt 실행·artifact 계약: `traffic_dbt_execution.py`
-6. 원천 의미: `docs/source.md`
-7. 상세 Bronze 배경: `docs/bronze-pipeline-reference.md`
+1. 현재 아키텍처 결정: `docs/superpowers/specs/2026-07-16-traffic-landing-materialization-design.md`
+2. 5분 raw 수집: `traffic_incident_landing.py`
+3. receipt 기반 Bronze 적재: `traffic_incident_bronze.py`
+4. exact-parent Flow 적재: `traffic_flow_bronze.py`
+5. Asset 기반 변환: `traffic_incident_transform.py`
+6. durable queue 계약: `traffic_ingest/snapshot_receipt.py`
+7. 원천 의미: `docs/source.md`
 
 ## DAG entrypoints
 
 | 파일 | 책임 |
 |---|---|
-| `traffic_incident_bronze.py` | TOPIS 수집, raw checkpoint, Bronze 적재·검증, run manifest 상태 전이를 조율한다. |
-| `traffic_incident_transform.py` | 최신 publishable Bronze run을 고정하고 root dbt project의 Traffic tag를 순서대로 실행한다. |
+| `traffic_incident_landing.py` | 5분마다 TOPIS 원본을 R2에 저장하고 `LANDED` receipt와 raw Asset을 발행한다. Trino를 사용하지 않는다. |
+| `traffic_incident_bronze.py` | raw Asset 또는 15분 fallback으로 pending receipt를 순서대로 Iceberg Bronze에 적재한다. 단일 `trino_heavy` task다. |
+| `traffic_incident_manual.py` | 운영 스케줄과 분리된 수동 recollect/backfill DAG 두 개를 노출한다. |
+| `traffic_flow_bronze.py` | Incident Bronze Asset의 정확한 parent run을 기준으로 TrafficInfo를 수집·적재한다. |
+| `traffic_incident_transform.py` | Incident 또는 Flow Bronze Asset을 받아 non-regressing snapshot pair를 고정하고 dbt selector를 순서대로 실행한다. |
 | `traffic_snapshot_recovery.py` | 특정 publishable snapshot을 격리된 recovery relation으로 검증하는 dev 전용 수동 DAG다. |
-| `traffic_reliability_report.py` | Bronze·manifest·Airflow 실패 증거를 읽어 Discord 신뢰성 리포트를 보낸다. |
+| `traffic_reliability_report.py` | landing ledger·receipt backlog·Bronze manifest를 읽어 Discord 신뢰성 리포트를 보낸다. |
 
 `traffic_snapshot_recovery`는 `snapshot_dag_run_id`를 입력받아
 `recovery_silver_seoul_traffic_incident`부터 검증하며 canonical Silver/Gold relation은 쓰지 않는다.
@@ -33,28 +36,44 @@ DAG entrypoint는 순서와 Airflow wiring만 소유한다. 도메인 로직은 
 |---|---|
 | `traffic_ingest/acc_info.py` | TOPIS request/response 파싱과 source-native 필드 |
 | `traffic_ingest/landing.py` | pagination, page checkpoint, complete marker, raw object 계약 |
+| `traffic_ingest/assets.py` | Incident raw/Bronze와 Flow Bronze Asset URI, metadata 검증, Airflow 2/3 schedule adapter |
+| `traffic_ingest/snapshot_receipt.py` | R2 `LANDED`/`MATERIALIZED` terminal receipt와 pending index |
+| `traffic_ingest/incident_pipeline.py` | Airflow와 분리된 Incident landing/materialization lifecycle |
+| `traffic_ingest/flow_pipeline.py` | exact-parent Flow landing/materialization과 stale Asset 억제 |
 | `traffic_ingest/runtime.py` | HTTP·R2 adapter와 landing/manifest 조립 |
 | `traffic_ingest/bronze.py` | Traffic Iceberg Bronze DDL, MERGE/검증 SQL |
 | `traffic_ingest/run_manifest.py` | STARTED/SUCCESS/FAILED와 publishability 기록 |
+| `traffic_ingest/run_ledger.py` | 5분 landing slot의 STARTED/SUCCESS/FAILED 증거 |
 | `traffic_dbt_execution.py` | root dbt 실행, attempt 격리, artifact 보존, 선택 방식 |
 | `traffic_dbt_failure.py` | dbt 실패 분류와 안전한 진단 정보 |
 | `traffic_lineage.py` | 명시적 opt-in일 때만 DAG OpenLineage selective enable |
 | `traffic_ingest/reliability_report.py` | 기존 import를 보존하는 compatibility facade |
 | `traffic_ingest/reliability/config.py` | 환경설정, identifier, 상수 |
 | `traffic_ingest/reliability/trino_repository.py` | Bronze·manifest read-only 요약 |
-| `traffic_ingest/reliability/airflow_evidence.py` | scheduled run·R2 Problem 증거와 redaction |
+| `traffic_ingest/reliability/ledger.py` | landing slot invariant와 연속 실패 구간 |
+| `traffic_ingest/reliability/backlog.py` | pending receipt 수와 oldest age |
 | `traffic_ingest/reliability/report.py` | 최종 상태와 report dict 조립 |
 | `traffic_ingest/reliability/discord.py` | 메시지 formatting과 webhook transport |
 
 ## 핵심 실행 흐름
 
 ```text
-Bronze DAG -> TrafficLanding -> R2 raw/checkpoint -> Bronze MERGE/verify
-           -> TrafficRunManifest SUCCESS + is_publishable
-Transform DAG -> publishable dag_run_id 고정 -> dbt tag run/test
-              -> invocation 전용 manifest.json/run_results.json -> lineage/metrics
-Reliability DAG -> Trino + Airflow/R2 evidence -> report -> Discord
+Landing (5m, 1 task) -> R2 raw/checkpoint -> LANDED receipt -> raw Asset
+Incident Bronze (1 task) -> pending receipt drain -> MERGE/verify
+                         -> MATERIALIZED receipt -> Incident Bronze Asset
+                         -> task success callback에서 pending ack
+Flow Bronze (2 tasks) -> exact Incident parent -> R2 raw -> MERGE/verify
+                      -> parent가 여전히 최신일 때만 Flow Bronze Asset
+Transform -> Incident OR Flow Asset -> 최신 Incident + exact Flow pair 고정
+          -> dbt run/test -> invocation 전용 artifacts -> lineage/metrics
+Reliability -> landing slot + receipt backlog + Bronze manifest -> Discord
 ```
+
+Materializer의 빈 fallback 실행은 성공으로 끝나지만 Asset을 발행하지 않는다. 따라서
+의도적인 `skipped` terminal task나 `all_done`/`one_failed` 보조 task 없이도 DAG 상태와
+데이터 발행 여부가 분리된다. 한 task의 실패가 곧 해당 lifecycle의 실패다.
+pending ack는 Asset을 담은 task 성공 메시지가 Airflow supervisor에 수락된 뒤에만 수행한다.
+그 사이 실패하면 pending이 남아 다음 Asset/fallback run에서 at-least-once로 재처리된다.
 
 ## dbt 선택·manifest·lineage
 
@@ -70,7 +89,9 @@ Reliability DAG -> Trino + Airflow/R2 evidence -> report -> Discord
 ## 변경 시작점
 
 - API·pagination·checkpoint: `traffic_ingest/landing.py`, `traffic_ingest/acc_info.py`
-- Bronze schema·적재: `traffic_ingest/bronze.py`
+- DAG 간 전달·재처리: `traffic_ingest/snapshot_receipt.py`, `traffic_ingest/assets.py`
+- Bronze schema·적재: `traffic_ingest/bronze.py`, `traffic_ingest/incident_pipeline.py`
+- Flow parent 계약: `traffic_ingest/flow_pipeline.py`
 - 수집 정합성·publishability: `traffic_ingest/run_manifest.py`
 - dbt tag/실행/artifact: `traffic_incident_transform.py`, `traffic_dbt_execution.py`
 - 알림·신뢰성: `traffic_ingest/reliability/`
