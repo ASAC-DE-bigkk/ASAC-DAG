@@ -1,5 +1,7 @@
 # Weather W2 과거 Observation 복구 설계
 
+> 상태(2026-07-15): 이 문서는 최초 구현 이력이다. 현재 DAG는 직접 `subprocess`/model 목록 대신 `weather_ingest.w2_recovery`의 named-selector phase plan과 공통 `weather_dbt_execution` Module을 사용한다. 6시간 window, 4개 lineage bucket, checkpoint 의미는 유지된다.
+
 ## 목표
 
 #196에서 확인된 KMA publishable manifest 91개의 Observation 누락을 `iceberg_dev.weather`에서 안전하게 복구하고, 같은 유형의 누락을 수동 재실행 가능한 Airflow recovery DAG로 수렴시킨다.

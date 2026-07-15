@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import json
 from typing import Any
 
 
@@ -13,6 +12,7 @@ MAX_WINDOW = timedelta(hours=6) - timedelta(microseconds=1)
 LEGACY_MAX_WINDOW = timedelta(days=1) - timedelta(microseconds=1)
 BRIDGE_VERSION = "weather_admin_dong_grid_bridge_v1"
 CANONICAL_REVISION_DATE = "2025-04-01"
+LINEAGE_RUN_BUCKET_COUNT = 4
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,62 @@ class RepairWindow:
     @property
     def duration_microseconds(self) -> int:
         return int((self.cutoff_at - self.start_at).total_seconds() * 1_000_000) + 1
+
+
+@dataclass(frozen=True, slots=True)
+class DbtPhase:
+    command: str
+    selector: str | None
+    invocation_id: str
+
+
+_PREPARATION_PHASES = (
+    DbtPhase("deps", None, "prepare-dependencies"),
+    DbtPhase("seed", "ask_seoul_weather_w1_inputs", "prepare-w1-inputs"),
+    DbtPhase(
+        "run",
+        "ask_seoul_weather_transform_common_admin",
+        "prepare-common-admin",
+    ),
+    DbtPhase("run", "ask_seoul_weather_w1_bridge", "prepare-w1-bridge"),
+    DbtPhase("test", "ask_seoul_weather_w1_bridge", "prepare-w1-contract"),
+)
+
+
+def preparation_phase_plan() -> tuple[DbtPhase, ...]:
+    return _PREPARATION_PHASES
+
+
+def window_phase_plan(window_index: int) -> tuple[DbtPhase, ...]:
+    invocation_prefix = f"window-{window_index:04d}"
+    return (
+        DbtPhase(
+            "run",
+            "ask_seoul_weather_w2_recovery_window_models",
+            f"{invocation_prefix}-models",
+        ),
+        DbtPhase(
+            "test",
+            "ask_seoul_weather_w2_recovery_window_contracts",
+            f"{invocation_prefix}-contracts",
+        ),
+    )
+
+
+def lineage_phase(window_index: int, bucket_index: int) -> DbtPhase:
+    return DbtPhase(
+        "test",
+        "ask_seoul_weather_w2_recovery_lineage_contract",
+        f"window-{window_index:04d}-lineage-{bucket_index}",
+    )
+
+
+def final_phase() -> DbtPhase:
+    return DbtPhase(
+        "test",
+        "ask_seoul_weather_w2_recovery_final_contract",
+        "final-contract",
+    )
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -59,16 +115,14 @@ def select_windows_with_publishable_anchors(
     windows: list[RepairWindow], anchor_window_indexes: set[int]
 ) -> list[RepairWindow]:
     invalid_indexes = sorted(
-        index
-        for index in anchor_window_indexes
-        if index < 0 or index >= len(windows)
+        index for index in anchor_window_indexes if index < 0 or index >= len(windows)
     )
     if invalid_indexes:
-        raise ValueError(f"anchor query returned unknown repair window indexes: {invalid_indexes}")
+        raise ValueError(
+            f"anchor query returned unknown repair window indexes: {invalid_indexes}"
+        )
     return [
-        window
-        for index, window in enumerate(windows)
-        if index in anchor_window_indexes
+        window for index, window in enumerate(windows) if index in anchor_window_indexes
     ]
 
 
@@ -96,22 +150,6 @@ def preparation_dbt_vars(
         ),
     )
     return window_dbt_vars(preparation_window)
-
-
-def dbt_cli_options(
-    command: str, *, target: str, variables: dict[str, str]
-) -> tuple[str, ...]:
-    options = ["--target", target]
-    if command in {"seed", "run", "test"}:
-        options.extend(["--threads", "1"])
-    options.extend(
-        [
-            "--vars",
-            json.dumps(variables, separators=(",", ":")),
-            "--no-use-colors",
-        ]
-    )
-    return tuple(options)
 
 
 def _range_payload(windows: list[RepairWindow]) -> dict[str, str]:
@@ -146,14 +184,18 @@ def _parse_window_label(label: str) -> RepairWindow:
     )
 
 
-def completed_window_labels(payload: dict[str, Any] | None, windows: list[RepairWindow]) -> set[str]:
+def completed_window_labels(
+    payload: dict[str, Any] | None, windows: list[RepairWindow]
+) -> set[str]:
     if not payload:
         return set()
     expected_range = _range_payload(windows)
     if payload.get("range") != expected_range:
         raise ValueError("checkpoint range does not match requested repair range")
     completed = payload.get("completed_windows") or []
-    if not isinstance(completed, list) or not all(isinstance(label, str) for label in completed):
+    if not isinstance(completed, list) or not all(
+        isinstance(label, str) for label in completed
+    ):
         raise ValueError("checkpoint completed_windows must be a list of labels")
     range_start = windows[0].start_at
     range_cutoff = windows[-1].cutoff_at

@@ -116,14 +116,16 @@ def test_cost_proxy_contains_only_the_primary_weather_and_traffic_models():
     assert (
         benchmark.CASES["traffic_gold"]["snapshot_var"] == "traffic_snapshot_dag_run_id"
     )
-    assert benchmark.DBT_PROJECT == "/opt/airflow/dbt"
+    assert benchmark.DBT_PROJECT == "/opt/airflow/dbt/domains/traffic_weather"
     assert all("model" in case for case in benchmark.CASES.values())
     assert all("report" not in case for case in benchmark.CASES.values())
     assert all("project" not in case for case in benchmark.CASES.values())
     assert (
-        benchmark._dbt_project_dir({"ASK_SEOUL_DBT_PROJECT_DIR": "/tmp/root-dbt"})
+        benchmark.dbt_project_dir({"ASK_SEOUL_DBT_PROJECT_DIR": "/tmp/root-dbt"})
         == "/tmp/root-dbt"
     )
+    assert not hasattr(benchmark, "DEFAULT_DBT_PROJECT")
+    assert not hasattr(benchmark, "DBT_PROJECT_ENV")
 
 
 def test_benchmark_case_registry_has_one_deeply_immutable_owner():

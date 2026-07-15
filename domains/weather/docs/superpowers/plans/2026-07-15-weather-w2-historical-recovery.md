@@ -1,5 +1,7 @@
 # Weather W2 과거 Observation 복구 구현 계획
 
+> 상태(2026-07-15): 이 문서는 최초 구현 이력이다. 현재 DAG는 직접 `subprocess`/model 목록 대신 `weather_ingest.w2_recovery`의 named-selector phase plan과 공통 `weather_dbt_execution` Module을 사용한다. 6시간 window, 4개 lineage bucket, checkpoint 의미는 유지된다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:test-driven-development and execute every RED/GREEN checkpoint in order. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** #196의 91개 과거 Observation 누락을 6시간 이하의 직렬 W2 repair로 복구하고 재개 가능한 manual Airflow DAG를 제공한다.

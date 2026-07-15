@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
-import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
+from airflow.exceptions import AirflowException, AirflowFailException
 from airflow.models.param import Param
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Variable
@@ -25,72 +26,39 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from common.security import redact, sanitize_log_value  # noqa: E402
 from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from weather_ingest.common.runtime import trino_cursor  # noqa: E402
+from weather_ingest.run_manifest import (  # noqa: E402
+    MANIFEST_TABLE,
+    SOURCE_ID as KMA_SOURCE_ID,
+)
 from weather_ingest.w2_recovery import (  # noqa: E402
+    DbtPhase,
+    LINEAGE_RUN_BUCKET_COUNT,
     checkpoint_payload,
     completed_window_labels,
-    dbt_cli_options,
+    final_phase,
     format_timestamp,
+    lineage_phase,
     preparation_dbt_vars,
+    preparation_phase_plan,
     select_windows_with_publishable_anchors,
     split_repair_windows,
+    window_phase_plan,
     window_dbt_vars,
 )
+import weather_dbt_execution as weather_dbt  # noqa: E402
+from weather_dbt_failure import classify_weather_dbt_failure  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 DAG_ID = "weather_w2_observation_recovery"
-DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
-DBT_PROJECT = "/opt/airflow/dbt/domains/weather"
+DBT_PIPELINE = "weather-w2-observation-recovery"
+DBT_RETRY_DELAY = timedelta(minutes=2)
 CHECKPOINT_PREFIX = "ask_seoul.weather.w2_observation_recovery"
 CHECKPOINT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
-KMA_SOURCE_ID = "kma_vilage_fcst"
-MANIFEST_TABLE = "bronze_collection_run_manifest"
-LINEAGE_RUN_BUCKET_COUNT = 4
-
-PREPARE_DBT_ARGS = (
-    ("deps",),
-    (
-        "seed",
-        "--select",
-        "asac_axes weather_place_grid_mapping weather_admin_dong_grid_bridge_history",
-    ),
-    ("run", "--select", "asac_axes.dim_admin_dong"),
-    ("run", "--select", "bridge_weather_admin_dong_grid"),
-    (
-        "test",
-        "--select",
-        "assert_weather_bridge_candidate_grain_unique "
-        "assert_weather_bridge_canonical_stamp_exact "
-        "assert_weather_bridge_legacy_mapping_reconciles "
-        "assert_weather_bridge_temporal_evidence "
-        "assert_weather_bridge_validity_non_overlapping",
-    ),
-)
-WINDOW_DBT_ARGS = (
-    ("run", "--select", "silver_kma_vilage_fcst_observation"),
-    ("run", "--select", "silver_kma_vilage_fcst_grid"),
-    ("run", "--select", "gold_weather_forecast_by_admin_dong"),
-    ("run", "--select", "weather_w2_observation_recovery_lineage_workset"),
-    (
-        "test",
-        "--select",
-        "assert_gold_weather_forecast_by_admin_dong_repair_reconciles "
-        "assert_gold_weather_forecast_by_admin_dong_repair_window_no_extra_rows",
-    ),
-)
-LINEAGE_DBT_ARGS = (
-    "test",
-    "--select",
-    "assert_gold_weather_forecast_by_admin_dong_repair_window_lineage",
-)
-FINAL_DBT_ARGS = (
-    "test",
-    "--select",
-    "assert_weather_observation_publishable_and_counts_reconcile",
-)
 DEFAULT_PARAMS = {
     "target": Param(
         default="dev",
@@ -119,24 +87,64 @@ record_weather_problem = problem_failure_callback(domain="weather")
 
 def checkpoint_variable_name(checkpoint_id: str) -> str:
     if not CHECKPOINT_ID_PATTERN.fullmatch(checkpoint_id):
-        raise ValueError("checkpoint_id must be 1-80 letters, numbers, dot, dash, or underscore")
+        raise ValueError(
+            "checkpoint_id must be 1-80 letters, numbers, dot, dash, or underscore"
+        )
     return f"{CHECKPOINT_PREFIX}.{checkpoint_id}"
 
 
-def dbt_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment.update({"DBT_PROJECT_DIR": DBT_PROJECT, "DBT_PROFILES_DIR": DBT_PROJECT})
-    return environment
+def _safe_execution_output(execution) -> str:
+    return "\n".join(
+        str(redact(value))
+        for attempt in execution.attempts
+        for value in (attempt.stdout, attempt.stderr)
+        if value
+    )
 
 
-def run_dbt(args: tuple[str, ...], *, target: str, variables: dict[str, str]) -> None:
-    command = [
-        DBT_BIN,
-        *args,
-        *dbt_cli_options(args[0], target=target, variables=variables),
-    ]
-    LOGGER.info("[weather-w2-recovery] dbt command=%s", " ".join(command[:-3]))
-    subprocess.run(command, cwd=DBT_PROJECT, env=dbt_environment(), check=True)
+def execute_recovery_phase(
+    phase: DbtPhase,
+    *,
+    target: str,
+    variables: dict[str, str],
+    context: dict[str, object],
+) -> None:
+    ti = context.get("ti")
+    execution = weather_dbt.execute_dbt_phase(
+        dbt_command=phase.command,
+        selector=phase.selector,
+        threads=1,
+        invocation_id=phase.invocation_id,
+        pipeline=DBT_PIPELINE,
+        run_id=context.get("run_id"),
+        task_id=getattr(ti, "task_id", None),
+        try_number=getattr(ti, "try_number", None),
+        target=target,
+        variables=json.dumps(variables, separators=(",", ":")),
+    )
+    safe_output = _safe_execution_output(execution)
+    if safe_output:
+        LOGGER.info(
+            "[weather-w2-recovery] dbt output=%s",
+            sanitize_log_value(safe_output, max_len=16_000),
+        )
+    completed = execution.completed
+    if completed.returncode == 0 and not execution.missing_expected_artifacts:
+        return
+
+    failure = classify_weather_dbt_failure(
+        dbt_command=phase.command,
+        returncode=int(completed.returncode),
+        artifact_path=execution.existing_run_results_path,
+        missing_expected_artifacts=execution.missing_expected_artifacts,
+        command_output=safe_output,
+    )
+    exception_type = AirflowException if failure.retryable else AirflowFailException
+    raise exception_type(
+        "weather W2 recovery dbt phase failed: "
+        f"classification={failure.classification}; "
+        f"exit_code={completed.returncode}"
+    )
 
 
 def _checkpoint_for_windows(variable_name: str, windows) -> set[str]:
@@ -233,28 +241,50 @@ def recover_observation_windows(**context) -> dict[str, object]:
     preparation_variables = preparation_dbt_vars(
         selected_windows[0], selected_windows[-1]
     )
-    for args in PREPARE_DBT_ARGS:
-        run_dbt(args, target=target, variables=preparation_variables)
+    for phase in preparation_phase_plan():
+        execute_recovery_phase(
+            phase,
+            target=target,
+            variables=preparation_variables,
+            context=context,
+        )
 
+    window_indexes = {window.label: index for index, window in enumerate(windows)}
     for window in selected_windows:
         if window.label in completed:
             LOGGER.info("[weather-w2-recovery] checkpoint skip window=%s", window.label)
             continue
+        window_index = window_indexes[window.label]
         variables = window_dbt_vars(window)
         LOGGER.info("[weather-w2-recovery] recover window=%s", window.label)
-        for args in WINDOW_DBT_ARGS:
-            run_dbt(args, target=target, variables=variables)
+        for phase in window_phase_plan(window_index):
+            execute_recovery_phase(
+                phase,
+                target=target,
+                variables=variables,
+                context=context,
+            )
         for lineage_bucket_index in range(LINEAGE_RUN_BUCKET_COUNT):
             lineage_variables = {
                 **variables,
                 "weather_w2_lineage_run_bucket_count": str(LINEAGE_RUN_BUCKET_COUNT),
                 "weather_w2_lineage_run_bucket_index": str(lineage_bucket_index),
             }
-            run_dbt(LINEAGE_DBT_ARGS, target=target, variables=lineage_variables)
+            execute_recovery_phase(
+                lineage_phase(window_index, lineage_bucket_index),
+                target=target,
+                variables=lineage_variables,
+                context=context,
+            )
         completed.add(window.label)
         _save_checkpoint(variable_name, windows, completed)
 
-    run_dbt(FINAL_DBT_ARGS, target=target, variables=preparation_variables)
+    execute_recovery_phase(
+        final_phase(),
+        target=target,
+        variables=preparation_variables,
+        context=context,
+    )
     return {
         "checkpoint_variable": variable_name,
         "completed_windows": len(
@@ -288,6 +318,8 @@ with DAG(
         python_callable=recover_observation_windows,
         pool=TRINO_HEAVY_POOL,
         pool_slots=1,
+        retries=1,
+        retry_delay=DBT_RETRY_DELAY,
         on_failure_callback=record_weather_problem,
     )
 

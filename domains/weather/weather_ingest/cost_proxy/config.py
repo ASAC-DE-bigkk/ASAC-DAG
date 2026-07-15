@@ -8,19 +8,12 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from weather_ingest._dbt_execution.contracts import dbt_project_dir
 from weather_ingest.run_manifest import MANIFEST_TABLE
 
 
-DEFAULT_DBT_PROJECT = "/opt/airflow/dbt"
-DBT_PROJECT_ENV = "ASK_SEOUL_DBT_PROJECT_DIR"
 DBT_BIN = os.environ.get("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
-
-
-def _dbt_project_dir(env: Mapping[str, str] = os.environ) -> str:
-    return (env.get(DBT_PROJECT_ENV) or DEFAULT_DBT_PROJECT).strip()
-
-
-DBT_PROJECT = _dbt_project_dir()
+DBT_PROJECT = dbt_project_dir()
 MIN_REPEAT = 3
 EXECUTION_FINGERPRINT_KEY = "execution_fingerprint"
 WEATHER_SOURCE_TABLES = ("bronze_kma_vilage_fcst", MANIFEST_TABLE)

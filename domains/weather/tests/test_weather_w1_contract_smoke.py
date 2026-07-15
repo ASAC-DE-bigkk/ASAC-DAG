@@ -268,7 +268,7 @@ def test_smoke_dag_runs_bridge_contract_then_always_cleans_up():
         "ask_seoul_weather_w1_bridge",
     }
 
-    assert module.DBT_PROJECT == "/opt/airflow/dbt"
+    assert module.DBT_PROJECT == "/opt/airflow/dbt/domains/traffic_weather"
     assert not hasattr(module, "dbt_smoke_command")
 
 

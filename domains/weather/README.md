@@ -76,9 +76,9 @@ Reliability DAG -> Trino Bronze/manifest summary -> report -> Discord
 
 ## dbt 선택·manifest·lineage
 
-- 활성 dbt project는 root monoproject `${ASK_SEOUL_DBT_PROJECT_DIR:-/opt/airflow/dbt}`다.
-- 도메인별 하위 dbt project를 따로 실행하지 않고 root project 하나만 사용한다.
-- DAG는 모델명을 나열하지 않고 `weather_vilage_fcst_transform.py`의 `tag:ask_seoul_weather_*` 선택자를 호출한다.
+- 활성 dbt project는 Weather/Traffic monoproject `${ASK_SEOUL_DBT_PROJECT_DIR:-/opt/airflow/dbt/domains/traffic_weather}`다.
+- Weather와 Traffic을 별도 dbt project로 실행하지 않고 이 project의 단일 manifest를 사용한다.
+- DAG는 모델명·path·tag를 나열하지 않고 `selectors.yml`의 named selector만 공통 dbt 실행 Module에 전달한다.
 - artifact는 `target/<pipeline>/<run_id>/<task_id>/try<n>/execution/` 아래에 invocation별로 둔다.
 - 해당 invocation의 `manifest.json`, `run_results.json`, 필요 시 `sources.json`만 읽는다.
 - Airflow DAG lineage는 `weather_lineage.py`, dbt OpenLineage 실행은 `weather_dbt_execution.py`가 소유한다.

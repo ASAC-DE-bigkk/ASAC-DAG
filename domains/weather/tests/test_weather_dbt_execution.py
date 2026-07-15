@@ -13,7 +13,14 @@ from weather_dbt_execution_test_support import (
 )
 
 
-def test_weather_execution_uses_root_project_env_override(monkeypatch):
+def test_weather_execution_defaults_to_traffic_weather_monoproject(monkeypatch):
+    monkeypatch.delenv("ASK_SEOUL_DBT_PROJECT_DIR", raising=False)
+    module = load_execution_module()
+
+    assert module.dbt_project_dir() == "/opt/airflow/dbt/domains/traffic_weather"
+
+
+def test_weather_execution_uses_project_env_override(monkeypatch):
     module = load_execution_module()
     monkeypatch.setenv("ASK_SEOUL_DBT_PROJECT_DIR", "/tmp/root-dbt")
 

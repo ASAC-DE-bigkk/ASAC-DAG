@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import os
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 
 DEFAULT_DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DEFAULT_DBT_OL_BIN = "/home/airflow/dbt-venv/bin/dbt-ol"
-DEFAULT_DBT_PROJECT_DIR = "/opt/airflow/dbt"
+DEFAULT_DBT_PROJECT_DIR = "/opt/airflow/dbt/domains/traffic_weather"
 DBT_BIN_ENV = "ASK_SEOUL_DBT_BIN"
 DBT_PROJECT_DIR_ENV = "ASK_SEOUL_DBT_PROJECT_DIR"
 ARTIFACT_RETENTION_ENV = "ASK_SEOUL_DBT_ARTIFACT_RETENTION_RUNS"
@@ -57,8 +58,8 @@ def dbt_bin() -> str:
     return (os.environ.get(DBT_BIN_ENV) or DEFAULT_DBT_BIN).strip()
 
 
-def dbt_project_dir() -> str:
-    return (os.environ.get(DBT_PROJECT_DIR_ENV) or DEFAULT_DBT_PROJECT_DIR).strip()
+def dbt_project_dir(environment: Mapping[str, str] = os.environ) -> str:
+    return (environment.get(DBT_PROJECT_DIR_ENV) or DEFAULT_DBT_PROJECT_DIR).strip()
 
 
 def safe_path_segment(value: str | None) -> str:
