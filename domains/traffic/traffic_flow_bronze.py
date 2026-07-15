@@ -28,6 +28,7 @@ from traffic_ingest.bronze_dag_support import (  # noqa: E402
     traffic_dag_schedule,
 )
 from traffic_ingest.common.runtime import download_raw_object, trino_cursor  # noqa: E402
+from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from traffic_ingest.flow_bronze import (  # noqa: E402
     load_traffic_flow_batch,
     verify_seoul_traffic_flow_bronze_runtime,
@@ -101,11 +102,27 @@ def load_seoul_traffic_flow_bronze(**context) -> dict:
 @fail_fast_traffic_bronze
 def verify_seoul_traffic_flow_bronze(**context) -> int:
     load_result = context["ti"].xcom_pull(task_ids=LOAD_TASK_ID) or {}
-    return verify_seoul_traffic_flow_bronze_runtime(
-        dag_run_id=context["run_id"],
-        expected_rows=int(load_result.get("expected_rows", load_result.get("inserted", 0))),
-        expected_raw_objects=int(load_result.get("page_count", 0)),
+    expected_rows = int(
+        load_result.get("expected_rows", load_result.get("inserted", 0))
     )
+    expected_raw_objects = int(load_result.get("page_count", 0))
+    verified_rows = verify_seoul_traffic_flow_bronze_runtime(
+        dag_run_id=context["run_id"],
+        expected_rows=expected_rows,
+        expected_raw_objects=expected_raw_objects,
+    )
+    build_traffic_flow_manifest().publish(
+        TrafficRun(
+            dag_id=context["dag"].dag_id,
+            run_id=context["run_id"],
+        ),
+        expected_rows=expected_rows,
+        actual_rows=verified_rows,
+        expected_raw_objects=expected_raw_objects,
+        actual_raw_objects=len(load_result.get("raw_object_keys") or []),
+        is_publishable=bool(load_result.get("is_publishable", True)),
+    )
+    return verified_rows
 
 
 with DAG(
@@ -145,6 +162,7 @@ with DAG(
     load_bronze = PythonOperator(
         task_id=LOAD_TASK_ID,
         python_callable=load_seoul_traffic_flow_bronze,
+        pool=TRINO_HEAVY_POOL,
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
@@ -153,6 +171,7 @@ with DAG(
     verify_bronze = PythonOperator(
         task_id="verify_seoul_traffic_flow_bronze",
         python_callable=verify_seoul_traffic_flow_bronze,
+        pool=TRINO_HEAVY_POOL,
         on_failure_callback=record_traffic_problem,
     )
 
