@@ -69,6 +69,8 @@ GOLD_SELECT = [
     "gold_license_multi_site",
     "gold_license_geo_grid",
     "gold_license_address_succession",
+    "gold_license_phone_succession",
+    "gold_detail_uptae_mix",
 ]
 
 _profile_config = ProfileConfig(

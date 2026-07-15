@@ -28,6 +28,14 @@ response:
   전부 소비. 총 gold 집계 20종.
 - 검증: pytest 359 · security PASS · DAG/dbt parse 0 · 씨앗 지표(전이/개명)는 이력 축적
   (6/30 수집 개시)에 따라 성장함을 문서 명시.
+- **최종 소진 라운드(비평 재판정)**: 확실 2건 추가 구축 — `gold_license_phone_succession`
+  (연쇄창업: 동일 전화 폐업→개업 업종전환, food→food 2.0만·중위 90일) ·
+  `gold_detail_uptae_mix`(업태 축 — 일반음식점 내 한식 5.1만, 19-way union). 조건부
+  colocation 은 geo_grid(업종 차원 보유) self-join 파생쿼리라 drop. **총 gold 집계 22종 —
+  엔티티 축(시간·공간·업종·상태·면적·식별자연결) 실질 소진 판정.**
+- **부수 발견(후속 조치 대상)**: 카탈로그 재측정으로 payload 가 확장돼도 기존 detail 테이블에
+  ALTER ADD COLUMN 이 없어 **카탈로그-실물 스키마 드리프트** 발생(silver_lodging_detail 의
+  uptaenm 부재 실측) — loader 에 컬럼 동기화 ensure 필요.
 
 ### 71. gold 인사이트 집계 세트 + 메타 사본 상한(무손실) + 유지보수 재승인 복원
 
