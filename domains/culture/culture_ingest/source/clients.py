@@ -45,6 +45,16 @@ def _count_tag(body: bytes, tag: str) -> int:
     return body.decode("utf-8", "ignore").count(f"<{tag}>")
 
 
+def extract_ids(body: bytes, id_field: str) -> list[str]:
+    """XML body 에서 ``<id_field>`` 값 목록을 뽑는다 — 상세 크롤용 id 수집(#363).
+
+    ``KopisClient.list_ids``(API 목록)와 ingest 의 ``_ids_from_landed_list``(랜딩
+    raw 재사용, #146)가 같은 추출 정의를 공유한다 — 두 경로의 id 집합이 어긋나면
+    detail 폴백이 다른 대상을 크롤하게 되므로 정의는 한 곳에만 둔다.
+    """
+    return re.findall(rf"<{id_field}>(.*?)</{id_field}>", body.decode("utf-8", "ignore"))
+
+
 def _paginate(fetch_page, count_body, rows, max_pages):
     """목록 페이징 공용 골격. page=1부터 fetch_page(page)로 body를 받아 Page를 내보내고,
     빈 페이지(count 0)·마지막 페이지(count<rows)·max_pages 도달·fetch_page가 None을
@@ -147,10 +157,9 @@ class KopisClient:
 
     def list_ids(self, path: str, base_params: dict, id_field: str, limit: int) -> list[str]:
         """목록 엔드포인트에서 최대 ``limit``개의 id를 수집한다(상세 크롤용)."""
-        id_re = re.compile(rf"<{id_field}>(.*?)</{id_field}>")
         ids: list[str] = []
         for page in self.list_pages(path, base_params, rows=100, max_pages=None):
-            ids.extend(id_re.findall(page.body.decode("utf-8", "ignore")))
+            ids.extend(extract_ids(page.body, id_field))
             if len(ids) >= limit:
                 break
         return ids[:limit]
