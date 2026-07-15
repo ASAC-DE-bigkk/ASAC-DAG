@@ -10,13 +10,13 @@ import pytest
 from gold import loader
 
 _Q = "iceberg_dev.commerce"
-_DETAIL = {"object": "commerce_food_detail", "kind": "detail_cluster",
+_DETAIL = {"object": "silver_food_detail", "kind": "detail_cluster",
            "members": ["bakery", "general_restaurant"], "payload": ["sitearea", "uptaenm"]}
 
 
 def test_detail_ddl_natural_key_no_bigserial():
     ddl = loader.detail_ddl(_Q, _DETAIL)
-    assert "CREATE TABLE IF NOT EXISTS iceberg_dev.commerce.commerce_food_detail" in ddl
+    assert "CREATE TABLE IF NOT EXISTS iceberg_dev.commerce.silver_food_detail" in ddl
     for col in loader.DETAIL_KEY_COLUMNS:          # 자연키+버전 키 전부 포함
         assert col in ddl
     assert "sitearea varchar" in ddl and "uptaenm varchar" in ddl

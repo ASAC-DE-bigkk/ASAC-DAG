@@ -107,17 +107,22 @@ minor = short               (API)
 > gold 적재·`commerce_entity_key` bigserial·전용 컨테이너)는 폐기한다. 서빙 대상은
 > **Cloudflare D1(SQLite)** 이며, gold 는 bronze/silver 와 동일한 **Iceberg 카탈로그** 구조로 만든다.
 
-### 4.1 아키텍처 (2단)
+### 4.1 아키텍처 — 레이어 정의(2026-07-15 사용자 확정, #70 재분류)
 
 ```
-bronze(Iceberg) → silver(Iceberg, dbt) → gold(Iceberg, dbt)  ← 전체 데이터·분석용(정본)
-                                              └→ D1(SQLite)  ← 선별 소수 테이블만 export(서빙, 예정)
+Raw/Bronze  원본 보존
+Silver      결측 처리 · 표준화 · 중복 제거 · **테이블 단위 정리 · JOIN 가능한 모델링(원형)**
+Gold        업무 목적별 **집계·지표·인사이트만**
+Serve       API·화면 조회 최적화 최종 결과 = D1(SQLite) 선별 export(예정)
 ```
 
-- **gold = Iceberg(dbt-trino)**: silver 와 같은 웨어하우스·같은 도구. 전체 규모(수백만 행)를 담는
-  정본 서빙-준비 계층. 리니지도 dbt/Cosmos 네이티브로 이어진다(기존 Python gold 의 리니지 사각 해소).
-- **D1 = 선별 export**: gold 중 **특정 몇 가지 테이블만** SQLite 로 옮겨 제공한다(export 절차는
-  후속 구현 — 대상 목록은 §4.3).
+- **원형(entity/entity_history/detail)은 silver 소속** — 명칭 `silver_*`, 파이프라인도
+  `commerce_load_silver` 에 편승(dbt 4모델 + 카탈로그 구동 detail 적재).
+- **gold 는 집계 전용** — `gold_license_dong_summary` 등. `commerce_load_gold`(06:00)는
+  집계만 빌드·누적한다.
+- detail 생성용 스펙(실측→클러스터 규칙)은 **파생 과정 메타** — `meta_detail_catalog`
+  (별도 meta_ 단위로 관리).
+- 전부 Iceberg(dbt-trino/Trino) — 리니지는 dbt/Cosmos 네이티브 + 물리명 stitch.
 
 ### 4.2 DB 특성에 따른 설계 원칙 (필수 준수)
 
@@ -135,7 +140,7 @@ bronze(Iceberg) → silver(Iceberg, dbt) → gold(Iceberg, dbt)  ← 전체 데�
 정리하고, gold(Iceberg) 모델과 export 계층을 그 특성에 맞게 설계한다 — "DB 가 바뀌면 서빙 설계도
 바뀐다"가 원칙이다.
 
-### 4.3 gold(Iceberg) 구조 — RDB 관계형 모델링 승계(재심의 2026-07-14)
+### 4.3 원형(silver)·집계(gold) 구조 — RDB 관계형 모델링 승계(재심의 2026-07-14 · 재분류 #70)
 
 > 집계 테이블만으로 축소하지 않는다 — **API 별로 컬럼이 크게 상이**하므로, 기존 RDB gold 의
 > 관계형 모델링(코어 + 카탈로그 구동 detail)을 Iceberg 로 그대로 승계해 **서빙 가능한 단위**
@@ -143,10 +148,10 @@ bronze(Iceberg) → silver(Iceberg, dbt) → gold(Iceberg, dbt)  ← 전체 데�
 
 | gold 객체(Iceberg) | 도구 | 내용 | D1 export |
 |---|---|---|---|
-| `gold_license_entity` | dbt | 업소 현재 상태(공통 컬럼, 자연키 grain) | 선별(필터/컬럼 축소) 후보 |
-| `gold_license_entity_history` | dbt | 버전 이력 프로젝션(append, collected_at 증분) | ❌ (대용량 — Iceberg 전용) |
-| `gold_catalog` | Python(Trino) | detail 스펙 정본(실측→클러스터 규칙, 버전·드리프트) | ❌ (내부 메타) |
-| `commerce_<domain>_detail` ×N | Python(Trino) | **API 별 상이(비공통) 컬럼 평탄화** — 카탈로그 구동, 멤버별 증분 INSERT INTO SELECT | 대상별 선별 후보 |
+| `silver_license_entity` | dbt | 업소 현재 상태(공통 컬럼, 자연키 grain) — **원형=silver(#70)** | 선별(필터/컬럼 축소) 후보 |
+| `silver_license_entity_history` | dbt | 버전 이력 프로젝션(append, collected_at 증분) | ❌ (대용량 — Iceberg 전용) |
+| `meta_detail_catalog` | Python(Trino) | detail 스펙 정본(파생 과정 — 별도 meta_ 단위) | ❌ (내부 메타) |
+| `silver_<domain>_detail` ×N | Python(Trino) | **API 별 상이(비공통) 컬럼 평탄화** — 카탈로그 구동(원형=silver) | 대상별 선별 후보 |
 | `gold_license_dong_summary` | dbt | 행정동별 업소/영업/폐업 집계(소형) | ✅ 1순위 |
 
 - **서빙 단위 추출** = 코어(entity) ⋈ detail(자연키 조인) — D1 export 는 이 조합에서 대상별

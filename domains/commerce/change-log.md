@@ -7,6 +7,35 @@
 
 ## 2026-07-15
 
+### 70. 레이어 재분류 — 원형은 silver(파이프라인 편승)·gold 는 집계 전용 + 명칭 전면 정리
+
+request:
+- 레이어 정의 확정: Raw/Bronze=원본, **Silver=결측 처리·표준화·중복 제거·테이블 단위 정리·JOIN
+  모델링(원형)**, **Gold=업무 목적 집계·지표·인사이트만**, Serve=조회 최적화(D1). 현재 gold 에
+  있던 테이블 원형을 silver 로 내리고, 집계형만 gold 유지. 원형 생성용 파생 테이블은 별도 단위
+  관리. **명칭만이 아니라 수집 파이프라인도 silver 에 편승**시킬 것. (선행 지시: gold_ 접두 통일
+  → 재분류로 silver_/meta_ 확정)
+
+response:
+- **물리 리네임(총 81, 실패 0 — Iceberg REST RENAME 지원 실측)**: detail 78
+  `commerce_*_detail`→(경유 `gold_*`)→**`silver_*_detail`** · `gold_license_entity(+_history)`→
+  **`silver_license_entity(+_history)`** · `gold_catalog`→**`meta_detail_catalog`**(파생 과정 메타,
+  별도 meta_ 단위). 집계 `gold_license_dong_summary` 만 gold 유지. 카탈로그 rows object 도 치환
+  (UPDATE 78행).
+- **파이프라인 편승(commerce_load_silver)**: SILVER_SELECT 에 entity 2종 추가(Cosmos ref 체인
+  자동 순서) + `build_detail_catalog`·`load_details`(마킹 **뒤** — detail 실패가 run 마킹을 막지
+  않음, 자체 워터마크 재개) + **`maintain_gold_tables`**(신설 테이블 optimize/expire/orphan —
+  스냅샷/메타 무한 축적 방지, #226 확장·승인분) 태스크 신설. silver 리포트에 "원형 detail 적재
+  N객체·신규 M행" 섹션 추가.
+- **commerce_load_gold = 집계 전용 재작성**: dbt_gold(dong_summary run+test) → report_gold
+  (집계 현황 행수·미빌드 실패색). build_catalog/load_details 제거. refresh DAG 는 원형+집계
+  전량 재구축 진입점으로 유지(docstring 명시).
+- 코드 정리: catalog_rules 명명 silver_ · loader CATALOG_TABLE=meta_detail_catalog ·
+  report.py 집계 전용 재작성. dbt 모델 gold/→silver/ 이동(+dong_summary ref 갱신).
+- 문서: PROJECT.md §4.1 을 사용자 4계층 정의로 대체(+§4.3 명칭), 집계 쿼리 문서 명칭 전면 치환.
+- **검증**: 리네임 후 증분 스모크 +0(워터마크 생존) · 카탈로그 78 specs(silver_) · pytest 359
+  전건 · security PASS · dbt parse·DAG 3종 exit 0.
+
 ### 69. gold detail 버킷 적재 유실 수정 — 워터마크 스냅샷 + 중단 방어(defend)
 
 request:

@@ -2,10 +2,11 @@
 
 설계(사용자 확정 — dbt/domains/commerce/docs/DB/gold/tables.md):
 - 경계 엄격: cluster = Jaccard>=0.7 AND 멤버>=3 AND 공유 비공통필드>=8. 그 외 전부 단독(single).
-- 이름: 객체명에 레이어(gold) 금지(레이어=DB가 식별) → `commerce_` 접두 = 도메인 식별.
+- 이름: `silver_` 접두(레이어 재분류 2026-07-15 사용자 확정 — detail 은 원형(테이블 단위
+  정리·JOIN 모델링)이라 silver 소속. 집계·지표만 gold. dags docs/PROJECT.md §4).
   cluster 이름은 도메인 의미 기반(sub_category/컬럼명/포괄어 금지) — NAME_BY_MEMBER 고정 맵.
-- Supertype/Subtype: commerce_business_entity(+_history) + <name>_detail(entity_id 매핑)
-  + dim(dataset/region/status) + commerce_catalog(카탈로그의 DB 실체) + marker.
+- Supertype/Subtype: silver_license_entity(+_history, dbt) + silver_<name>_detail
+  + meta_detail_catalog(스펙 정본 — silver detail 생성용 파생 과정, 별도 meta_ 단위).
 - payload 컬럼명 = 소스 필드코드 lowercase(추적성). 값 원본 키는 대문자 유지(json 추출 시 upper()).
 """
 from __future__ import annotations
@@ -100,17 +101,17 @@ def build_catalog(fields_by_short: dict[str, set[str]],
                 if not name:
                     raise ValueError(f"cluster 이름 미정(NAME_BY_MEMBER 에 추가 필요): {members}")
                 payload = sorted({f.lower() for f in set().union(*[nc[s] for s in members])})
-                details.append({"object": f"commerce_{name}_detail", "kind": "detail_cluster",
+                details.append({"object": f"silver_{name}_detail", "kind": "detail_cluster",
                                 "members": members, "payload": payload, "shared_n": len(shared)})
                 for m in members:
                     dataset_map[m] = {"entity_type": name,
-                                      "detail_table": f"commerce_{name}_detail"}
+                                      "detail_table": f"silver_{name}_detail"}
             else:
                 for s in members:
                     payload = sorted({f.lower() for f in nc[s]})
-                    details.append({"object": f"commerce_{s}_detail", "kind": "detail_single",
+                    details.append({"object": f"silver_{s}_detail", "kind": "detail_single",
                                     "members": [s], "payload": payload, "shared_n": len(payload)})
-                    dataset_map[s] = {"entity_type": s, "detail_table": f"commerce_{s}_detail"}
+                    dataset_map[s] = {"entity_type": s, "detail_table": f"silver_{s}_detail"}
 
     details.sort(key=lambda r: (r["kind"] != "detail_cluster", -len(r["members"]), r["object"]))
     canon = json.dumps([{k: r[k] for k in ("object", "kind", "members", "payload")}

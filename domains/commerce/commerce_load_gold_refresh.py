@@ -1,7 +1,8 @@
-"""commerce_load_gold_refresh — gold(Iceberg) **강제 전량 재구축**(트리거 전용).
+"""commerce_load_gold_refresh — 원형(silver 편입분)+집계(gold) **강제 전량 재구축**(트리거 전용).
 
-정기 `commerce_load_gold`(06:00 · 증분)와 별개로, 워터마크/기존 상태와 무관하게 gold Iceberg
-계층 전체를 새로 구축하는 온디맨드 DAG. 용도: gold 스키마/카탈로그 개편 반영 · 강제 새로고침 ·
+레이어 재분류(#70) 후에도 이 DAG 는 **원형 정리본(silver_license_entity 2종·silver_<domain>_detail)
++집계(gold_license_dong_summary)** 를 한 번에 전량 재구축하는 온디맨드 진입점으로 유지한다
+(다른 환경 부트스트랩/강제 새로고침 — 정기 경로는 silver(05:00)=원형·gold(06:00)=집계). 용도: gold 스키마/카탈로그 개편 반영 · 강제 새로고침 ·
 (후속) D1 export 전 정합 재구축. 서빙 레이어 정책: docs/PROJECT.md §4.
 
 정기 DAG 와의 차이:
@@ -49,7 +50,8 @@ _DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.dura
 DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce")
 DBT_BIN = os.getenv("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
 DBT_TARGET = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
-GOLD_SELECT = ["gold_license_entity", "gold_license_entity_history", "gold_license_dong_summary"]
+# 전량 재구축 대상: 원형 정리본(silver_entity 2종, #70 편승분)+집계(gold_dong_summary).
+GOLD_SELECT = ["silver_license_entity", "silver_license_entity_history", "gold_license_dong_summary"]
 
 _profile_config = ProfileConfig(
     profile_name="commerce",

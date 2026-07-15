@@ -1,10 +1,10 @@
 """gold 적재(Iceberg) — silver → gold **Iceberg 카탈로그**(서빙 Postgres 폐기, PROJECT.md §4).
 
 구조(재심의 2026-07-14 — 기존 RDB 관계형 모델링을 Iceberg 로 승계):
-- **코어**(공통 컬럼): gold_license_entity / gold_license_entity_history / gold_license_dong_summary
+- **원형 정리본**(silver): silver_license_entity / silver_license_entity_history · **집계**(gold): gold_license_dong_summary
   — dbt 모델(정적, commerce_load_gold 의 Cosmos 가 실행). 이 모듈 담당 아님.
-- **detail**(API 별 상이 컬럼 평탄화): 카탈로그 구동 — `gold_catalog`(Iceberg) 에 스펙을 두고
-  detail 테이블(`commerce_<domain>_detail`)을 DDL ensure + 증분 적재한다. **이 모듈 담당.**
+- **detail**(API 별 상이 컬럼 평탄화): 카탈로그 구동 — `meta_detail_catalog`(Iceberg) 에 스펙을 두고
+  detail 테이블(`silver_<domain>_detail`)을 DDL ensure + 증분 적재한다. **이 모듈 담당.**
   각 API 의 비공통 필드가 서빙 가능한 단위(테이블·컬럼)로 뽑히는 계층 — record_json 은 silver 정본.
 
 Postgres 시절과의 차이:
@@ -28,7 +28,7 @@ from security.dbio import assert_identifier
 
 log = logging.getLogger(__name__)
 
-CATALOG_TABLE = "gold_catalog"
+CATALOG_TABLE = "meta_detail_catalog"   # silver detail 생성용 스펙(파생 과정 — 별도 meta_ 단위)
 # detail 키 컬럼(자연키 + 버전 식별) — silver_license_history grain 승계.
 DETAIL_KEY_COLUMNS = ("dataset", "opnsfteamcode", "mgtno", "collected_at", "content_hash")
 # 멤버 행수가 이를 넘으면 content_hash 버킷 서브청크(json 추출 heap 바운드). env 로 조정.

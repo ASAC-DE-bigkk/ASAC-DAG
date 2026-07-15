@@ -68,7 +68,10 @@ DBT_BIN = os.getenv("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
 # 기본 dev(iceberg_dev/seoul-dev). prod 전환은 .env.commerce 또는 compose env 로.
 DBT_TARGET = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
 # 모델 선택(리스트 = Cosmos RenderConfig.select / 문자열 join = chunked seed·비교용).
-SILVER_SELECT = ["silver_license_history", "silver_license_current"]
+# 원형 정리본 entity 2종은 레이어 재분류(#70, PROJECT.md §4)로 silver 파이프라인에 편승 —
+# ref 체인(current→entity, history→entity_history)은 Cosmos 가 그래프 순서로 실행한다.
+SILVER_SELECT = ["silver_license_history", "silver_license_current",
+                 "silver_license_entity", "silver_license_entity_history"]
 SILVER_SELECT_STR = " ".join(SILVER_SELECT)
 # 스코프 dbt vars(운영 노브) — Cosmos 는 정적 렌더라 런타임 청크 루프가 불가하므로(위 docstring),
 # 저메모리 환경에서 dbt_silver 를 dataset 스코프로 돌릴 때 .env.commerce 에 JSON 으로 지정한다.
@@ -188,6 +191,56 @@ def commerce_load_silver():
 
         return quality_tasks.notify_masked_address_dong_skip_summary()
 
+    @task
+    def build_detail_catalog() -> dict:
+        """실측(bronze record_json) → 카탈로그 규칙 → meta_detail_catalog(Iceberg) 갱신.
+
+        silver detail(원형 — API 별 상이 컬럼) 생성용 스펙의 파생 과정(별도 meta_ 단위,
+        PROJECT.md §4.3). 레이어 재분류(#70)로 gold DAG 에서 silver 파이프라인으로 편승."""
+        from commerce_core import registry
+        from gold import catalog_rules, loader, measure
+
+        fields = measure.measure_fields()
+        meta = {d.short: {"fmt": d.fmt} for d in registry.enabled_for_schedule("daily")}
+        cat = catalog_rules.build_catalog(fields, meta)
+        _prev, prev_ver = loader.read_catalog()
+        if prev_ver and prev_ver != cat["version"]:
+            import logging
+            logging.getLogger(__name__).warning("detail 카탈로그 드리프트: %s → %s", prev_ver, cat["version"])
+        loader.upsert_catalog(cat["details"], cat["version"])
+        return {"version": cat["version"], "specs": len(cat["details"])}
+
+    @task
+    def load_details() -> dict:
+        """silver_<domain>_detail 증분 적재 — 카탈로그 구동, 멤버별 INSERT INTO SELECT(#70).
+
+        마킹(mark_silver_done) **뒤**에 두어 detail 실패가 run 마킹을 막지 않게 한다 —
+        detail 은 history 파생이라 자체 워터마크로 다음 실행이 이어간다(재개 표준 §3)."""
+        from gold import loader
+
+        details, version = loader.read_catalog()
+        if not details:
+            return {"loaded": {}}
+        loaded = loader.run_load_details(details)
+        return {"loaded": loaded, "objects": len(loaded), "rows": sum(loaded.values()),
+                "catalog_version": version}
+
+    @task
+    def maintain_gold_tables() -> list[dict]:
+        """신설 Iceberg 테이블 유지보수(#226 확장) — optimize/expire/orphan.
+
+        대상: 원형 정리본(entity 2종)+detail(카탈로그 동적)+meta_detail_catalog+gold 집계.
+        매일 delete/append 커밋이 쌓이므로 빠지면 스냅샷/메타 무한 축적 → R2 Data Catalog
+        메타 불일치(실측 원인 — bronze/maintenance.py 참조)."""
+        from bronze import maintenance
+        from gold import loader
+
+        details, _ = loader.read_catalog()
+        tables = tuple(["silver_license_entity", "silver_license_entity_history",
+                        "meta_detail_catalog", "gold_license_dong_summary"]
+                       + [d["object"] for d in details])
+        return maintenance.run_table_maintenance(tables)
+
     @task(trigger_rule="all_done")
     def report_silver(**ctx) -> dict:
         """DAG 완료 리포트(#218, PROJECT.md §2) — **이번 실행이 silver 로 적재한 신규분만**
@@ -214,7 +267,9 @@ def commerce_load_silver():
 
     seed = seed_silver_if_empty()
     [enrich_admin_dong_ref(), enrich_fill_jibun(), ensure_silver_marker()] >> seed
-    seed >> dbt_silver >> notify_masked_address_summary() >> mark_silver_done() >> report_silver()
+    # 원형 파이프라인 편승(#70): dbt(원형 4모델) → 마킹 → detail(카탈로그 구동) → 유지보수 → 리포트
+    (seed >> dbt_silver >> notify_masked_address_summary() >> mark_silver_done()
+     >> build_detail_catalog() >> load_details() >> maintain_gold_tables() >> report_silver())
 
 
 commerce_load_silver()
