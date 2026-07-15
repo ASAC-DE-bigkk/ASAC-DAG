@@ -46,6 +46,7 @@ from .clients import (
     KopisClient,
     KopisError,
     SeoulClient,
+    extract_ids,
 )
 from .datasets import ALL_DATASETS, BY_NAME, Dataset, select
 
@@ -131,17 +132,134 @@ def _ids_from_landed_list(ds: Dataset, landing: Landing, limit: int) -> list[str
         manifest = json.loads(landing.sink.get(f"{prefix}/_manifest.json"))
     except Exception:  # noqa: BLE001 -- 목록이 이 run 에 아직 없음(순서/부분실행) → 폴백
         return None
-    id_re = re.compile(rf"<{ds.id_field}>(.*?)</{ds.id_field}>")
     ids: list[str] = []
     for key in manifest.get("object_keys") or []:
         try:
             body = landing.sink.get(key)
         except Exception:  # noqa: BLE001 -- 페이지 유실 = 신뢰 불가 → 폴백
             return None
-        ids.extend(id_re.findall(body.decode("utf-8", "ignore")))
+        ids.extend(extract_ids(body, ds.id_field))  # 추출 정의는 clients.extract_ids 단일(#363)
         if len(ids) >= limit:
             break
     return ids[:limit]
+
+
+class _FetchAbort(Exception):
+    """fetch 핸들러가 매니페스트 작성 없이 결과 에러로 조기 종료할 때(skip·과반 실패).
+
+    ingest_dataset 이 잡아 result.error 로 옮긴다 — '실패 전파'가 아니라 기존 분기의
+    조기 return 경로 이동이라, 매니페스트/checks 미작성 동작이 그대로 유지된다.
+    """
+
+    def __init__(self, error: str):
+        super().__init__(error)
+        self.error = error
+
+
+def _fetch_kopis_list(ds, clients, landing, opts, prefix, append) -> dict:
+    """KOPIS 목록: 페이지를 끝까지 돌며 각 페이지를 page-NNNN.xml로 적재."""
+    params = _with_date_window(ds.endpoint, ds.base_params, opts)
+    for page in clients.kopis.list_pages(ds.endpoint, params, opts.kopis_rows, opts.max_pages):
+        append(landing.write_page(prefix, f"page-{page.index:04d}.xml", page.body, "xml"), page)
+    return params
+
+
+def _fetch_kopis_boxoffice(ds, clients, landing, opts, prefix, append) -> dict:
+    """예매상황판: 페이징 없이 단일 GET 1건만 적재(page-0001.xml)."""
+    params = _with_date_window(ds.endpoint, ds.base_params, opts)
+    page = clients.kopis.fetch_once(ds.endpoint, params, ds.row_tag)
+    append(landing.write_page(prefix, "page-0001.xml", page.body, "xml"), page)
+    return params
+
+
+def _fetch_kobis_boxoffice(ds, clients, landing, opts, prefix, append) -> dict:
+    """KOBIS 일별 박스오피스: 단일 GET 1건(page-0001.json).
+
+    targetDt=전일 확정분(DAG 03:00 KST 실행, load_date=당일 → 전일). date_from/date_to
+    창은 쓰지 않는다 — 일배치가 창을 항상 당일로 채워, 존중하면 아직 확정 안 된
+    당일을 조회하게 되기 때문. 과거 재수집은 logical date 재실행(operations.md).
+    서울은 base_params 에 wideAreaCd=0105001, 전국은 없음.
+    """
+    target_dt = (
+        date.fromisoformat(landing.ctx.load_date) - timedelta(days=1)
+    ).strftime("%Y%m%d")
+    page = clients.kobis.daily_boxoffice(target_dt, ds.base_params.get("wideAreaCd"))
+    append(landing.write_page(prefix, "page-0001.json", page.body, "json"), page)
+    return {**ds.base_params, "targetDt": target_dt}
+
+
+def _fetch_seoul_list(ds, clients, landing, opts, prefix, append) -> dict:
+    """서울 목록: 1000행 윈도우를 page-NNNNNN.json으로 적재."""
+    for page in clients.seoul.list_pages(ds.endpoint, opts.max_rows):
+        append(landing.write_page(prefix, f"page-{page.index:06d}.json", page.body, "json"), page)
+    return {"service": ds.endpoint}
+
+
+def _fetch_kcisa_list(ds, clients, landing, opts, prefix, append) -> dict:
+    """KCISA area2: PageNo 페이징(numOfrows=KCISA_ROWS)을 page-NNNN.xml 로 적재."""
+    for page in clients.kcisa.list_pages(ds.endpoint, ds.base_params, rows=KCISA_ROWS,
+                                         max_pages=opts.max_pages):
+        append(landing.write_page(prefix, f"page-{page.index:04d}.xml", page.body, "xml"), page)
+    return {**ds.base_params, "numOfrows": KCISA_ROWS}  # 매니페스트 기록용 요청 파라미터
+
+
+def _fetch_kopis_detail(ds, clients, landing, opts, prefix, append) -> dict:
+    """상세: 목록에서 id를 모아 건별 상세를 id=<값>.xml로 적재."""
+    if not opts.include_detail:
+        raise _FetchAbort("skipped (include_detail=False)")  # 옵션 꺼져 있으면 건너뜀
+    # 목록 재조회 제거(#146): 같은 run 에 랜딩된 목록 raw 에서 id 재사용.
+    ids = _ids_from_landed_list(ds, landing, opts.max_detail)
+    if ids is None:
+        # 폴백: 목록이 아직 안 랜딩된 실행 문맥(단독 실행·순서 역전)만 API 재조회.
+        id_params = _with_date_window(ds.id_source_endpoint, ds.base_params, opts)
+        ids = clients.kopis.list_ids(ds.id_source_endpoint, id_params, ds.id_field, opts.max_detail)
+    else:
+        print(f"  [detail] {ds.name}: 목록 재조회 생략 — 랜딩된 raw 에서 id {len(ids)}개 재사용(#146)")
+    detail_errors: list[str] = []
+    landed = 0
+    for identifier in ids:
+        try:
+            page = clients.kopis.detail(ds.endpoint, identifier)
+        except (HttpProblemError, requests.RequestException, KopisError) as exc:
+            # 개별 상세 실패(예: KOPIS 간헐적 400)는 그 id만 건너뛰고 계속 진행 —
+            # 한 건이 크롤 전체를 죽이지 않게. 과다 실패는 아래에서 태스크 실패로.
+            detail_errors.append(f"{identifier}: {type(exc).__name__}")
+            continue
+        append(landing.write_page(prefix, f"id={identifier}.xml", page.body, "xml"), page)
+        landed += 1
+    # 일시적 단건 실패는 관용하되, 하나도 못 받거나 과반이 실패하면 실질 장애로
+    # 보고 태스크를 실패시켜 재시도·알림한다.
+    if ids and (not landed or len(detail_errors) > len(ids) // 2):
+        raise _FetchAbort(
+            f"detail crawl failed: {len(detail_errors)}/{len(ids)} ids "
+            f"(e.g. {detail_errors[:3]})"
+        )
+    if detail_errors:
+        print(
+            f"  [detail] {ds.name}: {len(detail_errors)}/{len(ids)} id 건너뜀 "
+            f"(일시 오류, 계속 진행) e.g. {detail_errors[:3]}"
+        )
+    return {
+        **ds.base_params,
+        "id_field": ds.id_field,
+        "max_detail": opts.max_detail,
+        "ids": len(ids),
+        "detail_skipped": len(detail_errors),
+    }
+
+
+# kind → fetch 핸들러 (#363). if/elif 체인이 아니라 함수+레지스트리 — 새 kind 추가 =
+# 핸들러 1개 + 여기 1줄. 매니페스트용 request_params 는 핸들러 **반환값으로 강제**해,
+# 분기가 params 채우기를 잊어 write_manifest 에서 UnboundLocalError 로 터지던 버그
+# 클래스(#196 실버그)를 시그니처 수준에서 소멸시킨다.
+_FETCHERS = {
+    "kopis_list": _fetch_kopis_list,
+    "kopis_boxoffice": _fetch_kopis_boxoffice,
+    "kobis_boxoffice": _fetch_kobis_boxoffice,
+    "seoul_list": _fetch_seoul_list,
+    "kcisa_list": _fetch_kcisa_list,
+    "kopis_detail": _fetch_kopis_detail,
+}
 
 
 def ingest_dataset(
@@ -152,121 +270,31 @@ def ingest_dataset(
 ) -> DatasetResult:
     """데이터셋 1개를 받아 페이지 + 매니페스트를 적재한다. 에러는 예외로 던지지 않고
     결과(result)에 담아, 배치가 한 데이터셋 실패를 넘어 계속 돌 수 있게 한다.
+    소스별 수집 방식은 ``_FETCHERS`` 핸들러가, 계측·계약검사·매니페스트는 여기가 담당.
     """
     prefix = landing.prefix_for(ds.source, ds.name)
     result = DatasetResult(name=ds.name, source=ds.source, endpoint=ds.endpoint, prefix=prefix)
     t0 = time.monotonic()
     sample_body: bytes | None = None  # 첫 페이지 = 드리프트(관측 스키마) 점검용 샘플
 
-    def _record_page(body: bytes) -> None:
-        nonlocal sample_body
-        sample_body = sample_body or body
-
     def _append_page(key: str, page) -> None:
         """페이지 1건의 계측(pages/rows/bytes/object_keys)을 누적하고 드리프트 샘플로 기록."""
+        nonlocal sample_body
         result.pages += 1
         result.rows += page.row_count
         result.bytes_written += len(page.body)
         result.object_keys.append(key)
-        _record_page(page.body)
+        sample_body = sample_body or page.body
 
     try:
-        if ds.kind == "kopis_list":
-            # KOPIS 목록: 페이지를 끝까지 돌며 각 페이지를 page-NNNN.xml로 적재.
-            params = _with_date_window(ds.endpoint, ds.base_params, opts)
-            for page in clients.kopis.list_pages(ds.endpoint, params, opts.kopis_rows, opts.max_pages):
-                filename = f"page-{page.index:04d}.xml"
-                key = landing.write_page(prefix, filename, page.body, "xml")
-                _append_page(key, page)
-
-        elif ds.kind == "kopis_boxoffice":
-            # 예매상황판: 페이징 없이 단일 GET 1건만 적재(page-0001.xml).
-            params = _with_date_window(ds.endpoint, ds.base_params, opts)
-            page = clients.kopis.fetch_once(ds.endpoint, params, ds.row_tag)
-            key = landing.write_page(prefix, "page-0001.xml", page.body, "xml")
-            _append_page(key, page)
-
-        elif ds.kind == "kobis_boxoffice":
-            # KOBIS 일별 박스오피스: 단일 GET 1건(page-0001.json). targetDt=전일 확정분
-            # (DAG 03:00 KST 실행, load_date=당일 → 전일). date_from/date_to 창은 쓰지
-            # 않는다 — 일배치가 창을 항상 당일로 채워, 존중하면 아직 확정 안 된 당일을
-            # 조회하게 되기 때문. 과거 재수집은 logical date 재실행(operations.md). 서울은
-            # base_params 에 wideAreaCd=0105001, 전국은 없음.
-            target_dt = (
-                date.fromisoformat(landing.ctx.load_date) - timedelta(days=1)
-            ).strftime("%Y%m%d")
-            wide = ds.base_params.get("wideAreaCd")
-            page = clients.kobis.daily_boxoffice(target_dt, wide)
-            key = landing.write_page(prefix, "page-0001.json", page.body, "json")
-            _append_page(key, page)
-            # write_manifest 용 params (설정 누락 시 UnboundLocalError → #196 실버그 교훈).
-            params = {**ds.base_params, "targetDt": target_dt}
-
-        elif ds.kind == "seoul_list":
-            # 서울 목록: 1000행 윈도우를 page-NNNNNN.json으로 적재.
-            params = {"service": ds.endpoint}
-            for page in clients.seoul.list_pages(ds.endpoint, opts.max_rows):
-                filename = f"page-{page.index:06d}.json"
-                key = landing.write_page(prefix, filename, page.body, "json")
-                _append_page(key, page)
-
-        elif ds.kind == "kcisa_list":
-            # KCISA area2: PageNo 페이징(numOfrows=KCISA_ROWS)을 page-NNNN.xml 로 적재.
-            params = {**ds.base_params, "numOfrows": KCISA_ROWS}  # 매니페스트 기록용 요청 파라미터
-            for page in clients.kcisa.list_pages(ds.endpoint, ds.base_params, rows=KCISA_ROWS,
-                                                 max_pages=opts.max_pages):
-                filename = f"page-{page.index:04d}.xml"
-                key = landing.write_page(prefix, filename, page.body, "xml")
-                _append_page(key, page)
-
-        elif ds.kind == "kopis_detail":
-            # 상세: 목록에서 id를 모아 건별 상세를 id=<값>.xml로 적재.
-            if not opts.include_detail:
-                result.error = "skipped (include_detail=False)"  # 옵션 꺼져 있으면 건너뜀
-                return result
-            # 목록 재조회 제거(#146): 같은 run 에 랜딩된 목록 raw 에서 id 재사용.
-            ids = _ids_from_landed_list(ds, landing, opts.max_detail)
-            if ids is None:
-                # 폴백: 목록이 아직 안 랜딩된 실행 문맥(단독 실행·순서 역전)만 API 재조회.
-                id_params = _with_date_window(ds.id_source_endpoint, ds.base_params, opts)
-                ids = clients.kopis.list_ids(ds.id_source_endpoint, id_params, ds.id_field, opts.max_detail)
-            else:
-                print(f"  [detail] {ds.name}: 목록 재조회 생략 — 랜딩된 raw 에서 id {len(ids)}개 재사용(#146)")
-            detail_errors: list[str] = []
-            for identifier in ids:
-                try:
-                    page = clients.kopis.detail(ds.endpoint, identifier)
-                except (HttpProblemError, requests.RequestException, KopisError) as exc:
-                    # 개별 상세 실패(예: KOPIS 간헐적 400)는 그 id만 건너뛰고 계속 진행 —
-                    # 한 건이 크롤 전체를 죽이지 않게. 과다 실패는 아래에서 태스크 실패로.
-                    detail_errors.append(f"{identifier}: {type(exc).__name__}")
-                    continue
-                filename = f"id={identifier}.xml"
-                key = landing.write_page(prefix, filename, page.body, "xml")
-                _append_page(key, page)
-            # 일시적 단건 실패는 관용하되, 하나도 못 받거나 과반이 실패하면 실질 장애로
-            # 보고 태스크를 실패시켜 재시도·알림한다.
-            if ids and (not result.pages or len(detail_errors) > len(ids) // 2):
-                result.error = (
-                    f"detail crawl failed: {len(detail_errors)}/{len(ids)} ids "
-                    f"(e.g. {detail_errors[:3]})"
-                )
-                return result
-            if detail_errors:
-                print(
-                    f"  [detail] {ds.name}: {len(detail_errors)}/{len(ids)} id 건너뜀 "
-                    f"(일시 오류, 계속 진행) e.g. {detail_errors[:3]}"
-                )
-            params = {
-                **ds.base_params,
-                "id_field": ds.id_field,
-                "max_detail": opts.max_detail,
-                "ids": len(ids),
-                "detail_skipped": len(detail_errors),
-            }
-
-        else:
+        fetch = _FETCHERS.get(ds.kind)
+        if fetch is None:
             result.error = f"unknown kind: {ds.kind}"
+            return result
+        try:
+            params = fetch(ds, clients, landing, opts, prefix, _append_page)
+        except _FetchAbort as abort:
+            result.error = abort.error  # skip·과반실패 — 매니페스트/checks 미작성(기존 조기 return 동일)
             return result
 
         # 수집 검증 (계약 v0): 완전성·드리프트·freshness·볼륨HWM 점검 후 매니페스트에 동봉.
@@ -401,19 +429,26 @@ def write_run_report(
     """run 리포트를 적재 대상에 JSON으로 남긴다. 키를 반환."""
     key = f"{root}/_reports/load_date={ctx.load_date}/ingest_ts={ctx.ingest_ts}/run_report.json"
     body = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
-    if dry_run:
-        sink = LocalSink(local_dir)
-    else:
-        settings = build_r2_settings(target, env_file)
-        missing = missing_r2(settings)
-        if missing:
-            raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
-        sink = R2Sink(settings)
+    sink = LocalSink(local_dir) if dry_run else build_r2_sink(target, env_file)
     sink.put(key, body, "application/json")
     return key
 
 
 # --- 런타임 빌더 ---------------------------------------------------------------
+
+def build_r2_sink(target: str = "dev", env_file: str | None = None) -> R2Sink:
+    """R2 설정을 검증해 싱크를 만든다 — 누락 필드는 이름을 적어 즉시 실패(사전 점검).
+
+    write_run_report·build_landing·load_bronze 가 각자 복붙하던 3중 사전점검의 단일
+    진실원(#363). fail-open 이 필요한 경로(load_baselines_for_target)는 의도적으로
+    이 헬퍼를 쓰지 않는다 — baseline 은 보조 신호라 설정 누락이 수집을 막으면 안 된다.
+    """
+    settings = build_r2_settings(target, env_file)
+    missing = missing_r2(settings)
+    if missing:
+        raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
+    return R2Sink(settings)
+
 
 _BASELINE_SCAN_REPORTS = 5  # 부분 run(주간 refresh·백필)이 껴도 이 안에 전체 run 이 있도록
 
@@ -497,11 +532,7 @@ def build_landing(
     """적재 싱크를 만든다. dry_run이면 로컬, 아니면 R2(사전 점검 포함)."""
     if dry_run:
         return Landing(LocalSink(local_dir), root, ctx)
-    settings = build_r2_settings(target, env_file)
-    missing = missing_r2(settings)
-    if missing:
-        raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
-    return Landing(R2Sink(settings), root, ctx)
+    return Landing(build_r2_sink(target, env_file), root, ctx)
 
 
 ENGINES = ("pyiceberg", "trino")  # trino = 전환기 롤백 레버(#203) — 일몰 계획은 operations.md
@@ -573,12 +604,9 @@ def load_bronze(
     engine: str = "pyiceberg",
 ) -> dict[str, int]:
     """R2 싱크·웨어하우스를 만들어 ``load_bronze_from_raw``를 실행 (DAG/CLI 공용)."""
-    settings = build_r2_settings(target, env_file)
-    missing = missing_r2(settings)
-    if missing:
-        raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
     return load_bronze_from_raw(
-        ctx, summaries, sink=R2Sink(settings), warehouse=build_warehouse(target, engine)
+        ctx, summaries,
+        sink=build_r2_sink(target, env_file), warehouse=build_warehouse(target, engine),
     )
 
 
