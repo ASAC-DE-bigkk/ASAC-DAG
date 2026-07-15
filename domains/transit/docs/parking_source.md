@@ -52,7 +52,7 @@
 raw/transit/seoul_parking/parking/load_date=…/ingest_ts=…/page-0001.json   # 원본 응답
 + _manifest.json
 ```
-**Iceberg** `iceberg_dev.dev_codingpoppy94.bronze_parking` — 주차장당 1행:
+**Iceberg** `iceberg_dev.transit.bronze_parking` — 주차장당 1행:
 `source` / `ts_source`(=`NOW_PRK_VHCL_UPDT_TM`) / `ts_collected` / `lat`·`lon`(NULL) / `raw`(주차장 행 JSON) / `ingested_at` / `dag_run_id`.
 
 ## silver 반영 상태 (ASAC-DBT #51 구현 기준)

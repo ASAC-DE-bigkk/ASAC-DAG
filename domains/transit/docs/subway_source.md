@@ -188,7 +188,7 @@ raw/transit/seoul_subway/<dataset>/load_date=YYYY-MM-DD/ingest_ts=…/page-NNNN.
 # silver 부터는 ASAC-DBT(Iceberg silver_* 테이블) — DAG 은 bronze 까지만.
 ```
 
-**Iceberg 테이블** `iceberg_dev.dev_codingpoppy94.bronze_subway_{arrival,position}`:
+**Iceberg 테이블** `iceberg_dev.transit.bronze_subway_{arrival,position}`:
 
 | 컬럼 | 타입 | 내용 |
 |------|------|------|

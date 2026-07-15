@@ -66,10 +66,9 @@ def trino_catalog() -> str:
     return os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
 
 
-def smoke_schema() -> str:
-    if is_dev_target():
-        return os.environ.get("DEV_SMOKE_SCHEMA", "dev_local")
-    return os.environ.get("SMOKE_SCHEMA", "ops_smoke")
+def transit_schema() -> str:
+    # 도메인 공용 스키마(#367): prod/dev 동일 transit, 환경 분리는 카탈로그(trino_catalog)가 담당.
+    return os.environ.get("TRANSIT_SCHEMA", "transit")
 
 
 def sql_identifier(value: str) -> str:
@@ -97,7 +96,7 @@ def _trino_cursor():
     import trino.dbapi
 
     catalog = sql_identifier(trino_catalog())
-    schema = sql_identifier(smoke_schema())
+    schema = sql_identifier(transit_schema())
     connection = trino.dbapi.connect(
         host=os.environ.get("TRINO_HOST", "trino"),
         port=int(os.environ.get("TRINO_PORT", "8080")),
