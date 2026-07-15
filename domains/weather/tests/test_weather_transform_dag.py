@@ -1,5 +1,4 @@
 import types
-import types
 from pathlib import Path
 
 import pytest
@@ -56,6 +55,15 @@ def test_weather_dbt_factory_preserves_phase_contracts():
             module.notify_weather_transform_failure,
             module.record_weather_problem,
         ]
+
+
+def test_weather_transform_trino_tasks_do_not_inflate_pool_priority_from_chain():
+    module = load_transform_module()
+
+    for task_id in module.DBT_PHASE_TASK_IDS:
+        task = module.dag.task_dict[task_id]
+        assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+        assert task.kwargs["weight_rule"] == "absolute"
 
 
 def test_weather_transform_runs_place_mapping_seed_and_mart():

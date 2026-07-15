@@ -246,6 +246,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
         pool=TRINO_HEAVY_POOL,
+        weight_rule="absolute",
         on_failure_callback=record_traffic_dbt_problem,
     )
 

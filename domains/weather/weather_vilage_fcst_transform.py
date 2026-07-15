@@ -410,6 +410,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
             "snapshot_task_id": SNAPSHOT_TASK_ID,
         },
         pool=TRINO_HEAVY_POOL,
+        weight_rule="absolute",
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
         on_failure_callback=[notify_weather_transform_failure, record_weather_problem],

@@ -20,6 +20,15 @@ def test_traffic_transform_subscribes_to_incident_or_flow_bronze_asset_by_defaul
     }
 
 
+def test_traffic_transform_trino_tasks_do_not_inflate_pool_priority_from_chain():
+    module = load_transform_module()
+
+    for task_id in module.DBT_PHASE_TASK_IDS:
+        task = module.dag.task_dict[task_id]
+        assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+        assert task.kwargs["weight_rule"] == "absolute"
+
+
 def test_traffic_transform_validates_dev_runtime_before_dbt():
     module = load_transform_module()
     guard = module.dag.task_dict["validate_dev_runtime"]
