@@ -86,7 +86,7 @@
 raw/transit/seoul_bus/<dataset>/load_date=…/ingest_ts=…/page-NNNN.xml   # 노선당 1페이지, XML 원본
 + _manifest.json (rows·endpoint·request_params.busRouteId·run_id)
 ```
-**Iceberg** `iceberg_dev.dev_codingpoppy94.bronze_bus_{arrival,position}` — **노선당 1행**:
+**Iceberg** `iceberg_dev.transit.bronze_bus_{arrival,position}` — **노선당 1행**:
 
 | 컬럼 | 내용 |
 |------|------|

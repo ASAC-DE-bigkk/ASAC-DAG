@@ -43,7 +43,7 @@ from seoul_transit.r2_landing import land
 from seoul_transit.subway import collect_subway
 
 CATALOG = os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
-SCHEMA = os.environ.get("SMOKE_SCHEMA", "ops_smoke")
+SCHEMA = os.environ.get("TRANSIT_SCHEMA", "transit")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # R2 객체 적재 (raw) — 팀 <stage>/<domain>/<source> 규약

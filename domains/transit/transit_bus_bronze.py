@@ -35,7 +35,7 @@ from seoul_transit.bus import collect_bus_raw
 from seoul_transit.r2_landing import land
 
 CATALOG = os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
-SCHEMA = os.environ.get("SMOKE_SCHEMA", "ops_smoke")
+SCHEMA = os.environ.get("TRANSIT_SCHEMA", "transit")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 DOMAIN = os.environ.get("TRANSIT_DOMAIN", "transit")
