@@ -26,7 +26,7 @@ from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_FLOW_MATERIALIZED_ALIAS,
     TRAFFIC_FLOW_BRONZE_ASSET_REF,
     TRAFFIC_INCIDENT_BRONZE_ASSET,
-    incident_bronze_events,
+    latest_incident_bronze_event,
     publish_through_alias,
     schedule_asset,
 )
@@ -49,9 +49,9 @@ record_traffic_problem = problem_failure_callback(
 
 
 def _incident_parent_from_context(context: dict) -> str:
-    events = incident_bronze_events(context)
-    if events:
-        return str(events[-1]["bronze_dag_run_id"])
+    event = latest_incident_bronze_event(context)
+    if event is not None:
+        return str(event["bronze_dag_run_id"])
     configured = dag_run_conf(context).get("incident_run_id")
     if not str(configured or "").strip():
         raise AirflowFailException(

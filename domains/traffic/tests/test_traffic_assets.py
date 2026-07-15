@@ -2,12 +2,34 @@ from __future__ import annotations
 
 import types
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+def _incident_event(
+    run_id: str,
+    event_at: str,
+    *,
+    timestamp: datetime | None = None,
+) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        timestamp=timestamp,
+        extra={
+            "source_id": "seoul_traffic_incident",
+            "bronze_run_id": run_id,
+            "bronze_dag_run_id": run_id,
+            "event_at": event_at,
+            "load_date": event_at[:10],
+            "row_count": 4,
+            "payload_hash": "a" * 64,
+            "is_publishable": True,
+        },
+    )
 
 
 def test_traffic_assets_are_owned_by_the_traffic_domain():
@@ -28,26 +50,8 @@ def test_asset_event_metadata_is_validated_and_sorted_by_event_time():
         incident_bronze_events,
     )
 
-    older = types.SimpleNamespace(
-        extra={
-            "source_id": "seoul_traffic_incident",
-            "bronze_run_id": "snapshot-old",
-            "bronze_dag_run_id": "snapshot-old",
-            "event_at": "2026-07-16T00:00:00+00:00",
-            "load_date": "2026-07-16",
-            "row_count": 4,
-            "payload_hash": "a" * 64,
-            "is_publishable": True,
-        }
-    )
-    newer = types.SimpleNamespace(
-        extra={
-            **older.extra,
-            "bronze_run_id": "snapshot-new",
-            "bronze_dag_run_id": "snapshot-new",
-            "event_at": "2026-07-16T00:05:00+00:00",
-        }
-    )
+    older = _incident_event("snapshot-old", "2026-07-16T00:00:00+00:00")
+    newer = _incident_event("snapshot-new", "2026-07-16T00:05:00+00:00")
 
     events = incident_bronze_events(
         {"triggering_asset_events": {TRAFFIC_INCIDENT_BRONZE_ASSET: [newer, older]}}
@@ -69,6 +73,89 @@ def test_asset_event_metadata_rejects_incomplete_or_mismatched_identity():
     with pytest.raises(TrafficAssetContractError, match="incomplete"):
         incident_bronze_events(
             {"triggering_asset_events": {"iceberg://traffic/bronze": [incomplete]}}
+        )
+
+
+def test_latest_incident_event_coalesces_older_legacy_backlog():
+    from traffic_ingest.assets import (
+        TRAFFIC_INCIDENT_BRONZE_ASSET,
+        latest_incident_bronze_event,
+    )
+
+    legacy = types.SimpleNamespace(
+        timestamp=datetime(2026, 7, 7, tzinfo=timezone.utc),
+        extra={},
+    )
+    current = _incident_event(
+        "snapshot-current",
+        "2026-07-16T00:00:00+00:00",
+        timestamp=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+
+    selected = latest_incident_bronze_event(
+        {
+            "triggering_asset_events": {
+                TRAFFIC_INCIDENT_BRONZE_ASSET: [legacy, current]
+            }
+        }
+    )
+
+    assert selected["bronze_dag_run_id"] == "snapshot-current"
+
+
+def test_latest_incident_event_breaks_timestamp_ties_by_input_order():
+    from traffic_ingest.assets import (
+        TRAFFIC_INCIDENT_BRONZE_ASSET,
+        latest_incident_bronze_event,
+    )
+
+    timestamp = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    first = _incident_event(
+        "snapshot-first",
+        "2026-07-16T00:00:00+00:00",
+        timestamp=timestamp,
+    )
+    second = _incident_event(
+        "snapshot-second",
+        "2026-07-16T00:00:00+00:00",
+        timestamp=timestamp,
+    )
+
+    selected = latest_incident_bronze_event(
+        {
+            "triggering_asset_events": {
+                TRAFFIC_INCIDENT_BRONZE_ASSET: [first, second]
+            }
+        }
+    )
+
+    assert selected["bronze_dag_run_id"] == "snapshot-second"
+
+
+def test_latest_incident_event_rejects_malformed_latest_event():
+    from traffic_ingest.assets import (
+        TRAFFIC_INCIDENT_BRONZE_ASSET,
+        TrafficAssetContractError,
+        latest_incident_bronze_event,
+    )
+
+    current = _incident_event(
+        "snapshot-current",
+        "2026-07-16T00:00:00+00:00",
+        timestamp=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+    malformed_latest = types.SimpleNamespace(
+        timestamp=datetime(2026, 7, 16, 0, 5, tzinfo=timezone.utc),
+        extra={},
+    )
+
+    with pytest.raises(TrafficAssetContractError, match="incomplete"):
+        latest_incident_bronze_event(
+            {
+                "triggering_asset_events": {
+                    TRAFFIC_INCIDENT_BRONZE_ASSET: [current, malformed_latest]
+                }
+            }
         )
 
 
