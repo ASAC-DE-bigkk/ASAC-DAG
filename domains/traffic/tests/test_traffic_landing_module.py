@@ -44,6 +44,16 @@ class ScriptedTopisSource:
         return 200, self.pages[(start_index, end_index)]
 
 
+class SequentialTopisSource:
+    def __init__(self, payloads: list[bytes]) -> None:
+        self.payloads = payloads
+        self.requests: list[tuple[int, int]] = []
+
+    def fetch_page(self, start_index: int, end_index: int) -> tuple[int, bytes]:
+        self.requests.append((start_index, end_index))
+        return 200, self.payloads.pop(0)
+
+
 class MemoryRawObjectStore:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, str]] = {}
@@ -130,7 +140,7 @@ def test_collect_fails_loudly_when_landed_pages_do_not_cover_reported_total():
             (3, 3): acc_info_payload(total_count=3, incident_ids=()),
         }
     )
-    request_ids = iter(("request-1", "request-2"))
+    request_ids = iter(("request-1", "request-2", "request-3", "request-4"))
     landing = TrafficLanding(
         source=source,
         raw_store=MemoryRawObjectStore(),
@@ -147,6 +157,36 @@ def test_collect_fails_loudly_when_landed_pages_do_not_cover_reported_total():
             RunIdentity(dag_id="traffic_incident_bronze", run_id="manual__incomplete"),
             TrafficLandingRequest(start_index=1, end_index=2, page_size=2),
         )
+    assert source.requests == [(1, 2), (3, 3), (1, 2), (3, 3)]
+
+
+def test_collect_refetches_once_after_source_count_exceeds_metadata():
+    source = SequentialTopisSource(
+        [
+            acc_info_payload(total_count=1, incident_ids=("A1", "A2")),
+            acc_info_payload(total_count=1, incident_ids=("B1",)),
+        ]
+    )
+    raw_store = MemoryRawObjectStore()
+    request_ids = iter(("request-1", "request-2"))
+    landing = TrafficLanding(
+        source=source,
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 14, 0, 20, tzinfo=timezone.utc),
+        request_id=lambda: next(request_ids),
+    )
+
+    batch = landing.collect(
+        RunIdentity(dag_id="traffic_incident_bronze", run_id="manual__fresh-retry"),
+        TrafficLandingRequest(start_index=1, end_index=1000, page_size=1000),
+    )
+
+    assert source.requests == [(1, 1000), (1, 1000)]
+    assert batch.total_count == 1
+    assert batch.parsed_rows == 1
+    assert batch.raw_objects[0].request_id == "request-2"
+    assert len([key for key in raw_store.objects if key.endswith(".xml")]) == 2
 
 
 def test_collect_reuses_same_run_checkpoint_without_duplicate_source_request():

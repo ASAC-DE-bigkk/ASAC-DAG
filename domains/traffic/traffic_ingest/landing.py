@@ -209,6 +209,9 @@ class TrafficLanding:
         self,
         run: RunIdentity,
         request: TrafficLandingRequest,
+        *,
+        _fresh_retry_remaining: int = 1,
+        _ignore_incomplete_checkpoint: bool = False,
     ) -> TrafficLandingBatch:
         mode = TrafficCollectionMode(request.mode)
         if mode is TrafficCollectionMode.BACKFILL:
@@ -219,7 +222,11 @@ class TrafficLanding:
             raise TrafficInvalidWindowError(
                 "full_snapshot collection requires start_index=1"
             )
-        checkpoint = self._load_checkpoint(run, request)
+        checkpoint = (
+            None
+            if _ignore_incomplete_checkpoint
+            else self._load_checkpoint(run, request)
+        )
         checkpoint_objects = checkpoint.batch.raw_objects if checkpoint else ()
         trustworthy_objects = tuple(
             item
@@ -305,6 +312,16 @@ class TrafficLanding:
             else self._window_expected_rows(request, total_count)
         )
         if parsed_rows != expected_rows:
+            if (
+                mode is TrafficCollectionMode.FULL_SNAPSHOT
+                and _fresh_retry_remaining > 0
+            ):
+                return self.collect(
+                    run,
+                    request,
+                    _fresh_retry_remaining=_fresh_retry_remaining - 1,
+                    _ignore_incomplete_checkpoint=True,
+                )
             raise TrafficLandingIncompleteError(
                 "Traffic landing incomplete: "
                 f"total_count={total_count}, parsed_rows={parsed_rows}, "
