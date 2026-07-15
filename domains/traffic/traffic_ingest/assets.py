@@ -69,15 +69,9 @@ def _event_time(metadata: Mapping[str, object]) -> datetime:
     return value
 
 
-def _validated_events(
-    context: Mapping[str, object],
-    *,
-    asset_uri: str,
-    required_fields: frozenset[str],
-    source_id: str,
-    run_field: str,
-    duplicate_run_field: str,
-) -> list[dict[str, object]]:
+def _matching_asset_events(
+    context: Mapping[str, object], *, asset_uri: str
+) -> list[object]:
     triggering = context.get("triggering_asset_events") or {}
     if not isinstance(triggering, Mapping):
         raise TrafficAssetContractError("Traffic triggering Asset events are malformed")
@@ -90,6 +84,35 @@ def _validated_events(
             events.extend(asset_events)
         else:
             events.append(asset_events)
+    return events
+
+
+def _asset_event_timestamp(event: object) -> datetime:
+    timestamp = getattr(event, "timestamp", None)
+    if timestamp is None:
+        metadata = getattr(event, "extra", None)
+        if not isinstance(metadata, Mapping):
+            raise TrafficAssetContractError(
+                "Traffic triggering Asset event timestamp is unavailable"
+            )
+        return _event_time(metadata)
+    if not isinstance(timestamp, datetime) or timestamp.tzinfo is None:
+        raise TrafficAssetContractError(
+            "Traffic triggering Asset event timestamp is malformed"
+        )
+    return timestamp
+
+
+def _validated_events(
+    context: Mapping[str, object],
+    *,
+    asset_uri: str,
+    required_fields: frozenset[str],
+    source_id: str,
+    run_field: str,
+    duplicate_run_field: str,
+) -> list[dict[str, object]]:
+    events = _matching_asset_events(context, asset_uri=asset_uri)
 
     validated: list[dict[str, object]] = []
     for event in events:
@@ -118,6 +141,30 @@ def incident_bronze_events(context: Mapping[str, object]) -> list[dict[str, obje
         run_field="bronze_dag_run_id",
         duplicate_run_field="bronze_run_id",
     )
+
+
+def latest_incident_bronze_event(
+    context: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Select the newest triggering event before applying the strict contract."""
+
+    events = _matching_asset_events(
+        context,
+        asset_uri=TRAFFIC_INCIDENT_BRONZE_ASSET,
+    )
+    if not events:
+        return None
+    _, latest = max(
+        enumerate(events),
+        key=lambda item: (_asset_event_timestamp(item[1]), item[0]),
+    )
+    return incident_bronze_events(
+        {
+            "triggering_asset_events": {
+                TRAFFIC_INCIDENT_BRONZE_ASSET: [latest],
+            }
+        }
+    )[0]
 
 
 def flow_bronze_events(context: Mapping[str, object]) -> list[dict[str, object]]:
@@ -219,6 +266,7 @@ __all__ = [
     "TrafficAssetContractError",
     "flow_bronze_events",
     "incident_bronze_events",
+    "latest_incident_bronze_event",
     "materializer_schedule",
     "publish_through_alias",
     "schedule_asset",

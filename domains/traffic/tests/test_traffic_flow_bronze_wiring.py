@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -62,7 +63,13 @@ def test_flow_landing_wrapper_uses_exact_triggering_incident_parent(monkeypatch)
         run_id="asset__flow-1",
         dag_run=types.SimpleNamespace(conf={}),
         triggering_asset_events={
-            dag_module.TRAFFIC_INCIDENT_BRONZE_ASSET: [_incident_event()]
+            dag_module.TRAFFIC_INCIDENT_BRONZE_ASSET: [
+                types.SimpleNamespace(
+                    timestamp=datetime(2026, 7, 7, tzinfo=timezone.utc),
+                    extra={},
+                ),
+                _incident_event(),
+            ]
         },
     )
 
