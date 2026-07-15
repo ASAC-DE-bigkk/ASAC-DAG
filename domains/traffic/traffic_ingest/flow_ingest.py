@@ -8,15 +8,24 @@ from common.http import HttpCore, PathKey
 from traffic_ingest.flow_info import (
     SOURCE_ID,
     build_api_url,
+    resolve_flow_link_ids,
     traffic_api_key,
 )
+from traffic_ingest.flow_bronze import (
+    load_traffic_flow_batch,
+    verify_seoul_traffic_flow_bronze_runtime,
+)
 from traffic_ingest.flow_landing import TrafficFlowLanding
+from traffic_ingest.flow_pipeline import TrafficFlowPipeline
 from traffic_ingest.run_manifest import TrafficRunManifest
 from traffic_ingest.common.runtime import (
     r2_env,
     trino_cursor,
 )
 from traffic_ingest.runtime import R2RawObjectStore, _build_s3_client
+from traffic_ingest.runtime import build_traffic_manifest
+from common.runtime_guard import validate_dev_runtime
+from traffic_ingest.common.runtime import download_raw_object
 
 
 def _build_flow_http():
@@ -54,4 +63,40 @@ def build_traffic_flow_manifest() -> TrafficRunManifest:
     return TrafficRunManifest(trino_cursor, source_id=SOURCE_ID)
 
 
-__all__ = ["build_traffic_flow_landing", "build_traffic_flow_manifest"]
+def build_traffic_flow_pipeline() -> TrafficFlowPipeline:
+    def load(raw_result: dict[str, object], flow_run_id: str) -> dict[str, object]:
+        return load_traffic_flow_batch(
+            raw_result=raw_result,
+            dag_run_id=flow_run_id,
+            cursor_factory=trino_cursor,
+            download_raw_object=download_raw_object,
+        )
+
+    def verify(load_result: dict[str, object], flow_run_id: str) -> int:
+        return verify_seoul_traffic_flow_bronze_runtime(
+            dag_run_id=flow_run_id,
+            expected_rows=int(
+                load_result.get("expected_rows", load_result.get("inserted", 0))
+            ),
+            expected_raw_objects=int(load_result.get("page_count", 0)),
+        )
+
+    return TrafficFlowPipeline(
+        runtime_guard=lambda: validate_dev_runtime("traffic"),
+        incident_manifest=build_traffic_manifest(),
+        flow_manifest=build_traffic_flow_manifest(),
+        resolve_links=lambda conf, parent: resolve_flow_link_ids(
+            conf=conf,
+            incident_run_id=parent,
+        ),
+        landing=build_traffic_flow_landing(),
+        load=load,
+        verify=verify,
+    )
+
+
+__all__ = [
+    "build_traffic_flow_landing",
+    "build_traffic_flow_manifest",
+    "build_traffic_flow_pipeline",
+]

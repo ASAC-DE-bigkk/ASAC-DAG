@@ -7,6 +7,9 @@ DOMAIN_ROOT = Path(__file__).resolve().parents[1]
 def test_traffic_production_entrypoints_stay_below_400_lines():
     for relative_path in (
         "traffic_incident_bronze.py",
+        "traffic_incident_landing.py",
+        "traffic_incident_manual.py",
+        "traffic_flow_bronze.py",
         "traffic_incident_transform.py",
     ):
         path = DOMAIN_ROOT / relative_path

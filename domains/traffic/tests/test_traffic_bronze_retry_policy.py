@@ -10,7 +10,7 @@ from airflow.sdk.exceptions import AirflowFailException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import traffic_incident_bronze as dag_module  # noqa: E402
+import traffic_ingest.manual_incident as dag_module  # noqa: E402
 from traffic_ingest.errors import (  # noqa: E402
     TrafficBronzeConfigurationError,
     TrafficBronzeDeterministicError,

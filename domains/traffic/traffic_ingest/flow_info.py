@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from traffic_ingest.common.runtime import (
     raw_prefix,
+    sql_string,
     trino_cursor,
 )
 from traffic_ingest.errors import (
@@ -104,10 +105,11 @@ def _max_link_count(environ: dict[str, str] | None = None) -> int:
 def resolve_flow_link_ids(
     *,
     conf: dict[str, Any] | None = None,
+    incident_run_id: str | None = None,
     cursor_factory: Callable = trino_cursor,
     environ: dict[str, str] | None = None,
 ) -> list[str]:
-    """Resolve links from manual input or the latest publishable incident snapshot."""
+    """Resolve links from manual input or one exact Incident Bronze snapshot."""
     conf = conf or {}
     environ = os.environ if environ is None else environ
     explicit = conf.get("link_ids")
@@ -116,24 +118,19 @@ def resolve_flow_link_ids(
     if explicit not in (None, ""):
         return normalize_link_ids(explicit)[: _max_link_count(environ)]
 
+    if not str(incident_run_id or "").strip():
+        raise TrafficBronzeConfigurationError(
+            "Traffic flow incident_run_id is required when link_ids are not explicit."
+        )
+
     cursor, catalog, schema = cursor_factory()
     qualified = f"{catalog}.{schema}"
     cursor.execute(
         f"""
-        WITH latest_incident_run AS (
-            SELECT cast(dag_run_id AS varchar) AS dag_run_id
-            FROM {qualified}.bronze_collection_run_manifest
-            WHERE source_id = 'seoul_traffic_incident'
-              AND status = 'SUCCESS'
-              AND is_publishable
-            ORDER BY event_at DESC, dag_run_id DESC
-            LIMIT 1
-        )
         SELECT DISTINCT cast(incident.link_id AS varchar) AS link_id
         FROM {qualified}.bronze_seoul_traffic_incident AS incident
-        INNER JOIN latest_incident_run AS latest
-            ON cast(incident.dag_run_id AS varchar) = latest.dag_run_id
-        WHERE incident.link_id IS NOT NULL
+        WHERE incident.dag_run_id = {sql_string(str(incident_run_id))}
+          AND incident.link_id IS NOT NULL
           AND trim(cast(incident.link_id AS varchar)) <> ''
         ORDER BY link_id
         LIMIT {_max_link_count(environ)}

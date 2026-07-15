@@ -12,8 +12,14 @@ from common.http import HttpCore
 from common.http.seoul import SeoulOpenApiClient
 from traffic_ingest.common.runtime import raw_prefix, r2_env, trino_cursor
 from traffic_ingest.landing import TrafficLanding
+from traffic_ingest.incident_pipeline import (
+    IncidentLandingLifecycle,
+    IncidentMaterializer,
+)
 from traffic_ingest.errors import TrafficBronzeConfigurationError
+from traffic_ingest.run_ledger import TrafficRunLedger
 from traffic_ingest.run_manifest import TrafficRunManifest
+from traffic_ingest.snapshot_receipt import TrafficSnapshotReceipts
 
 
 _MISSING_OBJECT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
@@ -162,3 +168,65 @@ def build_traffic_landing() -> TrafficLanding:
 
 def build_traffic_manifest() -> TrafficRunManifest:
     return TrafficRunManifest(trino_cursor)
+
+
+def build_traffic_snapshot_receipts() -> TrafficSnapshotReceipts:
+    from common.storage import build_storage, r2_env as storage_r2_env
+
+    storage = build_storage(
+        "r2",
+        bucket=storage_r2_env("R2_BUCKET_NAME"),
+        endpoint=storage_r2_env("R2_ENDPOINT"),
+        key=storage_r2_env("R2_ACCESS_KEY_ID"),
+        secret=storage_r2_env("R2_SECRET_ACCESS_KEY"),
+        region="auto",
+    )
+    return TrafficSnapshotReceipts(storage)
+
+
+def build_incident_landing_lifecycle() -> IncidentLandingLifecycle:
+    from common.runtime_guard import validate_dev_runtime
+
+    return IncidentLandingLifecycle(
+        runtime_guard=lambda: validate_dev_runtime("traffic"),
+        ledger=TrafficRunLedger(),
+        landing=build_traffic_landing(),
+        receipts=build_traffic_snapshot_receipts(),
+        clock=lambda: datetime.now(timezone.utc),
+    )
+
+
+def build_incident_materializer() -> IncidentMaterializer:
+    from traffic_ingest.bronze import (
+        create_seoul_traffic_bronze_table,
+        insert_seoul_traffic_bronze_rows,
+        verify_seoul_traffic_bronze_runtime,
+    )
+    from traffic_ingest.bronze_batch import load_traffic_bronze_batch
+    from traffic_ingest.common.runtime import download_raw_object
+
+    def load(raw_result: dict[str, object], snapshot_run_id: str) -> dict[str, object]:
+        return load_traffic_bronze_batch(
+            raw_result=raw_result,
+            dag_run_id=snapshot_run_id,
+            cursor_factory=trino_cursor,
+            create_table=create_seoul_traffic_bronze_table,
+            download_raw_object=download_raw_object,
+            insert_rows=insert_seoul_traffic_bronze_rows,
+        )
+
+    def verify(load_result: dict[str, object], snapshot_run_id: str) -> int:
+        return verify_seoul_traffic_bronze_runtime(
+            raw_object_keys=list(load_result.get("raw_object_keys") or []),
+            dag_run_id=snapshot_run_id,
+            expected_rows=int(load_result.get("inserted") or 0),
+            expected_raw_objects=int(load_result.get("page_count") or 0),
+        )
+
+    return IncidentMaterializer(
+        receipts=build_traffic_snapshot_receipts(),
+        manifest=build_traffic_manifest(),
+        load=load,
+        verify=verify,
+        clock=lambda: datetime.now(timezone.utc),
+    )

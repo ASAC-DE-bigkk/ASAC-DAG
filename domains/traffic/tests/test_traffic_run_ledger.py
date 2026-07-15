@@ -96,6 +96,27 @@ def test_ledger_uses_deterministic_status_keys_and_never_persists_error_messages
     assert "must-not-be-persisted" not in repr(failed)
 
 
+def test_ledger_keys_preserve_distinct_run_identities():
+    storage = MemoryStorage()
+    logical_date = datetime(2026, 7, 15, 0, 0, tzinfo=timezone.utc)
+    ledger = _ledger(storage, logical_date)
+
+    _record(
+        ledger,
+        run_id="scheduled__a/b",
+        status=STATUS_SUCCESS,
+        logical_date=logical_date,
+    )
+    _record(
+        ledger,
+        run_id="scheduled__a-b",
+        status=STATUS_SUCCESS,
+        logical_date=logical_date,
+    )
+
+    assert len(storage.objects) == 2
+
+
 def test_scheduled_summary_counts_terminal_failure_and_nonstale_running_run():
     storage = MemoryStorage()
     start = datetime(2026, 7, 15, 0, 0, tzinfo=timezone.utc)
@@ -130,10 +151,11 @@ def test_scheduled_summary_counts_terminal_failure_and_nonstale_running_run():
     )
 
     assert summary == {
-        "expected": 1,
+        "expected": 4,
         "success": 1,
         "failed": 1,
         "running": 1,
+        "grace": 1,
         "failures": [
             {
                 "logical_date": "2026-07-15T00:05:00+00:00",
@@ -170,10 +192,18 @@ def test_scheduled_summary_reports_missing_and_stalled_slots_after_bootstrap():
         stale_after_minutes=15,
     )
 
-    assert summary["expected"] == 5
+    assert summary["expected"] == 8
     assert summary["success"] == 1
     assert summary["running"] == 0
     assert summary["failed"] == 4
+    assert summary["grace"] == 3
+    assert (
+        summary["success"]
+        + summary["failed"]
+        + summary["running"]
+        + summary["grace"]
+        == summary["expected"]
+    )
     assert summary["failures"] == [
         {
             "logical_date": "2026-07-15T00:05:00+00:00",
@@ -219,6 +249,41 @@ def test_scheduled_summary_is_explicitly_bootstrapping_until_first_scheduled_eve
         "success": 0,
         "failed": 0,
         "running": 0,
+        "grace": 0,
         "failures": [],
         "reason": "run_ledger_bootstrapping",
     }
+
+
+def test_terminal_failure_inside_stale_grace_is_failed_not_grace():
+    storage = MemoryStorage()
+    start = datetime(2026, 7, 15, 0, 0, tzinfo=timezone.utc)
+    ledger = _ledger(storage, start.replace(minute=10))
+    _record(
+        ledger,
+        run_id="scheduled__2026-07-15T00:00:00+00:00",
+        status=STATUS_SUCCESS,
+        logical_date=start,
+    )
+    _record(
+        ledger,
+        run_id="scheduled__2026-07-15T00:10:00+00:00",
+        status=STATUS_FAILED,
+        logical_date=start.replace(minute=10),
+        task_id="land_traffic_incident_snapshot",
+        error=RuntimeError("source unavailable"),
+    )
+
+    summary = ledger.collect_scheduled_run_summary(
+        dag_id="traffic_incident_bronze",
+        detected_at=start.replace(minute=10),
+        lookback_hours=24,
+        schedule_interval_minutes=5,
+        stale_after_minutes=15,
+    )
+
+    assert summary["expected"] == 3
+    assert summary["success"] == 1
+    assert summary["failed"] == 1
+    assert summary["running"] == 0
+    assert summary["grace"] == 1

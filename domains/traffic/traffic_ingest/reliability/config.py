@@ -15,6 +15,7 @@ KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger("traffic_ingest.reliability_report")
 
 TRAFFIC_BRONZE_DAG_ID = "traffic_incident_bronze"
+TRAFFIC_LANDING_DAG_ID = "traffic_incident_landing"
 # ``traffic_incident_bronze`` runs on a five-minute cron in the dev smoke flow.
 # The interval is added to the first-to-last failed slot so the reported window
 # includes the final slot's collection period.
@@ -40,6 +41,8 @@ class TrafficReportConfig:
     freshness_error_minutes: int
     scheduled_run_interval_minutes: int
     scheduled_run_stale_minutes: int
+    materialization_backlog_warn_minutes: int
+    materialization_backlog_error_minutes: int
 
 
 def is_dev_target(env: Mapping[str, str] = os.environ) -> bool:
@@ -104,5 +107,11 @@ def report_config(env: Mapping[str, str] = os.environ) -> TrafficReportConfig:
                 "ASK_SEOUL_REPORT_TRAFFIC_RUN_STALE_MINUTES",
                 str(TRAFFIC_RUN_STALE_MINUTES),
             )
+        ),
+        materialization_backlog_warn_minutes=int(
+            env.get("ASK_SEOUL_TRAFFIC_BACKLOG_WARN_MINUTES", "15")
+        ),
+        materialization_backlog_error_minutes=int(
+            env.get("ASK_SEOUL_TRAFFIC_BACKLOG_ERROR_MINUTES", "30")
         ),
     )

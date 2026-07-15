@@ -6,15 +6,18 @@ from traffic_transform_test_support import (
 from traffic_transform_test_support import restore_airflow_modules_after_dag_import  # noqa: F401
 
 
-def test_traffic_transform_subscribes_to_bronze_asset_by_default(
+def test_traffic_transform_subscribes_to_incident_or_flow_bronze_asset_by_default(
     monkeypatch,
 ):
     monkeypatch.delenv("ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE", raising=False)
     module = load_transform_module()
 
     assert module.TRAFFIC_TRANSFORM_CRON_KST == "12 * * * *"
-    assert len(module.dag.kwargs["schedule"]) == 1
-    assert module.dag.kwargs["schedule"][0].uri == module.TRAFFIC_BRONZE_ASSET
+    schedule = module.dag.kwargs["schedule"]
+    assert {asset.uri for asset in schedule.assets} == {
+        module.TRAFFIC_BRONZE_ASSET,
+        module.TRAFFIC_FLOW_BRONZE_ASSET,
+    }
 
 
 def test_traffic_transform_validates_dev_runtime_before_dbt():

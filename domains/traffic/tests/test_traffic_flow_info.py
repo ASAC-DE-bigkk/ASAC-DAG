@@ -1,7 +1,12 @@
 import json
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from traffic_ingest.errors import TrafficBronzeConfigurationError, TrafficSourceBusinessError
 from traffic_ingest.flow_info import (
@@ -9,6 +14,7 @@ from traffic_ingest.flow_info import (
     normalize_link_ids,
     parse_traffic_info_response,
     request_params_json,
+    resolve_flow_link_ids,
 )
 from traffic_ingest.flow_landing import TrafficFlowLanding
 
@@ -121,3 +127,36 @@ def test_flow_landing_preserves_raw_json_and_is_stable_for_same_run_link():
     )
     assert "manual__flow" in descriptor["raw_object_key"]
     assert descriptor["raw_object_key"].endswith(".xml")
+
+
+def test_flow_link_resolution_is_pinned_to_exact_incident_snapshot():
+    class Cursor:
+        def __init__(self):
+            self.statement = ""
+
+        def execute(self, statement):
+            self.statement = " ".join(statement.split())
+
+        def fetchall(self):
+            return [("1220003800",), ("1220003900",)]
+
+    cursor = Cursor()
+
+    result = resolve_flow_link_ids(
+        incident_run_id="scheduled__incident-42",
+        cursor_factory=lambda: (cursor, "iceberg_dev", "ask_seoul"),
+        environ={"SEOUL_TRAFFIC_FLOW_MAX_LINKS": "1000"},
+    )
+
+    assert result == ["1220003800", "1220003900"]
+    assert "incident.dag_run_id = 'scheduled__incident-42'" in cursor.statement
+    assert "bronze_collection_run_manifest" not in cursor.statement
+    assert "ORDER BY event_at" not in cursor.statement
+
+
+def test_flow_link_resolution_requires_parent_when_links_are_not_explicit():
+    with pytest.raises(TrafficBronzeConfigurationError, match="incident_run_id"):
+        resolve_flow_link_ids(
+            cursor_factory=lambda: pytest.fail("missing parent must fail before SQL"),
+            environ={},
+        )

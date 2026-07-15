@@ -1,5 +1,22 @@
 > 보존 문서: 이 문서는 2026-07-14 이전 README의 상세 Bronze 설계 메모를 내용 손실 없이 옮긴 것이다.
-> 현재 파일 구조와 실행 경로는 상위 `README.md`와 실제 코드가 기준이며, 아래 일부 구조 설명은 리팩터링 이전 상태일 수 있다.
+> 현재 파일 구조와 실행 경로는 상위 `README.md`, 실제 코드와
+> `docs/superpowers/specs/2026-07-16-traffic-landing-materialization-design.md`가 기준이다.
+> 아래 구조 설명과 cron 기반 Transform 설명은 리팩터링 이전 상태다.
+
+## 2026-07-16 현재 Bronze 경계
+
+5분 수집과 Trino 적재를 한 DAG에 두지 않는다. `traffic_incident_landing`은 원본과
+`LANDED` receipt만 R2에 내구성 있게 기록하고 raw Asset을 발행한다.
+`traffic_incident_bronze`는 raw Asset 또는 15분 fallback으로 pending receipt를 오래된
+순서부터 처리한다. Bronze 검증과 `MATERIALIZED` receipt 기록 뒤에도 pending은 유지한다.
+Incident Bronze Asset을 포함한 task 성공 메시지가 Airflow supervisor에 수락된 뒤
+success callback에서만 pending index를 제거한다.
+
+Flow는 Incident Bronze Asset의 run id를 exact parent로 보존한다. 처리 중 더 최신
+Incident가 도착한 Flow run은 Bronze에는 보존하되 stale Flow Asset을 발행하지 않는다.
+Transform은 Incident 또는 Flow Asset에 즉시 반응하며, 항상 최신 Incident와 그 run을
+parent로 가진 Flow만 한 쌍으로 사용한다. 밀린 Incident 이벤트는 manifest에
+`COALESCED`로 남기고 최신 snapshot으로 전진한다.
 
 # traffic 도메인 Bronze DAG 설계 메모
 

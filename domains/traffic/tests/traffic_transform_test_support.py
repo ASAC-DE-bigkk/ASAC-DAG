@@ -20,6 +20,8 @@ _AIRFLOW_MODULE_NAMES = (
     "airflow.sdk.exceptions",
     "airflow.utils",
     "airflow.utils.trigger_rule",
+    "traffic_ingest.assets",
+    "traffic_ingest.transform_dag_support",
 )
 
 
@@ -106,6 +108,22 @@ class FakeAsset:
     def __eq__(self, other):
         return isinstance(other, FakeAsset) and self.uri == other.uri
 
+    def __or__(self, other):
+        return FakeAssetExpression(self, other)
+
+
+class FakeAssetAlias:
+    def __init__(self, name):
+        self.name = name
+
+
+class FakeAssetExpression:
+    def __init__(self, *assets):
+        self.assets = assets
+
+    def __or__(self, other):
+        return FakeAssetExpression(*self.assets, other)
+
 
 class FakeAirflowException(Exception):
     pass
@@ -122,6 +140,7 @@ class FakeTriggerRule:
 
 def install_airflow_fakes():
     airflow = types.ModuleType("airflow")
+    airflow.__version__ = "3.2.2"
     airflow.DAG = FakeDAG
     airflow_exceptions = types.ModuleType("airflow.exceptions")
     airflow_exceptions.AirflowException = FakeAirflowException
@@ -139,6 +158,8 @@ def install_airflow_fakes():
     airflow_python.PythonOperator = FakePythonOperator
     airflow_sdk = types.ModuleType("airflow.sdk")
     airflow_sdk.Asset = FakeAsset
+    airflow_sdk.AssetAlias = FakeAssetAlias
+    airflow_sdk.Param = FakeParam
     airflow_sdk_exceptions = types.ModuleType("airflow.sdk.exceptions")
     airflow_sdk_exceptions.AirflowFailException = FakeAirflowFailException
     airflow_utils = types.ModuleType("airflow.utils")
@@ -165,6 +186,8 @@ def install_airflow_fakes():
 
 
 def load_transform_module():
+    sys.modules.pop("traffic_ingest.assets", None)
+    sys.modules.pop("traffic_ingest.transform_dag_support", None)
     install_airflow_fakes()
     module_path = Path(__file__).resolve().parents[1] / "traffic_incident_transform.py"
     spec = importlib.util.spec_from_file_location(

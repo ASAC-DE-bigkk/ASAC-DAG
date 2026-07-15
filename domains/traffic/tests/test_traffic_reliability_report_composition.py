@@ -61,9 +61,61 @@ def test_build_traffic_report_passes_for_fresh_complete_data(monkeypatch):
     )
     assert result["traffic"]["freshness_status"] == "PASS"
     assert result["publishability_ok"] is True
+    assert result["materialization_backlog"] == {
+        "count": 0,
+        "oldest_snapshot_at": None,
+        "oldest_age_minutes": None,
+        "status": "PASS",
+    }
     assert result["late_publishability"] == {
         "status": "NOT_EVALUATED",
         "reason": "bounded late-repair contract is owned by ASAC-DBT #117",
+    }
+
+
+def test_traffic_report_uses_landing_ledger_and_bronze_manifest(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    captured = {}
+    monkeypatch.setattr(
+        composition,
+        "collect_scheduled_run_summary",
+        lambda dag_id, *_args: captured.update(cadence_dag_id=dag_id)
+        or {
+            "expected": 1,
+            "success": 1,
+            "failed": 0,
+            "running": 0,
+            "grace": 0,
+            "failures": [],
+        },
+    )
+    monkeypatch.setattr(
+        composition,
+        "collect_dag_run_summary",
+        lambda _cursor, _config, dag_id, _detected_at: captured.update(
+            manifest_dag_id=dag_id
+        )
+        or {
+            "dag_id": dag_id,
+            "latest_terminal_status": "SUCCESS",
+            "latest_terminal_is_publishable": True,
+        },
+    )
+    cursor = RecordingCursor(
+        rows=[
+            (1, 25, 25, 1000, 0, datetime(2026, 7, 2, 8, 55, tzinfo=timezone.utc)),
+        ]
+    )
+
+    result = report.build_traffic_reliability_report(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "PASS"
+    assert captured == {
+        "manifest_dag_id": "traffic_incident_bronze",
+        "cadence_dag_id": "traffic_incident_landing",
     }
 
 

@@ -99,6 +99,7 @@ def install_airflow_fakes():
     airflow_python = types.ModuleType("airflow.providers.standard.operators.python")
     airflow_python.PythonOperator = FakePythonOperator
     airflow_sdk = types.ModuleType("airflow.sdk")
+    airflow_sdk.Param = FakeParam
     airflow_sdk_exceptions = types.ModuleType("airflow.sdk.exceptions")
     airflow_sdk_exceptions.AirflowFailException = FakeAirflowFailException
 

@@ -26,6 +26,7 @@ from traffic_ingest.reliability_report import (  # noqa: E402
     build_traffic_reliability_report,
     format_traffic_discord_message,
     report_dag_schedule,
+    scheduled_failure_identities,
     send_discord_message,
 )
 
@@ -57,29 +58,17 @@ def notification_fingerprint(report: dict) -> str:
             "status": dag_runs.get("latest_terminal_status"),
             "is_publishable": dag_runs.get("latest_terminal_is_publishable"),
         }
-    scheduled_failures = sorted(
-        (
-            {
-                "run_id": failure.get("run_id"),
-                "task_id": failure.get("task_id"),
-                "reason": failure.get("reason"),
-            }
-            for failure in scheduled_runs.get("failures") or []
-        ),
-        key=lambda failure: (
-            str(failure.get("run_id") or ""),
-            str(failure.get("task_id") or ""),
-            str(failure.get("reason") or ""),
-        ),
+    scheduled_incidents = scheduled_failure_identities(
+        list(scheduled_runs.get("failures") or [])
     )
     scheduled_failed_count = int(scheduled_runs.get("failed") or 0)
     if scheduled_runs.get("reason") or scheduled_failed_count:
         identity["scheduled_runs"] = {
             "reason": scheduled_runs.get("reason"),
             "error_type": scheduled_runs.get("error_type"),
-            "failures": scheduled_failures,
+            "incidents": scheduled_incidents,
         }
-        if not scheduled_failures:
+        if not scheduled_incidents:
             identity["scheduled_runs"]["failed_count"] = scheduled_failed_count
     payload = json.dumps(
         identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")

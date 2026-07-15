@@ -118,6 +118,17 @@ def stub_report_dependencies(monkeypatch):
             "success": 3,
             "failed": 0,
             "running": 1,
+            "grace": 0,
             "failures": [],
+        },
+    )
+    monkeypatch.setattr(
+        composition,
+        "collect_materialization_backlog",
+        lambda *args: {
+            "count": 0,
+            "oldest_snapshot_at": None,
+            "oldest_age_minutes": None,
+            "status": "PASS",
         },
     )
