@@ -7,6 +7,30 @@
 
 ## 2026-07-15
 
+### 74. R2 orphan(__dbt_tmp) 전량 정리 + gold description(culture 스타일) + 정리 도구 제도화
+
+request:
+- silver/gold 단계에 불필요한 데이터(메타 등) 잔여 확인 후, 남지 않도록 조치. 이어서 gold 테이블의
+  기능·역할 description 을 culture 도메인 gold 참조해 부여.
+
+response:
+- **잔여물 실측**: dbt `table` materialization 이 매 실행 `<model>__dbt_tmp-<uuid>` 물리 디렉터리를
+  남기고 RENAME(메타 이동)으로 테이블화 → 카탈로그엔 없지만 **R2 물리 파일 누적**(commerce ns
+  410 디렉터리 중 258 __dbt_tmp). remove_orphan_files 는 location 내부만 봐서 sibling 못 지움.
+- **안전 정리(사고→복구→완료)**: keep-set 을 location 만으로 잡았다가 CREATE OR REPLACE 직후
+  카탈로그 metadata 포인터가 다른 dir 이라 **gold 11종 metadata 손상**(silver/bronze 무손상 —
+  원천 안전). PyIceberg drop + silver 재빌드로 **11종 전량 복구(데이터 손실 0)**. keep-set 을
+  **location + metadata_location + 현재 스냅샷 파일 dir** 삼중으로 교정 후 재정리 →
+  **총 ~2,990 orphan 키 삭제 · 최종 잔여 0**(전 100 라이브 테이블 count 검증 무손상).
+- **제도화**: `scripts/cleanup_orphan_warehouse_dirs.py`(commerce 스코프·삼중 keep·commerce 접두
+  가드·삭제 후 전수 검증·dry-run 기본) 신설. metadata.json 축적은 loader.ensure_metadata_retention
+  (previous-versions-max=50)이 테이블 내부에서 이미 상한(#71). 스냅샷은 보존(사용자 지시).
+- **gold description(culture 참조)**: 22종 전부 culture `_culture_gold__models.yml` 스타일
+  (그레인 — '대표 질의(기능·역할)'. 핵심 특징)로 재작성. 예: lifespan="'이 업종은 보통 몇 년
+  버티나'", geo_grid="지도 밀도/핫스팟(top=가산·선릉·강남역)", phone_succession="'같은 사업자가
+  폐업 후 무엇으로 재도전하나'".
+- 검증: pytest 359 · dbt parse 0 · 정리 스크립트 dry-run 잔여 0.
+
 ### 73. gold 전량 재적재(R2 삭제→재빌드) + flow append-only 전환(재실행 0건 멱등 확인)
 
 request:
