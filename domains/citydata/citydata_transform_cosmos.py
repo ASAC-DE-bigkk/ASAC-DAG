@@ -42,6 +42,7 @@ if _DAGS_ROOT not in sys.path:
 
 from common.assets import CITYDATA_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.ops.airflow import record_run_metadata  # noqa: E402
 
 KST_TZ = ZoneInfo("Asia/Seoul")
 
@@ -51,6 +52,11 @@ DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata", dbt_project_dir=DBT_PROJECT)
+
+# run-metadata(ops.run_metadata) — 성공·실패 모두 1행 append(태스크 단위). 기존 problem
+# 콜백과 병행하며, best-effort(기록 실패는 태스크 판정 안 가림).
+_run_md_ok = record_run_metadata("citydata", "transform", status="success")
+_run_md_fail = record_run_metadata("citydata", "transform", status="failed")
 
 # 티어는 dbt **태그**로 관리 — 모델명 하드코딩 리스트 대신. 각 모델의 tier 는 그 모델
 # schema.yml `config: tags: [fast|slow]` 에 있고(SQL=비즈니스로직 / yml=문서·메타 분리
@@ -111,7 +117,12 @@ def _tier_group(group_id: str, select: list[str]) -> DbtTaskGroup:
         # 불가)라 재시도가 R2 비원자성으로 이중삽입 중복을 유발한다. 재시도 대신 다음 5분 run 의
         # 룩백이 실패 window 를 재계산해 self-heal 한다. gold 는 table 이라 재시도 무관.
         # 대가: 일시 race(seed 재빌드 등)마다 알림이 뜰 수 있으나 self-clearing 이다.
-        default_args={"retries": 0, "on_failure_callback": record_citydata_problem},
+        # retries=0 유지(위 주석의 중복 방지 근거). run-metadata 는 성공·실패 모두 기록.
+        default_args={
+            "retries": 0,
+            "on_success_callback": _run_md_ok,
+            "on_failure_callback": [record_citydata_problem, _run_md_fail],
+        },
     )
 
 
