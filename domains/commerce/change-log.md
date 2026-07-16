@@ -7,6 +7,24 @@
 
 ## 2026-07-15
 
+### 73. gold 전량 재적재(R2 삭제→재빌드) + flow append-only 전환(재실행 0건 멱등 확인)
+
+request:
+- 이전까지 적재된 commerce gold 아웃풋을 R2 에서 삭제하고 silver 산출물로 gold 전체 재적재.
+  적재 후 gold 재실행 시 **업데이트 0건**으로 올바르게 처리되는 것까지 확인(확인될 때까지 반복).
+
+response:
+- **flow 3모델(daily/monthly/yearly) append-only 전환**: 기존 "지연보정 창 delete+insert"는
+  재실행마다 창을 재삽입해 0건이 안 나옴 → **기적재 최대기간 초과 완결분만 append**(문자열
+  워터마크 비교)로 변경. 지연 도착 소급분은 --full-refresh 스윕으로 이관(트레이드오프 문서화).
+- **전량 재적재**: gold 22종 DROP(R2/Iceberg 삭제, 잔존 0 확인) → `dbt run --select tag:gold`
+  전량 재빌드(22/22, silver_license_entity/history/detail+taxonomy 기반). 삭제 전/후 행수 일치
+  (자정 경계 이동분 flow_daily +12 등 미세차는 완결일 boundary 이동으로 정상).
+- **멱등 확인(사용자 요구 — 반복 검증)**: gold 재실행 → flow 3모델 **INSERT (0 rows)** ·
+  22 테이블 행수 **완전 일치**(diff 0). flow 만 3회차 재실행까지 0건 재현. table 모델은 CREATE
+  OR REPLACE(현재상태 스냅샷 — 결정적 재계산이라 행수·내용 동일).
+- 검증: pytest 359 · dbt parse 0.
+
 ### 72. gold 인사이트 소진 탐색 — 신규 14모델 실증(총 집계 20종) + 명단 정본화
 
 request:
