@@ -42,6 +42,7 @@ if _DAGS_ROOT not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.assets import CITYDATA_BRONZE_ASSET  # noqa: E402
+from common.ops.airflow import record_run_metadata  # noqa: E402
 
 from citydata_ingest.common.config import RunContext  # noqa: E402
 from citydata_ingest.source.citydata import DEFAULT_BRONZE_BLOCKS  # noqa: E402
@@ -57,6 +58,11 @@ KST = "Asia/Seoul"
 
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata")
+
+# run-metadata(ops.run_metadata) — 성공·실패 모두 1행 append(태스크 단위). 기존 problem
+# 콜백과 병행. bronze 완전성(expected/landed)은 load_bronze 가 XCom 으로 밀어 채운다.
+_run_md_ok = record_run_metadata("citydata", "bronze", status="success")
+_run_md_fail = record_run_metadata("citydata", "bronze", status="failed")
 
 DEFAULT_PARAMS = {
     "target": "dev",
@@ -162,6 +168,14 @@ def _load_bronze(**context) -> int:
         ctx, results=fetched["results"], target=params["target"],
         blocks=tuple(params.get("blocks") or DEFAULT_BRONZE_BLOCKS))
     print(f"[citydata bronze] bronze_rows_inserted={inserted}")
+    # run-metadata 완전성: 시도 장소 대비 적재(landed) + bronze 행수 → 콜백이 이 XCom 을 읽어 채운다.
+    results = fetched["results"]
+    landed = sum(1 for r in results if r.get("ok"))
+    context["ti"].xcom_push(key="ops_run_completeness", value={
+        "expected_raw_objects": len(results),
+        "actual_raw_objects": landed,
+        "actual_rows": inserted,
+    })
     return inserted
 
 
@@ -196,21 +210,22 @@ with DAG(
     schedule="*/5 * * * *",
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 1, "retry_delay": timedelta(minutes=1)},
+    default_args={"retries": 1, "retry_delay": timedelta(minutes=1),
+                  "on_success_callback": _run_md_ok},
     params=DEFAULT_PARAMS,
     tags=["ingest", "citydata", "population", "bronze", "r2", "iceberg"],
 ) as dag:
     fetch_raw = PythonOperator(
         task_id="fetch_raw", python_callable=_fetch_raw,
-        on_failure_callback=record_citydata_problem)
+        on_failure_callback=[record_citydata_problem, _run_md_fail])
     # 적재 성공 시 Asset 발행 → citydata_transform 자동 기동 (#274). 크론 오프셋 대신
     # bronze 완료 이벤트로 변환을 묶어 "덜 끝난 bronze 를 읽는" 경합을 제거한다.
     load_bronze = PythonOperator(
         task_id="load_bronze", python_callable=_load_bronze,
         outlets=[Asset(CITYDATA_BRONZE_ASSET)],
-        on_failure_callback=record_citydata_problem)
+        on_failure_callback=[record_citydata_problem, _run_md_fail])
     report = PythonOperator(
         task_id="report", python_callable=_report, trigger_rule="all_done",
-        on_failure_callback=record_citydata_problem)
+        on_failure_callback=[record_citydata_problem, _run_md_fail])
 
     fetch_raw >> load_bronze >> report
