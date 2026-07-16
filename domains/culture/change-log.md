@@ -19,6 +19,20 @@
 - 영향: `culture_slo.py`(신규), `culture_ingest/slo/`(신규), `culture_transform.py:86,90`.
   dbt 마트(silver 3 + gold_culture_slo_daily)는 ASAC-DBT#110. 라이브 검증·머지는 게이트 후.
 
+## 2026-07-14 — DeadlineAlert 침묵 감시 (#259)
+
+- **#259 culture_bronze 침묵 감시** (2026-07-14): 기존 알림은 전부 "실패한 run"
+  반응형이라 "run 이 없거나 끝나지 않는" 침묵(행·스케줄러 정지·지연 폭주)이
+  사각지대였다. `DeadlineAlert(DAGRUN_QUEUED_AT, 2h, SyncCallback)` 층 추가.
+  콜백은 스파이크 실측 제약(콜백 호스트 sys.path = plugins 뿐)에 따라 dags 루트
+  `plugins/culture_deadline.py` 에 **자기완결형**(stdlib urllib + env 웹훅,
+  `CULTURE_DISCORD_WEBHOOK_URL`→`DISCORD_WEBHOOK_URL` 폴백)으로 배치 — culture
+  Notifier·common.discord 재사용 불가. 전제 인프라 = ASK-Seoul#23 plugins compose
+  마운트(머지됨). `culture_transform` 은 보류: DAGRUN_QUEUED_AT 은 run 생성 후
+  카운트라 "asset 트리거 자체가 안 옴"은 못 잡고, 그 침묵은 상류 bronze 감시가
+  커버한다. 영향: `culture_bronze.py`, `plugins/culture_deadline.py`,
+  루트 `.airflowignore`(plugins 스캔 제외, 신설).
+
 ## 2026-07-09 — bronze pyiceberg 직접 write 전환 (#203)
 
 - **#203 bronze pyiceberg 직접 write 전환** (2026-07-09): Trino `INSERT VALUES`
