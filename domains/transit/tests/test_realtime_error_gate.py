@@ -87,3 +87,34 @@ def test_warn_if_empty_noop_when_rows(monkeypatch):
     monkeypatch.setattr(alerts, "send_embed", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
     assert alerts.warn_if_empty("parking", 42, "run-1") is False
     assert called["n"] == 0
+
+
+# ── 무경보 창 (심야 미운행 0행 억제) ─────────────────────────────────────────────
+def test_in_quiet_hours_window_and_midnight_crossing(monkeypatch):
+    from datetime import datetime
+    from seoul_transit.config import KST
+
+    monkeypatch.setattr(alerts, "TRANSIT_QUIET_HOURS", "01:00-05:00")
+    assert alerts.in_quiet_hours(datetime(2026, 7, 16, 3, 0, tzinfo=KST)) is True
+    assert alerts.in_quiet_hours(datetime(2026, 7, 16, 5, 0, tzinfo=KST)) is False   # 종료 경계 미포함
+    assert alerts.in_quiet_hours(datetime(2026, 7, 16, 12, 0, tzinfo=KST)) is False
+    # 자정 걸침 창
+    monkeypatch.setattr(alerts, "TRANSIT_QUIET_HOURS", "23:00-05:00")
+    assert alerts.in_quiet_hours(datetime(2026, 7, 16, 23, 30, tzinfo=KST)) is True
+    assert alerts.in_quiet_hours(datetime(2026, 7, 16, 4, 0, tzinfo=KST)) is True
+    assert alerts.in_quiet_hours(datetime(2026, 7, 16, 12, 0, tzinfo=KST)) is False
+    # 형식 오류 → 억제 비활성(항상 경보)
+    monkeypatch.setattr(alerts, "TRANSIT_QUIET_HOURS", "nonsense")
+    assert alerts.in_quiet_hours(datetime(2026, 7, 16, 3, 0, tzinfo=KST)) is False
+
+
+def test_warn_if_empty_suppressed_in_quiet_hours(monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr(alerts, "send_embed", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    monkeypatch.setattr(alerts, "in_quiet_hours", lambda now=None: True)
+    # 심야 미운행 소스(quiet_ok=True) → 0행이어도 억제
+    assert alerts.warn_if_empty("subway_arrival", 0, "run-1", quiet_ok=True) is False
+    assert called["n"] == 0
+    # 24시간 소스(주차, 기본 quiet_ok=False) → 무경보 창이어도 경보
+    alerts.warn_if_empty("parking", 0, "run-1")
+    assert called["n"] == 1
