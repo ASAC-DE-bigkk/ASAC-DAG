@@ -30,6 +30,10 @@ DEFAULT_BRONZE_BLOCKS = (
     "LIVE_BUS_PPLTN",    # 버스 승하차 인원 -- transit 미보유
     "SBIKE_STTS",        # 따릉이 현황 -- 팀 미보유
     "WEATHER_STTS",      # 날씨 실황 + 대기질(PM2.5/PM10) -- weather 는 예보만 보유
+    # 팀 미보유 신규 가치(#192 원칙, 겹침 도메인 없음 확인). 재난문자·뉴스는 이벤트성(평소 0).
+    "CHARGER_STTS",      # 전기차 충전소(장소별 충전소·충전기 상태) -- 아무 도메인도 미보유
+    "LIVE_DST_MESSAGE",  # 긴급재난문자(재해구분·긴급단계·메시지·생성일시) -- 이벤트성
+    "LIVE_YNA_NEWS",     # 연합뉴스(기사구분·제목·내용·일자·출처) -- 이벤트성
 )
 
 # CITYDATA 안에서 블록이 아닌 스칼라 메타 키.
