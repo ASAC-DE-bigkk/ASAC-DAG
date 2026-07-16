@@ -7,6 +7,7 @@ max_attempts/backoff_base 로 보존(HttpCore 는 여기에 jitter·Retry-After 
 """
 
 import json
+import threading
 import urllib.parse
 
 from common.http import HttpCore
@@ -95,9 +96,42 @@ def get_text(url: str, timeout: int = 20) -> str:
     return _read(url, timeout)
 
 
+_TLS = threading.local()
+
+
+def get_text_mt(url: str, timeout: int = 20, rate_limit: float | None = None) -> str:
+    """스레드-로컬 HttpCore 로 원본 텍스트 GET — 병렬 수집용(#369, 버스 전 노선).
+
+    _CORE 의 RequestsTransport(Session)·rate-limiter 상태는 스레드 안전이 아니므로
+    워커 스레드마다 별도 HttpCore 를 만든다(재시도·백오프 정책은 _CORE 와 동일).
+
+    rate_limit 은 **워커(스레드)별** req/s 상한 — 코어 생성 시 1회 적용되므로
+    같은 스레드에서 값을 바꿔 불러도 최초 값이 유지된다(버스 collector 단일 소비 전제).
+    """
+    core = getattr(_TLS, "core", None)
+    if core is None:
+        core = _TLS.core = HttpCore(
+            source="seoul_openapi",
+            max_attempts=_MAX_ATTEMPTS,
+            backoff_base=_BACKOFF_BASE,
+            user_agent="asac-transit-collector/1.0",
+            rate_limit=rate_limit,
+        )
+    return core.get(url, timeout=timeout).text
+
+
 def subway_url(key: str, service: str, rows: int, target: str) -> str:
     """realtimeStationArrival / realtimePosition 공통 URL 빌더."""
     return f"{SUBWAY_BASE}/{key}/json/{service}/0/{rows}/{urllib.parse.quote(target)}"
+
+
+def subway_all_url(key: str) -> str:
+    """실시간 도착 일괄(ALL) — 전 역을 1콜로 (#369).
+
+    2026-07-15 실측: 경로형(`/ALL`)은 전량(2,954행/1.9MB)이 오고 start/end 형은
+    1000행에서 잘린다 → 반드시 경로형을 쓴다. 페이징 불필요.
+    """
+    return f"{SUBWAY_BASE}/{key}/json/realtimeStationArrival/ALL"
 
 
 def openapi_url(key: str, service: str, start: int, end: int, *path: str) -> str:
