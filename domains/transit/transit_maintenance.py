@@ -1,12 +1,14 @@
-"""transit 보존 정책 집행 DAG (#369 4단계) — 실시간 데이터 3일 롤링.
+"""transit 보존 정책 집행 DAG (#369 4단계) — 실시간 데이터 **주 단위(월~일 KST)** 보존.
 
-@daily 로 두 가지를 정리한다 (마스터·reference 는 대상 아님):
-  1. purge_r2_raw    : 실시간 dataset 의 raw 객체(load_date < cutoff) + 만료 pending 마커
-  2. purge_bronze    : bronze 행 DELETE(3일) → optimize → expire_snapshots/remove_orphan(7d)
+이번 주(월요일 00:00 KST 이후) 데이터만 유지 — @daily 로 돌지만 실제 삭제는 주가
+바뀐 뒤(월요일 런)에 지난주 분이 한꺼번에 나간다 (그 외 요일은 위생 점검 성격).
+  1. purge_r2_raw    : 실시간 dataset raw(ingest_ts < 주 경계) + 만료 pending 마커
+  2. purge_bronze    : bronze DELETE(주 경계) → optimize → expire_snapshots/remove_orphan(7d)
 
 전제(충족 확인됨): dbt silver·gold 는 incremental — bronze 를 잘라도 이력이 안 잘린다.
-⚠️ 삭제된 실시간 원본은 복구 불가 — 3일 내 미적재분(방치된 pending)은 영구 소실이므로
+⚠️ 삭제된 실시간 원본은 복구 불가 — 주 내 미적재분(방치된 pending)은 영구 소실이므로
    만료 pending 마커 발견 시 Discord WARN 으로 가시화한다.
+⚠️ 월요일 00시 직후에는 직전 주 원본이 사라지므로 R2 재적재식 복구 윈도우도 함께 리셋된다.
 
 순수 로직(판정·SQL)은 seoul_transit.maintenance — 이 파일은 오케스트레이션만.
 """
@@ -44,12 +46,12 @@ record_transit_problem = problem_failure_callback(domain=DOMAIN, source_system="
 
 
 def purge_r2_raw() -> dict:
-    """실시간 dataset raw(load_date < cutoff) + 만료 pending 마커 삭제.
+    """실시간 dataset raw(ingest_ts < 이번 주 월요일 00:00 KST) + 만료 pending 마커 삭제.
 
     나열은 r2_landing.list_keys(페이지네이션 내장) 재사용 — 단발 list_objects_v2
     (1,000키 캡)로 loader 장기 장애 시 초과분을 놓치던 결함 해소(#369 리뷰).
     """
-    cutoff = maintenance.cutoff_load_date()
+    cutoff = maintenance.cutoff_ingest_ts()
     summary: dict[str, int] = {}
 
     for dataset in sorted(maintenance.SOURCE_BY_DATASET):
@@ -58,16 +60,15 @@ def purge_r2_raw() -> dict:
         summary[dataset] = delete_keys(expired)
 
     # 만료 pending 마커 — raw 가 지워져 영원히 적재 불가 = loader 실패 방치 신호.
-    ingest_cutoff = maintenance.stale_pending_ingest_cutoff()
     stale = [
         k for k in list_keys(config.LOADER_PENDING_PREFIX)
-        if maintenance.is_stale_pending(k, ingest_cutoff)
+        if maintenance.is_stale_pending(k, cutoff)
     ]
     if stale:
         send_embed(
-            title=f"⚠️ transit 보존창 초과 pending 마커 {len(stale)}건 제거",
+            title=f"⚠️ transit 보존창(주 단위) 초과 pending 마커 {len(stale)}건 제거",
             description=(
-                "loader 가 보존일수 내에 적재하지 못한 마커를 제거했습니다 — "
+                "loader 가 해당 주 안에 적재하지 못한 마커를 제거했습니다 — "
                 f"해당 구간 실시간 데이터는 **영구 소실**입니다.\n"
                 f"예: `{stale[0]}`"
             ),
@@ -80,7 +81,7 @@ def purge_r2_raw() -> dict:
 
 
 def purge_bronze() -> dict:
-    """bronze 실시간 테이블 보존 집행 — DELETE(3일) + optimize + 스냅샷 회수(7d)."""
+    """bronze 실시간 테이블 보존 집행 — 주 경계 DELETE + optimize + 스냅샷 회수(7d)."""
     import trino.dbapi
 
     conn = trino.dbapi.connect(
@@ -96,26 +97,25 @@ def purge_bronze() -> dict:
                 f"WHERE table_schema = '{SCHEMA}'")
     existing = {r[0] for r in cur.fetchall()}
 
+    cutoff = maintenance.cutoff_bronze_ts()
     summary: dict[str, int] = {}
     for table in maintenance.bronze_tables():
         if table not in existing:
             continue  # 수집 제외 dataset(#212)의 테이블이 아직 없으면 건너뜀
         qualified = f"{cat}.{sch}.{maintenance.sql_identifier(table)}"
-        for stmt in maintenance.purge_sql(qualified):
+        for stmt in maintenance.purge_sql(qualified, cutoff):
             cur.execute(stmt)
-            if stmt.lstrip().upper().startswith("DELETE"):
-                cur.fetchall()  # DELETE 완료 대기
         cur.execute(f"SELECT count(*) FROM {qualified}")
         summary[table] = cur.fetchone()[0]
 
-    print(f"purge_bronze retention={maintenance.RETENTION_DAYS}d 잔여행: {summary}")
+    print(f"purge_bronze cutoff<{cutoff}Z 잔여행: {summary}")
     return summary
 
 
 with DAG(
     dag_id="transit_maintenance",
-    description=f"transit 실시간 데이터 {maintenance.RETENTION_DAYS}일 보존 집행 — "
-                "R2 raw + Iceberg bronze(DELETE·optimize·expire_snapshots). 마스터 제외.",
+    description="transit 실시간 데이터 주 단위(월~일 KST) 보존 집행 — 다음 주 시작 시 "
+                "지난주 R2 raw + Iceberg bronze 삭제(DELETE·optimize·expire_snapshots). 마스터 제외.",
     start_date=datetime(2026, 1, 1),
     schedule=config.schedule_for("transit_maintenance", "@daily"),
     catchup=False,

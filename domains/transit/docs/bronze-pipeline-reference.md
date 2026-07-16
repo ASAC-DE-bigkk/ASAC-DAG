@@ -58,20 +58,24 @@
 
 ## 보존 정책 (transit_maintenance, @daily — #369 4단계)
 
-- **실시간 dataset 만 3일 롤링** (`TRANSIT_RETENTION_DAYS`, 기본 3 = 오늘 포함 최근 3일 유지).
-  마스터(주간 스냅샷)·reference 는 대상 아님 — 대상 dataset 은 `maintenance.SOURCE_BY_DATASET` 에 명시 열거.
-- R2 raw: `load_date < cutoff` 객체 삭제 (lifecycle 규칙 대신 DAG 삭제 — 버킷 설정 교체
-  리스크 회피 + load_date 파티션 기준 정밀 삭제 + 로그 가시성).
-  ⚠️ load_date·ingest_ts 라벨은 **UTC**(r2_landing.land) — 보존 컷오프도 UTC 로 계산.
+- **실시간 dataset 은 주 단위(월~일, KST) 보존**: 이번 주(월요일 00:00 KST 이후)만
+  유지하고 다음 주가 시작되면 지난주를 삭제한다. 실질 보존은 요일에 따라 0~7일 가변
+  (월요일 아침 최소). 마스터(주간 스냅샷)·reference 는 대상 아님 — 대상 dataset 은
+  `maintenance.SOURCE_BY_DATASET` 에 명시 열거.
+- 경계 판정은 **ingest_ts(UTC)** 를 "월요일 00:00 KST 의 UTC 환산(일요일 15:00Z)"과
+  비교 — load_date 라벨(UTC 날짜)과 KST 주 경계의 9시간 어긋남을 원천 제거.
+- R2 raw: lifecycle 규칙 대신 DAG 삭제(버킷 설정 교체 리스크 회피 + 주 경계 정밀 삭제
+  + 로그 가시성). @daily 지만 실제 대량 삭제는 월요일 런에서 발생.
 - 보존 대상 등록의 관문은 `maintenance.SOURCE_BY_DATASET` — loader 의 TABLE_SPECS 에
   dataset 을 추가해도(적재 가능해져도) 여기 등록 전까지 삭제 대상이 아니다.
 - R2 경로 세그먼트(source)는 config(SUBWAY_SOURCE 등)로 중앙화 — collector 랜딩과
   maintenance 보존 집행이 같은 값을 공유(env 오버라이드 시에도 일치).
-- Iceberg bronze: `DELETE`(3일) → `optimize` → `expire_snapshots`/`remove_orphan_files`
+- Iceberg bronze: `DELETE`(주 경계) → `optimize` → `expire_snapshots`/`remove_orphan_files`
   (7d — Trino min-retention 제약으로 스냅샷 메타는 7일 유지).
-- 만료 pending 마커(보존창 내 미적재 = 영구 소실)는 삭제 + Discord WARN.
+- 만료 pending 마커(해당 주 내 미적재 = 영구 소실)는 삭제 + Discord WARN.
 - 전제: dbt silver·gold 는 incremental(확인됨) — bronze 절단이 이력을 자르지 않는다.
-  단 R2 원본 재적재 방식의 복구 윈도우도 3일 — 3일 내 미적재분은 복구 불가.
+  단 R2 원본 재적재 방식의 복구 윈도우도 주 경계에서 리셋 — 월요일 직후엔 직전 주
+  원본이 없다.
 
 ## 경보 정책
 
