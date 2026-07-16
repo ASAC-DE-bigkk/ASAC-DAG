@@ -87,8 +87,9 @@ def load_dag_runs(
 
     첫 실행(빈 표)은 전체 이력. 이후는 최근 window_days 만 delete+insert(지각 상태변경 흡수).
     """
-    from airflow.models.dagrun import DagRun  # noqa: E402 (Airflow 런타임 전용)
-    from airflow.utils.session import create_session  # noqa: E402
+    import os
+
+    from sqlalchemy import bindparam, create_engine, text
 
     wh = build_warehouse(target, engine="trino")
     table = _ensure_dag_runs_table(wh)
@@ -98,11 +99,25 @@ def load_dag_runs(
     cutoff_utc = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=window_days)
     cutoff_kst_date = (_dt.datetime.now(_KST) - _dt.timedelta(days=window_days)).date().isoformat()
 
-    with create_session() as session:
-        query = session.query(DagRun).filter(DagRun.dag_id.in_(list(dag_ids)))
-        if not first_run:
-            query = query.filter(DagRun.start_date >= cutoff_utc)
-        rows = [dag_run_row(r, domain=domain) for r in query.all() if r.start_date is not None]
+    # Airflow 3.0 은 태스크에서 ORM(create_session) 접근 금지(#303) → 메타DB read-only 직접 조회.
+    sql = (
+        "SELECT dag_id, run_id, state, run_type, start_date, end_date "
+        "FROM dag_run WHERE dag_id IN :ids AND start_date IS NOT NULL"
+    )
+    params = {"ids": list(dag_ids)}
+    if not first_run:
+        sql += " AND start_date >= :cutoff"
+        params["cutoff"] = cutoff_utc
+    stmt = text(sql).bindparams(bindparam("ids", expanding=True))
+    engine = create_engine(os.environ["AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"])
+    try:
+        with engine.connect() as conn:
+            rows = [
+                dag_run_row(SimpleNamespace(**dict(r._mapping)), domain=domain)
+                for r in conn.execute(stmt, params)
+            ]
+    finally:
+        engine.dispose()
 
     # 멱등: 첫 실행이면 표가 비어 delete 무의미 → 전량 append. 이후는 14일 윈도우 교체.
     if not first_run:
