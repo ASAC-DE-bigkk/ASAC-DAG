@@ -3,6 +3,22 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-16 — culture_slo DAG + SLO bronze 로더 (#257)
+
+- **신규 `culture_slo` DAG (05:00 KST)** — run_report(R2 `_reports/`)와 Airflow
+  `dag_run`(메타DB, culture 4 DAG)을 SLO bronze 2표로 흘린다. 본류 03:00 bronze →
+  ~04:00 transform 뒤·05:30 facility_refresh 앞 슬롯. Asset outlet 없음(스케줄
+  구동 — 본류 무수정 원칙 §3).
+- **로더** — `culture_ingest/slo/{loader,io}.py`. 순수 로직(스캔·행빌드)은 loader
+  (호스트 pytest), 부수효과(트리노 write·Airflow meta 읽기)는 io. `bronze_culture_run_report`
+  는 warehouse 엔진 디스패치(trino) 재사용(리포트별 `ingest_ts` 멱등), `bronze_culture_dag_runs`
+  는 타입드 별도 CREATE + 14일 윈도우 delete+insert(첫 실행은 전체 이력). 로더는
+  도메인 파라미터화(§6.2 `_shared` 승격 대비).
+- **본류 한 줄 수정** — `culture_transform` dbt `run`/`test` 에 `--exclude ... tag:slo`
+  추가(SLO 모델 소유권 = culture_slo, 야간 transform 이 미존재 소스 빌드하다 깨지는 것 방지).
+- 영향: `culture_slo.py`(신규), `culture_ingest/slo/`(신규), `culture_transform.py:86,90`.
+  dbt 마트(silver 3 + gold_culture_slo_daily)는 ASAC-DBT#110. 라이브 검증·머지는 게이트 후.
+
 ## 2026-07-09 — bronze pyiceberg 직접 write 전환 (#203)
 
 - **#203 bronze pyiceberg 직접 write 전환** (2026-07-09): Trino `INSERT VALUES`

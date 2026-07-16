@@ -83,11 +83,11 @@ with DAG(
     # asac_axes 패키지 자체 모델(dim_admin_dong)은 타 레포 로더(#154) 의존이라 이 환경에서 ERROR —
     # culture 변환은 자기 모델만 빌드/테스트한다 (패키지 seed·매크로·제네릭 테스트는 계속 사용).
     run_models = BashOperator(task_id="dbt_run",
-                              bash_command=_dbt("run --exclude package:asac_axes"),
+                              bash_command=_dbt("run --exclude package:asac_axes tag:slo"),
                               on_failure_callback=record_culture_problem)
 
     test_models = BashOperator(task_id="dbt_test",
-                               bash_command=_dbt("test --exclude package:asac_axes"),
+                               bash_command=_dbt("test --exclude package:asac_axes tag:slo"),
                                on_failure_callback=record_culture_problem)
 
     freshness >> seed >> run_models >> test_models
