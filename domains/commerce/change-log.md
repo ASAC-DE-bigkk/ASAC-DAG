@@ -17,19 +17,24 @@ response:
 - **잔여물 실측**: dbt `table` materialization 이 매 실행 `<model>__dbt_tmp-<uuid>` 물리 디렉터리를
   남기고 RENAME(메타 이동)으로 테이블화 → 카탈로그엔 없지만 **R2 물리 파일 누적**(commerce ns
   410 디렉터리 중 258 __dbt_tmp). remove_orphan_files 는 location 내부만 봐서 sibling 못 지움.
-- **안전 정리(사고→복구→완료)**: keep-set 을 location 만으로 잡았다가 CREATE OR REPLACE 직후
-  카탈로그 metadata 포인터가 다른 dir 이라 **gold 11종 metadata 손상**(silver/bronze 무손상 —
-  원천 안전). PyIceberg drop + silver 재빌드로 **11종 전량 복구(데이터 손실 0)**. keep-set 을
-  **location + metadata_location + 현재 스냅샷 파일 dir** 삼중으로 교정 후 재정리 →
-  **총 ~2,990 orphan 키 삭제 · 최종 잔여 0**(전 100 라이브 테이블 count 검증 무손상).
-- **제도화**: `scripts/cleanup_orphan_warehouse_dirs.py`(commerce 스코프·삼중 keep·commerce 접두
-  가드·삭제 후 전수 검증·dry-run 기본) 신설. metadata.json 축적은 loader.ensure_metadata_retention
-  (previous-versions-max=50)이 테이블 내부에서 이미 상한(#71). 스냅샷은 보존(사용자 지시).
+- **orphan 삭제는 불안전으로 판명 → 리포트 전용으로 회귀(중요)**: 네임스페이스 수준 orphan 삭제를
+  시도했으나 **R2 Data Catalog 에서 dbt 생성 테이블의 현재 metadata.json 물리 디렉터리를
+  location/metadata_location 만으로 신뢰성 있게 식별 불가** → keep-set 이 라이브 메타를 orphan 으로
+  오판·삭제해 **gold 11종을 2회 파손**. 게다가 **Trino 메타 캐시가 삭제 직후 count(*) 검증을
+  통과시켜 파손을 은폐**(캐시 만료 후 "Metadata not found" 로 발현). 매번 PyIceberg drop + silver
+  재빌드로 **전량 복구(데이터 손실 0 · bronze/silver 원천 전 과정 무손상)**. 결론: 이 워크로드에서
+  sibling orphan 자동삭제는 순이익이 아니므로 **`scripts/cleanup_orphan_warehouse_dirs.py` 를
+  삭제 기능 제거·리포트(감사) 전용으로 재작성**. 누적 관리는 (a) 전체 재빌드, (b) 테이블별
+  Iceberg `remove_orphan_files`(location 내부·스냅샷 보존)로. metadata.json 은
+  ensure_metadata_retention(previous-versions-max=50)이 이미 상한(#71). 스냅샷·데이터 행 미삭제.
 - **gold description(culture 참조)**: 22종 전부 culture `_culture_gold__models.yml` 스타일
-  (그레인 — '대표 질의(기능·역할)'. 핵심 특징)로 재작성. 예: lifespan="'이 업종은 보통 몇 년
-  버티나'", geo_grid="지도 밀도/핫스팟(top=가산·선릉·강남역)", phone_succession="'같은 사업자가
-  폐업 후 무엇으로 재도전하나'".
-- 검증: pytest 359 · dbt parse 0 · 정리 스크립트 dry-run 잔여 0.
+  (그레인 — '대표 질의(기능·역할)'. 핵심 특징)로 재작성. gu_specialization 설명의 미인용 `예:`
+  (콜론+공백)이 schema.yml YAML 을 깨 dbt run 이 실패하던 것 발견 → 값 따옴표로 수정.
+- **gold 서빙 설계 문서 2종 신설**(Ultracode 워크플로 — 6 화면 테마 팬아웃→종합→비평):
+  dbt `docs/DB/gold/serving-design.md`(지표 의도·용도 + 22종→화면→서빙tier 매핑) +
+  `opus-serving-build-instructions.md`(D1/Iceberg 이원화 아키텍처·D1 DDL·API 명세·화면 명세).
+  대용량(flow_daily 2.9M 등)은 Iceberg 직조회 또는 소형 롤업만 D1, 소형은 D1 직접 export.
+- 검증: pytest 359 · dbt run(gold 22 전수 빌드) 0 에러 · 서빙 문서 완결성 비평 PASS(22 전수 매핑).
 
 ### 73. gold 전량 재적재(R2 삭제→재빌드) + flow append-only 전환(재실행 0건 멱등 확인)
 
