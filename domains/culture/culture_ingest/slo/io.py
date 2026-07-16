@@ -99,25 +99,32 @@ def load_dag_runs(
     cutoff_utc = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=window_days)
     cutoff_kst_date = (_dt.datetime.now(_KST) - _dt.timedelta(days=window_days)).date().isoformat()
 
-    # Airflow 3.0 은 태스크에서 ORM(create_session) 접근 금지(#303) → 메타DB read-only 직접 조회.
-    sql = (
-        "SELECT dag_id, run_id, state, run_type, start_date, end_date "
-        "FROM dag_run WHERE dag_id IN :ids AND start_date IS NOT NULL"
-    )
-    params = {"ids": list(dag_ids)}
-    if not first_run:
-        sql += " AND start_date >= :cutoff"
-        params["cutoff"] = cutoff_utc
-    stmt = text(sql).bindparams(bindparam("ids", expanding=True))
-    engine = create_engine(os.environ["AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"])
+    # Airflow 3.0 은 태스크 워커에서 메타DB 접근을 격리한다(ORM·SQL_ALCHEMY_CONN 둘 다, #303).
+    # v1 은 접근 실패 시 dag_run enrichment 를 스킵한다 — 핵심 SLO(run_report 기반: scheduled/eod
+    # /green_disguise)는 dag_run 과 무관하므로 마트가 정상 동작한다. 표는 빈 채로 보장(silver 가 읽음).
+    # v2: PostgresHook + 정의된 Connection(conn_id) 으로 보완(태스크 허용 경로). 상세 = 설계 §5 한계.
     try:
-        with engine.connect() as conn:
-            rows = [
-                dag_run_row(SimpleNamespace(**dict(r._mapping)), domain=domain)
-                for r in conn.execute(stmt, params)
-            ]
-    finally:
-        engine.dispose()
+        sql = (
+            "SELECT dag_id, run_id, state, run_type, start_date, end_date "
+            "FROM dag_run WHERE dag_id IN :ids AND start_date IS NOT NULL"
+        )
+        params = {"ids": list(dag_ids)}
+        if not first_run:
+            sql += " AND start_date >= :cutoff"
+            params["cutoff"] = cutoff_utc
+        stmt = text(sql).bindparams(bindparam("ids", expanding=True))
+        engine = create_engine(os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", ""))
+        try:
+            with engine.connect() as conn:
+                rows = [
+                    dag_run_row(SimpleNamespace(**dict(r._mapping)), domain=domain)
+                    for r in conn.execute(stmt, params)
+                ]
+        finally:
+            engine.dispose()
+    except Exception as exc:  # noqa: BLE001 — 메타DB 격리(ArgumentError/OperationalError 등) 방어
+        print(f"slo: dag_run 메타DB 접근 불가 — enrichment 스킵({type(exc).__name__}). v2 PostgresHook 로 보완.")
+        return 0
 
     # 멱등: 첫 실행이면 표가 비어 delete 무의미 → 전량 append. 이후는 14일 윈도우 교체.
     if not first_run:
