@@ -34,8 +34,10 @@ from weather_ingest.run_manifest import (  # noqa: E402
     SOURCE_ID as KMA_SOURCE_ID,
 )
 from weather_ingest.w2_recovery import (  # noqa: E402
+    CHECKPOINT_CONTRACT_VERSION,
     DbtPhase,
     LINEAGE_RUN_BUCKET_COUNT,
+    WINNER_RUN_BUCKET_COUNT,
     checkpoint_payload,
     completed_window_labels,
     final_phase,
@@ -47,6 +49,7 @@ from weather_ingest.w2_recovery import (  # noqa: E402
     split_repair_windows,
     window_phase_plan,
     window_dbt_vars,
+    winner_phase,
 )
 import weather_dbt_execution as weather_dbt  # noqa: E402
 from weather_dbt_failure import classify_weather_dbt_failure  # noqa: E402
@@ -149,6 +152,17 @@ def execute_recovery_phase(
 
 def _checkpoint_for_windows(variable_name: str, windows) -> set[str]:
     stored = Variable.get(variable_name, default=None, deserialize_json=True)
+    stored_version = (
+        stored.get("contract_version") if isinstance(stored, dict) else None
+    )
+    if stored and stored_version != CHECKPOINT_CONTRACT_VERSION:
+        LOGGER.warning(
+            "[weather-w2-recovery] invalidating legacy checkpoint name=%s "
+            "expected_contract_version=%s stored_contract_version=%r",
+            variable_name,
+            CHECKPOINT_CONTRACT_VERSION,
+            stored_version,
+        )
     return completed_window_labels(stored, windows)
 
 
@@ -262,6 +276,18 @@ def recover_observation_windows(**context) -> dict[str, object]:
                 phase,
                 target=target,
                 variables=variables,
+                context=context,
+            )
+        for winner_bucket_index in range(WINNER_RUN_BUCKET_COUNT):
+            winner_variables = {
+                **variables,
+                "weather_w2_winner_bucket_count": str(WINNER_RUN_BUCKET_COUNT),
+                "weather_w2_winner_bucket_index": str(winner_bucket_index),
+            }
+            execute_recovery_phase(
+                winner_phase(window_index, winner_bucket_index),
+                target=target,
+                variables=winner_variables,
                 context=context,
             )
         for lineage_bucket_index in range(LINEAGE_RUN_BUCKET_COUNT):

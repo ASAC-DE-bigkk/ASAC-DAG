@@ -70,6 +70,7 @@ def phase_commands(
 ) -> list[tuple[str, list[str]]]:
     phase = command_name(dbt_command)
     threads_args = _threads_args(threads)
+    isolated_parse_args = [] if phase == "deps" else ["--no-partial-parse"]
     preflight_args = _runtime_args(
         target=target,
         target_path=paths.preflight_target_path,
@@ -96,6 +97,7 @@ def phase_commands(
                 [
                     executable,
                     "ls",
+                    *isolated_parse_args,
                     "--resource-type",
                     resource_type(dbt_command),
                     *selector_args,
@@ -111,6 +113,7 @@ def phase_commands(
         actual_args = [
             executable,
             *shlex.split(dbt_command),
+            *isolated_parse_args,
             *selector_args,
             *(threads_args if phase in MATERIALIZATION_COMMANDS else []),
             *execution_args,
@@ -119,6 +122,7 @@ def phase_commands(
         actual_args = [
             executable,
             *shlex.split(dbt_command),
+            *isolated_parse_args,
             *(threads_args if phase in MATERIALIZATION_COMMANDS else []),
             *execution_args,
         ]
