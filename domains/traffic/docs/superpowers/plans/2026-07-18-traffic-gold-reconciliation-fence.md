@@ -225,33 +225,26 @@ foreach ($line in $required) {
 
 Expected: Weather/Traffic allowlist 여섯 규칙이 모두 존재한다.
 
-- [ ] **Step 5: host DagBag import를 확인한다**
+- [ ] **Step 5: Airflow 3.2.2 one-off container에서 DagBag import를 확인한다**
 
 Run:
 
 ```powershell
-@'
-from pathlib import Path
-
-from airflow.models import DagBag
-
-bag = DagBag(dag_folder=".", include_examples=False, safe_mode=True)
-assert bag.import_errors == {}, bag.import_errors
-allowed_roots = (
-    (Path.cwd() / "domains" / "weather").resolve(),
-    (Path.cwd() / "domains" / "traffic").resolve(),
-)
-for dag_id, dag in bag.dags.items():
-    fileloc = Path(dag.fileloc).resolve()
-    assert any(fileloc.is_relative_to(root) for root in allowed_roots), (
-        dag_id,
-        fileloc,
-    )
-print(f"allowed_dags={len(bag.dag_ids)} import_errors=0")
-'@ | python -
+$wt = 'C:\Users\Dell3571\Desktop\Projects\ask-seoul-worktrees\dags-420-traffic-gold-reconciliation-fence'
+$envFile = 'C:\Users\Dell3571\Desktop\Projects\ask-seoul-sample\.env'
+docker run --rm `
+  --env-file $envFile `
+  -e AIRFLOW__CORE__LOAD_EXAMPLES=false `
+  -e AIRFLOW__CORE__DAG_IGNORE_FILE_SYNTAX=glob `
+  -e PYTHONPATH=/opt/airflow/dags:/opt/airflow/plugins `
+  -v "${wt}:/opt/airflow/dags:ro" `
+  -v "${wt}\plugins:/opt/airflow/plugins:ro" `
+  --entrypoint python `
+  elt-infra-airflow:local `
+  -c "from pathlib import Path; from airflow.models import DagBag; b=DagBag('/opt/airflow/dags', include_examples=False, safe_mode=True); roots=(Path('/opt/airflow/dags/domains/weather'),Path('/opt/airflow/dags/domains/traffic')); assert not b.import_errors,b.import_errors; assert len(b.dag_ids)==17,b.dag_ids; assert all(any(Path(d.fileloc).is_relative_to(r) for r in roots) for d in b.dags.values()),[(i,d.fileloc) for i,d in b.dags.items()]; print('allowed_dags=17 import_errors=0')"
 ```
 
-Expected: import error 0이며 발견된 모든 DAG ID가 Weather 또는 Traffic 소유다.
+Expected: 실제 운영과 같은 Airflow 3.2.2/glob parser에서 17개 DAG, import error 0이며 모든 `fileloc`이 `domains/weather/**` 또는 `domains/traffic/**`다. host Airflow 2.11.2/regexp DagBag은 이 저장소의 검증기로 사용하지 않는다.
 
 ---
 
