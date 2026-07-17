@@ -145,13 +145,13 @@ def install_airflow_fakes():
     )
 
 
-def load_transform_module():
+def load_transform_module(
+    filename="weather_vilage_fcst_transform.py", module_name=None
+):
     install_airflow_fakes()
-    module_path = (
-        Path(__file__).resolve().parents[1] / "weather_vilage_fcst_transform.py"
-    )
+    module_path = Path(__file__).resolve().parents[1] / filename
     spec = importlib.util.spec_from_file_location(
-        "weather_vilage_fcst_transform_under_test", module_path
+        module_name or f"{module_path.stem}_under_test", module_path
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
