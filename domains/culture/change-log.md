@@ -3,6 +3,20 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-17 — SLO dag_run enrichment v2: PostgresHook + Connection (#411)
+
+- **`load_dag_runs` 접속 획득 교체** — v1 의 `create_engine(env)` 는 Airflow 3
+  태스크 격리(#303)가 env 를 차단해 상시 스킵이었다(→ `bronze_culture_dag_runs`
+  0행 → 7/17 freshness 사고 DBT#238). v2 는 태스크 허용 경로인
+  `PostgresHook(postgres_conn_id="airflow_metadb").get_sqlalchemy_engine()` 로
+  교체 — SQL·14일 윈도우 멱등 쓰기는 무변경, Connection 미등록 시 스킵 안전망 유지.
+- **Connection 은 CLI 1회 등록**(컨테이너 env 재사용, 접속 문자열 무노출) —
+  재등록 절차는 `docs/operations.md` 런북. 공유 인프라(compose) 무수정.
+- **배포 순서 게이트**: 적재 확인 후에만 DBT freshness 재활성(별도 PR,
+  `from_iso8601_timestamp(start_at)` 교정 포함) — 빈 테이블 감시 금지(#238 교훈).
+- 영향: `culture_ingest/slo/io.py`, `tests/test_slo_io_wiring.py`(신규),
+  `docs/operations.md`, `docs/design/2026-07-17-slo-dag-run-enrichment-v2.md`.
+
 ## 2026-07-16 — culture_slo DAG + SLO bronze 로더 (#257)
 
 - **신규 `culture_slo` DAG (05:00 KST)** — run_report(R2 `_reports/`)와 Airflow

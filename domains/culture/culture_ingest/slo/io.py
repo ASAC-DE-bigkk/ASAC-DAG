@@ -29,6 +29,10 @@ _KST = _dt.timezone(_dt.timedelta(hours=9))
 _RUN_REPORT_DS = SimpleNamespace(name="culture_run_report", source="culture", endpoint="_reports")
 _DAG_RUNS_DATASET = "culture_dag_runs"  # -> bronze_culture_dag_runs
 
+# 메타DB Connection id — 도메인 중립(메타DB 는 팀 공용, §6.2 _shared 승격 대비).
+# 등록은 CLI 1회(런북 참조). 미등록이면 load_dag_runs 가 스킵한다(안전망).
+METADB_CONN_ID = "airflow_metadb"
+
 
 def load_run_reports(*, target: str = "dev") -> int:
     """R2 _reports 스캔 → bronze_culture_run_report 적재. 반환: 신규 적재 행수."""
@@ -87,9 +91,7 @@ def load_dag_runs(
 
     첫 실행(빈 표)은 전체 이력. 이후는 최근 window_days 만 delete+insert(지각 상태변경 흡수).
     """
-    import os
-
-    from sqlalchemy import bindparam, create_engine, text
+    from sqlalchemy import bindparam, text
 
     wh = build_warehouse(target, engine="trino")
     table = _ensure_dag_runs_table(wh)
@@ -99,10 +101,10 @@ def load_dag_runs(
     cutoff_utc = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=window_days)
     cutoff_kst_date = (_dt.datetime.now(_KST) - _dt.timedelta(days=window_days)).date().isoformat()
 
-    # Airflow 3.0 은 태스크 워커에서 메타DB 접근을 격리한다(ORM·SQL_ALCHEMY_CONN 둘 다, #303).
-    # v1 은 접근 실패 시 dag_run enrichment 를 스킵한다 — 핵심 SLO(run_report 기반: scheduled/eod
-    # /green_disguise)는 dag_run 과 무관하므로 마트가 정상 동작한다. 표는 빈 채로 보장(silver 가 읽음).
-    # v2: PostgresHook + 정의된 Connection(conn_id) 으로 보완(태스크 허용 경로). 상세 = 설계 §5 한계.
+    # Airflow 3.0 은 태스크 워커에서 메타DB 직결을 격리한다(ORM·SQL_ALCHEMY_CONN env 둘 다, #303).
+    # v2(#411): PostgresHook + 정의된 Connection(METADB_CONN_ID) — 태스크 허용 경로.
+    # Connection 미등록(스택 재구축 직후 등)이면 스킵 — 핵심 SLO(run_report 기반)는 dag_run 과
+    # 무관하므로 마트는 정상 동작하고, 표는 빈 채로 보장된다(silver 가 읽음). 등록 절차 = 런북.
     try:
         sql = (
             "SELECT dag_id, run_id, state, run_type, start_date, end_date "
@@ -113,7 +115,16 @@ def load_dag_runs(
             sql += " AND start_date >= :cutoff"
             params["cutoff"] = cutoff_utc
         stmt = text(sql).bindparams(bindparam("ids", expanding=True))
-        engine = create_engine(os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", ""))
+
+        from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+        hook = PostgresHook(postgres_conn_id=METADB_CONN_ID)
+        try:
+            engine = hook.get_sqlalchemy_engine()
+        except AttributeError:  # provider 구버전 폴백 — 동일 효과
+            from sqlalchemy import create_engine
+
+            engine = create_engine(hook.get_uri())
         try:
             with engine.connect() as conn:
                 rows = [
@@ -122,8 +133,11 @@ def load_dag_runs(
                 ]
         finally:
             engine.dispose()
-    except Exception as exc:  # noqa: BLE001 — 메타DB 격리(ArgumentError/OperationalError 등) 방어
-        print(f"slo: dag_run 메타DB 접근 불가 — enrichment 스킵({type(exc).__name__}). v2 PostgresHook 로 보완.")
+    except Exception as exc:  # noqa: BLE001 — Connection 미등록/메타DB 접근 불가 방어
+        print(
+            f"slo: dag_run enrichment 스킵({type(exc).__name__}) — "
+            f"Connection '{METADB_CONN_ID}' 등록 여부 확인(런북 참조)."
+        )
         return 0
 
     # 멱등: 첫 실행이면 표가 비어 delete 무의미 → 전량 append. 이후는 14일 윈도우 교체.
