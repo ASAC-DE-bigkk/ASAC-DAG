@@ -76,6 +76,61 @@ def test_asset_event_metadata_rejects_incomplete_or_mismatched_identity():
         )
 
 
+def test_incident_events_ignore_known_legacy_backlog_before_strict_validation():
+    from traffic_ingest.assets import (
+        TRAFFIC_INCIDENT_BRONZE_ASSET,
+        incident_bronze_events,
+    )
+
+    legacy = types.SimpleNamespace(
+        timestamp=datetime(2026, 7, 7, tzinfo=timezone.utc),
+        extra={},
+        source_dag_id="traffic_incident_bronze",
+        source_task_id="verify_seoul_traffic_bronze_runtime",
+    )
+    current = _incident_event(
+        "snapshot-current",
+        "2026-07-16T00:00:00+00:00",
+        timestamp=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+
+    events = incident_bronze_events(
+        {
+            "triggering_asset_events": {
+                TRAFFIC_INCIDENT_BRONZE_ASSET: [legacy, current]
+            }
+        }
+    )
+
+    assert [event["bronze_dag_run_id"] for event in events] == [
+        "snapshot-current"
+    ]
+
+
+def test_incident_events_still_reject_unknown_empty_metadata():
+    from traffic_ingest.assets import (
+        TRAFFIC_INCIDENT_BRONZE_ASSET,
+        TrafficAssetContractError,
+        incident_bronze_events,
+    )
+
+    unknown = types.SimpleNamespace(
+        timestamp=datetime(2026, 7, 16, tzinfo=timezone.utc),
+        extra={},
+        source_dag_id="traffic_incident_bronze",
+        source_task_id="unexpected_producer",
+    )
+
+    with pytest.raises(TrafficAssetContractError, match="incomplete"):
+        incident_bronze_events(
+            {
+                "triggering_asset_events": {
+                    TRAFFIC_INCIDENT_BRONZE_ASSET: [unknown]
+                }
+            }
+        )
+
+
 def test_latest_incident_event_coalesces_older_legacy_backlog():
     from traffic_ingest.assets import (
         TRAFFIC_INCIDENT_BRONZE_ASSET,

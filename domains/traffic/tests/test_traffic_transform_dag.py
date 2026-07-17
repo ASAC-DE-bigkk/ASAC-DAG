@@ -27,6 +27,17 @@ def test_traffic_transform_trino_tasks_do_not_inflate_pool_priority_from_chain()
         task = module.dag.task_dict[task_id]
         assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
         assert task.kwargs["weight_rule"] == "absolute"
+        expected_priority = (
+            module.PIN_CRITICAL_PRIORITY
+            if task_id in {"dbt_run_silver", "dbt_test_silver"}
+            else 1
+        )
+        assert task.kwargs["priority_weight"] == expected_priority
+
+    resolver = module.dag.task_dict[module.SNAPSHOT_TASK_ID]
+    assert resolver.kwargs["pool"] == module.TRINO_HEAVY_POOL
+    assert resolver.kwargs["weight_rule"] == "absolute"
+    assert resolver.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
 
 
 def test_traffic_transform_validates_dev_runtime_before_dbt():
@@ -38,7 +49,7 @@ def test_traffic_transform_validates_dev_runtime_before_dbt():
         "requested_target": "{{ params.target }}",
     }
     assert guard.downstream_task_ids == {
-        "resolve_traffic_snapshot_run"
+        "dbt_deps"
     }
 
 
