@@ -49,6 +49,9 @@ FLOW_BRONZE_FIELDS = frozenset(
         "is_publishable",
     }
 )
+LEGACY_INCIDENT_BRONZE_TASK_IDS = frozenset(
+    {"verify_seoul_traffic_bronze_runtime"}
+)
 
 
 class TrafficAssetContractError(ValueError):
@@ -103,6 +106,17 @@ def _asset_event_timestamp(event: object) -> datetime:
     return timestamp
 
 
+def _is_legacy_incident_bronze_event(event: object) -> bool:
+    metadata = getattr(event, "extra", None)
+    return (
+        isinstance(metadata, Mapping)
+        and not metadata
+        and getattr(event, "source_dag_id", None) == "traffic_incident_bronze"
+        and getattr(event, "source_task_id", None)
+        in LEGACY_INCIDENT_BRONZE_TASK_IDS
+    )
+
+
 def _validated_events(
     context: Mapping[str, object],
     *,
@@ -152,6 +166,7 @@ def latest_incident_bronze_event(
         context,
         asset_uri=TRAFFIC_INCIDENT_BRONZE_ASSET,
     )
+    events = [event for event in events if not _is_legacy_incident_bronze_event(event)]
     if not events:
         return None
     _, latest = max(
