@@ -27,7 +27,6 @@ from traffic_ingest.bronze_dag_support import (
     dag_run_conf,
     fail_fast_traffic_bronze,
     fail_traffic_run,
-    notify_traffic_bronze_failure,
     raw_object_keys_from_conf,
     record_traffic_run_ledger_started as record_traffic_run_ledger_started_callback,
     record_traffic_run_ledger_success,
@@ -119,7 +118,6 @@ def record_seoul_traffic_run_failed(context) -> None:
 
 def record_and_notify_seoul_traffic_run_failed(context) -> None:
     record_seoul_traffic_run_failed(context)
-    notify_traffic_bronze_failure(context)
 
 
 @fail_fast_traffic_bronze

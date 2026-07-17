@@ -66,7 +66,7 @@ def report_dag_schedule(env: Mapping[str, str] = os.environ) -> str | None:
         return env[GLOBAL_SCHEDULE_ENV] or None
     if not discord_webhook_url(env):
         return None
-    return "*/15 * * * *"
+    return "0 9 * * *"
 
 
 def sql_identifier(value: str) -> str:

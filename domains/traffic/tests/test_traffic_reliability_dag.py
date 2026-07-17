@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 import importlib.util
 from pathlib import Path
 import sys
@@ -250,10 +251,43 @@ def test_traffic_variable_tracking_is_fail_open():
     )
 
 
+def test_traffic_delivery_history_keeps_prior_daily_fingerprints():
+    module = load_module()
+    state = {"value": "[]"}
+
+    def get(*_args, **_kwargs):
+        return state["value"]
+
+    def set_value(_key, value):
+        state["value"] = value
+
+    first = module.daily_delivery_fingerprint(
+        _traffic_failure_report(),
+        logical_date=datetime(2026, 7, 17, tzinfo=timezone.utc),
+        run_id="scheduled__day-1",
+    )
+    second = module.daily_delivery_fingerprint(
+        _traffic_failure_report(),
+        logical_date=datetime(2026, 7, 18, tzinfo=timezone.utc),
+        run_id="scheduled__day-2",
+    )
+
+    assert module.should_notify_fingerprint(first, get=get) is True
+    assert module.record_delivered_fingerprint(first, get=get, set=set_value) is True
+    assert module.should_notify_fingerprint(second, get=get) is True
+    assert module.record_delivered_fingerprint(second, get=get, set=set_value) is True
+    assert module.should_notify_fingerprint(first, get=get) is False
+
+
 def test_traffic_records_fingerprint_only_after_successful_send(monkeypatch):
     module = load_module()
     source_report = _traffic_failure_report()
-    expected_fingerprint = module.notification_fingerprint(source_report)
+    logical_date = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    expected_fingerprint = module.daily_delivery_fingerprint(
+        source_report,
+        logical_date=logical_date,
+        run_id="report-run",
+    )
     events = []
     monkeypatch.setattr(
         module, "build_traffic_reliability_report", lambda: copy.deepcopy(source_report)
@@ -277,7 +311,10 @@ def test_traffic_records_fingerprint_only_after_successful_send(monkeypatch):
         lambda fingerprint: events.append(("record", fingerprint)) or True,
     )
 
-    result = module.collect_and_notify(run_id="report-run")
+    result = module.collect_and_notify(
+        run_id="report-run",
+        logical_date=logical_date,
+    )
 
     assert events == [
         ("decision", expected_fingerprint),
@@ -286,6 +323,54 @@ def test_traffic_records_fingerprint_only_after_successful_send(monkeypatch):
     ]
     assert result["discord_sent"] is True
     assert result["notification_state_recorded"] is True
+    assert result["notification_fingerprint"] == module.notification_fingerprint(source_report)
+    assert result["delivery_fingerprint"] == expected_fingerprint
+
+
+def test_traffic_daily_report_sends_again_on_next_kst_day_when_pass_is_unchanged(
+    monkeypatch,
+):
+    module = load_module()
+    source_report = _traffic_failure_report()
+    source_report["status"] = "PASS"
+    source_report["scheduled_runs"] = {"failed": 0, "failures": []}
+    state = {"value": "UNKNOWN"}
+    sent = []
+    recorded = []
+    first_day = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    second_day = datetime(2026, 7, 18, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        module, "build_traffic_reliability_report", lambda: copy.deepcopy(source_report)
+    )
+    monkeypatch.setattr(
+        module, "format_traffic_discord_message", lambda _report: "daily-message"
+    )
+    monkeypatch.setattr(
+        module, "should_notify_fingerprint", lambda fingerprint: state["value"] != fingerprint
+    )
+    monkeypatch.setattr(
+        module,
+        "send_discord_message",
+        lambda message: sent.append(message) or True,
+    )
+    monkeypatch.setattr(
+        module,
+        "record_delivered_fingerprint",
+        lambda fingerprint: recorded.append(fingerprint) or state.update(value=fingerprint) or True,
+    )
+
+    first = module.collect_and_notify(run_id="scheduled__day-1", logical_date=first_day)
+    same_day_retry = module.collect_and_notify(
+        run_id="manual__same-day",
+        logical_date=first_day,
+    )
+    next_day = module.collect_and_notify(run_id="scheduled__day-2", logical_date=second_day)
+
+    assert sent == ["daily-message", "daily-message"]
+    assert same_day_retry["discord_sent"] is False
+    assert first["notification_fingerprint"] == next_day["notification_fingerprint"]
+    assert first["delivery_fingerprint"] != next_day["delivery_fingerprint"]
+    assert recorded == [first["delivery_fingerprint"], next_day["delivery_fingerprint"]]
 
 
 def test_traffic_collect_and_notify_does_not_depend_on_airflow_task_log_metadata(
@@ -389,7 +474,11 @@ def test_traffic_sender_exception_leaves_state_retryable(monkeypatch):
     assert first["discord_sent"] is False
     assert second["discord_sent"] is True
     assert attempts == ["send", "send"]
-    assert state["value"] == module.notification_fingerprint(source_report)
+    assert state["value"] == module.daily_delivery_fingerprint(
+        source_report,
+        logical_date=None,
+        run_id="report-run-2",
+    )
 
 
 def test_traffic_formatter_error_remains_task_failure(monkeypatch):

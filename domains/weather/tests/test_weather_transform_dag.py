@@ -51,10 +51,14 @@ def test_weather_dbt_factory_preserves_phase_contracts():
         assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
         assert task.kwargs["retries"] == 1
         assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
-        assert task.kwargs["on_failure_callback"] == [
-            module.notify_weather_transform_failure,
-            module.record_weather_problem,
-        ]
+        assert task.kwargs["on_failure_callback"] is module.record_weather_problem
+
+
+def test_weather_transform_failure_callback_uses_current_attempt_artifact_xcom():
+    module = load_transform_module()
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "dbt_run_results_xcom_key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY" in source
 
 
 def test_weather_transform_trino_tasks_do_not_inflate_pool_priority_from_chain():
@@ -90,10 +94,7 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
         "dbt_run_common_admin_dong_dimension",
         "dbt_test_common_admin_dong_dimension",
     ):
-        assert dag.task_dict[task_id].kwargs["on_failure_callback"] == [
-            module.notify_weather_transform_failure,
-            module.record_weather_problem,
-        ]
+        assert dag.task_dict[task_id].kwargs["on_failure_callback"] is module.record_weather_problem
 
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "silver_kma_vilage_fcst" not in source

@@ -63,18 +63,64 @@ def notification_fingerprint(report: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def daily_delivery_fingerprint(
+    _report: dict,
+    *,
+    logical_date: datetime | None,
+    run_id: str | None,
+) -> str:
+    """Return one idempotency key per scheduled KST day, independent of status."""
+    if logical_date is not None:
+        delivery_key = f"date:{logical_date.astimezone(KST).date().isoformat()}"
+    else:
+        delivery_key = f"run:{run_id or 'unknown'}"
+    payload = json.dumps(
+        {"delivery_key": delivery_key, "report_contract": "bronze-reliability-daily-v1"},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def should_notify_fingerprint(fingerprint: str, *, get=Variable.get) -> bool:
-    """Compare with the last delivered fingerprint; Variable reads fail open."""
+    """Check the delivered daily fingerprint history; Variable reads fail open."""
     try:
-        return get(DELIVERY_FINGERPRINT_VARIABLE, "UNKNOWN") != fingerprint
+        raw = get(DELIVERY_FINGERPRINT_VARIABLE, "[]")
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError):
+            # Previous releases stored one plain fingerprint. Preserve that entry.
+            decoded = [raw] if raw and raw != "UNKNOWN" else []
+        if not isinstance(decoded, list):
+            return True
+        return fingerprint not in {value for value in decoded if isinstance(value, str)}
     except Exception:  # state tracking must never suppress an alert
         return True
 
 
-def record_delivered_fingerprint(fingerprint: str, *, set=Variable.set) -> bool:
-    """Persist only a confirmed delivery; Variable writes fail open."""
+def record_delivered_fingerprint(
+    fingerprint: str, *, get=Variable.get, set=Variable.set
+) -> bool:
+    """Persist every confirmed daily delivery; Variable writes fail open.
+
+    This deliberately provides at-least-once delivery if state storage fails:
+    claiming before Discord confirms delivery could silently lose that day's report.
+    """
     try:
-        set(DELIVERY_FINGERPRINT_VARIABLE, fingerprint)
+        raw = get(DELIVERY_FINGERPRINT_VARIABLE, "[]")
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError):
+            decoded = [raw] if raw and raw != "UNKNOWN" else []
+        history = {value for value in decoded if isinstance(value, str)}
+        history.add(fingerprint)
+        # max_active_runs=1 serializes normal report runs, so this read-modify-write
+        # ledger retains every logical day's idempotency key without a claim race.
+        set(
+            DELIVERY_FINGERPRINT_VARIABLE,
+            json.dumps(sorted(history), ensure_ascii=False, separators=(",", ":")),
+        )
         return True
     except Exception:
         return False
@@ -83,7 +129,12 @@ def record_delivered_fingerprint(fingerprint: str, *, set=Variable.set) -> bool:
 @track(layer="bronze", domain="weather")
 def collect_and_notify(**context) -> dict:
     report = build_weather_reliability_report()
-    fingerprint = notification_fingerprint(report)
+    notification = notification_fingerprint(report)
+    fingerprint = daily_delivery_fingerprint(
+        report,
+        logical_date=context.get("logical_date"),
+        run_id=context.get("run_id"),
+    )
     should_notify = should_notify_fingerprint(fingerprint)
     discord_sent = False
     state_recorded = False
@@ -104,7 +155,8 @@ def collect_and_notify(**context) -> dict:
     else:
         notification_reason = "delivery_succeeded_state_unavailable"
     report["discord_sent"] = discord_sent
-    report["notification_fingerprint"] = fingerprint
+    report["notification_fingerprint"] = notification
+    report["delivery_fingerprint"] = fingerprint
     report["notification_state_recorded"] = state_recorded
     report["notification_reason"] = notification_reason
     report["dag_run_id"] = context.get("run_id")

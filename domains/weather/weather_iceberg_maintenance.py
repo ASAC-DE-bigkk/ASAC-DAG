@@ -15,6 +15,7 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
+from common.errors.airflow import problem_failure_callback  # noqa: E402
 from weather_ingest.iceberg_maintenance import (  # noqa: E402
     _normalize_tables,
     run_maintenance,
@@ -23,6 +24,7 @@ from weather_ingest.run_manifest import MANIFEST_TABLE  # noqa: E402
 from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
 KST = "Asia/Seoul"
+record_weather_problem = problem_failure_callback(domain="weather")
 
 DEFAULT_PARAMS = {
     "target": "dev",
@@ -88,6 +90,7 @@ with DAG(
     PythonOperator(
         task_id="maintain",
         python_callable=_maintain,
+        on_failure_callback=record_weather_problem,
     )
 
 
