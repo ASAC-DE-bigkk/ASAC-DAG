@@ -96,6 +96,26 @@ Trino 는 조회·DDL·silver/gold(dbt)에서 그대로 쓴다.
   `engine` 파라미터를 제거하는 후속 이슈를 등록한다.
   — 진행: **1/7** (2026-07-10 success, load ~200s·데이터셋당 1스냅샷).
 
+## 메타DB Connection — SLO dag_run enrichment (#411)
+
+`culture_slo` 의 `load_dag_runs` 는 Airflow Connection `airflow_metadb` 로 메타DB
+dag_run 을 읽는다(태스크 격리 #303 의 허용 경로 = PostgresHook + 정의된 Connection).
+**등록은 CLI 1회** — 컨테이너 안에서 기존 env 를 재사용하므로 접속 문자열이
+레포·로그에 노출되지 않는다:
+
+```bash
+docker exec elt-infra-airflow-scheduler-1 bash -c \
+  'airflow connections add airflow_metadb \
+     --conn-uri "${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN/postgresql+psycopg2/postgres}"'
+```
+
+- **스택 재구축(메타DB 볼륨 소실) 시 재등록 필요.** 미등록이면 load_dag_runs 가
+  스킵 로그를 남기고 0을 반환한다 — 핵심 SLO(run_report 기반)는 영향 없고
+  `bronze_culture_dag_runs` 만 안 자란다.
+- DBT freshness 와의 결합: 이 테이블의 소스 freshness 는 적재가 살아있을 때만
+  켠다(#238 사고 — 빈 테이블 감시 금지). 스킵이 이틀 넘게 지속되면 freshness 가
+  다시 error 를 낼 수 있으니 Connection 부터 확인한다.
+
 ## 디버깅
 
 1. **어느 데이터셋이 깨졌나** — Airflow 그리드에서 red `fetch_raw` 매핑 인덱스 → 태스크 로그.
