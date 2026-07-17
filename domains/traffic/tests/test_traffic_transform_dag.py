@@ -22,6 +22,11 @@ def test_traffic_transform_subscribes_to_incident_or_flow_bronze_asset_by_defaul
 
 def test_traffic_transform_trino_tasks_do_not_inflate_pool_priority_from_chain():
     module = load_transform_module()
+    critical_task_ids = {
+        "dbt_run_silver",
+        "dbt_test_silver",
+        "dbt_test_gold",
+    }
 
     for task_id in module.DBT_PHASE_TASK_IDS:
         task = module.dag.task_dict[task_id]
@@ -29,7 +34,7 @@ def test_traffic_transform_trino_tasks_do_not_inflate_pool_priority_from_chain()
         assert task.kwargs["weight_rule"] == "absolute"
         expected_priority = (
             module.PIN_CRITICAL_PRIORITY
-            if task_id in {"dbt_run_silver", "dbt_test_silver"}
+            if task_id in critical_task_ids
             else 1
         )
         assert task.kwargs["priority_weight"] == expected_priority

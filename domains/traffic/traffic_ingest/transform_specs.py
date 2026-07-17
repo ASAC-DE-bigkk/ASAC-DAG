@@ -83,6 +83,7 @@ DBT_PHASE_SPECS = (
         silver_persisted=True,
         fresh_parse=True,
         snapshot_required=True,
+        pin_critical=True,
     ),
 )
 DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)

@@ -523,7 +523,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_run_silver": (True, True),
         "dbt_test_silver": (True, True),
         "dbt_run_gold": (True, False),
-        "dbt_test_gold": (True, False),
+        "dbt_test_gold": (True, True),
     }
 
 
