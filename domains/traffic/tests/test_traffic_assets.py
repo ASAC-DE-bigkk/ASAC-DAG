@@ -85,6 +85,8 @@ def test_latest_incident_event_coalesces_older_legacy_backlog():
     legacy = types.SimpleNamespace(
         timestamp=datetime(2026, 7, 7, tzinfo=timezone.utc),
         extra={},
+        source_dag_id="traffic_incident_bronze",
+        source_task_id="verify_seoul_traffic_bronze_runtime",
     )
     current = _incident_event(
         "snapshot-current",
@@ -96,6 +98,35 @@ def test_latest_incident_event_coalesces_older_legacy_backlog():
         {
             "triggering_asset_events": {
                 TRAFFIC_INCIDENT_BRONZE_ASSET: [legacy, current]
+            }
+        }
+    )
+
+    assert selected["bronze_dag_run_id"] == "snapshot-current"
+
+
+def test_latest_incident_event_skips_newer_legacy_verify_event():
+    from traffic_ingest.assets import (
+        TRAFFIC_INCIDENT_BRONZE_ASSET,
+        latest_incident_bronze_event,
+    )
+
+    current = _incident_event(
+        "snapshot-current",
+        "2026-07-16T00:00:00+00:00",
+        timestamp=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+    legacy_newer = types.SimpleNamespace(
+        timestamp=datetime(2026, 7, 16, 0, 5, tzinfo=timezone.utc),
+        extra={},
+        source_dag_id="traffic_incident_bronze",
+        source_task_id="verify_seoul_traffic_bronze_runtime",
+    )
+
+    selected = latest_incident_bronze_event(
+        {
+            "triggering_asset_events": {
+                TRAFFIC_INCIDENT_BRONZE_ASSET: [current, legacy_newer]
             }
         }
     )
