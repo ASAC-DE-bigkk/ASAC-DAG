@@ -106,16 +106,6 @@ DBT_PHASE_SPECS = (
         "ask_seoul_weather_transform_silver",
     ),
     DbtPhaseSpec(
-        "dbt_run_gold",
-        "run",
-        "ask_seoul_weather_transform_gold",
-    ),
-    DbtPhaseSpec(
-        "dbt_test_gold",
-        "test",
-        "ask_seoul_weather_transform_gold",
-    ),
-    DbtPhaseSpec(
         "dbt_run_place_mart",
         "run",
         "ask_seoul_weather_transform_place_mart",
@@ -124,6 +114,16 @@ DBT_PHASE_SPECS = (
         "dbt_test_place_mart",
         "test",
         "ask_seoul_weather_transform_place_mart",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_gold",
+        "run",
+        "ask_seoul_weather_transform_gold",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_gold",
+        "test",
+        "ask_seoul_weather_transform_gold",
     ),
 )
 DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)

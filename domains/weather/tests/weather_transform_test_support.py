@@ -214,18 +214,6 @@ EXPECTED_DBT_PHASES = (
         True,
     ),
     (
-        "dbt_run_gold",
-        "run",
-        "ask_seoul_weather_transform_gold",
-        True,
-    ),
-    (
-        "dbt_test_gold",
-        "test",
-        "ask_seoul_weather_transform_gold",
-        True,
-    ),
-    (
         "dbt_run_place_mart",
         "run",
         "ask_seoul_weather_transform_place_mart",
@@ -235,6 +223,18 @@ EXPECTED_DBT_PHASES = (
         "dbt_test_place_mart",
         "test",
         "ask_seoul_weather_transform_place_mart",
+        True,
+    ),
+    (
+        "dbt_run_gold",
+        "run",
+        "ask_seoul_weather_transform_gold",
+        True,
+    ),
+    (
+        "dbt_test_gold",
+        "test",
+        "ask_seoul_weather_transform_gold",
         True,
     ),
 )
