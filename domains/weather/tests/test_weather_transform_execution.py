@@ -113,14 +113,17 @@ def test_weather_dbt_model_command_writes_isolated_artifact(tmp_path, monkeypatc
         dbt_command="run",
     )
     ls_command, command = [item[0] for item in captured]
-    assert ls_command[1:4] == ["ls", "--resource-type", "model"]
-    assert command[:4] == [
-        module.DBT_BIN,
-        "run",
-        "--selector",
-        "ask_seoul_weather_transform_silver",
-    ]
-    assert "--selector" in ls_command
+    assert ls_command[:2] == [module.DBT_BIN, "ls"]
+    assert ls_command[ls_command.index("--resource-type") + 1] == "model"
+    assert command[:2] == [module.DBT_BIN, "run"]
+    assert command[command.index("--selector") + 1] == (
+        "ask_seoul_weather_transform_silver"
+    )
+    assert ls_command[ls_command.index("--selector") + 1] == (
+        "ask_seoul_weather_transform_silver"
+    )
+    assert "--no-partial-parse" in ls_command
+    assert "--no-partial-parse" in command
     assert "--indirect-selection=buildable" not in ls_command
     assert "--indirect-selection=buildable" not in command
     assert command[command.index("--target") + 1] == "dev"

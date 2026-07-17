@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from weather_ingest import w2_recovery as recovery_contracts  # noqa: E402
 from weather_ingest.w2_recovery import (  # noqa: E402
+    CHECKPOINT_CONTRACT_VERSION,
     checkpoint_payload,
     completed_window_labels,
     preparation_dbt_vars,
@@ -110,6 +111,10 @@ def test_selects_only_windows_that_have_publishable_manifest_anchors():
 def test_phase_plan_owns_only_named_selectors_and_stable_invocation_identity():
     preparation = recovery_contracts.preparation_phase_plan()
     window = recovery_contracts.window_phase_plan(3)
+    winner = tuple(
+        recovery_contracts.winner_phase(3, bucket_index)
+        for bucket_index in range(recovery_contracts.WINNER_RUN_BUCKET_COUNT)
+    )
     lineage = tuple(
         recovery_contracts.lineage_phase(3, bucket_index)
         for bucket_index in range(recovery_contracts.LINEAGE_RUN_BUCKET_COUNT)
@@ -144,6 +149,15 @@ def test_phase_plan_owns_only_named_selectors_and_stable_invocation_identity():
             "window-0003-contracts",
         ),
     )
+    assert recovery_contracts.WINNER_RUN_BUCKET_COUNT == 8
+    assert winner == tuple(
+        recovery_contracts.DbtPhase(
+            "test",
+            "ask_seoul_weather_w2_recovery_winner_contract",
+            f"window-0003-winner-{bucket_index}",
+        )
+        for bucket_index in range(8)
+    )
     assert lineage == tuple(
         recovery_contracts.DbtPhase(
             "test",
@@ -173,6 +187,7 @@ def test_checkpoint_rejects_a_different_requested_range():
         "start_at": "2026-07-02 00:00:00.000000",
         "cutoff_at": "2026-07-02 23:59:59.999999",
     }
+    assert payload["contract_version"] == CHECKPOINT_CONTRACT_VERSION
     assert payload["completed_windows"] == [windows[0].label]
 
     other_windows = split_repair_windows(
@@ -193,6 +208,7 @@ def test_checkpoint_migrates_completed_legacy_daily_window_to_subwindows():
         "2026-07-02 23:59:59.999999",
     )
     payload = {
+        "contract_version": CHECKPOINT_CONTRACT_VERSION,
         "range": {
             "start_at": "2026-07-02 00:00:00.000000",
             "cutoff_at": "2026-07-02 23:59:59.999999",
@@ -203,6 +219,22 @@ def test_checkpoint_migrates_completed_legacy_daily_window_to_subwindows():
     assert completed_window_labels(payload, windows) == {
         window.label for window in windows
     }
+
+
+def test_checkpoint_does_not_trust_unversioned_pre_winner_completion():
+    windows = split_repair_windows(
+        "2026-07-02 00:00:00.000000",
+        "2026-07-02 05:59:59.999999",
+    )
+    payload = {
+        "range": {
+            "start_at": "2026-07-02 00:00:00.000000",
+            "cutoff_at": "2026-07-02 05:59:59.999999",
+        },
+        "completed_windows": [windows[0].label],
+    }
+
+    assert completed_window_labels(payload, windows) == set()
 
 
 def _successful_execution():
@@ -290,6 +322,7 @@ def test_recovery_executes_selector_phases_in_order_and_checkpoints_before_final
         "ask_seoul_weather_w1_bridge",
         "ask_seoul_weather_w2_recovery_window_models",
         "ask_seoul_weather_w2_recovery_window_contracts",
+        *["ask_seoul_weather_w2_recovery_winner_contract"] * 8,
         *["ask_seoul_weather_w2_recovery_lineage_contract"] * 4,
         "ask_seoul_weather_w2_recovery_final_contract",
     ]
@@ -301,6 +334,14 @@ def test_recovery_executes_selector_phases_in_order_and_checkpoints_before_final
         "prepare-w1-contract",
         "window-0000-models",
         "window-0000-contracts",
+        "window-0000-winner-0",
+        "window-0000-winner-1",
+        "window-0000-winner-2",
+        "window-0000-winner-3",
+        "window-0000-winner-4",
+        "window-0000-winner-5",
+        "window-0000-winner-6",
+        "window-0000-winner-7",
         "window-0000-lineage-0",
         "window-0000-lineage-1",
         "window-0000-lineage-2",
@@ -317,7 +358,16 @@ def test_recovery_executes_selector_phases_in_order_and_checkpoints_before_final
     assert all(call["try_number"] == 2 for call in calls)
     assert all("runner" not in call for call in calls)
     assert all(isinstance(json.loads(call["variables"]), dict) for call in calls)
-    lineage_calls = calls[7:11]
+    winner_calls = calls[7:15]
+    assert [
+        json.loads(call["variables"])["weather_w2_winner_bucket_index"]
+        for call in winner_calls
+    ] == [str(bucket_index) for bucket_index in range(8)]
+    assert all(
+        json.loads(call["variables"])["weather_w2_winner_bucket_count"] == "8"
+        for call in winner_calls
+    )
+    lineage_calls = calls[15:19]
     assert [
         json.loads(call["variables"])["weather_w2_lineage_run_bucket_index"]
         for call in lineage_calls
@@ -327,6 +377,48 @@ def test_recovery_executes_selector_phases_in_order_and_checkpoints_before_final
         "2",
         "3",
     ]
+    assert result["completed_windows"] == 1
+
+
+def test_recovery_revalidates_unversioned_checkpoint_before_skip(monkeypatch):
+    module = load_recovery_module()
+    events = []
+    saved_payloads = []
+    legacy_payload = {
+        "range": {
+            "start_at": "2026-07-02 00:00:00.000000",
+            "cutoff_at": "2026-07-02 05:59:59.999999",
+        },
+        "completed_windows": [
+            "2026-07-02 00:00:00.000000__2026-07-02 05:59:59.999999"
+        ],
+    }
+    monkeypatch.setattr(module, "publishable_window_indexes", lambda _windows: {0})
+    monkeypatch.setattr(
+        module.Variable,
+        "get",
+        staticmethod(lambda *_args, **_kwargs: legacy_payload),
+    )
+    monkeypatch.setattr(
+        module.Variable,
+        "set",
+        staticmethod(
+            lambda _name, payload, **_kwargs: saved_payloads.append(payload)
+        ),
+    )
+
+    def execute_dbt_phase(**kwargs):
+        events.append(kwargs["invocation_id"])
+        return _successful_execution()
+
+    monkeypatch.setattr(module.weather_dbt, "execute_dbt_phase", execute_dbt_phase)
+
+    result = module.recover_observation_windows(**_recovery_context())
+
+    assert "window-0000-models" in events
+    assert "window-0000-winner-0" in events
+    assert "window-0000-lineage-0" in events
+    assert saved_payloads[-1]["contract_version"] == CHECKPOINT_CONTRACT_VERSION
     assert result["completed_windows"] == 1
 
 
@@ -367,6 +459,48 @@ def test_recovery_failure_stops_later_buckets_checkpoint_and_final(monkeypatch):
 
     assert events[-1] == "window-0000-lineage-2"
     assert "window-0000-lineage-3" not in events
+    assert "checkpoint" not in events
+    assert "final-contract" not in events
+
+
+def test_recovery_winner_failure_stops_later_validation_and_checkpoint(monkeypatch):
+    module = load_recovery_module()
+    events = []
+    monkeypatch.setattr(module, "publishable_window_indexes", lambda _windows: {0})
+    monkeypatch.setattr(
+        module.Variable, "get", staticmethod(lambda *_args, **_kwargs: None)
+    )
+    monkeypatch.setattr(
+        module.Variable,
+        "set",
+        staticmethod(lambda *_args, **_kwargs: events.append("checkpoint")),
+    )
+
+    def execute_dbt_phase(**kwargs):
+        events.append(kwargs["invocation_id"])
+        if kwargs["invocation_id"] == "window-0000-winner-5":
+            completed = subprocess.CompletedProcess(
+                args=["dbt"], returncode=1, stdout="", stderr="contract failed"
+            )
+            return types.SimpleNamespace(
+                attempts=(completed,),
+                completed=completed,
+                missing_expected_artifacts=(),
+                existing_run_results_path=None,
+                existing_sources_path=None,
+                existing_manifest_path=None,
+                selected_unique_ids=("test.asac_seoul.winner",),
+            )
+        return _successful_execution()
+
+    monkeypatch.setattr(module.weather_dbt, "execute_dbt_phase", execute_dbt_phase)
+
+    with pytest.raises(FakeAirflowFailException, match="data-contract-violation"):
+        module.recover_observation_windows(**_recovery_context())
+
+    assert events[-1] == "window-0000-winner-5"
+    assert "window-0000-winner-6" not in events
+    assert "window-0000-lineage-0" not in events
     assert "checkpoint" not in events
     assert "final-contract" not in events
 

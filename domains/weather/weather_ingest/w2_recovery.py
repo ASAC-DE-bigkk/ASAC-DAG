@@ -12,7 +12,9 @@ MAX_WINDOW = timedelta(hours=6) - timedelta(microseconds=1)
 LEGACY_MAX_WINDOW = timedelta(days=1) - timedelta(microseconds=1)
 BRIDGE_VERSION = "weather_admin_dong_grid_bridge_v1"
 CANONICAL_REVISION_DATE = "2025-04-01"
+WINNER_RUN_BUCKET_COUNT = 8
 LINEAGE_RUN_BUCKET_COUNT = 4
+CHECKPOINT_CONTRACT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,14 @@ def window_phase_plan(window_index: int) -> tuple[DbtPhase, ...]:
             "ask_seoul_weather_w2_recovery_window_contracts",
             f"{invocation_prefix}-contracts",
         ),
+    )
+
+
+def winner_phase(window_index: int, bucket_index: int) -> DbtPhase:
+    return DbtPhase(
+        "test",
+        "ask_seoul_weather_w2_recovery_winner_contract",
+        f"window-{window_index:04d}-winner-{bucket_index}",
     )
 
 
@@ -169,6 +179,7 @@ def checkpoint_payload(
     if unknown:
         raise ValueError(f"checkpoint contains unknown repair windows: {unknown}")
     return {
+        "contract_version": CHECKPOINT_CONTRACT_VERSION,
         "range": _range_payload(windows),
         "completed_windows": list(dict.fromkeys(completed_labels)),
     }
@@ -188,6 +199,8 @@ def completed_window_labels(
     payload: dict[str, Any] | None, windows: list[RepairWindow]
 ) -> set[str]:
     if not payload:
+        return set()
+    if payload.get("contract_version") != CHECKPOINT_CONTRACT_VERSION:
         return set()
     expected_range = _range_payload(windows)
     if payload.get("range") != expected_range:

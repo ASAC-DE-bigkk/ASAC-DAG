@@ -135,6 +135,7 @@ def test_weather_materialization_commands_use_dbt_ol(
     assert option(observed[-1], "--threads") == "1"
     assert option(observed[-2], "--selector") == "selected"
     assert observed[0][1] == "parse"
+    assert all("--no-partial-parse" in command for command in observed)
     assert "--threads" not in observed[0]
     assert "--threads" not in observed[-2]
     assert not any(
@@ -193,8 +194,10 @@ def test_weather_deps_and_source_freshness_stay_raw(dbt_command, tmp_path, monke
     assert all(command[0] == RAW_DBT for command in observed)
     assert all("--threads" not in command for command in observed)
     if dbt_command == "source freshness":
+        assert all("--no-partial-parse" in command for command in observed)
         assert execution.existing_sources_path == execution.paths.sources_path
     else:
+        assert all("--no-partial-parse" not in command for command in observed)
         assert execution.paths.manifest_path is None
 
 
