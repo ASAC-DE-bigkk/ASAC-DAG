@@ -125,8 +125,11 @@ def _validated_events(
     source_id: str,
     run_field: str,
     duplicate_run_field: str,
+    ignore_event: Callable[[object], bool] | None = None,
 ) -> list[dict[str, object]]:
     events = _matching_asset_events(context, asset_uri=asset_uri)
+    if ignore_event is not None:
+        events = [event for event in events if not ignore_event(event)]
 
     validated: list[dict[str, object]] = []
     for event in events:
@@ -154,6 +157,7 @@ def incident_bronze_events(context: Mapping[str, object]) -> list[dict[str, obje
         source_id="seoul_traffic_incident",
         run_field="bronze_dag_run_id",
         duplicate_run_field="bronze_run_id",
+        ignore_event=_is_legacy_incident_bronze_event,
     )
 
 

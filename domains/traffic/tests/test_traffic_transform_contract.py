@@ -325,12 +325,83 @@ def test_contract_gate_does_not_run_dbt_test_after_empty_selection(monkeypatch):
     assert pushed["value"]["failure_classification"] == "model-execution-failed"
 
 
+def test_preflight_phase_uses_non_materializing_snapshot_sentinel(monkeypatch):
+    module = load_transform_module()
+    captured = {}
+    completed = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    execution = types.SimpleNamespace(
+        attempts=(completed,),
+        completed=completed,
+        missing_expected_artifacts=(),
+        existing_run_results_path="/tmp/preflight/run_results.json",
+        existing_sources_path=None,
+        existing_manifest_path="/tmp/preflight/manifest.json",
+        selected_unique_ids=(),
+        primary_artifact_path="/tmp/preflight/run_results.json",
+    )
+    monkeypatch.setattr(
+        module.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **kwargs: captured.update(kwargs) or execution,
+    )
+    ti = types.SimpleNamespace(
+        task_id="dbt_source_freshness",
+        try_number=1,
+        xcom_pull=lambda **_kwargs: None,
+    )
+
+    result = module.run_dbt_phase(
+        dbt_command="source freshness",
+        selector="ask_seoul_traffic_transform_source",
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        snapshot_required=False,
+        silver_persisted=False,
+        ti=ti,
+        run_id="asset_triggered__preflight",
+        params={"target": "dev"},
+    )
+
+    assert result["status"] == "success"
+    assert json.loads(captured["variables"]) == {
+        "traffic_snapshot_dag_run_id": module.PREFLIGHT_SNAPSHOT_DAG_RUN_ID
+    }
+
+
+def test_snapshot_required_phase_rejects_missing_late_pin(monkeypatch):
+    module = load_transform_module()
+    called = False
+
+    def fail_if_called(**_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(module.traffic_dbt, "execute_dbt_phase", fail_if_called)
+    ti = types.SimpleNamespace(
+        task_id="dbt_run_silver",
+        try_number=1,
+        xcom_pull=lambda **_kwargs: None,
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="resolved snapshot"):
+        module.run_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_traffic_transform_silver",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            snapshot_required=True,
+            silver_persisted=False,
+            ti=ti,
+            run_id="asset_triggered__missing-pin",
+            params={"target": "dev"},
+        )
+
+    assert called is False
+
+
 def test_traffic_transform_bootstraps_asac_axes_before_silver():
     module = load_transform_module()
     dag = module.dag
 
     expected_task_order = [
-        "resolve_traffic_snapshot_run",
         "dbt_deps",
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
@@ -339,6 +410,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_run_common_admin_dong_dimension",
         "dbt_test_common_admin_dong_dimension",
         "dbt_test_asac_axes_seed_contract",
+        "resolve_traffic_snapshot_run",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",
@@ -414,7 +486,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         )
         assert dag.task_dict[task_id].kwargs["op_kwargs"]["silver_persisted"] is False
     assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {
-        "dbt_deps"
+        "dbt_run_silver"
     }
     assert (
         dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["snapshot_task_id"]
@@ -436,6 +508,23 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_run_gold": (True, False),
         "dbt_test_gold": (True, True),
     }
+    assert {
+        spec.task_id: (spec.snapshot_required, spec.pin_critical)
+        for spec in module.DBT_PHASE_SPECS
+    } == {
+        "dbt_deps": (False, False),
+        "dbt_source_freshness": (False, False),
+        "dbt_test_traffic_incident_availability": (False, False),
+        "dbt_test_traffic_bronze_source_contract": (False, False),
+        "dbt_seed_asac_axes": (False, False),
+        "dbt_run_common_admin_dong_dimension": (False, False),
+        "dbt_test_common_admin_dong_dimension": (False, False),
+        "dbt_test_asac_axes_seed_contract": (False, False),
+        "dbt_run_silver": (True, True),
+        "dbt_test_silver": (True, True),
+        "dbt_run_gold": (True, False),
+        "dbt_test_gold": (True, False),
+    }
 
 
 def test_contract_gates_are_the_only_path_into_persisted_silver():
@@ -453,10 +542,13 @@ def test_contract_gates_are_the_only_path_into_persisted_silver():
         "dbt_test_asac_axes_seed_contract"
     }
     assert dag.task_dict["dbt_test_asac_axes_seed_contract"].downstream_task_ids == {
-        "dbt_run_silver"
+        "resolve_traffic_snapshot_run"
+    }
+    assert dag.task_dict["resolve_traffic_snapshot_run"].upstream_task_ids == {
+        "dbt_test_asac_axes_seed_contract"
     }
     assert dag.task_dict["dbt_run_silver"].upstream_task_ids == {
-        "dbt_test_asac_axes_seed_contract",
+        "resolve_traffic_snapshot_run",
     }
 
 

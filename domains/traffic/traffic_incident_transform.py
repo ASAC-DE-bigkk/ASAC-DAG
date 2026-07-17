@@ -78,6 +78,8 @@ SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
 FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
 DBT_FAILURE_XCOM_KEY = "traffic_dbt_failure"
 DBT_RUN_RESULTS_RECORD_KEY = "dbt_run_results_path"
+PREFLIGHT_SNAPSHOT_DAG_RUN_ID = "__traffic_preflight__"
+PIN_CRITICAL_PRIORITY = 10
 
 
 DBT_RETRY_DELAY = timedelta(minutes=2)
@@ -116,6 +118,7 @@ def run_dbt_phase(
     snapshot_task_id: str,
     silver_persisted: bool,
     fresh_parse: bool = False,
+    snapshot_required: bool = False,
     **context,
 ) -> dict[str, object]:
     """Run one pinned dbt phase and let Airflow retry infrastructure failures only."""
@@ -126,10 +129,19 @@ def run_dbt_phase(
     try_number = getattr(ti, "try_number", None)
     params = context.get("params") or {}
     target = params.get("target", "dev")
+    if snapshot_required and not snapshot_run_id:
+        raise AirflowFailException(
+            f"traffic dbt phase requires resolved snapshot: {task_id or dbt_command}"
+        )
+    effective_snapshot_run_id = (
+        str(snapshot_run_id)
+        if snapshot_run_id
+        else PREFLIGHT_SNAPSHOT_DAG_RUN_ID
+    )
     dbt_variables = dbt_snapshot_variables(
         ti,
         snapshot_task_id,
-        snapshot_run_id,
+        effective_snapshot_run_id,
         FLOW_SNAPSHOT_XCOM_KEY,
     )
     execution = traffic_dbt.execute_dbt_phase(
@@ -242,10 +254,12 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
             "snapshot_task_id": SNAPSHOT_TASK_ID,
             "silver_persisted": spec.silver_persisted,
             "fresh_parse": spec.fresh_parse,
+            "snapshot_required": spec.snapshot_required,
         },
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
         pool=TRINO_HEAVY_POOL,
+        priority_weight=(PIN_CRITICAL_PRIORITY if spec.pin_critical else 1),
         weight_rule="absolute",
         on_failure_callback=record_traffic_dbt_problem,
     )
@@ -321,11 +335,23 @@ with DAG(
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
         python_callable=resolve_traffic_snapshot_run,
+        pool=TRINO_HEAVY_POOL,
+        priority_weight=PIN_CRITICAL_PRIORITY,
+        weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
     )
 
     dbt_phase_tasks = {spec.task_id: dbt_task(spec) for spec in DBT_PHASE_SPECS}
-    dbt_tasks_in_order = list(dbt_phase_tasks.values())
+    pre_snapshot_tasks = [
+        dbt_phase_tasks[spec.task_id]
+        for spec in DBT_PHASE_SPECS
+        if not spec.snapshot_required
+    ]
+    pinned_snapshot_tasks = [
+        dbt_phase_tasks[spec.task_id]
+        for spec in DBT_PHASE_SPECS
+        if spec.snapshot_required
+    ]
 
     publish_dbt_metrics = PythonOperator(
         task_id="publish_dbt_run_metrics",
@@ -333,7 +359,12 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
-    transform_tasks = [validate_runtime, resolve_snapshot, *dbt_tasks_in_order]
+    transform_tasks = [
+        validate_runtime,
+        *pre_snapshot_tasks,
+        resolve_snapshot,
+        *pinned_snapshot_tasks,
+    ]
     pipeline_tasks = [*transform_tasks, publish_dbt_metrics]
     for upstream, downstream in zip(pipeline_tasks, pipeline_tasks[1:]):
         upstream >> downstream
