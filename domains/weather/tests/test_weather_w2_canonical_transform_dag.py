@@ -78,15 +78,19 @@ def test_canonical_w2_dag_has_a_small_independent_phase_chain():
         }
         assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
         assert task.kwargs["weight_rule"] == "absolute"
-        assert task.kwargs["on_failure_callback"] == [
-            module.notify_weather_transform_failure,
-            module.record_weather_problem,
-        ]
+        assert task.kwargs["on_failure_callback"] is module.record_weather_problem
 
     metrics = module.dag.task_dict["publish_dbt_run_metrics"]
     assert metrics.is_teardown is True
     assert metrics.on_failure_fail_dagrun is False
     assert metrics.kwargs["on_failure_callback"] is module.record_weather_problem
+
+
+def test_canonical_w2_failure_callback_uses_current_attempt_artifact_xcom():
+    module = load_canonical_module()
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "dbt_run_results_xcom_key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY" in source
 
 
 def test_canonical_w2_dag_pins_a_publishable_bronze_snapshot(monkeypatch):

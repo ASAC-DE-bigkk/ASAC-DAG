@@ -85,6 +85,7 @@ def test_only_target_traffic_weather_dags_reference_domain_lineage_helpers():
         DOMAIN_DIR / "traffic_reliability_report.py": "traffic_lineage",
         DOMAINS_DIR / "weather" / "weather_vilage_fcst_bronze.py": "weather_lineage",
         DOMAINS_DIR / "weather" / "weather_vilage_fcst_transform.py": "weather_lineage",
+        DOMAINS_DIR / "weather" / "weather_w2_canonical_transform.py": "weather_lineage",
         DOMAINS_DIR / "weather" / "weather_w1_contract_smoke.py": "weather_lineage",
         DOMAINS_DIR / "weather" / "weather_reliability_report.py": "weather_lineage",
         DOMAINS_DIR / "weather" / "weather_iceberg_maintenance.py": "weather_lineage",

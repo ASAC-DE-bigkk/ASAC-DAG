@@ -86,7 +86,11 @@ DEFAULT_PARAMS = {
         description="dbt target profile name (dev only).",
     )
 }
-record_weather_problem = problem_failure_callback(domain="weather")
+record_weather_problem = problem_failure_callback(
+    domain="weather",
+    dbt_project_dir=DBT_PROJECT,
+    dbt_run_results_xcom_key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
+)
 
 
 def _triggering_asset_events(*, context: dict, asset_uri: str):
@@ -349,7 +353,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
         weight_rule="absolute",
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+        on_failure_callback=record_weather_problem,
     )
 
 

@@ -130,3 +130,11 @@ def test_maintenance_allows_missing_tables_to_be_skipped():
         "retention": "7d",
         "tables": ("silver_seoul_traffic_incident", "gold_weather_forecast_by_place"),
     }
+
+
+def test_maintenance_task_uses_weather_failure_callback():
+    module = load_maintenance_module()
+
+    task = module.dag.task_dict["maintain"]
+
+    assert task.kwargs["on_failure_callback"] is module.record_weather_problem

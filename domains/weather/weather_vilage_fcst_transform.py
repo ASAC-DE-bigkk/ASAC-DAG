@@ -141,7 +141,11 @@ DEFAULT_PARAMS = {
 }
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 # dbt transform 은 외부 소스 API 를 호출하지 않으므로 source_system 은 생략한다.
-record_weather_problem = problem_failure_callback(domain="weather")
+record_weather_problem = problem_failure_callback(
+    domain="weather",
+    dbt_project_dir=DBT_PROJECT,
+    dbt_run_results_xcom_key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
+)
 
 
 def _triggering_asset_events(*, context: dict, asset_uri: str):
@@ -413,7 +417,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
         weight_rule="absolute",
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
-        on_failure_callback=[notify_weather_transform_failure, record_weather_problem],
+        on_failure_callback=record_weather_problem,
     )
 
 

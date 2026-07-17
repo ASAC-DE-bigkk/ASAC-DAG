@@ -53,7 +53,6 @@ from weather_ingest.bronze_dag_support import (  # noqa: E402
     fail_fast_weather_bronze,
     format_raw_object_keys_for_recovery as format_raw_object_keys_for_recovery,
     kma_dag_schedule,
-    notify_weather_bronze_failure,
     notify_weather_bronze_success as notify_weather_bronze_success,
     pull_kma_raw_result,
     raw_object_keys_from_conf,
@@ -188,7 +187,6 @@ def record_kma_run_failed(context) -> None:
 
 def record_and_notify_kma_run_failed(context) -> None:
     record_kma_run_failed(context)
-    notify_weather_bronze_failure(context)
 
 
 @fail_fast_weather_bronze

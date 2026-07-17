@@ -178,6 +178,106 @@ def test_callback_respects_optout(monkeypatch, sent, guard_dir):
     assert stored and sent == []   # R2 는 기록, Discord 는 옵트아웃
 
 
+def test_callback_ignores_legacy_optout_for_weather_and_traffic(monkeypatch, sent, guard_dir):
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", _WEBHOOK)
+    monkeypatch.setenv(OPTOUT_ENV, "weather,traffic,culture")
+    from common.errors.sink import R2ErrorSink
+
+    for domain in ("weather", "traffic"):
+        stored: list[str] = []
+        sink = R2ErrorSink(put_object=lambda key, payload: stored.append(key))
+        callback = problem_failure_callback(domain=domain, sink=sink)
+        callback(_airflow_context(run_id=f"manual__{domain}"))
+        assert stored
+
+    assert len(sent) == 2
+    assert {"weather", "traffic"} <= {
+        payload["embeds"][0]["title"].split(" · ")[0].removeprefix("❌ ")
+        for payload in sent
+    }
+
+
+def test_callback_reads_current_weather_dbt_attempt_results_from_xcom(
+    monkeypatch, sent, guard_dir, tmp_path
+):
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", _WEBHOOK)
+    project_dir = tmp_path / "weather-dbt"
+    stale_results = project_dir / "target" / "run_results.json"
+    current_results = (
+        project_dir
+        / "target"
+        / "weather-transform"
+        / "scheduled__current"
+        / "dbt_test_gold"
+        / "try1"
+        / "invocation"
+        / "execution"
+        / "run_results.json"
+    )
+    stale_results.parent.mkdir(parents=True)
+    current_results.parent.mkdir(parents=True)
+    stale_results.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "status": "error",
+                        "unique_id": "model.ask.stale_model",
+                        "message": "stale shared artifact",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    current_results.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "status": "error",
+                        "unique_id": "test.ask.current_contract",
+                        "message": "current attempt failure",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = _airflow_context(run_id="scheduled__current")
+    context["task_instance"] = SimpleNamespace(
+        dag_id="weather_vilage_fcst_transform",
+        task_id="dbt_test_gold",
+        try_number=1,
+        xcom_pull=lambda *, task_ids, key: (
+            str(current_results)
+            if task_ids == "dbt_test_gold"
+            and key == "weather_dbt_run_results_path"
+            else None
+        ),
+    )
+    context["dag_run"] = SimpleNamespace(
+        dag_id="weather_vilage_fcst_transform",
+        run_id="scheduled__current",
+    )
+    from common.errors.sink import R2ErrorSink
+
+    callback = problem_failure_callback(
+        domain="weather",
+        sink=R2ErrorSink(put_object=lambda *_args: None),
+        dbt_project_dir=str(project_dir),
+        dbt_run_results_xcom_key="weather_dbt_run_results_path",
+    )
+
+    callback(context)
+
+    description = sent[0]["embeds"][0]["description"]
+    assert "current_contract" in description
+    assert "current attempt failure" in description
+    assert "stale_model" not in description
+    assert "stale shared artifact" not in description
+
+
 def test_callback_never_raises_even_if_discord_breaks(monkeypatch, guard_dir):
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", _WEBHOOK)
     monkeypatch.delenv(OPTOUT_ENV, raising=False)
