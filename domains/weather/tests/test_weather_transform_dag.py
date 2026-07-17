@@ -104,6 +104,36 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
     assert "assert_gold_" not in source
 
 
+def test_weather_transform_runs_place_mart_before_full_gold_and_metrics():
+    module = load_transform_module()
+    dag = module.dag
+
+    terminal_order = (
+        "dbt_run_silver",
+        "dbt_test_silver",
+        "dbt_run_place_mart",
+        "dbt_test_place_mart",
+        "dbt_run_gold",
+        "dbt_test_gold",
+        "publish_dbt_run_metrics",
+    )
+
+    for upstream_task_id, downstream_task_id in zip(
+        terminal_order, terminal_order[1:]
+    ):
+        assert dag.task_dict[upstream_task_id].downstream_task_ids == {
+            downstream_task_id
+        }
+    assert (
+        dag.task_dict["dbt_run_gold"].kwargs["op_kwargs"]["selector"]
+        == "ask_seoul_weather_transform_gold"
+    )
+    assert (
+        dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["selector"]
+        == "ask_seoul_weather_transform_gold"
+    )
+
+
 def test_weather_transform_passes_w2_canonical_revision_to_model_commands():
     module = load_transform_module()
     dag = module.dag
@@ -261,7 +291,7 @@ def test_weather_transform_publishes_dbt_run_metrics_as_non_gating_teardown():
     assert metrics.on_failure_fail_dagrun is False
     assert metrics.kwargs["trigger_rule"] == "all_done_setup_success"
     assert metrics.kwargs["on_failure_callback"] is module.record_weather_problem
-    assert dag.task_dict["dbt_test_place_mart"].downstream_task_ids == {
+    assert dag.task_dict["dbt_test_gold"].downstream_task_ids == {
         "publish_dbt_run_metrics"
     }
     assert metrics.downstream_task_ids == set()
