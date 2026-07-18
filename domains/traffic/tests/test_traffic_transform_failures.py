@@ -104,18 +104,70 @@ def test_dbt_deps_and_selected_phases_use_only_supported_isolated_paths(
     )
 
 
+def test_successful_pinned_dbt_phase_returns_citydata_snapshot_lineage(
+    tmp_path, monkeypatch
+):
+    module = load_transform_module()
+    monkeypatch.setattr(module, "DBT_PROJECT", str(tmp_path / "dbt"))
+    snapshot_id = 8738321387624398062
+
+    def xcom_pull(*, task_ids, key=None):
+        if task_ids != module.SNAPSHOT_TASK_ID:
+            return None
+        if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY:
+            return snapshot_id
+        return "snapshot-a"
+
+    ti = types.SimpleNamespace(
+        task_id="dbt_run_silver",
+        try_number=1,
+        xcom_pull=xcom_pull,
+    )
+
+    def run(command, **_kwargs):
+        if command[1] == "ls":
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout='{"unique_id":"model.traffic.silver","resource_type":"model"}\n',
+                stderr="",
+            )
+        write_materialization_artifacts(command)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    result = module.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        silver_persisted=False,
+        snapshot_required=True,
+        ti=ti,
+        run_id="manual__a",
+        params={"target": "dev"},
+    )
+
+    assert result["traffic_citydata_crowding_snapshot_id"] == snapshot_id
+
+
 def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
     tmp_path, monkeypatch
 ):
     module = load_transform_module()
     monkeypatch.setattr(module, "DBT_PROJECT", str(tmp_path / "dbt"))
     pushed = {}
+
+    def xcom_pull(*, task_ids, key=None):
+        if task_ids != module.SNAPSHOT_TASK_ID:
+            return None
+        if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY:
+            return 8738321387624398062
+        return "snapshot-a"
+
     ti = types.SimpleNamespace(
         task_id="dbt_test_silver",
         try_number=1,
-        xcom_pull=lambda task_ids: (
-            "snapshot-a" if task_ids == module.SNAPSHOT_TASK_ID else None
-        ),
+        xcom_pull=xcom_pull,
         xcom_push=lambda key, value: pushed.update(key=key, value=value),
     )
 
@@ -155,6 +207,7 @@ def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
 
     assert pushed["key"] == module.DBT_FAILURE_XCOM_KEY
     assert pushed["value"]["traffic_snapshot_dag_run_id"] == "snapshot-a"
+    assert pushed["value"]["traffic_citydata_crowding_snapshot_id"] == 8738321387624398062
     assert pushed["value"]["failure_classification"] == "data-contract-violation"
     assert pushed["value"]["silver_persisted"] is True
     assert pushed["value"]["dbt_run_results_path"].endswith("/run_results.json")

@@ -158,6 +158,9 @@ def run_dbt_phase(
         FLOW_SNAPSHOT_XCOM_KEY,
         CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
     )
+    citydata_crowding_snapshot_id = dbt_variables.get(
+        "traffic_citydata_crowding_snapshot_id"
+    )
     if (
         snapshot_required
         and "traffic_citydata_crowding_snapshot_id" not in dbt_variables
@@ -196,6 +199,7 @@ def run_dbt_phase(
     if completed.returncode == 0 and not missing_artifact_error:
         return {
             "status": "success",
+            "traffic_citydata_crowding_snapshot_id": citydata_crowding_snapshot_id,
             "run_results_path": execution.existing_run_results_path,
             "sources_path": execution.existing_sources_path,
             "manifest_path": execution.existing_manifest_path,
@@ -218,6 +222,7 @@ def run_dbt_phase(
     record = build_recovery_record(
         failure,
         traffic_snapshot_dag_run_id=str(snapshot_run_id) if snapshot_run_id else None,
+        traffic_citydata_crowding_snapshot_id=citydata_crowding_snapshot_id,
         dag_id=getattr(ti, "dag_id", "traffic_incident_transform"),
         task_id=task_id,
         run_id=run_id,

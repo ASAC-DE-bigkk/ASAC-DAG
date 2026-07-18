@@ -152,6 +152,7 @@ def build_recovery_record(
     try_number: int | None,
     silver_persisted: bool,
     occurred_at: datetime,
+    traffic_citydata_crowding_snapshot_id: int | None = None,
 ) -> dict[str, Any]:
     """Build the durable operator record for a failed, pinned dbt invocation."""
     return {
@@ -163,6 +164,7 @@ def build_recovery_record(
         "run_id": run_id,
         "try_number": try_number,
         "traffic_snapshot_dag_run_id": traffic_snapshot_dag_run_id,
+        "traffic_citydata_crowding_snapshot_id": traffic_citydata_crowding_snapshot_id,
         "failure_classification": failure.classification,
         "retryable": failure.retryable,
         "dbt_test_names": failure.failed_test_names,
@@ -181,6 +183,7 @@ def build_failure_notification(record: dict[str, Any]) -> tuple[str, str, str]:
     description = "\n".join(
         (
             f"**snapshot**: `{record.get('traffic_snapshot_dag_run_id') or 'unknown'}`",
+            f"**citydata snapshot**: `{record.get('traffic_citydata_crowding_snapshot_id') or 'unknown'}`",
             f"**dbt test**: `{failed_tests}`",
             f"**failed rows**: {record.get('dbt_failed_row_count', 0)}",
             f"**artifact**: `{record.get('dbt_artifact_path') or 'unknown'}`",
