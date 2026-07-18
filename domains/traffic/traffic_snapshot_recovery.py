@@ -31,7 +31,6 @@ if DAGS_ROOT_DIR not in sys.path:
 from common.discord import COLOR_FAIL, COLOR_OK, first_notice_for_run, send_embed  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from traffic_dbt_failure import (  # noqa: E402
     R2RecoveryRecordSink,
     build_failure_notification,
@@ -41,6 +40,7 @@ from traffic_dbt_failure import (  # noqa: E402
     silver_persisted_from_results,
 )
 import traffic_dbt_execution as traffic_dbt  # noqa: E402
+from traffic_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL  # noqa: E402
 from traffic_ingest.run_manifest import RunNotPublishableError  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
@@ -61,10 +61,17 @@ class DbtPhaseSpec:
     dbt_command: str
     selector: str | None = None
     recovery_silver_persisted: bool = False
+    workload: DbtWorkload = DbtWorkload.TRINO
+    threads: int | None = 2
 
 
 RECOVERY_DBT_PHASE_SPECS = (
-    DbtPhaseSpec("dbt_deps", "deps"),
+    DbtPhaseSpec(
+        "dbt_deps",
+        "deps",
+        workload=DbtWorkload.LOCAL,
+        threads=None,
+    ),
     DbtPhaseSpec(
         "dbt_run_recovery_silver",
         "run",
@@ -152,6 +159,7 @@ def run_recovery_dbt_phase(
     selector: str | None,
     snapshot_task_id: str,
     recovery_silver_persisted: bool,
+    threads: int | None = None,
     **context,
 ) -> dict[str, object]:
     """Run one recovery-only dbt phase against the preflight-validated snapshot."""
@@ -171,6 +179,7 @@ def run_recovery_dbt_phase(
         try_number=try_number,
         target=target,
         variables=json.dumps({"traffic_snapshot_dag_run_id": snapshot_run_id}),
+        threads=threads,
         project_dir=DBT_PROJECT,
         executable=DBT_BIN,
         runner=subprocess.run,
@@ -355,20 +364,23 @@ def record_recovery_completion(**context: Any) -> dict[str, Any]:
 
 
 def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
-    return PythonOperator(
-        task_id=spec.task_id,
-        python_callable=run_recovery_dbt_phase,
-        op_kwargs={
+    operator_kwargs = {
+        "task_id": spec.task_id,
+        "python_callable": run_recovery_dbt_phase,
+        "op_kwargs": {
             "dbt_command": spec.dbt_command,
             "selector": spec.selector,
             "snapshot_task_id": SNAPSHOT_TASK_ID,
             "recovery_silver_persisted": spec.recovery_silver_persisted,
+            "threads": spec.threads,
         },
-        retries=1,
-        retry_delay=DBT_RETRY_DELAY,
-        pool=TRINO_HEAVY_POOL,
-        on_failure_callback=record_recovery_dbt_problem,
-    )
+        "retries": 1,
+        "retry_delay": DBT_RETRY_DELAY,
+        "on_failure_callback": record_recovery_dbt_problem,
+    }
+    if spec.workload is DbtWorkload.TRINO:
+        operator_kwargs["pool"] = TRINO_HEAVY_POOL
+    return PythonOperator(**operator_kwargs)
 
 
 with DAG(

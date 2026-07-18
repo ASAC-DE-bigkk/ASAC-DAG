@@ -41,6 +41,7 @@ def test_canonical_w2_dag_has_a_small_independent_phase_chain():
     module = load_canonical_module()
 
     assert module.DAG_ID == "weather_w2_canonical_transform"
+    assert module.TRINO_HEAVY_POOL == "trino_weather_heavy"
     assert module.DBT_PIPELINE == "weather-w2-canonical-transform"
     assert tuple(
         (
@@ -75,8 +76,15 @@ def test_canonical_w2_dag_has_a_small_independent_phase_chain():
             "selector": selector,
             "include_project_vars": include_vars,
             "snapshot_task_id": module.SNAPSHOT_TASK_ID,
+            "threads": None if task_id == "dbt_deps" else 2,
         }
-        assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+        if task_id == "dbt_deps":
+            assert "pool" not in task.kwargs or task.kwargs["pool"] in (
+                None,
+                "default_pool",
+            )
+        else:
+            assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
         assert task.kwargs["weight_rule"] == "absolute"
         assert task.kwargs["on_failure_callback"] is module.record_weather_problem
 

@@ -98,7 +98,16 @@ def test_recovery_dag_is_manual_and_uses_only_recovery_selectors():
             dag.task_dict[task_id].kwargs["on_failure_callback"]
             is module.record_recovery_dbt_problem
         )
-        assert dag.task_dict[task_id].kwargs["pool"] == module.TRINO_HEAVY_POOL
+        task_kwargs = dag.task_dict[task_id].kwargs
+        if task_id == "dbt_deps":
+            assert "pool" not in task_kwargs or task_kwargs["pool"] in (
+                None,
+                "default_pool",
+            )
+            assert task_kwargs["op_kwargs"]["threads"] is None
+        else:
+            assert task_kwargs["pool"] == module.TRINO_HEAVY_POOL
+            assert task_kwargs["op_kwargs"]["threads"] == 2
         assert "dbt_args" not in dag.task_dict[task_id].kwargs["op_kwargs"]
 
     source = Path(module.__file__).read_text(encoding="utf-8")

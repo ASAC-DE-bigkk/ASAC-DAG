@@ -28,9 +28,18 @@ def test_traffic_transform_trino_tasks_do_not_inflate_pool_priority_from_chain()
         "dbt_test_gold",
     }
 
+    assert module.TRINO_HEAVY_POOL == "trino_traffic_heavy"
     for task_id in module.DBT_PHASE_TASK_IDS:
         task = module.dag.task_dict[task_id]
-        assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+        if task_id == "dbt_deps":
+            assert "pool" not in task.kwargs or task.kwargs["pool"] in (
+                None,
+                "default_pool",
+            )
+            assert task.kwargs["op_kwargs"]["threads"] is None
+        else:
+            assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+            assert task.kwargs["op_kwargs"]["threads"] == 2
         assert task.kwargs["weight_rule"] == "absolute"
         expected_priority = (
             module.PIN_CRITICAL_PRIORITY
@@ -53,9 +62,10 @@ def test_traffic_transform_validates_dev_runtime_before_dbt():
         "domain": "traffic",
         "requested_target": "{{ params.target }}",
     }
-    assert guard.downstream_task_ids == {
-        "dbt_deps"
-    }
+    assert guard.downstream_task_ids == {"select_traffic_test_tier"}
+    select_tier = module.dag.task_dict["select_traffic_test_tier"]
+    assert select_tier.python_callable is module.select_traffic_test_tier
+    assert select_tier.downstream_task_ids == {"dbt_deps"}
 
 
 def test_traffic_transform_limits_target_param_to_dev_or_prod():
@@ -76,6 +86,9 @@ def test_traffic_transform_publishes_dbt_run_metrics_after_terminal_test():
     assert task.is_teardown is True
     assert task.on_failure_fail_dagrun is False
     assert module.dag.task_dict["dbt_test_gold"].downstream_task_ids == {
+        "mark_traffic_test_tier"
+    }
+    assert module.dag.task_dict["mark_traffic_test_tier"].downstream_task_ids == {
         "publish_dbt_run_metrics"
     }
 

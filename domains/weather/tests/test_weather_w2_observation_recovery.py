@@ -281,6 +281,7 @@ def test_manual_recovery_dag_shape_is_serial_dev_only_and_domain_pooled():
     }
     recover_task = dag.task_dict["recover_observation_windows"]
     assert isinstance(recover_task, FakePythonOperator)
+    assert module.TRINO_HEAVY_POOL == "trino_weather_heavy"
     assert recover_task.kwargs["pool"] == module.TRINO_HEAVY_POOL
     assert recover_task.kwargs["pool_slots"] == 1
     assert recover_task.kwargs["retries"] == 1

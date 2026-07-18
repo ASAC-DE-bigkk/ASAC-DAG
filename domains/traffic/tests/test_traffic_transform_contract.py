@@ -6,6 +6,7 @@ import pytest
 
 from traffic_transform_test_support import (
     FakeAirflowFailException,
+    FakeVariable,
     load_transform_module,
     write_materialization_artifacts,
 )
@@ -29,6 +30,9 @@ def test_snapshot_resolver_delegates_to_the_traffic_manifest(monkeypatch):
         def require_publishable(self, run_id):
             calls.append(run_id)
             return run_id
+
+        def coalesce_many(self, *_args, **_kwargs):
+            pass
 
     monkeypatch.setattr(module, "build_traffic_manifest", lambda: Manifest())
 
@@ -60,9 +64,9 @@ def test_traffic_snapshot_resolver_rejects_missing_asset_events():
         module.resolve_traffic_snapshot_run(triggering_asset_events={})
 
 
-def test_traffic_snapshot_resolver_coalesces_older_asset_events(monkeypatch):
+def test_traffic_snapshot_resolver_coalesces_older_asset_events_in_one_batch(monkeypatch):
     module = load_transform_module()
-    coalesced = []
+    coalesced_batches = []
     monkeypatch.setattr(
         module,
         "resolve_citydata_crowding_snapshot_id",
@@ -77,8 +81,8 @@ def test_traffic_snapshot_resolver_coalesces_older_asset_events(monkeypatch):
         def require_publishable(self, run_id):
             return run_id
 
-        def coalesce(self, run_id, *, replacement_run_id):
-            coalesced.append((run_id, replacement_run_id))
+        def coalesce_many(self, run_ids, *, replacement_run_id):
+            coalesced_batches.append((list(run_ids), replacement_run_id))
 
     monkeypatch.setattr(module, "build_traffic_manifest", lambda: Manifest())
 
@@ -99,12 +103,75 @@ def test_traffic_snapshot_resolver_coalesces_older_asset_events(monkeypatch):
     assert module.resolve_traffic_snapshot_run(
         triggering_asset_events={
             module.TRAFFIC_BRONZE_ASSET: [
-                event("traffic-old", "2026-07-15T12:00:00+09:00"),
+                event("traffic-old-a", "2026-07-15T12:00:00+09:00"),
+                event("traffic-old-b", "2026-07-15T12:00:30+09:00"),
                 event("traffic-new", "2026-07-15T12:01:00+09:00"),
             ]
         }
     ) == "traffic-new"
-    assert coalesced == [("traffic-old", "traffic-new")]
+    assert coalesced_batches == [(["traffic-old-a", "traffic-old-b"], "traffic-new")]
+
+
+def test_traffic_snapshot_resolver_batches_large_stale_backlog(monkeypatch):
+    module = load_transform_module()
+    coalesced_batches = []
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: 8738321387624398062,
+        raising=False,
+    )
+
+    class Manifest:
+        def latest_publishable_run_id(self):
+            return "traffic-latest"
+
+        def require_publishable(self, run_id):
+            return run_id
+
+        def coalesce_many(self, run_ids, *, replacement_run_id):
+            coalesced_batches.append((list(run_ids), replacement_run_id))
+
+    monkeypatch.setattr(module, "build_traffic_manifest", lambda: Manifest())
+
+    events = [
+        types.SimpleNamespace(
+            extra={
+                "source_id": "seoul_traffic_incident",
+                "bronze_run_id": f"traffic-old-{index}",
+                "bronze_dag_run_id": f"traffic-old-{index}",
+                "event_at": "2026-07-15T12:00:00+09:00",
+                "load_date": "2026-07-15",
+                "row_count": 7,
+                "payload_hash": "a" * 64,
+                "is_publishable": True,
+            }
+        )
+        for index in range(80)
+    ]
+    events.append(
+        types.SimpleNamespace(
+            extra={
+                "source_id": "seoul_traffic_incident",
+                "bronze_run_id": "traffic-latest",
+                "bronze_dag_run_id": "traffic-latest",
+                "event_at": "2026-07-15T12:01:00+09:00",
+                "load_date": "2026-07-15",
+                "row_count": 7,
+                "payload_hash": "b" * 64,
+                "is_publishable": True,
+            }
+        )
+    )
+
+    assert module.resolve_traffic_snapshot_run(
+        triggering_asset_events={module.TRAFFIC_BRONZE_ASSET: events}
+    ) == "traffic-latest"
+    assert len(coalesced_batches) == 1
+    assert coalesced_batches[0][0] == sorted(
+        f"traffic-old-{index}" for index in range(80)
+    )
+    assert coalesced_batches[0][1] == "traffic-latest"
 
 
 def test_traffic_snapshot_resolver_rejects_manifest_mismatch(monkeypatch):
@@ -157,7 +224,7 @@ def test_flow_asset_pins_exact_incident_and_flow_pair(monkeypatch):
             incident_calls.append(run_id)
             return run_id
 
-        def coalesce(self, *_args, **_kwargs):
+        def coalesce_many(self, *_args, **_kwargs):
             pass
 
     class FlowManifest:
@@ -214,7 +281,7 @@ def test_stale_flow_asset_falls_forward_to_latest_incident_without_flow(monkeypa
             assert run_id == "incident-new"
             return run_id
 
-        def coalesce(self, *_args, **_kwargs):
+        def coalesce_many(self, *_args, **_kwargs):
             pass
 
     class FlowManifest:
@@ -579,11 +646,357 @@ def test_snapshot_required_phase_rejects_missing_late_pin(monkeypatch):
     assert called is False
 
 
+def test_gold_test_selector_is_chosen_from_current_run_tier(monkeypatch):
+    module = load_transform_module()
+    captured = {}
+
+    def execute_dbt_phase(**kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(
+            attempts=[types.SimpleNamespace(returncode=0, stdout="", stderr="")],
+            completed=types.SimpleNamespace(returncode=0, stdout="", stderr=""),
+            existing_run_results_path=None,
+            existing_sources_path=None,
+            existing_manifest_path=None,
+            missing_expected_artifacts=(),
+            selected_unique_ids=tuple(
+                f"test.asac.gold_gate_{index}" for index in range(123)
+            ),
+        )
+
+    monkeypatch.setattr(module.traffic_dbt, "execute_dbt_phase", execute_dbt_phase)
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=1,
+        xcom_pull=lambda *, task_ids, key=None: (
+            {
+                "tier": module.TrafficTestTier.GATE.value,
+                "hour_bucket": "2026-07-18T10",
+                "day_bucket": "2026-07-18",
+            }
+            if task_ids == module.SELECT_TEST_TIER_TASK_ID
+            else (
+                8738321387624398062
+                if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY
+                else "snapshot-a"
+            )
+        ),
+    )
+
+    result = module.run_dbt_phase(
+        dbt_command="test",
+        selector="ask_seoul_traffic_transform_gold_full_tests",
+        selector_by_test_tier={
+            module.TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
+            module.TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
+            module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+        },
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        silver_persisted=True,
+        fresh_parse=True,
+        snapshot_required=True,
+        threads=2,
+        ti=ti,
+        run_id="manual__tier",
+        params={"target": "dev"},
+    )
+
+    assert result["status"] == "success"
+    assert captured["selector"] == "ask_seoul_traffic_transform_gold_gate_tests"
+    assert captured["threads"] == 2
+    assert len(result["selected_unique_ids"]) == 123
+
+
+def test_select_traffic_test_tier_freezes_current_run_decision():
+    module = load_transform_module()
+
+    result = module.select_traffic_test_tier()
+
+    assert result["tier"] == module.TrafficTestTier.FULL.value
+    assert set(result) == {"tier", "hour_bucket", "day_bucket"}
+    assert FakeVariable.values == {}
+
+
+def test_mark_traffic_test_tier_writes_frozen_decision_in_conservative_order():
+    module = load_transform_module()
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids: {
+            "tier": module.TrafficTestTier.FULL.value,
+            "hour_bucket": "2026-07-18T10",
+            "day_bucket": "2026-07-18",
+        }
+        if task_ids == module.SELECT_TEST_TIER_TASK_ID
+        else None
+    )
+
+    result = module.mark_traffic_test_tier(ti=ti)
+
+    assert FakeVariable.set_calls == [
+        ("ask_seoul_traffic_gold_test_last_success_hour_kst", "2026-07-18T10"),
+        ("ask_seoul_traffic_gold_test_last_success_day_kst", "2026-07-18"),
+    ]
+    assert result == {
+        "ask_seoul_traffic_gold_test_last_success_hour_kst": "2026-07-18T10",
+        "ask_seoul_traffic_gold_test_last_success_day_kst": "2026-07-18",
+    }
+
+
+INVALID_TRAFFIC_TEST_DECISIONS = (
+    pytest.param(
+        {"tier": "full", "hour_bucket": None, "day_bucket": "2026-07-18"},
+        id="non-string-hour",
+    ),
+    pytest.param(
+        {"tier": "full", "hour_bucket": "2026-07-18T1", "day_bucket": "2026-07-18"},
+        id="malformed-hour",
+    ),
+    pytest.param(
+        {"tier": "full", "hour_bucket": "2026-07-18T24", "day_bucket": "2026-07-18"},
+        id="invalid-hour",
+    ),
+    pytest.param(
+        {"tier": "full", "hour_bucket": "2026-07-18T10", "day_bucket": "2026-7-18"},
+        id="malformed-day",
+    ),
+    pytest.param(
+        {"tier": "full", "hour_bucket": "2026-02-29T10", "day_bucket": "2026-02-29"},
+        id="invalid-calendar-date",
+    ),
+    pytest.param(
+        {"tier": "full", "hour_bucket": "2026-07-17T23", "day_bucket": "2026-07-18"},
+        id="inconsistent-buckets",
+    ),
+)
+
+
+@pytest.mark.parametrize("raw_decision", INVALID_TRAFFIC_TEST_DECISIONS)
+def test_gold_selector_rejects_invalid_buckets_before_executor(
+    monkeypatch, raw_decision
+):
+    module = load_transform_module()
+    calls = []
+    monkeypatch.setattr(
+        module.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=1,
+        xcom_pull=lambda *, task_ids, key=None: (
+            raw_decision
+            if task_ids == module.SELECT_TEST_TIER_TASK_ID
+            else (
+                8738321387624398062
+                if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY
+                else "snapshot-a"
+            )
+        ),
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="invalid traffic test decision"):
+        module.run_dbt_phase(
+            dbt_command="test",
+            selector="ask_seoul_traffic_transform_gold_full_tests",
+            selector_by_test_tier={
+                module.TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
+                module.TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
+                module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+            },
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=True,
+            fresh_parse=True,
+            snapshot_required=True,
+            threads=2,
+            ti=ti,
+            run_id="manual__invalid-buckets",
+            params={"target": "dev"},
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("raw_decision", INVALID_TRAFFIC_TEST_DECISIONS)
+def test_marker_rejects_invalid_buckets_before_variable_write(raw_decision):
+    module = load_transform_module()
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids: raw_decision
+        if task_ids == module.SELECT_TEST_TIER_TASK_ID
+        else None
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="invalid traffic test decision"):
+        module.mark_traffic_test_tier(ti=ti)
+
+    assert FakeVariable.set_calls == []
+    assert FakeVariable.values == {}
+
+
+def test_gold_test_selector_fails_closed_for_invalid_tier():
+    module = load_transform_module()
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=1,
+        xcom_pull=lambda *, task_ids, key=None: (
+            {
+                "tier": "bad-tier",
+                "hour_bucket": "2026-07-18T10",
+                "day_bucket": "2026-07-18",
+            }
+            if task_ids == module.SELECT_TEST_TIER_TASK_ID
+            else (
+                8738321387624398062
+                if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY
+                else "snapshot-a"
+            )
+        ),
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="invalid traffic test decision"):
+        module.run_dbt_phase(
+            dbt_command="test",
+            selector="ask_seoul_traffic_transform_gold_full_tests",
+            selector_by_test_tier={
+                module.TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
+                module.TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
+                module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+            },
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=True,
+            fresh_parse=True,
+            snapshot_required=True,
+            threads=2,
+            ti=ti,
+            run_id="manual__tier",
+            params={"target": "dev"},
+        )
+
+
+def test_gold_test_selector_fails_closed_for_malformed_decision():
+    module = load_transform_module()
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=1,
+        xcom_pull=lambda *, task_ids, key=None: (
+            {"hour_bucket": "2026-07-18T10", "day_bucket": "2026-07-18"}
+            if task_ids == module.SELECT_TEST_TIER_TASK_ID
+            else (
+                8738321387624398062
+                if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY
+                else "snapshot-a"
+            )
+        ),
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="invalid traffic test decision"):
+        module.run_dbt_phase(
+            dbt_command="test",
+            selector="ask_seoul_traffic_transform_gold_full_tests",
+            selector_by_test_tier={
+                module.TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
+                module.TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
+                module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+            },
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=True,
+            fresh_parse=True,
+            snapshot_required=True,
+            threads=2,
+            ti=ti,
+            run_id="manual__tier",
+            params={"target": "dev"},
+        )
+
+
+def test_axes_and_admin_tier_noop_returns_success_without_executor(monkeypatch):
+    module = load_transform_module()
+    calls = []
+    monkeypatch.setattr(
+        module.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_asac_axes_seed_contract",
+        try_number=1,
+        xcom_pull=lambda *, task_ids, key=None: (
+            {
+                "tier": module.TrafficTestTier.GATE.value,
+                "hour_bucket": "2026-07-18T10",
+                "day_bucket": "2026-07-18",
+            }
+            if task_ids == module.SELECT_TEST_TIER_TASK_ID
+            else "snapshot-a"
+        ),
+    )
+
+    result = module.run_dbt_phase(
+        dbt_command="test",
+        selector="ask_seoul_traffic_transform_asac_axes_contract",
+        selector_by_test_tier={
+            module.TrafficTestTier.GATE: None,
+            module.TrafficTestTier.HOURLY: None,
+            module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_asac_axes_contract",
+        },
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        silver_persisted=False,
+        threads=2,
+        ti=ti,
+        run_id="manual__tier",
+        params={"target": "dev"},
+    )
+
+    assert result == {
+        "status": "success",
+        "skipped": True,
+        "skip_reason": "traffic_test_tier_noop",
+        "run_results_path": None,
+        "sources_path": None,
+        "manifest_path": None,
+        "selected_unique_ids": [],
+    }
+    assert calls == []
+
+
+def test_axes_and_admin_missing_tier_key_fails_instead_of_noop():
+    module = load_transform_module()
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_common_admin_dong_dimension",
+        try_number=1,
+        xcom_pull=lambda *, task_ids, key=None: (
+            {
+                "tier": module.TrafficTestTier.HOURLY.value,
+                "hour_bucket": "2026-07-18T10",
+                "day_bucket": "2026-07-18",
+            }
+            if task_ids == module.SELECT_TEST_TIER_TASK_ID
+            else "snapshot-a"
+        ),
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="missing dbt selector"):
+        module.run_dbt_phase(
+            dbt_command="test",
+            selector="ask_seoul_traffic_transform_common_admin",
+            selector_by_test_tier={
+                module.TrafficTestTier.GATE: None,
+                module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_common_admin",
+            },
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=False,
+            threads=2,
+            ti=ti,
+            run_id="manual__tier",
+            params={"target": "dev"},
+        )
+
+
 def test_traffic_transform_bootstraps_asac_axes_before_silver():
     module = load_transform_module()
     dag = module.dag
 
     expected_task_order = [
+        "select_traffic_test_tier",
         "dbt_deps",
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
@@ -597,6 +1010,7 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_test_silver",
         "dbt_run_gold",
         "dbt_test_gold",
+        "mark_traffic_test_tier",
     ]
 
     assert set(expected_task_order) <= set(dag.task_ids)
@@ -640,7 +1054,10 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_run_silver": ("run", "ask_seoul_traffic_transform_silver"),
         "dbt_test_silver": ("test", "ask_seoul_traffic_transform_silver"),
         "dbt_run_gold": ("run", "ask_seoul_traffic_transform_gold"),
-        "dbt_test_gold": ("test", "ask_seoul_traffic_transform_gold"),
+        "dbt_test_gold": (
+            "test",
+            "ask_seoul_traffic_transform_gold_full_tests",
+        ),
     }
     assert module.DBT_PHASE_TASK_IDS == tuple(expected_phase_contracts)
     assert tuple(spec.task_id for spec in module.DBT_PHASE_SPECS) == (
@@ -658,6 +1075,9 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         assert op_kwargs["dbt_command"] == dbt_command
         assert op_kwargs["selector"] == selector
         assert "dbt_args" not in op_kwargs
+        assert op_kwargs["threads"] == next(
+            spec.threads for spec in module.DBT_PHASE_SPECS if spec.task_id == task_id
+        )
     for task_id in (
         "dbt_run_common_admin_dong_dimension",
         "dbt_test_common_admin_dong_dimension",
@@ -691,21 +1111,26 @@ def test_traffic_transform_bootstraps_asac_axes_before_silver():
         "dbt_test_gold": (True, True),
     }
     assert {
-        spec.task_id: (spec.snapshot_required, spec.pin_critical)
+        spec.task_id: (
+            spec.snapshot_required,
+            spec.pin_critical,
+            spec.workload.value,
+            spec.threads,
+        )
         for spec in module.DBT_PHASE_SPECS
     } == {
-        "dbt_deps": (False, False),
-        "dbt_source_freshness": (False, False),
-        "dbt_test_traffic_incident_availability": (False, False),
-        "dbt_test_traffic_bronze_source_contract": (False, False),
-        "dbt_seed_asac_axes": (False, False),
-        "dbt_run_common_admin_dong_dimension": (False, False),
-        "dbt_test_common_admin_dong_dimension": (False, False),
-        "dbt_test_asac_axes_seed_contract": (False, False),
-        "dbt_run_silver": (True, True),
-        "dbt_test_silver": (True, True),
-        "dbt_run_gold": (True, False),
-        "dbt_test_gold": (True, True),
+        "dbt_deps": (False, False, "local", None),
+        "dbt_source_freshness": (False, False, "trino", 2),
+        "dbt_test_traffic_incident_availability": (False, False, "trino", 2),
+        "dbt_test_traffic_bronze_source_contract": (False, False, "trino", 2),
+        "dbt_seed_asac_axes": (False, False, "trino", 2),
+        "dbt_run_common_admin_dong_dimension": (False, False, "trino", 2),
+        "dbt_test_common_admin_dong_dimension": (False, False, "trino", 2),
+        "dbt_test_asac_axes_seed_contract": (False, False, "trino", 2),
+        "dbt_run_silver": (True, True, "trino", 2),
+        "dbt_test_silver": (True, True, "trino", 2),
+        "dbt_run_gold": (True, False, "trino", 2),
+        "dbt_test_gold": (True, True, "trino", 2),
     }
 
 

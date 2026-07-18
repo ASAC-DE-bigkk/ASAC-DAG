@@ -101,6 +101,29 @@ class FakeParam:
         self.schema = schema
 
 
+class FakeVariable:
+    values: dict[str, str] = {}
+    fail_get = False
+    set_calls: list[tuple[str, str]] = []
+
+    @classmethod
+    def reset(cls):
+        cls.values = {}
+        cls.fail_get = False
+        cls.set_calls = []
+
+    @classmethod
+    def get(cls, key, default=None, **_kwargs):
+        if cls.fail_get:
+            raise RuntimeError("metadata unavailable")
+        return cls.values.get(key, default)
+
+    @classmethod
+    def set(cls, key, value, **_kwargs):
+        cls.set_calls.append((key, value))
+        cls.values[key] = value
+
+
 class FakeAsset:
     def __init__(self, uri):
         self.uri = uri
@@ -160,6 +183,8 @@ def install_airflow_fakes():
     airflow_sdk.Asset = FakeAsset
     airflow_sdk.AssetAlias = FakeAssetAlias
     airflow_sdk.Param = FakeParam
+    FakeVariable.reset()
+    airflow_sdk.Variable = FakeVariable
     airflow_sdk_exceptions = types.ModuleType("airflow.sdk.exceptions")
     airflow_sdk_exceptions.AirflowFailException = FakeAirflowFailException
     airflow_utils = types.ModuleType("airflow.utils")

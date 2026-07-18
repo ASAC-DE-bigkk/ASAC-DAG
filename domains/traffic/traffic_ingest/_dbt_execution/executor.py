@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from . import environment
@@ -23,6 +24,31 @@ from .paths import (
     reset_execution_directories,
     retention_runs,
 )
+
+
+def _packages_yml_exists(project_dir: str) -> bool:
+    return Path(project_dir, "packages.yml").is_file()
+
+
+def _package_sentinel(packages_path: str) -> Path:
+    return Path(packages_path) / "asac_axes" / "dbt_project.yml"
+
+
+def _self_heal_deps_command(
+    *,
+    executable: str,
+    target: str,
+    log_path: str,
+) -> list[str]:
+    return [
+        executable,
+        "deps",
+        "--target",
+        target,
+        "--no-use-colors",
+        "--log-path",
+        log_path,
+    ]
 
 
 def execute_dbt_phase(
@@ -65,6 +91,57 @@ def execute_dbt_phase(
     attempts: list[Any] = []
     selected_ids: tuple[str, ...] = ()
     actual_attempted = False
+
+    if phase != "deps" and _packages_yml_exists(resolved_project):
+        sentinel = _package_sentinel(paths.packages_path)
+        if not sentinel.is_file():
+            deps_command = _self_heal_deps_command(
+                executable=resolved_executable,
+                target=target,
+                log_path=paths.preflight_log_path,
+            )
+            completed = runner(
+                deps_command,
+                cwd=resolved_project,
+                env=raw_env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            attempts.append(completed)
+            if completed.returncode != 0:
+                return DbtExecution(
+                    attempts=tuple(attempts),
+                    paths=paths,
+                    selected_unique_ids=selected_ids,
+                    actual_attempted=False,
+                    existing_run_results_path=None,
+                    existing_sources_path=None,
+                    existing_manifest_path=None,
+                    missing_expected_artifacts=(),
+                )
+            if not sentinel.is_file():
+                attempts.append(
+                    subprocess.CompletedProcess(
+                        args=deps_command,
+                        returncode=2,
+                        stdout="",
+                        stderr=(
+                            "dbt package sentinel missing after self-heal deps: "
+                            f"{sentinel}"
+                        ),
+                    )
+                )
+                return DbtExecution(
+                    attempts=tuple(attempts),
+                    paths=paths,
+                    selected_unique_ids=selected_ids,
+                    actual_attempted=False,
+                    existing_run_results_path=None,
+                    existing_sources_path=None,
+                    existing_manifest_path=None,
+                    missing_expected_artifacts=(),
+                )
 
     for stage, command in phase_commands(
         executable=resolved_executable,
