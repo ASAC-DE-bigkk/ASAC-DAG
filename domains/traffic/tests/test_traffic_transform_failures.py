@@ -383,6 +383,7 @@ def test_final_dbt_failure_callback_persists_recovery_record_and_notifies(monkey
         "run_id": "manual__a",
         "failure_classification": "data-contract-violation",
         "traffic_snapshot_dag_run_id": "snapshot-a",
+        "traffic_citydata_crowding_snapshot_id": 8738321387624398062,
         "dbt_artifact_path": "/tmp/run_results.json",
         "dbt_test_names": ["assert_silver_traffic_location_contract"],
         "dbt_failed_row_count": 2,
@@ -432,6 +433,10 @@ def test_final_dbt_failure_callback_persists_recovery_record_and_notifies(monkey
     assert written["recovery"] == record
     problem_document = written["problem"].to_dict()
     assert problem_document["traffic_snapshot_dag_run_id"] == "snapshot-a"
+    assert (
+        problem_document["traffic_citydata_crowding_snapshot_id"]
+        == 8738321387624398062
+    )
     assert problem_document["dbt_test_names"] == [
         "assert_silver_traffic_location_contract"
     ]

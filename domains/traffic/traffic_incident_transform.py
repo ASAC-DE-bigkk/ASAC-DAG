@@ -159,11 +159,11 @@ def run_dbt_phase(
         CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
     )
     citydata_crowding_snapshot_id = dbt_variables.get(
-        "traffic_citydata_crowding_snapshot_id"
+        CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY
     )
     if (
         snapshot_required
-        and "traffic_citydata_crowding_snapshot_id" not in dbt_variables
+        and CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY not in dbt_variables
     ):
         raise AirflowFailException(
             "traffic dbt phase requires Citydata crowding snapshot: "

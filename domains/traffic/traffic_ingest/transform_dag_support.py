@@ -153,7 +153,7 @@ def dbt_snapshot_variables(
         and not isinstance(citydata_crowding_snapshot_id, bool)
         and citydata_crowding_snapshot_id > 0
     ):
-        variables["traffic_citydata_crowding_snapshot_id"] = (
+        variables[citydata_crowding_snapshot_xcom_key] = (
             citydata_crowding_snapshot_id
         )
     return variables
@@ -195,6 +195,7 @@ def record_classified_dbt_problem(
             name: record.get(name)
             for name in (
                 "traffic_snapshot_dag_run_id",
+                "traffic_citydata_crowding_snapshot_id",
                 "dbt_test_names",
                 "dbt_failed_row_count",
                 "dbt_artifact_path",
