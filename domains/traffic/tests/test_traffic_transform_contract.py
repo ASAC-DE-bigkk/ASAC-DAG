@@ -15,6 +15,12 @@ from traffic_transform_test_support import restore_airflow_modules_after_dag_imp
 def test_snapshot_resolver_delegates_to_the_traffic_manifest(monkeypatch):
     module = load_transform_module()
     calls = []
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: 8738321387624398062,
+        raising=False,
+    )
 
     class Manifest:
         def latest_publishable_run_id(self):
@@ -57,6 +63,12 @@ def test_traffic_snapshot_resolver_rejects_missing_asset_events():
 def test_traffic_snapshot_resolver_coalesces_older_asset_events(monkeypatch):
     module = load_transform_module()
     coalesced = []
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: 8738321387624398062,
+        raising=False,
+    )
 
     class Manifest:
         def latest_publishable_run_id(self):
@@ -130,6 +142,12 @@ def test_flow_asset_pins_exact_incident_and_flow_pair(monkeypatch):
     incident_calls = []
     flow_calls = []
     pushed = []
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: 8738321387624398062,
+        raising=False,
+    )
 
     class IncidentManifest:
         def latest_publishable_run_id(self):
@@ -172,12 +190,21 @@ def test_flow_asset_pins_exact_incident_and_flow_pair(monkeypatch):
     ) == "incident-42"
     assert incident_calls == ["incident-42"]
     assert flow_calls == ["flow-42"]
-    assert pushed == [(module.FLOW_SNAPSHOT_XCOM_KEY, "flow-42")]
+    assert pushed == [
+        (module.FLOW_SNAPSHOT_XCOM_KEY, "flow-42"),
+        (module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY, 8738321387624398062),
+    ]
 
 
 def test_stale_flow_asset_falls_forward_to_latest_incident_without_flow(monkeypatch):
     module = load_transform_module()
     pushed = []
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: 8738321387624398062,
+        raising=False,
+    )
 
     class IncidentManifest:
         def latest_publishable_run_id(self):
@@ -217,7 +244,59 @@ def test_stale_flow_asset_falls_forward_to_latest_incident_without_flow(monkeypa
         ti=ti,
         triggering_asset_events={module.TRAFFIC_FLOW_BRONZE_ASSET: [flow_event]},
     ) == "incident-new"
-    assert pushed == [(module.FLOW_SNAPSHOT_XCOM_KEY, None)]
+    assert pushed == [
+        (module.FLOW_SNAPSHOT_XCOM_KEY, None),
+        (module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY, 8738321387624398062),
+    ]
+
+
+def test_snapshot_resolver_fails_closed_when_citydata_snapshot_is_unavailable(
+    monkeypatch,
+):
+    module = load_transform_module()
+    from traffic_ingest.external_snapshot import ExternalSnapshotUnavailableError
+
+    monkeypatch.setattr(
+        module,
+        "resolve_transform_snapshot_pair",
+        lambda **_kwargs: types.SimpleNamespace(
+            incident_run_id="incident-42",
+            flow_run_id=None,
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: (_ for _ in ()).throw(
+            ExternalSnapshotUnavailableError("no Citydata snapshot")
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="no Citydata snapshot"):
+        module.resolve_traffic_snapshot_run()
+
+
+def test_snapshot_resolver_propagates_citydata_query_errors_for_retry(monkeypatch):
+    module = load_transform_module()
+    query_error = RuntimeError("Trino connection reset")
+    monkeypatch.setattr(
+        module,
+        "resolve_transform_snapshot_pair",
+        lambda **_kwargs: types.SimpleNamespace(
+            incident_run_id="incident-42",
+            flow_run_id=None,
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: (_ for _ in ()).throw(query_error),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="Trino connection reset"):
+        module.resolve_traffic_snapshot_run()
 
 
 def test_traffic_contract_gates_delegate_membership_to_dbt_selectors():
@@ -365,6 +444,109 @@ def test_preflight_phase_uses_non_materializing_snapshot_sentinel(monkeypatch):
     assert json.loads(captured["variables"]) == {
         "traffic_snapshot_dag_run_id": module.PREFLIGHT_SNAPSHOT_DAG_RUN_ID
     }
+
+
+def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch):
+    module = load_transform_module()
+    captured = {}
+    completed = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    execution = types.SimpleNamespace(
+        attempts=(completed,),
+        completed=completed,
+        missing_expected_artifacts=(),
+        existing_run_results_path="/tmp/pinned/run_results.json",
+        existing_sources_path="/tmp/pinned/sources.json",
+        existing_manifest_path="/tmp/pinned/manifest.json",
+        selected_unique_ids=(),
+        primary_artifact_path="/tmp/pinned/run_results.json",
+    )
+    monkeypatch.setattr(
+        module.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **kwargs: captured.update(kwargs) or execution,
+    )
+
+    def xcom_pull(*, task_ids, key=None):
+        values = {
+            (module.SNAPSHOT_TASK_ID, None): "snapshot-a",
+            (module.SNAPSHOT_TASK_ID, module.FLOW_SNAPSHOT_XCOM_KEY): None,
+            (
+                module.SNAPSHOT_TASK_ID,
+                module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
+            ): 8738321387624398062,
+        }
+        return values[(task_ids, key)]
+
+    ti = types.SimpleNamespace(
+        task_id="dbt_run_silver",
+        try_number=1,
+        xcom_pull=xcom_pull,
+    )
+
+    result = module.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        snapshot_required=True,
+        silver_persisted=False,
+        ti=ti,
+        run_id="asset_triggered__pinned",
+        params={"target": "dev"},
+    )
+
+    assert result["status"] == "success"
+    assert json.loads(captured["variables"]) == {
+        "traffic_snapshot_dag_run_id": "snapshot-a",
+        "traffic_citydata_crowding_snapshot_id": 8738321387624398062,
+    }
+
+
+@pytest.mark.parametrize(
+    "external_snapshot_id",
+    [None, 0, -1, True, "8738321387624398062"],
+)
+def test_snapshot_required_phase_rejects_missing_or_invalid_citydata_snapshot(
+    monkeypatch,
+    external_snapshot_id,
+):
+    module = load_transform_module()
+    called = False
+
+    def fail_if_called(**_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(module.traffic_dbt, "execute_dbt_phase", fail_if_called)
+
+    def xcom_pull(*, task_ids, key=None):
+        if key is None:
+            return "snapshot-a"
+        if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY:
+            return external_snapshot_id
+        return None
+
+    ti = types.SimpleNamespace(
+        task_id="dbt_run_silver",
+        try_number=1,
+        xcom_pull=xcom_pull,
+    )
+
+    with pytest.raises(
+        FakeAirflowFailException,
+        match="traffic dbt phase requires Citydata crowding snapshot",
+    ):
+        module.run_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_traffic_transform_silver",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            snapshot_required=True,
+            silver_persisted=False,
+            ti=ti,
+            run_id="asset_triggered__missing-citydata-pin",
+            params={"target": "dev"},
+        )
+
+    assert called is False
 
 
 def test_snapshot_required_phase_rejects_missing_late_pin(monkeypatch):
