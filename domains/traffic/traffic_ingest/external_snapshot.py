@@ -1,0 +1,38 @@
+import os
+from typing import Mapping
+
+from traffic_ingest.common.runtime import sql_identifier, trino_cursor
+
+
+class ExternalSnapshotUnavailableError(RuntimeError):
+    """An external Iceberg table has no usable snapshot to pin."""
+
+
+def resolve_citydata_crowding_snapshot_id(
+    cursor_factory=trino_cursor,
+    env: Mapping[str, str] = os.environ,
+) -> int:
+    cursor, catalog, _ = cursor_factory()
+    schema = sql_identifier(env.get("SEOUL_CITYDATA_SCHEMA", "seoul_citydata"))
+    table = sql_identifier("gold_citydata_ppltn_by_time")
+    cursor.execute(
+        "SELECT snapshot_id "
+        f'FROM {catalog}.{schema}."{table}$snapshots" '
+        "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    try:
+        raw_snapshot_id = row[0]
+    except (TypeError, IndexError) as exc:
+        raise ExternalSnapshotUnavailableError(
+            "Citydata crowding Iceberg snapshot is unavailable"
+        ) from exc
+    if (
+        isinstance(raw_snapshot_id, bool)
+        or not isinstance(raw_snapshot_id, int)
+        or raw_snapshot_id <= 0
+    ):
+        raise ExternalSnapshotUnavailableError(
+            "Citydata crowding Iceberg snapshot ID must be a positive integer"
+        )
+    return raw_snapshot_id
