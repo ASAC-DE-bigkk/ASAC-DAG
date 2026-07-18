@@ -129,6 +129,7 @@ def dbt_snapshot_variables(
     snapshot_task_id: str,
     incident_run_id: str,
     flow_xcom_key: str,
+    citydata_crowding_snapshot_xcom_key: str,
 ) -> dict[str, object]:
     variables: dict[str, object] = {"traffic_snapshot_dag_run_id": incident_run_id}
     try:
@@ -140,6 +141,21 @@ def dbt_snapshot_variables(
         flow_run_id = None
     if flow_run_id:
         variables["traffic_flow_snapshot_dag_run_id"] = flow_run_id
+    try:
+        citydata_crowding_snapshot_id = task_instance.xcom_pull(
+            task_ids=snapshot_task_id,
+            key=citydata_crowding_snapshot_xcom_key,
+        )
+    except TypeError:
+        citydata_crowding_snapshot_id = None
+    if (
+        isinstance(citydata_crowding_snapshot_id, int)
+        and not isinstance(citydata_crowding_snapshot_id, bool)
+        and citydata_crowding_snapshot_id > 0
+    ):
+        variables[citydata_crowding_snapshot_xcom_key] = (
+            citydata_crowding_snapshot_id
+        )
     return variables
 
 
@@ -179,6 +195,7 @@ def record_classified_dbt_problem(
             name: record.get(name)
             for name in (
                 "traffic_snapshot_dag_run_id",
+                "traffic_citydata_crowding_snapshot_id",
                 "dbt_test_names",
                 "dbt_failed_row_count",
                 "dbt_artifact_path",

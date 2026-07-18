@@ -123,6 +123,7 @@ def test_missing_current_attempt_artifact_is_recorded_as_unknown_not_a_stale_pat
 
     assert failure.artifact_path is None
     assert record["dbt_artifact_path"] is None
+    assert record["traffic_citydata_crowding_snapshot_id"] is None
 
 
 def test_does_not_retry_an_unscoped_connection_error_in_model_output():
@@ -237,6 +238,7 @@ def test_builds_recovery_record_with_snapshot_contract_context():
     record = build_recovery_record(
         failure,
         traffic_snapshot_dag_run_id="scheduled__2026-07-13T01:35:00+00:00",
+        traffic_citydata_crowding_snapshot_id=8738321387624398062,
         dag_id="traffic_incident_transform",
         task_id="dbt_test_silver",
         run_id="scheduled__2026-07-13T02:12:00+00:00",
@@ -248,6 +250,7 @@ def test_builds_recovery_record_with_snapshot_contract_context():
     assert (
         record["traffic_snapshot_dag_run_id"] == "scheduled__2026-07-13T01:35:00+00:00"
     )
+    assert record["traffic_citydata_crowding_snapshot_id"] == 8738321387624398062
     assert record["dbt_test_names"] == ["assert_silver_traffic_location_contract"]
     assert record["dbt_failed_row_count"] == 3
     assert record["dbt_artifact_path"] == "/artifacts/run_results.json"
@@ -271,6 +274,7 @@ def test_recovery_record_sink_writes_a_run_scoped_r2_document():
     record = build_recovery_record(
         failure,
         traffic_snapshot_dag_run_id="snapshot-a",
+        traffic_citydata_crowding_snapshot_id=8738321387624398062,
         dag_id="traffic_incident_transform",
         task_id="dbt_test_silver",
         run_id="manual__2026-07-13T02:12:00+00:00",
@@ -315,6 +319,7 @@ def test_failure_notification_contains_the_operator_recovery_context():
     record = build_recovery_record(
         failure,
         traffic_snapshot_dag_run_id="snapshot-a",
+        traffic_citydata_crowding_snapshot_id=8738321387624398062,
         dag_id="traffic_incident_transform",
         task_id="dbt_test_silver",
         run_id="run-a",
@@ -327,6 +332,7 @@ def test_failure_notification_contains_the_operator_recovery_context():
 
     assert "data-contract-violation" in title
     assert "snapshot-a" in description
+    assert "**citydata snapshot**: `8738321387624398062`" in description
     assert "assert_silver_traffic_location_contract" in description
     assert "3" in description
     assert "/artifacts/run_results.json" in description

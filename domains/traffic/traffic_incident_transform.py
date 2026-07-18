@@ -50,6 +50,10 @@ from traffic_dbt_failure import (  # noqa: E402
 import traffic_dbt_execution as traffic_dbt  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
+from traffic_ingest.external_snapshot import (  # noqa: E402
+    ExternalSnapshotUnavailableError,
+    resolve_citydata_crowding_snapshot_id,
+)
 from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_FLOW_BRONZE_ASSET as TRAFFIC_FLOW_BRONZE_ASSET,
 )
@@ -76,6 +80,7 @@ DBT_PROJECT = traffic_dbt.dbt_project_dir()
 DOMAIN = "traffic"
 SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
 FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
+CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY = "traffic_citydata_crowding_snapshot_id"
 DBT_FAILURE_XCOM_KEY = "traffic_dbt_failure"
 DBT_RUN_RESULTS_RECORD_KEY = "dbt_run_results_path"
 PREFLIGHT_SNAPSHOT_DAG_RUN_ID = "__traffic_preflight__"
@@ -102,11 +107,19 @@ def resolve_traffic_snapshot_run(**context) -> str:
         incident_manifest_factory=build_traffic_manifest,
         flow_manifest_factory=build_traffic_flow_manifest,
     )
+    try:
+        citydata_crowding_snapshot_id = resolve_citydata_crowding_snapshot_id()
+    except ExternalSnapshotUnavailableError as exc:
+        raise AirflowFailException(str(exc)) from exc
     task_instance = context.get("ti") or context.get("task_instance")
     if task_instance is not None:
         task_instance.xcom_push(
             key=FLOW_SNAPSHOT_XCOM_KEY,
             value=pair.flow_run_id,
+        )
+        task_instance.xcom_push(
+            key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
+            value=citydata_crowding_snapshot_id,
         )
     return pair.incident_run_id
 
@@ -143,7 +156,19 @@ def run_dbt_phase(
         snapshot_task_id,
         effective_snapshot_run_id,
         FLOW_SNAPSHOT_XCOM_KEY,
+        CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
     )
+    citydata_crowding_snapshot_id = dbt_variables.get(
+        CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY
+    )
+    if (
+        snapshot_required
+        and CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY not in dbt_variables
+    ):
+        raise AirflowFailException(
+            "traffic dbt phase requires Citydata crowding snapshot: "
+            f"{task_id or dbt_command}"
+        )
     execution = traffic_dbt.execute_dbt_phase(
         dbt_command=dbt_command,
         selector=selector,
@@ -174,6 +199,7 @@ def run_dbt_phase(
     if completed.returncode == 0 and not missing_artifact_error:
         return {
             "status": "success",
+            "traffic_citydata_crowding_snapshot_id": citydata_crowding_snapshot_id,
             "run_results_path": execution.existing_run_results_path,
             "sources_path": execution.existing_sources_path,
             "manifest_path": execution.existing_manifest_path,
@@ -196,6 +222,7 @@ def run_dbt_phase(
     record = build_recovery_record(
         failure,
         traffic_snapshot_dag_run_id=str(snapshot_run_id) if snapshot_run_id else None,
+        traffic_citydata_crowding_snapshot_id=citydata_crowding_snapshot_id,
         dag_id=getattr(ti, "dag_id", "traffic_incident_transform"),
         task_id=task_id,
         run_id=run_id,
