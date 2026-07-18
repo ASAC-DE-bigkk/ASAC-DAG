@@ -38,7 +38,7 @@ from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
-from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from weather_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL  # noqa: E402
 from weather_ingest.runtime import build_weather_manifest  # noqa: E402
 import weather_dbt_execution as weather_dbt  # noqa: E402
 from weather_dbt_failure import classify_weather_dbt_failure  # noqa: E402
@@ -61,10 +61,18 @@ class DbtPhaseSpec:
     dbt_command: str
     selector: str | None = None
     include_project_vars: bool = True
+    workload: DbtWorkload = DbtWorkload.TRINO
+    threads: int | None = 2
 
 
 DBT_PHASE_SPECS = (
-    DbtPhaseSpec("dbt_deps", "deps", include_project_vars=False),
+    DbtPhaseSpec(
+        "dbt_deps",
+        "deps",
+        include_project_vars=False,
+        workload=DbtWorkload.LOCAL,
+        threads=None,
+    ),
     DbtPhaseSpec(
         "dbt_source_freshness",
         "source freshness",
@@ -322,6 +330,7 @@ def run_dbt_phase(
     selector: str | None,
     include_project_vars: bool = True,
     snapshot_task_id: str | None = None,
+    threads: int | None = None,
     **context,
 ) -> dict[str, object]:
     """Run one dbt phase with an artifact path isolated to this task attempt."""
@@ -358,6 +367,7 @@ def run_dbt_phase(
                 if include_project_vars and not is_deps
                 else None
             ),
+            threads=threads,
             project_dir=DBT_PROJECT,
             executable=DBT_BIN,
             runner=subprocess.run,
@@ -404,21 +414,24 @@ def run_dbt_phase(
 
 
 def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
-    return PythonOperator(
-        task_id=spec.task_id,
-        python_callable=run_dbt_phase,
-        op_kwargs={
+    operator_kwargs = {
+        "task_id": spec.task_id,
+        "python_callable": run_dbt_phase,
+        "op_kwargs": {
             "dbt_command": spec.dbt_command,
             "selector": spec.selector,
             "include_project_vars": spec.include_project_vars,
             "snapshot_task_id": SNAPSHOT_TASK_ID,
+            "threads": spec.threads,
         },
-        pool=TRINO_HEAVY_POOL,
-        weight_rule="absolute",
-        retries=1,
-        retry_delay=DBT_RETRY_DELAY,
-        on_failure_callback=record_weather_problem,
-    )
+        "weight_rule": "absolute",
+        "retries": 1,
+        "retry_delay": DBT_RETRY_DELAY,
+        "on_failure_callback": record_weather_problem,
+    }
+    if spec.workload is DbtWorkload.TRINO:
+        operator_kwargs["pool"] = TRINO_HEAVY_POOL
+    return PythonOperator(**operator_kwargs)
 
 
 def _current_run_results_path(**context) -> str | None:

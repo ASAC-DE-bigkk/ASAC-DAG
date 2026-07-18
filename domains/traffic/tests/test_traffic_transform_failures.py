@@ -35,7 +35,13 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
         task = dag.task_dict[task_id]
         assert isinstance(task, FakePythonOperator)
         assert task.python_callable is module.run_dbt_phase
-        assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+        if task_id == "dbt_deps":
+            assert "pool" not in task.kwargs or task.kwargs["pool"] in (
+                None,
+                "default_pool",
+            )
+        else:
+            assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
         assert task.kwargs["retries"] == 1
         assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
         assert task.kwargs["on_failure_callback"] is module.record_traffic_dbt_problem

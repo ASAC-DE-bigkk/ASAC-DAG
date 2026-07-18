@@ -98,6 +98,7 @@ def test_weather_dbt_model_command_writes_isolated_artifact(tmp_path, monkeypatc
     result = module.run_dbt_phase(
         dbt_command="run",
         selector="ask_seoul_weather_transform_silver",
+        threads=2,
         ti=ti,
         run_id="scheduled/2026:07",
         params={"target": "dev"},
@@ -127,6 +128,8 @@ def test_weather_dbt_model_command_writes_isolated_artifact(tmp_path, monkeypatc
     assert "--indirect-selection=buildable" not in ls_command
     assert "--indirect-selection=buildable" not in command
     assert command[command.index("--target") + 1] == "dev"
+    assert command[command.index("--threads") + 1] == "2"
+    assert "--threads" not in ls_command
     assert command[command.index("--vars") + 1] == json.dumps(
         module.WEATHER_DBT_CONTRACT_VARS,
         separators=(",", ":"),

@@ -38,6 +38,7 @@ def test_canonical_w2_phase_passes_pinned_snapshot_and_revision(monkeypatch):
         dbt_command="run",
         selector="ask_seoul_weather_w2_canonical_models",
         snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        threads=2,
         ti=task_instance,
         run_id="asset__weather-run-42",
         params={"target": "dev"},
@@ -46,6 +47,7 @@ def test_canonical_w2_phase_passes_pinned_snapshot_and_revision(monkeypatch):
     assert captured["pipeline"] == "weather-w2-canonical-transform"
     assert captured["selector"] == "ask_seoul_weather_w2_canonical_models"
     assert captured["target"] == "dev"
+    assert captured["threads"] == 2
     assert json.loads(captured["variables"]) == {
         "weather_w2_canonical_revision_date": "2025-04-01",
         "weather_snapshot_dag_run_id": "weather-run-42",

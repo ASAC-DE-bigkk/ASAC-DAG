@@ -51,7 +51,6 @@ import traffic_dbt_execution as traffic_dbt  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
 from traffic_ingest.external_snapshot import (  # noqa: E402
-    ExternalSnapshotUnavailableError,
     resolve_citydata_crowding_snapshot_id,
 )
 from traffic_ingest.assets import (  # noqa: E402
@@ -59,15 +58,35 @@ from traffic_ingest.assets import (  # noqa: E402
 )
 from traffic_ingest.transform_specs import (  # noqa: E402
     DBT_PHASE_SPECS,
-    DBT_PHASE_TASK_IDS,
-    DbtPhaseSpec,
+    DBT_PHASE_TASK_IDS as DBT_PHASE_TASK_IDS,
+)
+from traffic_ingest.transform_test_tier import (  # noqa: E402
+    MARK_TEST_TIER_TASK_ID,
+    SELECT_TEST_TIER_TASK_ID,
+    TrafficTestDecision as TrafficTestDecision,
+    TrafficTestTier,
+    _parse_traffic_test_decision as _parse_traffic_test_decision,
+    _selector_for_test_tier,
+    choose_test_decision as choose_test_decision,
+    mark_successful_decision as mark_successful_decision,
+    mark_traffic_test_tier,
+    select_traffic_test_tier,
+)
+from traffic_ingest.transform_metrics import (  # noqa: E402
+    DBT_FAILURE_XCOM_KEY,
+    DBT_RUN_RESULTS_RECORD_KEY,
+    DOMAIN as DOMAIN,
+    _current_run_results_path as _current_run_results_path,
+    publish_dbt_run_metrics as _publish_dbt_run_metrics,
 )
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     TRAFFIC_TRANSFORM_CRON_KST as TRAFFIC_TRANSFORM_CRON_KST,
     TransformFailurePorts,
+    build_dbt_phase_task,
     dbt_snapshot_variables,
     record_classified_dbt_problem,
-    resolve_transform_snapshot_pair,
+    resolve_traffic_snapshot_run as _resolve_traffic_snapshot_run,
+    resolve_transform_snapshot_pair as resolve_transform_snapshot_pair,
     transform_schedule,
 )
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
@@ -77,12 +96,9 @@ KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger(__name__)
 DBT_BIN = traffic_dbt.dbt_bin()
 DBT_PROJECT = traffic_dbt.dbt_project_dir()
-DOMAIN = "traffic"
 SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
 FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
 CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY = "traffic_citydata_crowding_snapshot_id"
-DBT_FAILURE_XCOM_KEY = "traffic_dbt_failure"
-DBT_RUN_RESULTS_RECORD_KEY = "dbt_run_results_path"
 PREFLIGHT_SNAPSHOT_DAG_RUN_ID = "__traffic_preflight__"
 PIN_CRITICAL_PRIORITY = 10
 
@@ -101,27 +117,15 @@ record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
 def resolve_traffic_snapshot_run(**context) -> str:
-    """Pin a non-regressing Incident/Flow snapshot pair."""
-    pair = resolve_transform_snapshot_pair(
+    return _resolve_traffic_snapshot_run(
         context=context,
+        snapshot_pair_resolver=resolve_transform_snapshot_pair,
         incident_manifest_factory=build_traffic_manifest,
         flow_manifest_factory=build_traffic_flow_manifest,
+        citydata_snapshot_resolver=resolve_citydata_crowding_snapshot_id,
+        flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,
+        citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
     )
-    try:
-        citydata_crowding_snapshot_id = resolve_citydata_crowding_snapshot_id()
-    except ExternalSnapshotUnavailableError as exc:
-        raise AirflowFailException(str(exc)) from exc
-    task_instance = context.get("ti") or context.get("task_instance")
-    if task_instance is not None:
-        task_instance.xcom_push(
-            key=FLOW_SNAPSHOT_XCOM_KEY,
-            value=pair.flow_run_id,
-        )
-        task_instance.xcom_push(
-            key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
-            value=citydata_crowding_snapshot_id,
-        )
-    return pair.incident_run_id
 
 
 def run_dbt_phase(
@@ -132,6 +136,8 @@ def run_dbt_phase(
     silver_persisted: bool,
     fresh_parse: bool = False,
     snapshot_required: bool = False,
+    threads: int | None = None,
+    selector_by_test_tier: dict[TrafficTestTier, str | None] | None = None,
     **context,
 ) -> dict[str, object]:
     """Run one pinned dbt phase and let Airflow retry infrastructure failures only."""
@@ -142,6 +148,21 @@ def run_dbt_phase(
     try_number = getattr(ti, "try_number", None)
     params = context.get("params") or {}
     target = params.get("target", "dev")
+    effective_selector, tier_skipped = _selector_for_test_tier(
+        selector=selector,
+        selector_by_test_tier=selector_by_test_tier,
+        ti=ti,
+    )
+    if tier_skipped:
+        return {
+            "status": "success",
+            "skipped": True,
+            "skip_reason": "traffic_test_tier_noop",
+            "run_results_path": None,
+            "sources_path": None,
+            "manifest_path": None,
+            "selected_unique_ids": [],
+        }
     if snapshot_required and not snapshot_run_id:
         raise AirflowFailException(
             f"traffic dbt phase requires resolved snapshot: {task_id or dbt_command}"
@@ -171,7 +192,7 @@ def run_dbt_phase(
         )
     execution = traffic_dbt.execute_dbt_phase(
         dbt_command=dbt_command,
-        selector=selector,
+        selector=effective_selector,
         invocation_id=task_id or dbt_command.replace(" ", "-"),
         pipeline="traffic-transform",
         run_id=run_id,
@@ -179,6 +200,7 @@ def run_dbt_phase(
         try_number=try_number,
         target=target,
         variables=json.dumps(dbt_variables),
+        threads=threads,
         fresh_parse=fresh_parse,
         project_dir=DBT_PROJECT,
         executable=DBT_BIN,
@@ -271,74 +293,12 @@ def record_traffic_dbt_problem(context) -> None:
     )
 
 
-def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
-    return PythonOperator(
-        task_id=spec.task_id,
-        python_callable=run_dbt_phase,
-        op_kwargs={
-            "dbt_command": spec.dbt_command,
-            "selector": spec.selector,
-            "snapshot_task_id": SNAPSHOT_TASK_ID,
-            "silver_persisted": spec.silver_persisted,
-            "fresh_parse": spec.fresh_parse,
-            "snapshot_required": spec.snapshot_required,
-        },
-        retries=1,
-        retry_delay=DBT_RETRY_DELAY,
-        pool=TRINO_HEAVY_POOL,
-        priority_weight=(PIN_CRITICAL_PRIORITY if spec.pin_critical else 1),
-        weight_rule="absolute",
-        on_failure_callback=record_traffic_dbt_problem,
-    )
-
-
-def _current_run_results_path(**context) -> str | None:
-    """Return the latest isolated dbt artifact recorded by this DAG run."""
-    ti = context.get("ti") or context.get("task_instance")
-    if ti is None:
-        return None
-    for task_id in reversed(DBT_PHASE_TASK_IDS):
-        try:
-            result = ti.xcom_pull(task_ids=task_id)
-        except Exception as exc:  # noqa: BLE001 - inspect earlier current-run phases
-            LOGGER.debug(
-                "traffic dbt result XCom lookup failed for %s: %s",
-                task_id,
-                type(exc).__name__,
-            )
-            result = None
-        if isinstance(result, dict) and result.get("run_results_path"):
-            return str(result["run_results_path"])
-        try:
-            failure = ti.xcom_pull(task_ids=task_id, key=DBT_FAILURE_XCOM_KEY)
-        except Exception as exc:  # noqa: BLE001 - inspect earlier current-run phases
-            LOGGER.debug(
-                "traffic dbt failure XCom lookup failed for %s: %s",
-                task_id,
-                type(exc).__name__,
-            )
-            failure = None
-        if isinstance(failure, dict) and failure.get(DBT_RUN_RESULTS_RECORD_KEY):
-            return str(failure[DBT_RUN_RESULTS_RECORD_KEY])
-    return None
-
-
 def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> dict:
-    """Persist Traffic dbt metrics while preserving terminal dbt failure semantics."""
-    resolved_path = (
-        run_results_path
-        if run_results_path is not None
-        else _current_run_results_path(**context)
+    return _publish_dbt_run_metrics(
+        run_results_path,
+        dump_results=dump_dbt_run_results,
+        **context,
     )
-    if not resolved_path or not os.path.exists(resolved_path):
-        print(f"run_results.json 없음 — 메트릭 적재 skip: {resolved_path}")
-        return {"rows": 0, "skipped": True}
-    target = (context.get("params") or {}).get("target")
-    records = dump_dbt_run_results(resolved_path, domain=DOMAIN, target=target)
-    print(
-        f"dbt 실행 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})"
-    )
-    return {"rows": len(records), "skipped": False}
 
 
 with DAG(
@@ -359,6 +319,12 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     )
 
+    select_test_tier_task = PythonOperator(
+        task_id=SELECT_TEST_TIER_TASK_ID,
+        python_callable=select_traffic_test_tier,
+        on_failure_callback=record_traffic_problem,
+    )
+
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
         python_callable=resolve_traffic_snapshot_run,
@@ -368,7 +334,17 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     )
 
-    dbt_phase_tasks = {spec.task_id: dbt_task(spec) for spec in DBT_PHASE_SPECS}
+    dbt_phase_tasks = {
+        spec.task_id: build_dbt_phase_task(
+            spec,
+            python_callable=run_dbt_phase,
+            snapshot_task_id=SNAPSHOT_TASK_ID,
+            retry_delay=DBT_RETRY_DELAY,
+            pin_critical_priority=PIN_CRITICAL_PRIORITY,
+            failure_callback=record_traffic_dbt_problem,
+        )
+        for spec in DBT_PHASE_SPECS
+    }
     pre_snapshot_tasks = [
         dbt_phase_tasks[spec.task_id]
         for spec in DBT_PHASE_SPECS
@@ -380,6 +356,12 @@ with DAG(
         if spec.snapshot_required
     ]
 
+    mark_test_tier_task = PythonOperator(
+        task_id=MARK_TEST_TIER_TASK_ID,
+        python_callable=mark_traffic_test_tier,
+        on_failure_callback=record_traffic_problem,
+    )
+
     publish_dbt_metrics = PythonOperator(
         task_id="publish_dbt_run_metrics",
         python_callable=publish_dbt_run_metrics,
@@ -388,9 +370,11 @@ with DAG(
 
     transform_tasks = [
         validate_runtime,
+        select_test_tier_task,
         *pre_snapshot_tasks,
         resolve_snapshot,
         *pinned_snapshot_tasks,
+        mark_test_tier_task,
     ]
     pipeline_tasks = [*transform_tasks, publish_dbt_metrics]
     for upstream, downstream in zip(pipeline_tasks, pipeline_tasks[1:]):

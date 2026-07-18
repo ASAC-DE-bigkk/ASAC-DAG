@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk.exceptions import AirflowFailException
 
 from traffic_ingest.assets import (
@@ -17,6 +18,9 @@ from traffic_ingest.assets import (
     incident_bronze_events,
     schedule_asset,
 )
+from traffic_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL
+from traffic_ingest.external_snapshot import ExternalSnapshotUnavailableError
+from traffic_ingest.transform_specs import DbtPhaseSpec
 
 
 TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
@@ -75,13 +79,15 @@ def resolve_transform_snapshot_pair(
         domain="traffic",
     )
 
-    for event in incident_events:
-        candidate_run_id = str(event["bronze_dag_run_id"])
-        if candidate_run_id != latest_incident_run_id:
-            incident_manifest.coalesce(
-                candidate_run_id,
-                replacement_run_id=latest_incident_run_id,
-            )
+    stale_incident_run_ids = [
+        str(event["bronze_dag_run_id"])
+        for event in incident_events
+        if str(event["bronze_dag_run_id"]) != latest_incident_run_id
+    ]
+    incident_manifest.coalesce_many(
+        stale_incident_run_ids,
+        replacement_run_id=latest_incident_run_id,
+    )
 
     if flow_events:
         selected_flow = flow_events[-1]
@@ -99,6 +105,36 @@ def resolve_transform_snapshot_pair(
             )
 
     return SnapshotPair(incident_run_id=latest_incident_run_id)
+
+
+def resolve_traffic_snapshot_run(
+    *,
+    context: dict,
+    snapshot_pair_resolver,
+    incident_manifest_factory,
+    flow_manifest_factory,
+    citydata_snapshot_resolver,
+    flow_xcom_key: str,
+    citydata_xcom_key: str,
+) -> str:
+    """Pin a non-regressing Incident/Flow/Citydata snapshot set."""
+    pair = snapshot_pair_resolver(
+        context=context,
+        incident_manifest_factory=incident_manifest_factory,
+        flow_manifest_factory=flow_manifest_factory,
+    )
+    try:
+        citydata_crowding_snapshot_id = citydata_snapshot_resolver()
+    except ExternalSnapshotUnavailableError as exc:
+        raise AirflowFailException(str(exc)) from exc
+    task_instance = context.get("ti") or context.get("task_instance")
+    if task_instance is not None:
+        task_instance.xcom_push(key=flow_xcom_key, value=pair.flow_run_id)
+        task_instance.xcom_push(
+            key=citydata_xcom_key,
+            value=citydata_crowding_snapshot_id,
+        )
+    return pair.incident_run_id
 
 
 @dataclass(frozen=True)
@@ -157,6 +193,39 @@ def dbt_snapshot_variables(
             citydata_crowding_snapshot_id
         )
     return variables
+
+
+def build_dbt_phase_task(
+    spec: DbtPhaseSpec,
+    *,
+    python_callable,
+    snapshot_task_id: str,
+    retry_delay,
+    pin_critical_priority: int,
+    failure_callback,
+) -> PythonOperator:
+    operator_kwargs = {
+        "task_id": spec.task_id,
+        "python_callable": python_callable,
+        "op_kwargs": {
+            "dbt_command": spec.dbt_command,
+            "selector": spec.selector,
+            "snapshot_task_id": snapshot_task_id,
+            "silver_persisted": spec.silver_persisted,
+            "fresh_parse": spec.fresh_parse,
+            "snapshot_required": spec.snapshot_required,
+            "threads": spec.threads,
+            "selector_by_test_tier": spec.selector_by_test_tier,
+        },
+        "retries": 1,
+        "retry_delay": retry_delay,
+        "priority_weight": pin_critical_priority if spec.pin_critical else 1,
+        "weight_rule": "absolute",
+        "on_failure_callback": failure_callback,
+    }
+    if spec.workload is DbtWorkload.TRINO:
+        operator_kwargs["pool"] = TRINO_HEAVY_POOL
+    return PythonOperator(**operator_kwargs)
 
 
 def record_classified_dbt_problem(
@@ -243,8 +312,10 @@ __all__ = [
     "TRAFFIC_TRANSFORM_CRON_KST",
     "SnapshotPair",
     "TransformFailurePorts",
+    "build_dbt_phase_task",
     "dbt_snapshot_variables",
     "resolve_transform_snapshot_pair",
     "record_classified_dbt_problem",
+    "resolve_traffic_snapshot_run",
     "transform_schedule",
 ]

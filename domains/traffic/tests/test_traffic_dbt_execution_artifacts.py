@@ -65,6 +65,221 @@ def test_deps_actual_omits_unsupported_target_path_but_keeps_runtime_context(tmp
     )
 
 
+def test_deps_phase_does_not_self_heal_recursively(tmp_path):
+    module = load_execution_module()
+    (tmp_path / "packages.yml").write_text(
+        "packages:\n  - package: asac_axes\n", encoding="utf-8"
+    )
+    observed = []
+
+    module.execute_dbt_phase(
+        dbt_command="deps",
+        selector=None,
+        invocation_id="deps-no-recursion",
+        pipeline="traffic-transform",
+        run_id="manual__1",
+        task_id="dbt_deps",
+        try_number=1,
+        target="dev",
+        variables=None,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=lambda command, **_kwargs: observed.append(command)
+        or completed(command),
+        environ={},
+    )
+
+    assert [command[1] for command in observed] == ["deps"]
+
+
+def test_non_deps_phase_keeps_current_behavior_without_packages_yml(tmp_path):
+    module = load_execution_module()
+    observed = []
+
+    def runner(command, **_kwargs):
+        observed.append(command)
+        if command[1] == "ls":
+            return completed(
+                command,
+                stdout='{"unique_id":"model.asac.silver","resource_type":"model"}\n',
+            )
+        write_actual_artifacts(command)
+        return completed(command)
+
+    module.execute_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        invocation_id="no-packages-yml",
+        pipeline="traffic-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        target="dev",
+        variables=None,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=runner,
+        environ={},
+    )
+
+    assert [command[1] for command in observed] == ["ls", "run"]
+
+
+def test_non_deps_phase_does_not_self_heal_when_package_sentinel_exists(tmp_path):
+    module = load_execution_module()
+    paths = module.attempt_paths(
+        project_dir=str(tmp_path),
+        pipeline="traffic-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        invocation_id="sentinel-present",
+        dbt_command="run",
+    )
+    (tmp_path / "packages.yml").write_text(
+        "packages:\n  - package: asac_axes\n", encoding="utf-8"
+    )
+    sentinel = Path(paths.packages_path) / "asac_axes" / "dbt_project.yml"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("name: asac_axes\n", encoding="utf-8")
+    observed = []
+
+    def runner(command, **_kwargs):
+        observed.append(command)
+        if command[1] == "ls":
+            return completed(
+                command,
+                stdout='{"unique_id":"model.asac.silver","resource_type":"model"}\n',
+            )
+        write_actual_artifacts(command)
+        return completed(command)
+
+    module.execute_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        invocation_id="sentinel-present",
+        pipeline="traffic-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        target="dev",
+        variables=None,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=runner,
+        environ={},
+    )
+
+    assert [command[1] for command in observed] == ["ls", "run"]
+
+
+def test_non_deps_phase_self_heals_missing_packages_before_ls(tmp_path):
+    module = load_execution_module()
+    (tmp_path / "packages.yml").write_text(
+        "packages:\n  - package: asac_axes\n", encoding="utf-8"
+    )
+    observed = []
+
+    def runner(command, **kwargs):
+        observed.append((command, kwargs))
+        if command[1] == "deps":
+            packages_path = Path(kwargs["env"]["DBT_PACKAGES_INSTALL_PATH"])
+            sentinel = packages_path / "asac_axes" / "dbt_project.yml"
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_text("name: asac_axes\n", encoding="utf-8")
+            return completed(command)
+        if command[1] == "ls":
+            return completed(
+                command,
+                stdout='{"unique_id":"model.asac.silver","resource_type":"model"}\n',
+            )
+        write_actual_artifacts(command)
+        return completed(command)
+
+    execution = module.execute_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        invocation_id="self-heal",
+        pipeline="traffic-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        target="dev",
+        variables=None,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=runner,
+        environ={},
+    )
+
+    assert [command[0][1] for command in observed] == ["deps", "ls", "run"]
+    deps_command, deps_kwargs = observed[0]
+    assert "--target-path" not in deps_command
+    assert deps_kwargs["env"]["DBT_PACKAGES_INSTALL_PATH"] == execution.paths.packages_path
+
+
+def test_non_deps_phase_stops_when_self_heal_deps_fails(tmp_path):
+    module = load_execution_module()
+    (tmp_path / "packages.yml").write_text(
+        "packages:\n  - package: asac_axes\n", encoding="utf-8"
+    )
+    observed = []
+
+    def runner(command, **_kwargs):
+        observed.append(command)
+        return completed(command, returncode=1, stderr="deps failed")
+
+    execution = module.execute_dbt_phase(
+        dbt_command="test",
+        selector="ask_seoul_traffic_transform_gold",
+        invocation_id="self-heal-fails",
+        pipeline="traffic-transform",
+        run_id="manual__1",
+        task_id="dbt_test_gold",
+        try_number=1,
+        target="dev",
+        variables=None,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=runner,
+        environ={},
+    )
+
+    assert [command[1] for command in observed] == ["deps"]
+    assert execution.completed.returncode == 1
+    assert execution.actual_attempted is False
+
+
+def test_non_deps_phase_fails_closed_when_sentinel_still_missing_after_deps(tmp_path):
+    module = load_execution_module()
+    (tmp_path / "packages.yml").write_text(
+        "packages:\n  - package: asac_axes\n", encoding="utf-8"
+    )
+    observed = []
+
+    execution = module.execute_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        invocation_id="self-heal-missing-sentinel",
+        pipeline="traffic-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        target="dev",
+        variables=None,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=lambda command, **_kwargs: observed.append(command)
+        or completed(command),
+        environ={},
+    )
+
+    assert [command[1] for command in observed] == ["deps"]
+    assert execution.completed.returncode == 2
+    assert "package sentinel missing" in execution.completed.stderr
+    assert execution.actual_attempted is False
+
+
 @pytest.mark.parametrize(
     ("environment", "message"),
     [

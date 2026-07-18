@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Protocol
@@ -102,17 +103,99 @@ class TrafficRunManifest:
             failure_reason=f"{type(error).__name__} in {task_id}",
         )
 
-    def coalesce(self, run_id: str, *, replacement_run_id: str) -> str:
-        return self._record(
-            TrafficRun("traffic_incident_bronze", run_id),
-            status=STATUS_COALESCED,
-            is_publishable=False,
-            expected_rows=None,
-            actual_rows=None,
-            expected_raw_objects=None,
-            actual_raw_objects=None,
-            failure_reason=f"replaced_by={replacement_run_id}",
+    def coalesce(self, run_id: str, *, replacement_run_id: str) -> str | None:
+        return self.coalesce_many([run_id], replacement_run_id=replacement_run_id)
+
+    def coalesce_many(
+        self,
+        run_ids: Iterable[str],
+        *,
+        replacement_run_id: str,
+    ) -> str | None:
+        normalized_run_ids = _normalize_coalesced_run_ids(
+            run_ids,
+            replacement_run_id=replacement_run_id,
         )
+        if not normalized_run_ids:
+            return None
+
+        cursor, catalog, schema = self._cursor_factory()
+        qualified_schema = f"{catalog}.{schema}"
+        qualified_table = f"{qualified_schema}.{MANIFEST_TABLE}"
+        try:
+            cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {qualified_schema}")
+        except Exception as exc:
+            if "Namespace already exists" not in str(exc):
+                raise
+        cursor.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {qualified_table} (
+                source_id varchar,
+                dag_id varchar,
+                dag_run_id varchar,
+                status varchar,
+                is_publishable boolean,
+                event_at timestamp(6),
+                expected_rows integer,
+                actual_rows integer,
+                expected_raw_objects integer,
+                actual_raw_objects integer,
+                failure_reason varchar
+            )
+            WITH (format = 'PARQUET')
+            """
+        )
+        event_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+        columns = (
+            "source_id, dag_id, dag_run_id, status, is_publishable, event_at, "
+            "expected_rows, actual_rows, expected_raw_objects, actual_raw_objects, failure_reason"
+        )
+        values_rows = ", ".join(
+            "("
+            + ", ".join(
+                (
+                    _sql_string(self._source_id),
+                    _sql_string("traffic_incident_bronze"),
+                    _sql_string(run_id),
+                    _sql_string(STATUS_COALESCED),
+                    "false",
+                    f"TIMESTAMP {_sql_string(event_at)}",
+                    "NULL",
+                    "NULL",
+                    "NULL",
+                    "NULL",
+                    _sql_string(f"replaced_by={replacement_run_id}"),
+                )
+            )
+            + ")"
+            for run_id in normalized_run_ids
+        )
+        cursor.execute(
+            f"""
+            MERGE INTO {qualified_table} AS target
+            USING (VALUES {values_rows}) AS incoming ({columns})
+              ON target.source_id = incoming.source_id
+             AND target.dag_run_id = incoming.dag_run_id
+             AND target.status = incoming.status
+            WHEN MATCHED THEN UPDATE SET
+                dag_id = incoming.dag_id,
+                is_publishable = incoming.is_publishable,
+                event_at = incoming.event_at,
+                expected_rows = incoming.expected_rows,
+                actual_rows = incoming.actual_rows,
+                expected_raw_objects = incoming.expected_raw_objects,
+                actual_raw_objects = incoming.actual_raw_objects,
+                failure_reason = incoming.failure_reason
+            WHEN NOT MATCHED THEN INSERT ({columns})
+            VALUES (
+                incoming.source_id, incoming.dag_id, incoming.dag_run_id, incoming.status,
+                incoming.is_publishable, incoming.event_at, incoming.expected_rows,
+                incoming.actual_rows, incoming.expected_raw_objects, incoming.actual_raw_objects,
+                incoming.failure_reason
+            )
+            """
+        )
+        return qualified_table
 
     def require_publishable(self, run_id: str) -> str:
         cursor, catalog, schema = self._cursor_factory()
@@ -258,6 +341,21 @@ def _sql_string(value: object | None) -> str:
     if value is None:
         return "NULL"
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _normalize_coalesced_run_ids(
+    run_ids: Iterable[str],
+    *,
+    replacement_run_id: str,
+) -> tuple[str, ...]:
+    replacement = str(replacement_run_id).strip()
+    unique: dict[str, None] = {}
+    for value in run_ids:
+        run_id = str(value).strip()
+        if not run_id or run_id == replacement:
+            continue
+        unique.setdefault(run_id, None)
+    return tuple(unique)
 
 
 def _sql_int(value: int | None) -> str:
