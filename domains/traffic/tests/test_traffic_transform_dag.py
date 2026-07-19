@@ -1,107 +1,260 @@
+import sys
 import types
 
+import pytest
+
 from traffic_transform_test_support import (
+    FakeAirflowFailException,
+    FakeVariable,
+    load_gold_transform_module,
     load_transform_module,
 )
 from traffic_transform_test_support import restore_airflow_modules_after_dag_import  # noqa: F401
 
 
-def test_traffic_transform_subscribes_to_incident_or_flow_bronze_asset_by_default(
-    monkeypatch,
-):
-    monkeypatch.delenv("ASK_SEOUL_TRAFFIC_TRANSFORM_DAG_SCHEDULE", raising=False)
-    module = load_transform_module()
+def _marker_type():
+    return sys.modules["traffic_ingest.transform_admission"].TransformSuccessMarker
 
-    assert module.TRAFFIC_TRANSFORM_CRON_KST == "12 * * * *"
-    schedule = module.dag.kwargs["schedule"]
-    assert {asset.uri for asset in schedule.assets} == {
-        module.TRAFFIC_BRONZE_ASSET,
+
+def _marker(module, identity, *, snapshot_id=42, fingerprint="a" * 64):
+    return _marker_type()(
+        version=1,
+        pipeline=identity.pipeline,
+        identity=identity,
+        output_snapshot_id=snapshot_id,
+        compacted_files_fingerprint=fingerprint,
+    ).to_json()
+
+
+def _silver_ti(module, incident_run_id="incident-1", run_result=None):
+    return types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids, key=None: (
+            incident_run_id
+            if task_ids == module.SNAPSHOT_TASK_ID
+            else run_result
+            if task_ids == "dbt_run_silver"
+            else None
+        )
+    )
+
+
+def test_silver_dag_schedule_and_guard_order():
+    module = load_transform_module()
+    dag = module.dag
+
+    assert dag.kwargs["schedule"].uri == module.TRAFFIC_INCIDENT_BRONZE_ASSET
+    assert dag.kwargs["max_active_runs"] == 1
+    assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
+        "resolve_traffic_snapshot_run"
+    }
+    assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {
+        "admit_traffic_silver_snapshot"
+    }
+    assert dag.task_dict["admit_traffic_silver_snapshot"].downstream_task_ids == {
+        "dbt_deps"
+    }
+    assert "dbt_run_gold" not in dag.task_ids
+    assert "select_traffic_test_tier" not in dag.task_ids
+
+
+def test_gold_dag_schedule_and_guard_order():
+    module = load_gold_transform_module()
+    dag = module.dag
+
+    assert {asset.uri for asset in dag.kwargs["schedule"].assets} == {
+        module.TRAFFIC_INCIDENT_SILVER_ASSET,
         module.TRAFFIC_FLOW_BRONZE_ASSET,
     }
-
-
-def test_traffic_transform_trino_tasks_do_not_inflate_pool_priority_from_chain():
-    module = load_transform_module()
-    critical_task_ids = {
-        "dbt_run_silver",
-        "dbt_test_silver",
-        "dbt_test_gold",
+    assert dag.kwargs["max_active_runs"] == 1
+    assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
+        "select_traffic_test_tier"
+    }
+    assert dag.task_dict["select_traffic_test_tier"].downstream_task_ids == {
+        "resolve_traffic_gold_snapshot_run"
+    }
+    assert dag.task_dict["resolve_traffic_gold_snapshot_run"].downstream_task_ids == {
+        "admit_traffic_gold_snapshot"
     }
 
+
+@pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])
+def test_split_dags_keep_dev_only_target(loader):
+    module = loader()
+    target = module.DEFAULT_PARAMS["target"]
+
+    assert target.value == "dev"
+    assert target.schema["enum"] == ["dev"]
+
+
+@pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])
+def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
+    module = loader()
+    critical_task_ids = {"dbt_run_silver", "dbt_test_silver", "dbt_test_gold"}
+
     assert module.TRINO_HEAVY_POOL == "trino_traffic_heavy"
-    for task_id in module.DBT_PHASE_TASK_IDS:
-        task = module.dag.task_dict[task_id]
-        if task_id == "dbt_deps":
-            assert "pool" not in task.kwargs or task.kwargs["pool"] in (
-                None,
-                "default_pool",
-            )
+    for task_id, task in module.dbt_phase_tasks.items():
+        if task_id in {"dbt_deps", "dbt_deps_gold"}:
+            assert "pool" not in task.kwargs
             assert task.kwargs["op_kwargs"]["threads"] is None
         else:
             assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
             assert task.kwargs["op_kwargs"]["threads"] == 2
         assert task.kwargs["weight_rule"] == "absolute"
-        expected_priority = (
-            module.PIN_CRITICAL_PRIORITY
-            if task_id in critical_task_ids
-            else 1
+        assert task.kwargs["priority_weight"] == (
+            module.PIN_CRITICAL_PRIORITY if task_id in critical_task_ids else 1
         )
-        assert task.kwargs["priority_weight"] == expected_priority
 
-    resolver = module.dag.task_dict[module.SNAPSHOT_TASK_ID]
-    assert resolver.kwargs["pool"] == module.TRINO_HEAVY_POOL
-    assert resolver.kwargs["weight_rule"] == "absolute"
-    assert resolver.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
+    for task_id in (
+        module.SNAPSHOT_TASK_ID,
+        "admit_traffic_silver_snapshot"
+        if module.dag.dag_id == "traffic_incident_transform"
+        else "admit_traffic_gold_snapshot",
+    ):
+        task = module.dag.task_dict[task_id]
+        assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+        assert task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
+        assert task.kwargs["weight_rule"] == "absolute"
 
 
-def test_traffic_transform_validates_dev_runtime_before_dbt():
+def test_silver_marker_is_a_separate_task_after_asset_publication():
     module = load_transform_module()
-    guard = module.dag.task_dict["validate_dev_runtime"]
+    dag = module.dag
 
-    assert guard.kwargs["op_kwargs"] == {
-        "domain": "traffic",
-        "requested_target": "{{ params.target }}",
+    assert dag.task_dict["dbt_test_silver"].downstream_task_ids == {
+        "publish_traffic_incident_silver_asset"
     }
-    assert guard.downstream_task_ids == {"select_traffic_test_tier"}
-    select_tier = module.dag.task_dict["select_traffic_test_tier"]
-    assert select_tier.python_callable is module.select_traffic_test_tier
-    assert select_tier.downstream_task_ids == {"dbt_deps"}
-
-
-def test_traffic_transform_limits_target_param_to_dev_or_prod():
-    module = load_transform_module()
-
-    target_param = module.DEFAULT_PARAMS["target"]
-
-    assert target_param.value == "dev"
-    assert target_param.schema["enum"] == ["dev"]
-
-
-def test_traffic_transform_publishes_dbt_run_metrics_after_terminal_test():
-    module = load_transform_module()
-
-    task = module.dag.task_dict["publish_dbt_run_metrics"]
-
-    assert task.kwargs["trigger_rule"] == "all_done_setup_success"
-    assert task.is_teardown is True
-    assert task.on_failure_fail_dagrun is False
-    assert module.dag.task_dict["dbt_test_gold"].downstream_task_ids == {
-        "mark_traffic_test_tier"
+    assert dag.task_dict["publish_traffic_incident_silver_asset"].downstream_task_ids == {
+        "mark_traffic_silver_success"
     }
-    assert module.dag.task_dict["mark_traffic_test_tier"].downstream_task_ids == {
+    assert dag.task_dict["mark_traffic_silver_success"].downstream_task_ids == {
         "publish_dbt_run_metrics"
     }
 
 
-def test_traffic_transform_has_no_failure_propagating_fanout_leaf():
+def test_silver_publication_never_writes_marker(monkeypatch):
     module = load_transform_module()
-    dag = module.dag
-    metrics = dag.task_dict["publish_dbt_run_metrics"]
+    evidence = {
+        "silver_snapshot_evidence": {
+            "snapshot_id": 42,
+            "committed_at": "2026-07-19T12:00:00+09:00",
+            "operation": "overwrite",
+            "compacted_files": ["a"],
+        }
+    }
+    monkeypatch.setattr(module, "publish_through_alias", lambda *_args, **_kwargs: None)
+
+    metadata = module.publish_traffic_incident_silver_asset(
+        ti=_silver_ti(module, run_result=evidence), outlet_events={}
+    )
+
+    assert metadata["silver_snapshot_id"] == 42
+    assert FakeVariable.set_calls == []
+
+
+def test_silver_publication_failure_cannot_write_marker(monkeypatch):
+    module = load_transform_module()
+    evidence = {
+        "silver_snapshot_evidence": {
+            "snapshot_id": 42,
+            "committed_at": "2026-07-19T12:00:00+09:00",
+            "operation": "overwrite",
+            "compacted_files": [],
+        }
+    }
+    monkeypatch.setattr(
+        module,
+        "publish_through_alias",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("publish failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="publish failed"):
+        module.publish_traffic_incident_silver_asset(
+            ti=_silver_ti(module, run_result=evidence), outlet_events={}
+        )
+    assert FakeVariable.set_calls == []
+
+
+def test_mark_silver_success_uses_strict_dbt_run_evidence():
+    module = load_transform_module()
+    evidence = {
+        "silver_snapshot_evidence": {
+            "snapshot_id": 42,
+            "committed_at": "2026-07-19T12:00:00+09:00",
+            "operation": "overwrite",
+            "compacted_files": ["b", "a"],
+        }
+    }
+
+    module.mark_traffic_silver_success(ti=_silver_ti(module, run_result=evidence))
+
+    marker = _marker_type().from_json(
+        FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY]
+    )
+    assert marker.identity == module.TransformIdentity.silver("incident-1")
+    assert marker.output_snapshot_id == 42
+
+
+@pytest.mark.parametrize(
+    ("raw_marker", "incident_run_id"),
+    [(None, "incident-1"), ("mismatch", "incident-1")],
+)
+def test_silver_admission_does_not_read_telemetry_without_matching_identity(
+    monkeypatch, raw_marker, incident_run_id
+):
+    module = load_transform_module()
+    calls = []
+    if raw_marker == "mismatch":
+        FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = _marker(
+            module, module.TransformIdentity.silver("incident-other")
+        )
+    monkeypatch.setattr(
+        module,
+        "current_silver_output_evidence",
+        lambda: calls.append("telemetry") or (_ for _ in ()).throw(RuntimeError()),
+    )
+
+    assert module.admit_traffic_silver_snapshot(
+        ti=_silver_ti(module, incident_run_id=incident_run_id)
+    )["action"] == "RUN"
+    assert calls == []
+
+
+def test_silver_telemetry_failure_blocks_only_potential_skip(monkeypatch):
+    module = load_transform_module()
+    FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = _marker(
+        module, module.TransformIdentity.silver("incident-1")
+    )
+    monkeypatch.setattr(
+        module,
+        "current_silver_output_evidence",
+        lambda: (_ for _ in ()).throw(FakeAirflowFailException("telemetry unavailable")),
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="telemetry unavailable"):
+        module.admit_traffic_silver_snapshot(ti=_silver_ti(module))
+
+
+@pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])
+def test_metrics_teardown_is_terminal_without_failure_fanout(loader):
+    module = loader()
+    metrics = module.dag.task_dict["publish_dbt_run_metrics"]
+    success_task_id = (
+        "mark_traffic_silver_success"
+        if module.dag.dag_id == "traffic_incident_transform"
+        else "mark_traffic_gold_success"
+    )
+
+    assert metrics.kwargs["trigger_rule"] == "all_done_setup_success"
+    assert metrics.is_teardown is True
+    assert metrics.on_failure_fail_dagrun is False
+    assert module.dag.task_dict[success_task_id].downstream_task_ids == {
+        "publish_dbt_run_metrics"
+    }
     assert metrics.downstream_task_ids == set()
-    assert "fail_transform_if_upstream_failed" not in dag.task_ids
+    assert "fail_transform_if_upstream_failed" not in module.dag.task_ids
 
 
-def test_traffic_metrics_use_latest_current_run_dbt_artifact_path():
+def test_metrics_use_latest_current_run_dbt_artifact_path():
     module = load_transform_module()
     terminal_path = "/tmp/traffic-terminal/run_results.json"
     ti = types.SimpleNamespace(
@@ -115,7 +268,7 @@ def test_traffic_metrics_use_latest_current_run_dbt_artifact_path():
     assert module._current_run_results_path(ti=ti) == terminal_path
 
 
-def test_traffic_metrics_use_earlier_success_artifact_when_later_phases_have_none():
+def test_metrics_use_earlier_success_artifact_when_later_phases_have_none():
     module = load_transform_module()
     earlier_path = "/tmp/traffic-silver/run_results.json"
     ti = types.SimpleNamespace(
@@ -129,13 +282,14 @@ def test_traffic_metrics_use_earlier_success_artifact_when_later_phases_have_non
     assert module._current_run_results_path(ti=ti) == earlier_path
 
 
-def test_traffic_metrics_use_earlier_failure_artifact():
+def test_metrics_use_earlier_failure_artifact():
     module = load_transform_module()
     failure_path = "/tmp/traffic-freshness-failure/run_results.json"
     ti = types.SimpleNamespace(
         xcom_pull=lambda *, task_ids, key=None: (
             {"dbt_run_results_path": failure_path}
-            if task_ids == "dbt_source_freshness" and key == module.DBT_FAILURE_XCOM_KEY
+            if task_ids == "dbt_source_freshness"
+            and key == module.DBT_FAILURE_XCOM_KEY
             else None
         )
     )
@@ -143,7 +297,7 @@ def test_traffic_metrics_use_earlier_failure_artifact():
     assert module._current_run_results_path(ti=ti) == failure_path
 
 
-def test_traffic_metrics_prefer_most_advanced_current_run_artifact():
+def test_metrics_prefer_most_advanced_current_run_artifact():
     module = load_transform_module()
     artifacts = {
         ("dbt_deps", None): {"run_results_path": None},
@@ -159,28 +313,28 @@ def test_traffic_metrics_prefer_most_advanced_current_run_artifact():
     assert module._current_run_results_path(ti=ti) == "/tmp/gold/run_results.json"
 
 
-def test_traffic_metrics_resolver_never_falls_back_to_shared_target(tmp_path):
+def test_metrics_resolver_never_falls_back_to_shared_target(tmp_path):
     module = load_transform_module()
-    stale_shared_result = tmp_path / "target" / "run_results.json"
-    stale_shared_result.parent.mkdir()
-    stale_shared_result.write_text("{}", encoding="utf-8")
+    stale = tmp_path / "target" / "run_results.json"
+    stale.parent.mkdir()
+    stale.write_text("{}", encoding="utf-8")
     ti = types.SimpleNamespace(xcom_pull=lambda **_kwargs: None)
 
     assert module._current_run_results_path(ti=ti) is None
 
 
-def test_traffic_metrics_skip_stale_shared_target_without_current_run_artifact(
+def test_metrics_skip_stale_shared_target_without_current_run_artifact(
     tmp_path, monkeypatch
 ):
     module = load_transform_module()
-    stale_shared_result = tmp_path / "target" / "run_results.json"
-    stale_shared_result.parent.mkdir()
-    stale_shared_result.write_text("{}", encoding="utf-8")
-    published_paths = []
+    stale = tmp_path / "target" / "run_results.json"
+    stale.parent.mkdir()
+    stale.write_text("{}", encoding="utf-8")
+    published = []
     monkeypatch.setattr(
         module,
         "dump_dbt_run_results",
-        lambda path, **_kwargs: published_paths.append(path) or [{}],
+        lambda path, **_kwargs: published.append(path) or [{}],
     )
     ti = types.SimpleNamespace(xcom_pull=lambda **_kwargs: None)
 
@@ -188,24 +342,37 @@ def test_traffic_metrics_skip_stale_shared_target_without_current_run_artifact(
         "rows": 0,
         "skipped": True,
     }
-    assert published_paths == []
+    assert published == []
 
 
-def test_traffic_publish_dbt_run_metrics_forwards_domain_and_target(
-    tmp_path, monkeypatch
-):
+def test_metrics_forward_domain_and_target(tmp_path, monkeypatch):
     module = load_transform_module()
-    run_results = tmp_path / "run_results.json"
-    run_results.write_text("{}", encoding="utf-8")
+    result_path = tmp_path / "run_results.json"
+    result_path.write_text("{}", encoding="utf-8")
     captured = {}
-
-    def fake_dump(path, *, domain, target):
-        captured.update(path=path, domain=domain, target=target)
-        return [{}]
-
-    monkeypatch.setattr(module, "dump_dbt_run_results", fake_dump)
+    monkeypatch.setattr(
+        module,
+        "dump_dbt_run_results",
+        lambda path, *, domain, target: captured.update(
+            path=path, domain=domain, target=target
+        )
+        or [{}],
+    )
 
     assert module.publish_dbt_run_metrics(
-        run_results_path=str(run_results), params={"target": "dev"}
+        run_results_path=str(result_path), params={"target": "dev"}
     ) == {"rows": 1, "skipped": False}
-    assert captured == {"path": str(run_results), "domain": "traffic", "target": "dev"}
+    assert captured == {
+        "path": str(result_path),
+        "domain": "traffic",
+        "target": "dev",
+    }
+
+
+def test_silver_module_has_no_flow_or_citydata_resolver_or_constant():
+    module = load_transform_module()
+    source = open(module.__file__, encoding="utf-8").read()
+
+    assert "TRAFFIC_FLOW_BRONZE_ASSET" not in source
+    assert "resolve_citydata_crowding_snapshot_id" not in source
+    assert "CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY" not in source

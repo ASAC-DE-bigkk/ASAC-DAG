@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from traffic_ingest.common.resources import DbtWorkload
 from traffic_ingest.test_cadence import TrafficTestTier
@@ -20,9 +21,15 @@ class DbtPhaseSpec:
     workload: DbtWorkload = DbtWorkload.TRINO
     threads: int | None = 2
     selector_by_test_tier: dict[TrafficTestTier, str | None] | None = None
+    selector_when_flow_missing: str | None = None
+    selector_by_test_tier_when_flow_missing: (
+        dict[TrafficTestTier, str | None] | None
+    ) = None
+    citydata_snapshot_required: bool = False
+    silver_fence_mode: Literal["write", "verify"] | None = None
 
 
-DBT_PHASE_SPECS = (
+SILVER_DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_deps",
         "deps",
@@ -43,6 +50,33 @@ DBT_PHASE_SPECS = (
         "dbt_test_traffic_bronze_source_contract",
         "test",
         "traffic_transform_contract_gate",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_silver",
+        "run",
+        "ask_seoul_traffic_transform_silver",
+        fresh_parse=True,
+        snapshot_required=True,
+        pin_critical=True,
+        silver_fence_mode="write",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_silver",
+        "test",
+        "ask_seoul_traffic_transform_silver",
+        silver_persisted=True,
+        snapshot_required=True,
+        pin_critical=True,
+        silver_fence_mode="verify",
+    ),
+)
+
+GOLD_DBT_PHASE_SPECS = (
+    DbtPhaseSpec(
+        "dbt_deps_gold",
+        "deps",
+        workload=DbtWorkload.LOCAL,
+        threads=None,
     ),
     DbtPhaseSpec(
         "dbt_seed_asac_axes",
@@ -75,27 +109,13 @@ DBT_PHASE_SPECS = (
         },
     ),
     DbtPhaseSpec(
-        "dbt_run_silver",
-        "run",
-        "ask_seoul_traffic_transform_silver",
-        fresh_parse=True,
-        snapshot_required=True,
-        pin_critical=True,
-    ),
-    DbtPhaseSpec(
-        "dbt_test_silver",
-        "test",
-        "ask_seoul_traffic_transform_silver",
-        silver_persisted=True,
-        snapshot_required=True,
-        pin_critical=True,
-    ),
-    DbtPhaseSpec(
         "dbt_run_gold",
         "run",
         "ask_seoul_traffic_transform_gold",
         silver_persisted=True,
         snapshot_required=True,
+        citydata_snapshot_required=True,
+        selector_when_flow_missing="ask_seoul_traffic_transform_gold_incident_models",
     ),
     DbtPhaseSpec(
         "dbt_test_gold",
@@ -105,14 +125,35 @@ DBT_PHASE_SPECS = (
         fresh_parse=True,
         snapshot_required=True,
         pin_critical=True,
+        citydata_snapshot_required=True,
         selector_by_test_tier={
             TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
             TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
             TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
         },
+        selector_by_test_tier_when_flow_missing={
+            TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_incident_gate_tests",
+            TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_incident_hourly_tests",
+            TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_incident_full_tests",
+        },
     ),
+)
+
+# Transitional view for the unsplit DAG. Keep its original phase order and do not
+# add the Gold-owned deps task until the two DAGs are wired independently.
+DBT_PHASE_SPECS = (
+    *SILVER_DBT_PHASE_SPECS[:-2],
+    *GOLD_DBT_PHASE_SPECS[1:-2],
+    *SILVER_DBT_PHASE_SPECS[-2:],
+    *GOLD_DBT_PHASE_SPECS[-2:],
 )
 DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
 
 
-__all__ = ["DBT_PHASE_SPECS", "DBT_PHASE_TASK_IDS", "DbtPhaseSpec"]
+__all__ = [
+    "DBT_PHASE_SPECS",
+    "DBT_PHASE_TASK_IDS",
+    "GOLD_DBT_PHASE_SPECS",
+    "SILVER_DBT_PHASE_SPECS",
+    "DbtPhaseSpec",
+]

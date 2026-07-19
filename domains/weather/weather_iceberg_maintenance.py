@@ -47,6 +47,23 @@ CANONICAL_TABLES = (
     "silver_seoul_traffic_incident",
     "gold_traffic_incident_summary",
 )
+TRAFFIC_TRINO_HEAVY_POOL = "trino_traffic_heavy"
+TRAFFIC_TABLES = frozenset(
+    {
+        "bronze_seoul_traffic_incident",
+        "bronze_seoul_traffic_incident_request_audit",
+        "silver_seoul_traffic_incident",
+        "gold_traffic_incident_summary",
+    }
+)
+
+
+def maintenance_pool_for_table(table: str) -> str:
+    if table not in CANONICAL_TABLES:
+        raise ValueError("maintenance table is outside canonical allowlist")
+    return TRAFFIC_TRINO_HEAVY_POOL if table in TRAFFIC_TABLES else TRINO_HEAVY_POOL
+
+
 DEFAULT_PARAM_VALUES = {
     "target": "dev",
     "retention": "7d",
@@ -453,7 +470,7 @@ with DAG(
                     if gate_task_ids
                     else None,
                 },
-                pool=TRINO_HEAVY_POOL,
+                pool=maintenance_pool_for_table(table),
                 pool_slots=1,
                 weight_rule="absolute",
                 retries=0,

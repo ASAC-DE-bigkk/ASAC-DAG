@@ -1,4 +1,4 @@
-"""Airflow DAG: publish Traffic Incident Bronze into the Silver Asset."""
+"""Airflow DAG: combine Traffic Silver with compatible Flow and Citydata for Gold."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
@@ -18,7 +18,6 @@ for path in (DIR, os.path.dirname(DIR), os.path.dirname(os.path.dirname(DIR))):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from common.assets import TRAFFIC_BRONZE_ASSET as TRAFFIC_INCIDENT_BRONZE_ASSET  # noqa: E402
 from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa: E402
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
@@ -36,25 +35,25 @@ import traffic_dbt_execution as traffic_dbt  # noqa: E402
 from traffic_ingest import transform_runtime  # noqa: E402
 from traffic_ingest.transform_runtime import PREFLIGHT_SNAPSHOT_DAG_RUN_ID  # noqa: E402, F401
 from traffic_ingest.assets import (  # noqa: E402
-    TRAFFIC_INCIDENT_SILVER_ASSET_REF,
-    TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS,
-    publish_through_alias,
+    TRAFFIC_FLOW_BRONZE_ASSET,
+    TRAFFIC_INCIDENT_SILVER_ASSET,
     schedule_asset,
 )
 from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
-from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
+from traffic_ingest.external_snapshot import resolve_citydata_crowding_snapshot_id  # noqa: E402
+from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
+from traffic_ingest.transform_admission import TransformIdentity, TransformSuccessMarker  # noqa: E402, F401
 from traffic_ingest.transform_dag_support import (  # noqa: E402
-    SILVER_ASSET_CONTRACT,
-    SILVER_SUCCESS_MARKER_KEY,
+    GOLD_SUCCESS_MARKER_KEY,
+    SILVER_OUTPUT_EVIDENCE_XCOM_KEY,  # noqa: F401
+    SILVER_SUCCESS_MARKER_KEY,  # noqa: F401
     SilverOutputEvidence,  # noqa: F401
     TransformFailurePorts,
-    TransformIdentity,
     admit_transform,
     build_dbt_phase_task,
     current_silver_output_evidence,
     record_classified_dbt_problem,
-    resolve_traffic_silver_snapshot_run as _resolve_traffic_silver_snapshot_run,
-    silver_output_evidence_from_dbt_run,
+    resolve_traffic_gold_snapshot_run as _resolve_traffic_gold_snapshot_run,
     write_success_marker,
 )
 from traffic_ingest.transform_metrics import (  # noqa: E402
@@ -63,7 +62,13 @@ from traffic_ingest.transform_metrics import (  # noqa: E402
     _current_run_results_path as _current_run_results_path,
     publish_dbt_run_metrics as _publish_dbt_run_metrics,
 )
-from traffic_ingest.transform_specs import SILVER_DBT_PHASE_SPECS  # noqa: E402
+from traffic_ingest.transform_specs import GOLD_DBT_PHASE_SPECS  # noqa: E402
+from traffic_ingest.transform_test_tier import (  # noqa: E402
+    SELECT_TEST_TIER_TASK_ID,  # noqa: F401
+    TrafficTestTier,  # noqa: F401
+    select_traffic_test_tier,
+    mark_traffic_test_tier,
+)
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 
 
@@ -71,74 +76,83 @@ KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger(__name__)
 DBT_BIN = traffic_dbt.dbt_bin()
 DBT_PROJECT = traffic_dbt.dbt_project_dir()
-SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
-TRAFFIC_BRONZE_ASSET = TRAFFIC_INCIDENT_BRONZE_ASSET
+SNAPSHOT_TASK_ID = "resolve_traffic_gold_snapshot_run"
+FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
+CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY = "traffic_citydata_crowding_snapshot_id"
 PIN_CRITICAL_PRIORITY = 10
 DBT_RETRY_DELAY = timedelta(minutes=2)
 DEFAULT_PARAMS = {
-    "target": Param(
-        default="dev",
-        type="string",
-        enum=["dev"],
-        description="dbt target profile name (dev only until production rollout).",
-    )
+    "target": Param(default="dev", type="string", enum=["dev"])
 }
 record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
-def resolve_traffic_snapshot_run(**context) -> str:
-    return _resolve_traffic_silver_snapshot_run(
+def resolve_traffic_gold_snapshot_run(**context) -> str:
+    return _resolve_traffic_gold_snapshot_run(
         context=context,
-        incident_manifest_factory=build_traffic_manifest,
+        variable=Variable,
+        flow_manifest_factory=build_traffic_flow_manifest,
+        citydata_snapshot_resolver=resolve_citydata_crowding_snapshot_id,
+        flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,
+        citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
     )
 
 
-def admit_traffic_silver_snapshot(**context) -> dict[str, object]:
-    ti = context["ti"]
+def resolve_gold_citydata_snapshot_id(*, ti):
+    return ti.xcom_pull(
+        task_ids=SNAPSHOT_TASK_ID,
+        key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
+    )
+
+
+def _gold_identity(*, ti) -> TransformIdentity:
     incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
+    flow_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID, key=FLOW_SNAPSHOT_XCOM_KEY)
+    return TransformIdentity.gold(
+        incident_run_id,
+        flow_run_id=flow_run_id,
+        citydata_snapshot_id=resolve_gold_citydata_snapshot_id(ti=ti),
+    )
+
+
+def admit_traffic_gold_snapshot(**context) -> dict[str, object]:
+    ti = context["ti"]
     return admit_transform(
         variable=Variable,
-        marker_key=SILVER_SUCCESS_MARKER_KEY,
-        identity=TransformIdentity.silver(incident_run_id),
+        marker_key=GOLD_SUCCESS_MARKER_KEY,
+        identity=_gold_identity(ti=ti),
         current_evidence_loader=current_silver_output_evidence,
     )
 
 
-def publish_traffic_incident_silver_asset(**context) -> dict[str, object]:
+def mark_traffic_gold_success(**context) -> dict[str, object]:
+    """Advance cadence conservatively, then persist the admission marker last."""
+    mark_traffic_test_tier(**context)
     ti = context["ti"]
-    incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
-    evidence = silver_output_evidence_from_dbt_run(ti)
-    metadata = {
-        "source_id": "seoul_traffic_incident",
-        "incident_run_id": TransformIdentity.silver(incident_run_id).incident_run_id,
-        "silver_snapshot_id": evidence.snapshot_id,
-        "compacted_files_fingerprint": evidence.compacted_files_fingerprint,
-        "event_at": datetime.now(timezone.utc).isoformat(),
-        "is_publishable": True,
-        "contract": SILVER_ASSET_CONTRACT,
-    }
-    publish_through_alias(
-        context,
-        alias=TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS,
-        asset=TRAFFIC_INCIDENT_SILVER_ASSET_REF,
-        metadata=metadata,
-    )
-    return metadata
-
-
-def mark_traffic_silver_success(**context) -> dict[str, object]:
-    ti = context["ti"]
-    incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
     serialized = write_success_marker(
         variable=Variable,
-        marker_key=SILVER_SUCCESS_MARKER_KEY,
-        identity=TransformIdentity.silver(incident_run_id),
-        evidence=silver_output_evidence_from_dbt_run(ti),
+        marker_key=GOLD_SUCCESS_MARKER_KEY,
+        identity=_gold_identity(ti=ti),
+        evidence=current_silver_output_evidence(),
     )
     return {"marker": serialized}
 
 
-def run_dbt_phase(*, dbt_command: str, selector: str | None, snapshot_task_id: str, silver_persisted: bool, fresh_parse: bool = False, snapshot_required: bool = False, silver_fence_mode: str | None = None, threads: int | None = None, **context) -> dict[str, object]:
+def run_dbt_phase(
+    *,
+    dbt_command: str,
+    selector: str | None,
+    snapshot_task_id: str,
+    silver_persisted: bool,
+    fresh_parse: bool = False,
+    snapshot_required: bool = False,
+    citydata_snapshot_required: bool = False,
+    threads: int | None = None,
+    selector_by_test_tier=None,
+    selector_when_flow_missing: str | None = None,
+    selector_by_test_tier_when_flow_missing=None,
+    **context,
+) -> dict[str, object]:
     return transform_runtime.run_dbt_phase(
         dbt_command=dbt_command,
         selector=selector,
@@ -146,10 +160,17 @@ def run_dbt_phase(*, dbt_command: str, selector: str | None, snapshot_task_id: s
         silver_persisted=silver_persisted,
         fresh_parse=fresh_parse,
         snapshot_required=snapshot_required,
-        silver_fence_mode=silver_fence_mode,
+        citydata_snapshot_required=citydata_snapshot_required,
         threads=threads,
+        selector_by_test_tier=selector_by_test_tier,
+        selector_when_flow_missing=selector_when_flow_missing,
+        selector_by_test_tier_when_flow_missing=(
+            selector_by_test_tier_when_flow_missing
+        ),
         dbt_bin=DBT_BIN,
         dbt_project=DBT_PROJECT,
+        flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,
+        citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
         load_results=load_dbt_results,
         classify_failure=classify_dbt_failure,
         recovery_record_builder=build_recovery_record,
@@ -185,15 +206,16 @@ def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> d
 
 
 with DAG(
-    dag_id="traffic_incident_transform",
-    description="Transform Traffic Incident Bronze into the Silver Asset.",
+    dag_id="traffic_gold_transform",
+    description="Build Traffic Gold from Silver, compatible Flow, and Citydata.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
-    schedule=schedule_asset(TRAFFIC_INCIDENT_BRONZE_ASSET),
+    schedule=schedule_asset(TRAFFIC_INCIDENT_SILVER_ASSET)
+    | schedule_asset(TRAFFIC_FLOW_BRONZE_ASSET),
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": DBT_RETRY_DELAY},
     params=DEFAULT_PARAMS,
-    tags=["ask_seoul", "traffic", "transform", "silver", "dbt"],
+    tags=["ask_seoul", "traffic", "transform", "gold", "dbt"],
 ) as dag:
     validate_runtime = PythonOperator(
         task_id="validate_dev_runtime",
@@ -201,17 +223,22 @@ with DAG(
         op_kwargs={"domain": "traffic", "requested_target": "{{ params.target }}"},
         on_failure_callback=record_traffic_problem,
     )
+    select_test_tier = PythonOperator(
+        task_id="select_traffic_test_tier",
+        python_callable=select_traffic_test_tier,
+        on_failure_callback=record_traffic_problem,
+    )
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
-        python_callable=resolve_traffic_snapshot_run,
+        python_callable=resolve_traffic_gold_snapshot_run,
         pool=TRINO_HEAVY_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
     )
     admit_snapshot = PythonOperator(
-        task_id="admit_traffic_silver_snapshot",
-        python_callable=admit_traffic_silver_snapshot,
+        task_id="admit_traffic_gold_snapshot",
+        python_callable=admit_traffic_gold_snapshot,
         pool=TRINO_HEAVY_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
@@ -226,17 +253,14 @@ with DAG(
             pin_critical_priority=PIN_CRITICAL_PRIORITY,
             failure_callback=record_traffic_dbt_problem,
         )
-        for spec in SILVER_DBT_PHASE_SPECS
+        for spec in GOLD_DBT_PHASE_SPECS
     }
-    publish_silver = PythonOperator(
-        task_id="publish_traffic_incident_silver_asset",
-        python_callable=publish_traffic_incident_silver_asset,
-        outlets=[TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS],
-        on_failure_callback=record_traffic_problem,
-    )
     mark_success = PythonOperator(
-        task_id="mark_traffic_silver_success",
-        python_callable=mark_traffic_silver_success,
+        task_id="mark_traffic_gold_success",
+        python_callable=mark_traffic_gold_success,
+        pool=TRINO_HEAVY_POOL,
+        priority_weight=PIN_CRITICAL_PRIORITY,
+        weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
     )
     publish_metrics = PythonOperator(
@@ -245,7 +269,7 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
-    chain = [validate_runtime, resolve_snapshot, admit_snapshot, *dbt_phase_tasks.values(), publish_silver, mark_success, publish_metrics]
+    chain = [validate_runtime, select_test_tier, resolve_snapshot, admit_snapshot, *dbt_phase_tasks.values(), mark_success, publish_metrics]
     for upstream, downstream in zip(chain, chain[1:]):
         upstream >> downstream
 

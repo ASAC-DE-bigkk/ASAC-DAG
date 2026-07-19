@@ -215,7 +215,7 @@ def test_maintenance_builds_static_canonical_action_chain():
             task_id = module.action_task_id(index, table, operation)
             task = module.dag.task_dict[task_id]
             assert task.upstream_task_ids == {previous}
-            assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+            assert task.kwargs["pool"] == module.maintenance_pool_for_table(table)
             assert task.kwargs["pool_slots"] == 1
             assert task.kwargs["weight_rule"] == "absolute"
             assert task.kwargs["retries"] == 0
@@ -238,6 +238,26 @@ def test_maintenance_builds_static_canonical_action_chain():
         for operation in module.OPERATIONS:
             action = module.dag.task_dict[module.action_task_id(index, table, operation)]
             assert action.kwargs["op_kwargs"]["previous_gate_task_id"] == expected_previous_gate
+
+
+def test_maintenance_routes_traffic_tables_to_traffic_writer_pool():
+    module = load_maintenance_module()
+    for table in module.TRAFFIC_TABLES:
+        assert module.maintenance_pool_for_table(table) == "trino_traffic_heavy"
+        for operation in module.OPERATIONS:
+            task = module.dag.task_dict[module.action_task_id(
+                module.CANONICAL_TABLES.index(table) + 1, table, operation
+            )]
+            assert task.kwargs["pool"] == "trino_traffic_heavy"
+
+
+def test_maintenance_keeps_weather_tables_in_weather_pool():
+    module = load_maintenance_module()
+    weather_tables = set(module.CANONICAL_TABLES) - set(module.TRAFFIC_TABLES)
+    assert all(
+        module.maintenance_pool_for_table(table) == module.TRINO_HEAVY_POOL
+        for table in weather_tables
+    )
 
 
 def test_mutation_tasks_keep_weather_failure_callback():
