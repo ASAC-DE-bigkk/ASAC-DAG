@@ -21,7 +21,12 @@ class ExternalCompactionRace(RuntimeError):
 
 
 def _is_timezone_aware_iso_timestamp(value: object) -> bool:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if (
+        not isinstance(value, str)
+        or len(value) <= 10
+        or value[10] not in {"T", " "}
+        or value != value.strip()
+    ):
         return False
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:

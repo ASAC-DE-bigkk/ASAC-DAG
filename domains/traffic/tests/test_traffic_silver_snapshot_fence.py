@@ -178,6 +178,7 @@ def test_evidence_parser_accepts_only_needed_canonical_iceberg_operations(operat
         None,
         "",
         "2026-07-19T00:00:00",
+        "2026-07-19X00:00:00+00:00",
         "not-a-timestamp",
         " 2026-07-19T00:00:00Z",
     ],
