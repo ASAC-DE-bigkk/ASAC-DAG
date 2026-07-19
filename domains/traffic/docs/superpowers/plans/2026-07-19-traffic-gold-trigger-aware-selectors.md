@@ -229,4 +229,3 @@ maintenance/W2/recovery/backfill은 별도 해결 전까지 paused로 유지한�
 
 매 시간 active run, failed task, `trino_traffic_heavy`/`trino_weather_heavy` 적체, source freshness,
 Traffic duplicate/lineage, 일일 reliability를 읽기 전용 점검한다. 새 실패는 즉시 증거와 원인만 보고한다.
-
