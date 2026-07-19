@@ -131,6 +131,7 @@ def run_dbt_phase(
         flow_xcom_key,
         citydata_xcom_key,
     )
+    flow_snapshot_run_id = dbt_variables.get(flow_xcom_key)
     citydata_crowding_snapshot_id = dbt_variables.get(citydata_xcom_key)
     if citydata_snapshot_required and citydata_xcom_key not in dbt_variables:
         raise AirflowFailException(
@@ -208,6 +209,9 @@ def run_dbt_phase(
     record = recovery_record_builder(
         failure,
         traffic_snapshot_dag_run_id=str(snapshot_run_id) if snapshot_run_id else None,
+        traffic_flow_snapshot_dag_run_id=(
+            str(flow_snapshot_run_id) if flow_snapshot_run_id else None
+        ),
         traffic_citydata_crowding_snapshot_id=citydata_crowding_snapshot_id,
         dag_id=getattr(ti, "dag_id", "traffic_incident_transform"),
         task_id=task_id,

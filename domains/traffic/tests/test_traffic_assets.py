@@ -38,6 +38,7 @@ def test_traffic_assets_are_owned_by_the_traffic_domain():
     assert assets.TRAFFIC_INCIDENT_RAW_ASSET == "r2://traffic/incident/raw-snapshot"
     assert assets.TRAFFIC_INCIDENT_BRONZE_ASSET == "iceberg://traffic/bronze"
     assert assets.TRAFFIC_FLOW_BRONZE_ASSET == "iceberg://traffic/flow/bronze"
+    assert assets.TRAFFIC_FLOW_SILVER_ASSET == "iceberg://traffic/flow/silver"
     assert assets.TRAFFIC_INCIDENT_SILVER_ASSET == "iceberg://traffic/incident/silver"
     assert assets.TRAFFIC_INCIDENT_SILVER_ASSET_REF.uri == (
         "iceberg://traffic/incident/silver"
@@ -49,6 +50,62 @@ def test_traffic_assets_are_owned_by_the_traffic_domain():
         "traffic_incident_silver_materialized"
     )
     assert assets.TRAFFIC_FLOW_MATERIALIZED_ALIAS.name == "traffic_flow_materialized"
+    assert assets.TRAFFIC_FLOW_SILVER_MATERIALIZED_ALIAS.name == (
+        "traffic_flow_silver_materialized"
+    )
+
+
+def test_flow_silver_events_require_the_materialized_contract():
+    from traffic_ingest import assets
+
+    event = types.SimpleNamespace(
+        extra={
+            "source_id": "seoul_traffic_flow",
+            "flow_run_id": "flow-42",
+            "flow_dag_run_id": "flow-42",
+            "parent_incident_run_id": "incident-42",
+            "event_at": "2026-07-19T09:00:00+00:00",
+            "is_publishable": True,
+            "contract": "traffic_flow_silver.v1",
+        }
+    )
+
+    events = assets.flow_silver_events(
+        {
+            "triggering_asset_events": {
+                assets.TRAFFIC_FLOW_SILVER_ASSET: [event]
+            }
+        }
+    )
+
+    assert events == [event.extra]
+
+
+def test_flow_silver_events_reject_bronze_metadata_without_materialized_contract():
+    from traffic_ingest import assets
+
+    bronze_event = types.SimpleNamespace(
+        extra={
+            "source_id": "seoul_traffic_flow",
+            "flow_run_id": "flow-42",
+            "flow_dag_run_id": "flow-42",
+            "parent_incident_run_id": "incident-42",
+            "event_at": "2026-07-19T09:00:00+00:00",
+            "load_date": "2026-07-19",
+            "row_count": 6,
+            "payload_hash": "b" * 64,
+            "is_publishable": True,
+        }
+    )
+
+    with pytest.raises(assets.TrafficAssetContractError, match="incomplete"):
+        assets.flow_silver_events(
+            {
+                "triggering_asset_events": {
+                    assets.TRAFFIC_FLOW_SILVER_ASSET: [bronze_event]
+                }
+            }
+        )
 
 
 def test_asset_event_metadata_is_validated_and_sorted_by_event_time():
