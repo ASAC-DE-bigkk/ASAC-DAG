@@ -41,14 +41,12 @@ def _fail_closed_fence(exc: Exception) -> None:
 
 
 def _expected_write_evidence(ti: Any) -> SilverSnapshotEvidence:
-    try:
-        raw_result = ti.xcom_pull(task_ids="dbt_run_silver")
-        if not isinstance(raw_result, dict):
-            raise SnapshotFenceTelemetryError("dbt_run_silver result is missing")
-        return SilverSnapshotEvidence.from_dict(raw_result["silver_snapshot_evidence"])
-    except (KeyError, SnapshotFenceTelemetryError, TypeError) as exc:
-        _fail_closed_fence(exc)
-    raise AssertionError("unreachable")
+    raw_result = ti.xcom_pull(task_ids="dbt_run_silver")
+    if not isinstance(raw_result, dict):
+        raise SnapshotFenceTelemetryError("dbt_run_silver result is missing")
+    if "silver_snapshot_evidence" not in raw_result:
+        raise SnapshotFenceTelemetryError("silver_snapshot_evidence is missing")
+    return SilverSnapshotEvidence.from_dict(raw_result["silver_snapshot_evidence"])
 
 
 def run_dbt_phase(
@@ -75,6 +73,9 @@ def run_dbt_phase(
     **context,
 ) -> dict[str, object]:
     """Run one dbt phase, preserving classified failures and optional Silver fencing."""
+    if silver_fence_mode not in {None, "write", "verify"}:
+        raise AirflowFailException(f"invalid silver_fence_mode: {silver_fence_mode}")
+
     ti = context["ti"]
     snapshot_run_id = ti.xcom_pull(task_ids=snapshot_task_id)
     run_id = context.get("run_id")

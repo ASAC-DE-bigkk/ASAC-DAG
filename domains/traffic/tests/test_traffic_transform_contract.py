@@ -150,9 +150,25 @@ def test_silver_verify_rejects_snapshot_change_after_successful_dbt(monkeypatch)
         )
 
 
-@pytest.mark.parametrize("run_result", [None, {}, {"silver_snapshot_evidence": {}}])
+@pytest.mark.parametrize(
+    ("run_result", "expected_message"),
+    [
+        (
+            None,
+            "invalid silver snapshot evidence: dbt_run_silver result is missing",
+        ),
+        (
+            {},
+            "invalid silver snapshot evidence: silver_snapshot_evidence is missing",
+        ),
+        (
+            {"silver_snapshot_evidence": {}},
+            "invalid silver snapshot evidence: snapshot evidence fields are invalid",
+        ),
+    ],
+)
 def test_silver_verify_rejects_missing_or_malformed_expected_evidence_before_dbt(
-    monkeypatch, run_result
+    monkeypatch, run_result, expected_message
 ):
     runtime = _load_transform_runtime()
     called = False
@@ -163,7 +179,7 @@ def test_silver_verify_rejects_missing_or_malformed_expected_evidence_before_dbt
         return _successful_runtime_execution()
 
     monkeypatch.setattr(runtime.traffic_dbt, "execute_dbt_phase", execute_dbt_phase)
-    with pytest.raises(FakeAirflowFailException, match="silver snapshot evidence"):
+    with pytest.raises(FakeAirflowFailException) as exc_info:
         runtime.run_dbt_phase(
             dbt_command="test",
             selector="ask_seoul_traffic_transform_silver",
@@ -177,6 +193,8 @@ def test_silver_verify_rejects_missing_or_malformed_expected_evidence_before_dbt
             params={"target": "dev"},
         )
 
+    assert str(exc_info.value) == expected_message
+    assert str(exc_info.value).count("invalid silver snapshot evidence:") == 1
     assert called is False
 
 
@@ -242,6 +260,47 @@ def test_no_silver_fence_mode_preserves_existing_dbt_success_contract(monkeypatc
     )
 
     assert "silver_snapshot_evidence" not in result
+
+
+def test_invalid_silver_fence_mode_fails_before_dbt_and_evidence_collection(
+    monkeypatch,
+):
+    runtime = _load_transform_runtime()
+    dbt_called = False
+    evidence_called = False
+
+    def execute_dbt_phase(**_kwargs):
+        nonlocal dbt_called
+        dbt_called = True
+        return _successful_runtime_execution()
+
+    def collect_evidence():
+        nonlocal evidence_called
+        evidence_called = True
+        return _silver_evidence(11)
+
+    monkeypatch.setattr(runtime.traffic_dbt, "execute_dbt_phase", execute_dbt_phase)
+    monkeypatch.setattr(runtime, "collect_silver_snapshot_evidence", collect_evidence)
+
+    with pytest.raises(
+        FakeAirflowFailException,
+        match="^invalid silver_fence_mode: typo$",
+    ):
+        runtime.run_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_traffic_transform_silver",
+            snapshot_task_id="resolve_traffic_snapshot_run",
+            silver_persisted=False,
+            snapshot_required=True,
+            citydata_snapshot_required=False,
+            silver_fence_mode="typo",
+            ti=_runtime_ti(),
+            run_id="manual__invalid_fence_mode",
+            params={"target": "dev"},
+        )
+
+    assert dbt_called is False
+    assert evidence_called is False
 
 
 def test_snapshot_resolver_delegates_to_the_traffic_manifest(monkeypatch):
