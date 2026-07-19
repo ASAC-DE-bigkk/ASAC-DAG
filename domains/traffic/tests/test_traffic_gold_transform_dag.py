@@ -1,4 +1,5 @@
 import types
+from collections import UserDict, UserList
 
 import pytest
 
@@ -60,6 +61,40 @@ def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_br
     assert incident == "incident-1"
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
     assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
+
+
+def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch):
+    module = load_gold_transform_module()
+    event = types.SimpleNamespace(
+        extra={
+            "source_id": "seoul_traffic_incident",
+            "incident_run_id": "incident-1",
+            "silver_snapshot_id": 42,
+            "compacted_files_fingerprint": "a" * 64,
+            "event_at": "2026-07-19T08:24:20+00:00",
+            "is_publishable": True,
+            "contract": "traffic_incident_silver.v1",
+        }
+    )
+    triggering_asset_events = UserDict(
+        {module.TRAFFIC_INCIDENT_SILVER_ASSET: UserList([event])}
+    )
+    monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    pushed = {}
+    ti = types.SimpleNamespace(
+        xcom_push=lambda *, key, value: pushed.update({key: value})
+    )
+
+    assert module.resolve_traffic_gold_snapshot_run(
+        ti=ti,
+        triggering_asset_events=triggering_asset_events,
+    ) == "incident-1"
+    assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
+    assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
+    assert pushed[module.SILVER_OUTPUT_EVIDENCE_XCOM_KEY] == {
+        "snapshot_id": 42,
+        "compacted_files_fingerprint": "a" * 64,
+    }
 
 
 def test_gold_admission_fails_closed_for_malformed_marker_and_skips_exact_tuple(monkeypatch):

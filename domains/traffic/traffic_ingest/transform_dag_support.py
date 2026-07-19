@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -329,15 +329,20 @@ def resolve_traffic_silver_snapshot_run(
     return latest_run_id
 
 
-def _events_for_asset(context: dict, asset_uri: str) -> list[object]:
+def _events_for_asset(context: Mapping[str, object], asset_uri: str) -> list[object]:
     triggering = context.get("triggering_asset_events") or {}
-    if not isinstance(triggering, dict):
+    if not isinstance(triggering, Mapping):
         raise AirflowFailException("Traffic triggering Asset events are malformed")
     events: list[object] = []
     for asset, values in triggering.items():
         if str(getattr(asset, "uri", asset)) != asset_uri:
             continue
-        events.extend(values if isinstance(values, (list, tuple)) else [values])
+        if isinstance(values, Sequence) and not isinstance(
+            values, (str, bytes, bytearray)
+        ):
+            events.extend(values)
+        else:
+            events.append(values)
     return events
 
 
