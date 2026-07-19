@@ -14,6 +14,236 @@ from traffic_transform_test_support import (
 from traffic_transform_test_support import restore_airflow_modules_after_dag_import  # noqa: F401
 
 
+def _silver_evidence(snapshot_id: int):
+    from traffic_ingest.silver_snapshot_fence import SilverSnapshotEvidence
+
+    return SilverSnapshotEvidence(
+        snapshot_id=snapshot_id,
+        committed_at="2026-07-19T00:00:00+00:00",
+        operation="overwrite",
+        compacted_files=(),
+    )
+
+
+def _successful_runtime_execution():
+    completed = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    return types.SimpleNamespace(
+        attempts=(completed,),
+        completed=completed,
+        missing_expected_artifacts=(),
+        existing_run_results_path="/tmp/run_results.json",
+        existing_sources_path=None,
+        existing_manifest_path="/tmp/manifest.json",
+        selected_unique_ids=(),
+    )
+
+
+def _runtime_ti(*, task_id="dbt_run_silver", run_result=None, citydata=None):
+    def xcom_pull(*, task_ids, key=None):
+        if task_ids == "resolve_traffic_snapshot_run":
+            if key == "traffic_citydata_crowding_snapshot_id":
+                return citydata
+            return "incident-1"
+        if task_ids == "dbt_run_silver":
+            return run_result
+        return None
+
+    return types.SimpleNamespace(
+        task_id=task_id,
+        try_number=1,
+        dag_id="traffic_incident_transform",
+        xcom_pull=xcom_pull,
+        xcom_push=lambda **_kwargs: None,
+    )
+
+
+def _load_transform_runtime():
+    load_transform_module()
+    from traffic_ingest import transform_runtime
+
+    return transform_runtime
+
+
+def test_silver_write_captures_baseline_and_returns_post_write_evidence(monkeypatch):
+    runtime = _load_transform_runtime()
+    evidence = iter((_silver_evidence(10), _silver_evidence(11)))
+    monkeypatch.setattr(runtime, "collect_silver_snapshot_evidence", lambda: next(evidence))
+    monkeypatch.setattr(
+        runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **_kwargs: _successful_runtime_execution(),
+    )
+
+    result = runtime.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        snapshot_task_id="resolve_traffic_snapshot_run",
+        silver_persisted=False,
+        snapshot_required=True,
+        citydata_snapshot_required=False,
+        silver_fence_mode="write",
+        threads=2,
+        ti=_runtime_ti(),
+        run_id="manual__silver_fence",
+        params={"target": "dev"},
+    )
+
+    assert result["silver_snapshot_evidence"] == _silver_evidence(11).as_dict()
+
+
+def test_silver_verify_rejects_snapshot_change_before_dbt(monkeypatch):
+    runtime = _load_transform_runtime()
+    called = False
+    monkeypatch.setattr(runtime, "collect_silver_snapshot_evidence", lambda: _silver_evidence(12))
+
+    def execute_dbt_phase(**_kwargs):
+        nonlocal called
+        called = True
+        return _successful_runtime_execution()
+
+    monkeypatch.setattr(runtime.traffic_dbt, "execute_dbt_phase", execute_dbt_phase)
+    with pytest.raises(FakeAirflowFailException, match="EXTERNAL_COMPACTION_RACE:"):
+        runtime.run_dbt_phase(
+            dbt_command="test",
+            selector="ask_seoul_traffic_transform_silver",
+            snapshot_task_id="resolve_traffic_snapshot_run",
+            silver_persisted=True,
+            snapshot_required=True,
+            citydata_snapshot_required=False,
+            silver_fence_mode="verify",
+            ti=_runtime_ti(
+                task_id="dbt_test_silver",
+                run_result={"silver_snapshot_evidence": _silver_evidence(11).as_dict()},
+            ),
+            run_id="manual__silver_test_fence",
+            params={"target": "dev"},
+        )
+
+    assert called is False
+
+
+def test_silver_verify_rejects_snapshot_change_after_successful_dbt(monkeypatch):
+    runtime = _load_transform_runtime()
+    evidence = iter((_silver_evidence(11), _silver_evidence(12)))
+    monkeypatch.setattr(runtime, "collect_silver_snapshot_evidence", lambda: next(evidence))
+    monkeypatch.setattr(
+        runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **_kwargs: _successful_runtime_execution(),
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="EXTERNAL_COMPACTION_RACE:"):
+        runtime.run_dbt_phase(
+            dbt_command="test",
+            selector="ask_seoul_traffic_transform_silver",
+            snapshot_task_id="resolve_traffic_snapshot_run",
+            silver_persisted=True,
+            snapshot_required=True,
+            citydata_snapshot_required=False,
+            silver_fence_mode="verify",
+            ti=_runtime_ti(
+                task_id="dbt_test_silver",
+                run_result={"silver_snapshot_evidence": _silver_evidence(11).as_dict()},
+            ),
+            run_id="manual__silver_test_post_fence",
+            params={"target": "dev"},
+        )
+
+
+@pytest.mark.parametrize("run_result", [None, {}, {"silver_snapshot_evidence": {}}])
+def test_silver_verify_rejects_missing_or_malformed_expected_evidence_before_dbt(
+    monkeypatch, run_result
+):
+    runtime = _load_transform_runtime()
+    called = False
+
+    def execute_dbt_phase(**_kwargs):
+        nonlocal called
+        called = True
+        return _successful_runtime_execution()
+
+    monkeypatch.setattr(runtime.traffic_dbt, "execute_dbt_phase", execute_dbt_phase)
+    with pytest.raises(FakeAirflowFailException, match="silver snapshot evidence"):
+        runtime.run_dbt_phase(
+            dbt_command="test",
+            selector="ask_seoul_traffic_transform_silver",
+            snapshot_task_id="resolve_traffic_snapshot_run",
+            silver_persisted=True,
+            snapshot_required=True,
+            citydata_snapshot_required=False,
+            silver_fence_mode="verify",
+            ti=_runtime_ti(task_id="dbt_test_silver", run_result=run_result),
+            run_id="manual__missing_evidence",
+            params={"target": "dev"},
+        )
+
+    assert called is False
+
+
+def test_citydata_snapshot_requirement_is_owned_by_gold_not_incident_pin(monkeypatch):
+    runtime = _load_transform_runtime()
+    monkeypatch.setattr(
+        runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **_kwargs: _successful_runtime_execution(),
+    )
+
+    silver = runtime.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        snapshot_task_id="resolve_traffic_snapshot_run",
+        silver_persisted=False,
+        snapshot_required=True,
+        citydata_snapshot_required=False,
+        ti=_runtime_ti(),
+        run_id="manual__silver_without_citydata",
+        params={"target": "dev"},
+    )
+    assert silver["status"] == "success"
+
+    with pytest.raises(FakeAirflowFailException, match="Citydata crowding snapshot"):
+        runtime.run_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_traffic_transform_gold",
+            snapshot_task_id="resolve_traffic_snapshot_run",
+            silver_persisted=True,
+            snapshot_required=True,
+            citydata_snapshot_required=True,
+            ti=_runtime_ti(task_id="dbt_run_gold", citydata=None),
+            run_id="manual__gold_without_citydata",
+            params={"target": "dev"},
+        )
+
+
+def test_no_silver_fence_mode_preserves_existing_dbt_success_contract(monkeypatch):
+    runtime = _load_transform_runtime()
+    monkeypatch.setattr(
+        runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **_kwargs: _successful_runtime_execution(),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "collect_silver_snapshot_evidence",
+        lambda: pytest.fail("unfenced phase must not read Silver snapshot metadata"),
+    )
+
+    result = runtime.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_gold",
+        snapshot_task_id="resolve_traffic_snapshot_run",
+        silver_persisted=True,
+        snapshot_required=True,
+        citydata_snapshot_required=False,
+        silver_fence_mode=None,
+        ti=_runtime_ti(task_id="dbt_run_gold"),
+        run_id="manual__compat",
+        params={"target": "dev"},
+    )
+
+    assert "silver_snapshot_evidence" not in result
+
+
 def test_snapshot_resolver_delegates_to_the_traffic_manifest(monkeypatch):
     module = load_transform_module()
     calls = []
@@ -573,7 +803,7 @@ def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch)
     "external_snapshot_id",
     [None, 0, -1, True, "8738321387624398062"],
 )
-def test_snapshot_required_phase_rejects_missing_or_invalid_citydata_snapshot(
+def test_citydata_required_phase_rejects_missing_or_invalid_citydata_snapshot(
     monkeypatch,
     external_snapshot_id,
 ):
@@ -594,7 +824,7 @@ def test_snapshot_required_phase_rejects_missing_or_invalid_citydata_snapshot(
         return None
 
     ti = types.SimpleNamespace(
-        task_id="dbt_run_silver",
+        task_id="dbt_run_gold",
         try_number=1,
         xcom_pull=xcom_pull,
     )
@@ -608,6 +838,7 @@ def test_snapshot_required_phase_rejects_missing_or_invalid_citydata_snapshot(
             selector="ask_seoul_traffic_transform_silver",
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             snapshot_required=True,
+            citydata_snapshot_required=True,
             silver_persisted=False,
             ti=ti,
             run_id="asset_triggered__missing-citydata-pin",

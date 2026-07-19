@@ -13,6 +13,67 @@ from traffic_transform_test_support import (
 from traffic_transform_test_support import restore_airflow_modules_after_dag_import  # noqa: F401
 
 
+def test_external_compaction_race_is_not_classified_as_a_generic_dbt_failure(
+    monkeypatch,
+):
+    module = load_transform_module()
+    from traffic_ingest import transform_runtime
+    from traffic_ingest.silver_snapshot_fence import SilverSnapshotEvidence
+
+    baseline = SilverSnapshotEvidence(
+        snapshot_id=10,
+        committed_at="2026-07-19T00:00:00+00:00",
+        operation="overwrite",
+        compacted_files=(),
+    )
+    raced = SilverSnapshotEvidence(
+        snapshot_id=11,
+        committed_at="2026-07-19T00:01:00+00:00",
+        operation="replace",
+        compacted_files=(),
+    )
+    evidence = iter((baseline, raced))
+    monkeypatch.setattr(
+        transform_runtime,
+        "collect_silver_snapshot_evidence",
+        lambda: next(evidence),
+    )
+    monkeypatch.setattr(
+        transform_runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **_kwargs: types.SimpleNamespace(
+            attempts=(types.SimpleNamespace(returncode=0, stdout="", stderr=""),),
+            completed=types.SimpleNamespace(returncode=0, stdout="", stderr=""),
+            missing_expected_artifacts=(),
+            existing_run_results_path="/tmp/run_results.json",
+            existing_sources_path=None,
+            existing_manifest_path="/tmp/manifest.json",
+            selected_unique_ids=(),
+        ),
+    )
+    ti = types.SimpleNamespace(
+        task_id="dbt_run_silver",
+        try_number=1,
+        dag_id="traffic_incident_transform",
+        xcom_pull=lambda *, task_ids, key=None: "snapshot-a",
+        xcom_push=lambda **_kwargs: pytest.fail("race must not produce dbt failure XCom"),
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="^EXTERNAL_COMPACTION_RACE: "):
+        module.run_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_traffic_transform_silver",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=False,
+            snapshot_required=True,
+            citydata_snapshot_required=False,
+            silver_fence_mode="write",
+            ti=ti,
+            run_id="manual__race",
+            params={"target": "dev"},
+        )
+
+
 def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
     module = load_transform_module()
     dag = module.dag

@@ -7,19 +7,16 @@ through the dbt models and keeps transform retries independent from API calls.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
-from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Param
-from airflow.sdk.exceptions import AirflowFailException
 
 # 공통 패키지(dags/common) import — dags 루트를 path 에 올린다
 DAG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,7 +63,6 @@ from traffic_ingest.transform_test_tier import (  # noqa: E402
     TrafficTestDecision as TrafficTestDecision,
     TrafficTestTier,
     _parse_traffic_test_decision as _parse_traffic_test_decision,
-    _selector_for_test_tier,
     choose_test_decision as choose_test_decision,
     mark_successful_decision as mark_successful_decision,
     mark_traffic_test_tier,
@@ -79,11 +75,11 @@ from traffic_ingest.transform_metrics import (  # noqa: E402
     _current_run_results_path as _current_run_results_path,
     publish_dbt_run_metrics as _publish_dbt_run_metrics,
 )
+from traffic_ingest import transform_runtime  # noqa: E402
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     TRAFFIC_TRANSFORM_CRON_KST as TRAFFIC_TRANSFORM_CRON_KST,
     TransformFailurePorts,
     build_dbt_phase_task,
-    dbt_snapshot_variables,
     record_classified_dbt_problem,
     resolve_traffic_snapshot_run as _resolve_traffic_snapshot_run,
     resolve_transform_snapshot_pair as resolve_transform_snapshot_pair,
@@ -136,141 +132,35 @@ def run_dbt_phase(
     silver_persisted: bool,
     fresh_parse: bool = False,
     snapshot_required: bool = False,
+    citydata_snapshot_required: bool = False,
+    silver_fence_mode: str | None = None,
     threads: int | None = None,
     selector_by_test_tier: dict[TrafficTestTier, str | None] | None = None,
     **context,
 ) -> dict[str, object]:
-    """Run one pinned dbt phase and let Airflow retry infrastructure failures only."""
-    ti = context["ti"]
-    snapshot_run_id = ti.xcom_pull(task_ids=snapshot_task_id)
-    run_id = context.get("run_id")
-    task_id = getattr(ti, "task_id", None)
-    try_number = getattr(ti, "try_number", None)
-    params = context.get("params") or {}
-    target = params.get("target", "dev")
-    effective_selector, tier_skipped = _selector_for_test_tier(
-        selector=selector,
-        selector_by_test_tier=selector_by_test_tier,
-        ti=ti,
-    )
-    if tier_skipped:
-        return {
-            "status": "success",
-            "skipped": True,
-            "skip_reason": "traffic_test_tier_noop",
-            "run_results_path": None,
-            "sources_path": None,
-            "manifest_path": None,
-            "selected_unique_ids": [],
-        }
-    if snapshot_required and not snapshot_run_id:
-        raise AirflowFailException(
-            f"traffic dbt phase requires resolved snapshot: {task_id or dbt_command}"
-        )
-    effective_snapshot_run_id = (
-        str(snapshot_run_id)
-        if snapshot_run_id
-        else PREFLIGHT_SNAPSHOT_DAG_RUN_ID
-    )
-    dbt_variables = dbt_snapshot_variables(
-        ti,
-        snapshot_task_id,
-        effective_snapshot_run_id,
-        FLOW_SNAPSHOT_XCOM_KEY,
-        CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
-    )
-    citydata_crowding_snapshot_id = dbt_variables.get(
-        CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY
-    )
-    if (
-        snapshot_required
-        and CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY not in dbt_variables
-    ):
-        raise AirflowFailException(
-            "traffic dbt phase requires Citydata crowding snapshot: "
-            f"{task_id or dbt_command}"
-        )
-    execution = traffic_dbt.execute_dbt_phase(
+    """Compatibility adapter for the isolated Traffic transform runtime."""
+    return transform_runtime.run_dbt_phase(
         dbt_command=dbt_command,
-        selector=effective_selector,
-        invocation_id=task_id or dbt_command.replace(" ", "-"),
-        pipeline="traffic-transform",
-        run_id=run_id,
-        task_id=task_id,
-        try_number=try_number,
-        target=target,
-        variables=json.dumps(dbt_variables),
-        threads=threads,
+        selector=selector,
+        snapshot_task_id=snapshot_task_id,
+        silver_persisted=silver_persisted,
         fresh_parse=fresh_parse,
-        project_dir=DBT_PROJECT,
-        executable=DBT_BIN,
+        snapshot_required=snapshot_required,
+        citydata_snapshot_required=citydata_snapshot_required,
+        silver_fence_mode=silver_fence_mode,
+        threads=threads,
+        selector_by_test_tier=selector_by_test_tier,
+        dbt_bin=DBT_BIN,
+        dbt_project=DBT_PROJECT,
+        flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,
+        citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
+        load_results=load_dbt_results,
+        classify_failure=classify_dbt_failure,
+        recovery_record_builder=build_recovery_record,
+        persisted_from_results=silver_persisted_from_results,
         runner=subprocess.run,
+        **context,
     )
-    for completed in execution.attempts:
-        if completed.stdout:
-            print(completed.stdout, end="")
-        if completed.stderr:
-            print(completed.stderr, end="", file=sys.stderr)
-    completed = execution.completed
-    missing_artifact_error = (
-        "missing expected dbt artifacts: "
-        + ", ".join(execution.missing_expected_artifacts)
-        if completed.returncode == 0 and execution.missing_expected_artifacts
-        else ""
-    )
-    if completed.returncode == 0 and not missing_artifact_error:
-        return {
-            "status": "success",
-            "traffic_citydata_crowding_snapshot_id": citydata_crowding_snapshot_id,
-            "run_results_path": execution.existing_run_results_path,
-            "sources_path": execution.existing_sources_path,
-            "manifest_path": execution.existing_manifest_path,
-            "selected_unique_ids": list(execution.selected_unique_ids),
-        }
-
-    results = (
-        load_dbt_results(execution.existing_run_results_path)
-        if execution.existing_run_results_path
-        else []
-    )
-    failure = classify_dbt_failure(
-        returncode=completed.returncode or 2,
-        results=results,
-        artifact_path=execution.primary_artifact_path,
-        command_output=(
-            f"{completed.stdout}\n{completed.stderr}\n{missing_artifact_error}"
-        ),
-    )
-    record = build_recovery_record(
-        failure,
-        traffic_snapshot_dag_run_id=str(snapshot_run_id) if snapshot_run_id else None,
-        traffic_citydata_crowding_snapshot_id=citydata_crowding_snapshot_id,
-        dag_id=getattr(ti, "dag_id", "traffic_incident_transform"),
-        task_id=task_id,
-        run_id=run_id,
-        try_number=try_number if isinstance(try_number, int) else None,
-        silver_persisted=silver_persisted_from_results(
-            results,
-            selected_unique_ids=execution.selected_unique_ids,
-            default=silver_persisted,
-        ),
-        occurred_at=datetime.now(timezone.utc),
-    )
-    record.update(
-        {
-            DBT_RUN_RESULTS_RECORD_KEY: execution.existing_run_results_path,
-            "dbt_sources_path": execution.existing_sources_path,
-            "dbt_manifest_path": execution.existing_manifest_path,
-        }
-    )
-    ti.xcom_push(key=DBT_FAILURE_XCOM_KEY, value=record)
-    message = (
-        f"traffic dbt {failure.classification}: "
-        f"artifact={execution.primary_artifact_path or 'unknown'}"
-    )
-    if failure.retryable:
-        raise AirflowException(message)
-    raise AirflowFailException(message)
 
 
 def record_traffic_dbt_problem(context) -> None:
