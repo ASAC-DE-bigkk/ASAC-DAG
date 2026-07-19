@@ -75,7 +75,7 @@ def test_gold_admission_fails_closed_for_malformed_marker_and_skips_exact_tuple(
     )
     monkeypatch.setattr(
         module,
-        "resolve_current_silver_evidence",
+        "current_silver_output_evidence",
         lambda **_kwargs: module.SilverOutputEvidence(42, "a" * 64),
     )
     monkeypatch.setattr(module, "resolve_gold_citydata_snapshot_id", lambda **_kwargs: 7)
@@ -92,3 +92,65 @@ def test_gold_admission_fails_closed_for_malformed_marker_and_skips_exact_tuple(
     ).to_json()
     with pytest.raises(FakeAirflowSkipException):
         module.admit_traffic_gold_snapshot(ti=ti)
+
+
+def test_gold_admission_uses_fresh_current_evidence_not_stale_resolver_xcom(monkeypatch):
+    module = load_gold_transform_module()
+    FakeVariable.values[module.GOLD_SUCCESS_MARKER_KEY] = module.TransformSuccessMarker(
+        version=1,
+        pipeline="gold",
+        identity=module.TransformIdentity.gold(
+            "incident-1", flow_run_id=None, citydata_snapshot_id=7
+        ),
+        output_snapshot_id=42,
+        compacted_files_fingerprint="a" * 64,
+    ).to_json()
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids, key=None: (
+            {"snapshot_id": 42, "compacted_files_fingerprint": "a" * 64}
+            if key == module.SILVER_OUTPUT_EVIDENCE_XCOM_KEY
+            else None
+            if key == module.FLOW_SNAPSHOT_XCOM_KEY
+            else 7
+            if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY
+            else "incident-1"
+        )
+    )
+    monkeypatch.setattr(
+        module,
+        "current_silver_output_evidence",
+        lambda: module.SilverOutputEvidence(43, "b" * 64),
+    )
+
+    assert module.admit_traffic_gold_snapshot(ti=ti)["action"] == "RUN"
+
+
+def test_gold_success_marker_uses_fresh_evidence_and_heavy_pool(monkeypatch):
+    module = load_gold_transform_module()
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids, key=None: (
+            {"tier": "gate", "hour_bucket": "2026-07-19T15", "day_bucket": "2026-07-19"}
+            if task_ids == module.SELECT_TEST_TIER_TASK_ID
+            else None
+            if key == module.FLOW_SNAPSHOT_XCOM_KEY
+            else 7
+            if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY
+            else "incident-1"
+        )
+    )
+    monkeypatch.setattr(
+        module,
+        "current_silver_output_evidence",
+        lambda: module.SilverOutputEvidence(43, "b" * 64),
+    )
+
+    module.mark_traffic_gold_success(ti=ti)
+
+    marker = module.TransformSuccessMarker.from_json(
+        FakeVariable.values[module.GOLD_SUCCESS_MARKER_KEY]
+    )
+    assert marker.output_snapshot_id == 43
+    task = module.dag.task_dict["mark_traffic_gold_success"]
+    assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+    assert task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
+    assert task.kwargs["weight_rule"] == "absolute"

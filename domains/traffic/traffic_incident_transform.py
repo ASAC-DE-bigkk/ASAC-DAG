@@ -73,7 +73,6 @@ DBT_BIN = traffic_dbt.dbt_bin()
 DBT_PROJECT = traffic_dbt.dbt_project_dir()
 SNAPSHOT_TASK_ID = "resolve_traffic_snapshot_run"
 TRAFFIC_BRONZE_ASSET = TRAFFIC_INCIDENT_BRONZE_ASSET
-CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY = "traffic_citydata_crowding_snapshot_id"
 PIN_CRITICAL_PRIORITY = 10
 DBT_RETRY_DELAY = timedelta(minutes=2)
 DEFAULT_PARAMS = {
@@ -97,12 +96,11 @@ def resolve_traffic_snapshot_run(**context) -> str:
 def admit_traffic_silver_snapshot(**context) -> dict[str, object]:
     ti = context["ti"]
     incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
-    evidence = current_silver_output_evidence()
     return admit_transform(
         variable=Variable,
         marker_key=SILVER_SUCCESS_MARKER_KEY,
         identity=TransformIdentity.silver(incident_run_id),
-        evidence=evidence,
+        current_evidence_loader=current_silver_output_evidence,
     )
 
 
@@ -125,13 +123,19 @@ def publish_traffic_incident_silver_asset(**context) -> dict[str, object]:
         asset=TRAFFIC_INCIDENT_SILVER_ASSET_REF,
         metadata=metadata,
     )
-    write_success_marker(
+    return metadata
+
+
+def mark_traffic_silver_success(**context) -> dict[str, object]:
+    ti = context["ti"]
+    incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
+    serialized = write_success_marker(
         variable=Variable,
         marker_key=SILVER_SUCCESS_MARKER_KEY,
         identity=TransformIdentity.silver(incident_run_id),
-        evidence=evidence,
+        evidence=silver_output_evidence_from_dbt_run(ti),
     )
-    return metadata
+    return {"marker": serialized}
 
 
 def run_dbt_phase(*, dbt_command: str, selector: str | None, snapshot_task_id: str, silver_persisted: bool, fresh_parse: bool = False, snapshot_required: bool = False, silver_fence_mode: str | None = None, threads: int | None = None, **context) -> dict[str, object]:
@@ -208,6 +212,9 @@ with DAG(
     admit_snapshot = PythonOperator(
         task_id="admit_traffic_silver_snapshot",
         python_callable=admit_traffic_silver_snapshot,
+        pool=TRINO_HEAVY_POOL,
+        priority_weight=PIN_CRITICAL_PRIORITY,
+        weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
     )
     dbt_phase_tasks = {
@@ -227,13 +234,18 @@ with DAG(
         outlets=[TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS],
         on_failure_callback=record_traffic_problem,
     )
+    mark_success = PythonOperator(
+        task_id="mark_traffic_silver_success",
+        python_callable=mark_traffic_silver_success,
+        on_failure_callback=record_traffic_problem,
+    )
     publish_metrics = PythonOperator(
         task_id="publish_dbt_run_metrics",
         python_callable=publish_dbt_run_metrics,
         on_failure_callback=record_traffic_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
-    chain = [validate_runtime, resolve_snapshot, admit_snapshot, *dbt_phase_tasks.values(), publish_silver, publish_metrics]
+    chain = [validate_runtime, resolve_snapshot, admit_snapshot, *dbt_phase_tasks.values(), publish_silver, mark_success, publish_metrics]
     for upstream, downstream in zip(chain, chain[1:]):
         upstream >> downstream
 

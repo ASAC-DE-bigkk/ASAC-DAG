@@ -181,19 +181,21 @@ def test_dbt_deps_and_selected_phases_use_only_supported_isolated_paths(
 def test_successful_pinned_dbt_phase_returns_citydata_snapshot_lineage(
     tmp_path, monkeypatch
 ):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     monkeypatch.setattr(module, "DBT_PROJECT", str(tmp_path / "dbt"))
     snapshot_id = 8738321387624398062
 
     def xcom_pull(*, task_ids, key=None):
         if task_ids != module.SNAPSHOT_TASK_ID:
             return None
+        if key == module.FLOW_SNAPSHOT_XCOM_KEY:
+            return None
         if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY:
             return snapshot_id
         return "snapshot-a"
 
     ti = types.SimpleNamespace(
-        task_id="dbt_run_silver",
+        task_id="dbt_run_gold",
         try_number=1,
         xcom_pull=xcom_pull,
     )
@@ -202,7 +204,7 @@ def test_successful_pinned_dbt_phase_returns_citydata_snapshot_lineage(
         if command[1] == "ls":
             return types.SimpleNamespace(
                 returncode=0,
-                stdout='{"unique_id":"model.traffic.silver","resource_type":"model"}\n',
+                stdout='{"unique_id":"model.traffic.gold","resource_type":"model"}\n',
                 stderr="",
             )
         write_materialization_artifacts(command)
@@ -212,10 +214,11 @@ def test_successful_pinned_dbt_phase_returns_citydata_snapshot_lineage(
 
     result = module.run_dbt_phase(
         dbt_command="run",
-        selector="ask_seoul_traffic_transform_silver",
+        selector="ask_seoul_traffic_transform_gold",
         snapshot_task_id=module.SNAPSHOT_TASK_ID,
-        silver_persisted=False,
+        silver_persisted=True,
         snapshot_required=True,
+        citydata_snapshot_required=True,
         ti=ti,
         run_id="manual__a",
         params={"target": "dev"},
@@ -227,19 +230,21 @@ def test_successful_pinned_dbt_phase_returns_citydata_snapshot_lineage(
 def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
     tmp_path, monkeypatch
 ):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     monkeypatch.setattr(module, "DBT_PROJECT", str(tmp_path / "dbt"))
     pushed = {}
 
     def xcom_pull(*, task_ids, key=None):
         if task_ids != module.SNAPSHOT_TASK_ID:
             return None
+        if key == module.FLOW_SNAPSHOT_XCOM_KEY:
+            return None
         if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY:
             return 8738321387624398062
         return "snapshot-a"
 
     ti = types.SimpleNamespace(
-        task_id="dbt_test_silver",
+        task_id="dbt_test_gold",
         try_number=1,
         xcom_pull=xcom_pull,
         xcom_push=lambda key, value: pushed.update(key=key, value=value),
@@ -249,7 +254,7 @@ def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
         if command[1] == "ls":
             return types.SimpleNamespace(
                 returncode=0,
-                stdout='{"unique_id":"test.traffic.silver","resource_type":"test"}\n',
+                stdout='{"unique_id":"test.traffic.gold","resource_type":"test"}\n',
                 stderr="",
             )
         write_materialization_artifacts(command)
@@ -271,9 +276,10 @@ def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
     with pytest.raises(FakeAirflowFailException):
         module.run_dbt_phase(
             dbt_command="test",
-            selector="ask_seoul_traffic_transform_silver",
+            selector="ask_seoul_traffic_transform_gold_full_tests",
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             silver_persisted=True,
+            citydata_snapshot_required=True,
             ti=ti,
             run_id="manual__a",
             params={"target": "dev"},

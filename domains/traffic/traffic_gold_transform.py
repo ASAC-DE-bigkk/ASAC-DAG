@@ -51,9 +51,9 @@ from traffic_ingest.transform_dag_support import (  # noqa: E402
     TransformFailurePorts,
     admit_transform,
     build_dbt_phase_task,
+    current_silver_output_evidence,
     record_classified_dbt_problem,
     resolve_traffic_gold_snapshot_run as _resolve_traffic_gold_snapshot_run,
-    silver_output_evidence_from_resolver,
     write_success_marker,
 )
 from traffic_ingest.transform_metrics import (  # noqa: E402
@@ -98,10 +98,6 @@ def resolve_traffic_gold_snapshot_run(**context) -> str:
     )
 
 
-def resolve_current_silver_evidence(*, ti):
-    return silver_output_evidence_from_resolver(ti, snapshot_task_id=SNAPSHOT_TASK_ID)
-
-
 def resolve_gold_citydata_snapshot_id(*, ti):
     return ti.xcom_pull(
         task_ids=SNAPSHOT_TASK_ID,
@@ -125,7 +121,7 @@ def admit_traffic_gold_snapshot(**context) -> dict[str, object]:
         variable=Variable,
         marker_key=GOLD_SUCCESS_MARKER_KEY,
         identity=_gold_identity(ti=ti),
-        evidence=resolve_current_silver_evidence(ti=ti),
+        current_evidence_loader=current_silver_output_evidence,
     )
 
 
@@ -137,7 +133,7 @@ def mark_traffic_gold_success(**context) -> dict[str, object]:
         variable=Variable,
         marker_key=GOLD_SUCCESS_MARKER_KEY,
         identity=_gold_identity(ti=ti),
-        evidence=resolve_current_silver_evidence(ti=ti),
+        evidence=current_silver_output_evidence(),
     )
     return {"marker": serialized}
 
@@ -225,6 +221,9 @@ with DAG(
     admit_snapshot = PythonOperator(
         task_id="admit_traffic_gold_snapshot",
         python_callable=admit_traffic_gold_snapshot,
+        pool=TRINO_HEAVY_POOL,
+        priority_weight=PIN_CRITICAL_PRIORITY,
+        weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
     )
     dbt_phase_tasks = {
@@ -241,6 +240,9 @@ with DAG(
     mark_success = PythonOperator(
         task_id="mark_traffic_gold_success",
         python_callable=mark_traffic_gold_success,
+        pool=TRINO_HEAVY_POOL,
+        priority_weight=PIN_CRITICAL_PRIORITY,
+        weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
     )
     publish_metrics = PythonOperator(

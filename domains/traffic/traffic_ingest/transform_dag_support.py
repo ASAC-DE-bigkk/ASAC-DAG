@@ -260,9 +260,13 @@ def admit_transform(
     variable,
     marker_key: str,
     identity: TransformIdentity,
-    evidence: SilverOutputEvidence,
+    current_evidence_loader: Callable[[], SilverOutputEvidence],
 ) -> dict[str, object]:
     marker = load_success_marker(variable, key=marker_key, pipeline=identity.pipeline)
+    if marker is None or marker.identity != identity:
+        return {"action": "RUN", "identity": identity.as_dict()}
+
+    evidence = current_evidence_loader()
     try:
         decision = admission_decision(
             marker,

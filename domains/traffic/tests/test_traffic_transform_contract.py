@@ -495,166 +495,113 @@ def test_traffic_snapshot_resolver_rejects_manifest_mismatch(monkeypatch):
         )
 
 
-def _obsolete_combined_flow_asset_pins_exact_incident_and_flow_pair(monkeypatch):
-    module = load_transform_module()
-    incident_calls = []
-    flow_calls = []
-    pushed = []
-    monkeypatch.setattr(
-        module,
-        "resolve_citydata_crowding_snapshot_id",
-        lambda: 8738321387624398062,
-        raising=False,
+def _set_silver_marker(module, incident_run_id="incident-42"):
+    FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = (
+        module.TransformSuccessMarker(
+            version=1,
+            pipeline="silver",
+            identity=module.TransformIdentity.silver(incident_run_id),
+            output_snapshot_id=42,
+            compacted_files_fingerprint="a" * 64,
+        ).to_json()
     )
 
-    class IncidentManifest:
-        def latest_publishable_run_id(self):
-            return "incident-42"
 
-        def require_publishable(self, run_id):
-            incident_calls.append(run_id)
-            return run_id
+def _flow_event(*, flow_run_id="flow-42", parent_incident_run_id="incident-42"):
+    return types.SimpleNamespace(
+        extra={
+            "source_id": "seoul_traffic_flow",
+            "flow_run_id": flow_run_id,
+            "flow_dag_run_id": flow_run_id,
+            "parent_incident_run_id": parent_incident_run_id,
+            "event_at": "2026-07-16T00:06:00+00:00",
+            "load_date": "2026-07-16",
+            "row_count": 1,
+            "payload_hash": "b" * 64,
+            "is_publishable": True,
+        }
+    )
 
-        def coalesce_many(self, *_args, **_kwargs):
-            pass
+
+def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
+    module = load_gold_transform_module()
+    _set_silver_marker(module)
+    flow_calls = []
+    pushed = {}
 
     class FlowManifest:
         def require_publishable(self, run_id):
             flow_calls.append(run_id)
             return run_id
 
-    monkeypatch.setattr(module, "build_traffic_manifest", lambda: IncidentManifest())
     monkeypatch.setattr(module, "build_traffic_flow_manifest", lambda: FlowManifest())
-    flow_event = types.SimpleNamespace(
-        extra={
-            "source_id": "seoul_traffic_flow",
-            "flow_run_id": "flow-42",
-            "flow_dag_run_id": "flow-42",
-            "parent_incident_run_id": "incident-42",
-            "event_at": "2026-07-16T00:06:00+00:00",
-            "load_date": "2026-07-16",
-            "row_count": 1,
-            "payload_hash": "b" * 64,
-            "is_publishable": True,
-        }
-    )
+    monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
     ti = types.SimpleNamespace(
-        xcom_push=lambda key, value: pushed.append((key, value))
+        xcom_push=lambda *, key, value: pushed.update({key: value})
     )
 
-    assert module.resolve_traffic_snapshot_run(
+    assert module.resolve_traffic_gold_snapshot_run(
         ti=ti,
-        triggering_asset_events={module.TRAFFIC_FLOW_BRONZE_ASSET: [flow_event]},
+        triggering_asset_events={module.TRAFFIC_FLOW_BRONZE_ASSET: [_flow_event()]},
     ) == "incident-42"
-    assert incident_calls == ["incident-42"]
     assert flow_calls == ["flow-42"]
-    assert pushed == [
-        (module.FLOW_SNAPSHOT_XCOM_KEY, "flow-42"),
-        (module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY, 8738321387624398062),
-    ]
+    assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] == "flow-42"
+    assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
 
 
-def _obsolete_combined_stale_flow_asset_falls_forward_to_latest_incident_without_flow(monkeypatch):
-    module = load_transform_module()
-    pushed = []
+def test_gold_stale_incompatible_flow_becomes_none(monkeypatch):
+    module = load_gold_transform_module()
+    _set_silver_marker(module, "incident-new")
+    pushed = {}
     monkeypatch.setattr(
         module,
-        "resolve_citydata_crowding_snapshot_id",
-        lambda: 8738321387624398062,
-        raising=False,
+        "build_traffic_flow_manifest",
+        lambda: pytest.fail("incompatible Flow must not be read"),
     )
-
-    class IncidentManifest:
-        def latest_publishable_run_id(self):
-            return "incident-new"
-
-        def require_publishable(self, run_id):
-            assert run_id == "incident-new"
-            return run_id
-
-        def coalesce_many(self, *_args, **_kwargs):
-            pass
-
-    class FlowManifest:
-        def require_publishable(self, _run_id):
-            pytest.fail("stale Flow must not be selected")
-
-    monkeypatch.setattr(module, "build_traffic_manifest", lambda: IncidentManifest())
-    monkeypatch.setattr(module, "build_traffic_flow_manifest", lambda: FlowManifest())
-    flow_event = types.SimpleNamespace(
-        extra={
-            "source_id": "seoul_traffic_flow",
-            "flow_run_id": "flow-old",
-            "flow_dag_run_id": "flow-old",
-            "parent_incident_run_id": "incident-old",
-            "event_at": "2026-07-16T00:06:00+00:00",
-            "load_date": "2026-07-16",
-            "row_count": 1,
-            "payload_hash": "b" * 64,
-            "is_publishable": True,
-        }
-    )
+    monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
     ti = types.SimpleNamespace(
-        xcom_push=lambda key, value: pushed.append((key, value))
+        xcom_push=lambda *, key, value: pushed.update({key: value})
     )
 
-    assert module.resolve_traffic_snapshot_run(
+    assert module.resolve_traffic_gold_snapshot_run(
         ti=ti,
-        triggering_asset_events={module.TRAFFIC_FLOW_BRONZE_ASSET: [flow_event]},
+        triggering_asset_events={
+            module.TRAFFIC_FLOW_BRONZE_ASSET: [
+                _flow_event(flow_run_id="flow-old", parent_incident_run_id="incident-old")
+            ]
+        },
     ) == "incident-new"
-    assert pushed == [
-        (module.FLOW_SNAPSHOT_XCOM_KEY, None),
-        (module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY, 8738321387624398062),
-    ]
+    assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
 
 
-def _obsolete_combined_snapshot_resolver_fails_closed_when_citydata_snapshot_is_unavailable(
-    monkeypatch,
-):
-    module = load_transform_module()
+def test_gold_resolver_fails_closed_when_citydata_unavailable(monkeypatch):
+    module = load_gold_transform_module()
+    _set_silver_marker(module)
     from traffic_ingest.external_snapshot import ExternalSnapshotUnavailableError
 
-    monkeypatch.setattr(
-        module,
-        "resolve_transform_snapshot_pair",
-        lambda **_kwargs: types.SimpleNamespace(
-            incident_run_id="incident-42",
-            flow_run_id=None,
-        ),
-    )
     monkeypatch.setattr(
         module,
         "resolve_citydata_crowding_snapshot_id",
         lambda: (_ for _ in ()).throw(
             ExternalSnapshotUnavailableError("no Citydata snapshot")
         ),
-        raising=False,
     )
 
     with pytest.raises(FakeAirflowFailException, match="no Citydata snapshot"):
-        module.resolve_traffic_snapshot_run()
+        module.resolve_traffic_gold_snapshot_run(triggering_asset_events={})
 
 
-def _obsolete_combined_snapshot_resolver_propagates_citydata_query_errors_for_retry(monkeypatch):
-    module = load_transform_module()
-    query_error = RuntimeError("Trino connection reset")
-    monkeypatch.setattr(
-        module,
-        "resolve_transform_snapshot_pair",
-        lambda **_kwargs: types.SimpleNamespace(
-            incident_run_id="incident-42",
-            flow_run_id=None,
-        ),
-    )
+def test_gold_resolver_propagates_citydata_query_errors_for_retry(monkeypatch):
+    module = load_gold_transform_module()
+    _set_silver_marker(module)
     monkeypatch.setattr(
         module,
         "resolve_citydata_crowding_snapshot_id",
-        lambda: (_ for _ in ()).throw(query_error),
-        raising=False,
+        lambda: (_ for _ in ()).throw(RuntimeError("Trino connection reset")),
     )
 
     with pytest.raises(RuntimeError, match="Trino connection reset"):
-        module.resolve_traffic_snapshot_run()
+        module.resolve_traffic_gold_snapshot_run(triggering_asset_events={})
 
 
 def test_traffic_contract_gates_delegate_membership_to_dbt_selectors():
@@ -830,17 +777,18 @@ def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch)
         return values[(task_ids, key)]
 
     ti = types.SimpleNamespace(
-        task_id="dbt_run_silver",
+        task_id="dbt_run_gold",
         try_number=1,
         xcom_pull=xcom_pull,
     )
 
     result = module.run_dbt_phase(
         dbt_command="run",
-        selector="ask_seoul_traffic_transform_silver",
+        selector="ask_seoul_traffic_transform_gold",
         snapshot_task_id=module.SNAPSHOT_TASK_ID,
         snapshot_required=True,
-        silver_persisted=False,
+        citydata_snapshot_required=True,
+        silver_persisted=True,
         ti=ti,
         run_id="asset_triggered__pinned",
         params={"target": "dev"},
@@ -861,7 +809,7 @@ def test_citydata_required_phase_rejects_missing_or_invalid_citydata_snapshot(
     monkeypatch,
     external_snapshot_id,
 ):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     called = False
 
     def fail_if_called(**_kwargs):
@@ -873,6 +821,8 @@ def test_citydata_required_phase_rejects_missing_or_invalid_citydata_snapshot(
     def xcom_pull(*, task_ids, key=None):
         if key is None:
             return "snapshot-a"
+        if key == module.FLOW_SNAPSHOT_XCOM_KEY:
+            return None
         if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY:
             return external_snapshot_id
         return None
@@ -889,11 +839,11 @@ def test_citydata_required_phase_rejects_missing_or_invalid_citydata_snapshot(
     ):
         module.run_dbt_phase(
             dbt_command="run",
-            selector="ask_seoul_traffic_transform_silver",
+            selector="ask_seoul_traffic_transform_gold",
             snapshot_task_id=module.SNAPSHOT_TASK_ID,
             snapshot_required=True,
             citydata_snapshot_required=True,
-            silver_persisted=False,
+            silver_persisted=True,
             ti=ti,
             run_id="asset_triggered__missing-citydata-pin",
             params={"target": "dev"},
