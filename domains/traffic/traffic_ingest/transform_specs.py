@@ -139,30 +139,44 @@ GOLD_DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_run_gold",
         "run",
-        "ask_seoul_traffic_transform_gold",
+        "ask_seoul_traffic_transform_gold_models_without_commerce",
         silver_persisted=True,
         snapshot_required=True,
         citydata_snapshot_required=True,
-        selector_when_flow_missing="ask_seoul_traffic_transform_gold_incident_models",
+        selector_when_flow_missing=(
+            "ask_seoul_traffic_transform_gold_incident_models_without_commerce"
+        ),
     ),
     DbtPhaseSpec(
         "dbt_test_gold",
         "test",
-        "ask_seoul_traffic_transform_gold_full_tests",
+        "ask_seoul_traffic_transform_gold_full_tests_without_commerce",
         silver_persisted=True,
         fresh_parse=True,
         snapshot_required=True,
         pin_critical=True,
         citydata_snapshot_required=True,
         selector_by_test_tier={
-            TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
-            TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
-            TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+            TrafficTestTier.GATE: (
+                "ask_seoul_traffic_transform_gold_gate_tests_without_commerce"
+            ),
+            TrafficTestTier.HOURLY: (
+                "ask_seoul_traffic_transform_gold_hourly_tests_without_commerce"
+            ),
+            TrafficTestTier.FULL: (
+                "ask_seoul_traffic_transform_gold_full_tests_without_commerce"
+            ),
         },
         selector_by_test_tier_when_flow_missing={
-            TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_incident_gate_tests",
-            TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_incident_hourly_tests",
-            TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_incident_full_tests",
+            TrafficTestTier.GATE: (
+                "ask_seoul_traffic_transform_gold_incident_gate_tests_without_commerce"
+            ),
+            TrafficTestTier.HOURLY: (
+                "ask_seoul_traffic_transform_gold_incident_hourly_tests_without_commerce"
+            ),
+            TrafficTestTier.FULL: (
+                "ask_seoul_traffic_transform_gold_incident_full_tests_without_commerce"
+            ),
         },
     ),
 )
