@@ -632,6 +632,7 @@ def record_classified_dbt_problem(
             name: record.get(name)
             for name in (
                 "traffic_snapshot_dag_run_id",
+                "traffic_flow_snapshot_dag_run_id",
                 "traffic_citydata_crowding_snapshot_id",
                 "dbt_test_names",
                 "dbt_failed_row_count",
