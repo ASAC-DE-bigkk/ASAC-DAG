@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 from ..run_manifest import MANIFEST_TABLE as MANIFEST_TABLE
+from .lineage import StagePolicy
 
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -23,6 +24,27 @@ DISCORD_GREEN = 3066993
 DISCORD_YELLOW = 16776960
 DISCORD_RED = 15158332
 KMA_BASE_INTERVAL_HOURS = 3
+MARQUEZ_BASE_URL = "http://marquez-api:5000/api/v1"
+MARQUEZ_NAMESPACE = "ask-seoul-dev-airflow"
+WEATHER_PIPELINE_STAGE_POLICIES = (
+    StagePolicy("bronze", "Weather Bronze", "weather_vilage_fcst_bronze", 360),
+    StagePolicy(
+        "source_freshness",
+        "Weather source freshness",
+        "weather_vilage_fcst_transform.dbt_source_freshness",
+        360,
+    ),
+    StagePolicy(
+        "transform", "Weather Silver/Gold", "weather_vilage_fcst_transform", 360
+    ),
+    StagePolicy(
+        "maintenance",
+        "Iceberg maintenance",
+        "ask_seoul_iceberg_maintenance",
+        1_560,
+        required=False,
+    ),
+)
 
 
 @dataclass(frozen=True)

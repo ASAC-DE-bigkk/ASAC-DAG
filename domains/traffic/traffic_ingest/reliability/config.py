@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 from ..run_manifest import MANIFEST_TABLE as MANIFEST_TABLE
+from .lineage import StagePolicy
 
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -30,6 +31,31 @@ DISCORD_GREEN = 3066993
 DISCORD_YELLOW = 16776960
 DISCORD_RED = 15158332
 SCHEDULED_FAILURE_REASON_FALLBACK = "원인 미확인"
+MARQUEZ_BASE_URL = "http://marquez-api:5000/api/v1"
+MARQUEZ_NAMESPACE = "ask-seoul-dev-airflow"
+TRAFFIC_PIPELINE_STAGE_POLICIES = (
+    StagePolicy("landing", "Raw landing", "traffic_incident_landing", 20),
+    StagePolicy("incident_bronze", "Incident Bronze", "traffic_incident_bronze", 60),
+    StagePolicy("flow_bronze", "Flow Bronze", "traffic_flow_bronze", 30),
+    StagePolicy(
+        "incident_source_freshness",
+        "Incident source freshness",
+        "traffic_incident_transform.dbt_source_freshness",
+        120,
+    ),
+    StagePolicy(
+        "incident_silver", "Incident Silver", "traffic_incident_transform", 120
+    ),
+    StagePolicy("flow_silver", "Flow Silver", "traffic_flow_transform", 120),
+    StagePolicy("gold", "Traffic Gold", "traffic_gold_transform", 240),
+    StagePolicy(
+        "maintenance",
+        "Iceberg maintenance",
+        "ask_seoul_iceberg_maintenance",
+        1_560,
+        required=False,
+    ),
+)
 
 
 @dataclass(frozen=True)
