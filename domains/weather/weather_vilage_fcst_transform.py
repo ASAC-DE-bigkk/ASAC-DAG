@@ -126,12 +126,12 @@ DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_run_gold",
         "run",
-        "ask_seoul_weather_transform_gold",
+        "ask_seoul_weather_transform_gold_without_commerce",
     ),
     DbtPhaseSpec(
         "dbt_test_gold",
         "test",
-        "ask_seoul_weather_transform_gold",
+        "ask_seoul_weather_transform_gold_without_commerce",
     ),
 )
 DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
