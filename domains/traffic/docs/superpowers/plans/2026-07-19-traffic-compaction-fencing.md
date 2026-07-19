@@ -189,7 +189,7 @@ def assert_safe_post_write(
         raise ExternalCompactionRace("unexpected replace snapshot after Silver MERGE")
 ```
 
-`collect_silver_snapshot_evidence()`는 exact `iceberg_dev.weather_traffic_bronze.silver_seoul_traffic_incident` metadata table만 조회하고 cursor/connection을 항상 닫는다.
+`collect_silver_snapshot_evidence()`는 exact `iceberg_dev.traffic.silver_seoul_traffic_incident` metadata table만 조회하고 cursor/connection을 항상 닫는다.
 
 - [ ] **Step 4: GREEN 확인**
 

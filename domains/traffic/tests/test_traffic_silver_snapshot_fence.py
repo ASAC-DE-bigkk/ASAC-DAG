@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import traffic_ingest.silver_snapshot_fence as snapshot_fence
 from traffic_ingest.silver_snapshot_fence import (
     ExternalCompactionRace,
     SilverSnapshotEvidence,
@@ -220,13 +221,13 @@ def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources()
     snapshot_sql, files_sql = cursor.statements
     assert snapshot_sql == (
         "SELECT snapshot_id, committed_at, operation "
-        "FROM iceberg_dev.weather_traffic_bronze."
+        "FROM iceberg_dev.traffic."
         '"silver_seoul_traffic_incident$snapshots" '
         "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
     )
     assert files_sql == (
         "SELECT file_path "
-        "FROM iceberg_dev.weather_traffic_bronze."
+        "FROM iceberg_dev.traffic."
         '"silver_seoul_traffic_incident$files" '
         "WHERE content = 0 "
         "AND regexp_like(file_path, '(^|/)compacted-[^/]*$') "
@@ -234,6 +235,20 @@ def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources()
     )
     assert "LIKE" not in files_sql
     assert all("SHOW TABLES" not in statement.upper() for statement in cursor.statements)
+
+
+def test_trino_connection_uses_the_exact_silver_relation_namespace(monkeypatch):
+    captured = {}
+    connection = object()
+
+    monkeypatch.setattr(
+        "trino.dbapi.connect",
+        lambda **kwargs: captured.update(kwargs) or connection,
+    )
+
+    assert snapshot_fence._trino_connection() is connection
+    assert captured["catalog"] == "iceberg_dev"
+    assert captured["schema"] == "traffic"
 
 
 def test_collect_evidence_serializes_a_trino_snapshot_timestamp():

@@ -5,8 +5,11 @@ from datetime import datetime
 from typing import Any
 
 
-TRAFFIC_SILVER_RELATION = "iceberg_dev.weather_traffic_bronze.silver_seoul_traffic_incident"
-_RELATION_NAMESPACE, _RELATION_NAME = TRAFFIC_SILVER_RELATION.rsplit(".", 1)
+TRAFFIC_SILVER_RELATION = "iceberg_dev.traffic.silver_seoul_traffic_incident"
+_RELATION_CATALOG, _RELATION_SCHEMA, _RELATION_NAME = TRAFFIC_SILVER_RELATION.split(
+    ".", 2
+)
+_RELATION_NAMESPACE = f"{_RELATION_CATALOG}.{_RELATION_SCHEMA}"
 _SNAPSHOTS_RELATION = f'{_RELATION_NAMESPACE}."{_RELATION_NAME}$snapshots"'
 _FILES_RELATION = f'{_RELATION_NAMESPACE}."{_RELATION_NAME}$files"'
 _ALLOWED_OPERATIONS = frozenset({"append", "overwrite", "replace", "delete"})
@@ -91,8 +94,8 @@ def _trino_connection() -> Any:
         host=os.environ.get("TRINO_HOST", "trino"),
         port=int(os.environ.get("TRINO_PORT", "8080")),
         user=os.environ.get("TRINO_USER", "airflow"),
-        catalog="iceberg_dev",
-        schema="weather_traffic_bronze",
+        catalog=_RELATION_CATALOG,
+        schema=_RELATION_SCHEMA,
         http_scheme=os.environ.get("TRINO_HTTP_SCHEME", "http"),
     )
 
