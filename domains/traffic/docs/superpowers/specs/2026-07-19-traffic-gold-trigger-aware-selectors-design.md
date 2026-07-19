@@ -2,7 +2,7 @@
 
 ## 목표
 
-`traffic_gold_transform`은 `Traffic Incident Silver OR Traffic Flow Bronze` Asset으로 시작한다.
+`traffic_gold_transform`은 `Traffic Incident Silver OR Traffic Flow Silver` Asset으로 시작한다.
 따라서 정상 운영에서도 두 Asset이 동시에 도착한다고 가정할 수 없다. 각 Gold DagRun이 실제로
 pin한 입력에 맞는 dbt node만 실행하게 하여 incident-only run이 Flow 전용 모델 때문에
 실패하지 않도록 한다.
@@ -40,10 +40,10 @@ ASAC-DAG의 `DbtPhaseSpec`은 Flow snapshot이 없을 때 사용할 named select
 4. 현재 test tier에 대응하는 incident-only test만 실행한다.
 5. `(incident, None, citydata)` identity로 성공 marker를 기록한다.
 
-### compatible Flow Bronze가 도착한 run
+### compatible Flow Silver가 도착한 run
 
 1. Silver 성공 marker와 compatible Flow Bronze event를 결합한다.
-2. Flow manifest publishability를 기존 방식으로 검증한다.
+2. Flow Silver Asset 계약과 원본 Bronze manifest publishability를 검증한다.
 3. 기존 Gold model 21개와 기존 tier test selector를 그대로 실행한다.
 4. `(incident, flow, citydata)` identity로 성공 marker를 기록한다.
 

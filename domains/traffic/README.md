@@ -10,9 +10,10 @@
 3. receipt 기반 Bronze 적재: `traffic_incident_bronze.py`
 4. exact-parent Flow 적재: `traffic_flow_bronze.py`
 5. Incident Silver 변환: `traffic_incident_transform.py`
-6. Gold 변환: `traffic_gold_transform.py`
-7. durable queue 계약: `traffic_ingest/snapshot_receipt.py`
-8. 원천 의미: `docs/source.md`
+6. Flow Silver 변환: `traffic_flow_transform.py`
+7. Gold 변환: `traffic_gold_transform.py`
+8. durable queue 계약: `traffic_ingest/snapshot_receipt.py`
+9. 원천 의미: `docs/source.md`
 
 ## DAG entrypoints
 
@@ -23,7 +24,8 @@
 | `traffic_incident_manual.py` | 운영 스케줄과 분리된 수동 recollect/backfill DAG 두 개를 노출한다. |
 | `traffic_flow_bronze.py` | Incident Bronze Asset의 정확한 parent run을 기준으로 TrafficInfo를 수집·적재한다. |
 | `traffic_incident_transform.py` | Incident Bronze Asset만 받아 exact publishable snapshot을 고정하고 Silver run/test 후 Silver Asset을 발행한다. |
-| `traffic_gold_transform.py` | Silver Asset 또는 compatible Flow Bronze Asset을 받아 exact Silver/Flow와 read-only Citydata snapshot을 고정하고 Gold run/test를 실행한다. |
+| `traffic_flow_transform.py` | Flow Bronze와 matching Incident Silver를 고정해 Flow Silver run/test 후 Flow Silver Asset을 발행한다. |
+| `traffic_gold_transform.py` | Incident Silver 또는 compatible Flow Silver Asset을 받아 exact Silver/Flow와 read-only Citydata snapshot을 고정하고 Gold run/test를 실행한다. |
 | `traffic_snapshot_recovery.py` | 특정 publishable snapshot을 격리된 recovery relation으로 검증하는 dev 전용 수동 DAG다. |
 | `traffic_reliability_report.py` | landing ledger·receipt backlog·Bronze manifest를 읽어 Discord 신뢰성 리포트를 보낸다. |
 
@@ -72,7 +74,9 @@ Flow Bronze (2 tasks) -> exact Incident parent -> R2 raw -> MERGE/verify
 Silver Transform -> Incident Bronze Asset -> exact Incident pin -> admission
                  -> source/Bronze contract -> Silver run/test -> Silver Asset
                  -> success marker -> lineage/metrics
-Gold Transform -> Silver Asset OR compatible Flow Bronze Asset
+Flow Silver Transform -> Flow Bronze Asset AND matching Incident Silver Asset
+                      -> exact pair pin -> Flow Silver run/test -> Flow Silver Asset
+Gold Transform -> Incident Silver Asset OR compatible Flow Silver Asset
                -> exact Incident/Flow + read-only Citydata snapshot pin -> admission
                -> Gold run/test -> success marker -> lineage/metrics
 Reliability -> landing slot + receipt backlog + Bronze manifest -> Discord

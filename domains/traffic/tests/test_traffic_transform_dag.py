@@ -63,7 +63,7 @@ def test_gold_dag_schedule_and_guard_order():
 
     assert {asset.uri for asset in dag.kwargs["schedule"].assets} == {
         module.TRAFFIC_INCIDENT_SILVER_ASSET,
-        module.TRAFFIC_FLOW_BRONZE_ASSET,
+        module.TRAFFIC_FLOW_SILVER_ASSET,
     }
     assert dag.kwargs["max_active_runs"] == 1
     assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {

@@ -10,6 +10,7 @@ def test_traffic_production_entrypoints_stay_below_400_lines():
         "traffic_incident_landing.py",
         "traffic_incident_manual.py",
         "traffic_flow_bronze.py",
+        "traffic_flow_transform.py",
         "traffic_incident_transform.py",
     ):
         path = DOMAIN_ROOT / relative_path

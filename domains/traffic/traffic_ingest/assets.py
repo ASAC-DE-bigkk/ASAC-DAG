@@ -18,16 +18,21 @@ TRAFFIC_INCIDENT_RAW_ASSET = "r2://traffic/incident/raw-snapshot"
 TRAFFIC_INCIDENT_BRONZE_ASSET = TRAFFIC_BRONZE_ASSET
 TRAFFIC_INCIDENT_SILVER_ASSET = "iceberg://traffic/incident/silver"
 TRAFFIC_FLOW_BRONZE_ASSET = "iceberg://traffic/flow/bronze"
+TRAFFIC_FLOW_SILVER_ASSET = "iceberg://traffic/flow/silver"
 
 TRAFFIC_INCIDENT_RAW_ASSET_REF = Asset(TRAFFIC_INCIDENT_RAW_ASSET)
 TRAFFIC_INCIDENT_BRONZE_ASSET_REF = Asset(TRAFFIC_INCIDENT_BRONZE_ASSET)
 TRAFFIC_INCIDENT_SILVER_ASSET_REF = Asset(TRAFFIC_INCIDENT_SILVER_ASSET)
 TRAFFIC_FLOW_BRONZE_ASSET_REF = Asset(TRAFFIC_FLOW_BRONZE_ASSET)
+TRAFFIC_FLOW_SILVER_ASSET_REF = Asset(TRAFFIC_FLOW_SILVER_ASSET)
 TRAFFIC_INCIDENT_MATERIALIZED_ALIAS = AssetAlias("traffic_incident_materialized")
 TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS = AssetAlias(
     "traffic_incident_silver_materialized"
 )
 TRAFFIC_FLOW_MATERIALIZED_ALIAS = AssetAlias("traffic_flow_materialized")
+TRAFFIC_FLOW_SILVER_MATERIALIZED_ALIAS = AssetAlias(
+    "traffic_flow_silver_materialized"
+)
 
 INCIDENT_BRONZE_FIELDS = frozenset(
     {
@@ -52,6 +57,17 @@ FLOW_BRONZE_FIELDS = frozenset(
         "row_count",
         "payload_hash",
         "is_publishable",
+    }
+)
+FLOW_SILVER_FIELDS = frozenset(
+    {
+        "source_id",
+        "flow_run_id",
+        "flow_dag_run_id",
+        "parent_incident_run_id",
+        "event_at",
+        "is_publishable",
+        "contract",
     }
 )
 LEGACY_INCIDENT_BRONZE_TASK_IDS = frozenset(
@@ -202,6 +218,24 @@ def flow_bronze_events(context: Mapping[str, object]) -> list[dict[str, object]]
     )
 
 
+def flow_silver_events(context: Mapping[str, object]) -> list[dict[str, object]]:
+    events = _validated_events(
+        context,
+        asset_uri=TRAFFIC_FLOW_SILVER_ASSET,
+        required_fields=FLOW_SILVER_FIELDS,
+        source_id="seoul_traffic_flow",
+        run_field="flow_dag_run_id",
+        duplicate_run_field="flow_run_id",
+    )
+    if any(
+        set(event) != FLOW_SILVER_FIELDS
+        or event["contract"] != "traffic_flow_silver.v1"
+        for event in events
+    ):
+        raise TrafficAssetContractError("Traffic Flow Silver Asset metadata is invalid")
+    return events
+
+
 def _airflow_three_schedule(*, cron: str, asset: Asset, timezone: ZoneInfo):
     from airflow.timetables.assets import AssetOrTimeSchedule
     from airflow.timetables.trigger import CronTriggerTimetable
@@ -277,11 +311,15 @@ def publish_through_alias(
 
 __all__ = [
     "FLOW_BRONZE_FIELDS",
+    "FLOW_SILVER_FIELDS",
     "INCIDENT_BRONZE_FIELDS",
     "KST",
     "TRAFFIC_FLOW_BRONZE_ASSET",
     "TRAFFIC_FLOW_BRONZE_ASSET_REF",
     "TRAFFIC_FLOW_MATERIALIZED_ALIAS",
+    "TRAFFIC_FLOW_SILVER_ASSET",
+    "TRAFFIC_FLOW_SILVER_ASSET_REF",
+    "TRAFFIC_FLOW_SILVER_MATERIALIZED_ALIAS",
     "TRAFFIC_INCIDENT_BRONZE_ASSET",
     "TRAFFIC_INCIDENT_BRONZE_ASSET_REF",
     "TRAFFIC_INCIDENT_MATERIALIZED_ALIAS",
@@ -292,6 +330,7 @@ __all__ = [
     "TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS",
     "TrafficAssetContractError",
     "flow_bronze_events",
+    "flow_silver_events",
     "incident_bronze_events",
     "latest_incident_bronze_event",
     "materializer_schedule",

@@ -135,6 +135,9 @@ class FakeAsset:
     def __or__(self, other):
         return FakeAssetExpression(self, other)
 
+    def __and__(self, other):
+        return FakeAssetExpression(self, other)
+
 
 class FakeAssetAlias:
     def __init__(self, name):
@@ -146,6 +149,9 @@ class FakeAssetExpression:
         self.assets = assets
 
     def __or__(self, other):
+        return FakeAssetExpression(*self.assets, other)
+
+    def __and__(self, other):
         return FakeAssetExpression(*self.assets, other)
 
 
@@ -241,6 +247,24 @@ def load_gold_transform_module():
     module_path = Path(__file__).resolve().parents[1] / "traffic_gold_transform.py"
     spec = importlib.util.spec_from_file_location(
         "traffic_gold_transform_under_test", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
+def load_flow_transform_module():
+    sys.modules.pop("traffic_ingest.assets", None)
+    sys.modules.pop("traffic_ingest.transform_dag_support", None)
+    install_airflow_fakes()
+    module_path = Path(__file__).resolve().parents[1] / "traffic_flow_transform.py"
+    spec = importlib.util.spec_from_file_location(
+        "traffic_flow_transform_under_test", module_path
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

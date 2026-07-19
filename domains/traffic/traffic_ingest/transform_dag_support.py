@@ -16,8 +16,10 @@ from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 from traffic_ingest.assets import (
     TRAFFIC_FLOW_BRONZE_ASSET,
     TRAFFIC_INCIDENT_BRONZE_ASSET,
+    TRAFFIC_INCIDENT_SILVER_ASSET,
     TrafficAssetContractError,
     flow_bronze_events,
+    flow_silver_events,
     incident_bronze_events,
     schedule_asset,
 )
@@ -380,6 +382,47 @@ def _silver_materialization_from_event(event: object) -> tuple[str, SilverOutput
     return incident_run_id, evidence, event_at
 
 
+def resolve_traffic_flow_silver_snapshot_run(
+    *,
+    context: dict,
+    flow_manifest_factory: Callable[[], Any],
+    flow_xcom_key: str,
+) -> str:
+    """Pin one publishable Flow Bronze run to its materialized Incident parent."""
+    silver_events = _events_for_asset(context, TRAFFIC_INCIDENT_SILVER_ASSET)
+    if not silver_events:
+        raise AirflowFailException(
+            "Traffic Flow Silver requires an Incident Silver asset event"
+        )
+    incident_run_id, _, _ = max(
+        (_silver_materialization_from_event(event) for event in silver_events),
+        key=lambda item: (item[2], item[0]),
+    )
+    try:
+        flow_events = flow_bronze_events(context)
+    except TrafficAssetContractError as exc:
+        raise AirflowFailException(str(exc)) from exc
+    compatible_flow_events = [
+        event
+        for event in flow_events
+        if str(event["parent_incident_run_id"]) == incident_run_id
+    ]
+    if not compatible_flow_events:
+        raise AirflowFailException(
+            "Traffic Flow Silver requires a matching Incident parent"
+        )
+    flow_run_id = str(compatible_flow_events[-1]["flow_dag_run_id"])
+    _require_publishable(
+        flow_manifest_factory(),
+        flow_run_id,
+        domain="traffic flow",
+    )
+    task_instance = context.get("ti") or context.get("task_instance")
+    if task_instance is not None:
+        task_instance.xcom_push(key=flow_xcom_key, value=flow_run_id)
+    return incident_run_id
+
+
 def resolve_traffic_gold_snapshot_run(
     *,
     context: dict,
@@ -410,7 +453,7 @@ def resolve_traffic_gold_snapshot_run(
         )
 
     try:
-        flow_events = flow_bronze_events(context)
+        flow_events = flow_silver_events(context)
     except TrafficAssetContractError as exc:
         raise AirflowFailException(str(exc)) from exc
     compatible_flow_events = [
@@ -652,6 +695,7 @@ __all__ = [
     "resolve_transform_snapshot_pair",
     "record_classified_dbt_problem",
     "resolve_traffic_gold_snapshot_run",
+    "resolve_traffic_flow_silver_snapshot_run",
     "resolve_traffic_silver_snapshot_run",
     "resolve_traffic_snapshot_run",
     "silver_output_evidence_from_dbt_run",

@@ -19,7 +19,10 @@ def test_gold_dag_is_independent_and_owns_test_tier_marker():
     assert dag.dag_id == "traffic_gold_transform"
     assert {asset.uri for asset in dag.kwargs["schedule"].assets} == {
         module.TRAFFIC_INCIDENT_SILVER_ASSET,
-        module.TRAFFIC_FLOW_BRONZE_ASSET,
+        module.TRAFFIC_FLOW_SILVER_ASSET,
+    }
+    assert "iceberg://traffic/flow/bronze" not in {
+        asset.uri for asset in dag.kwargs["schedule"].assets
     }
     assert dag.kwargs["max_active_runs"] == 1
     assert "dbt_run_silver" not in dag.task_ids
@@ -55,7 +58,7 @@ def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_br
 
     incident = module.resolve_traffic_gold_snapshot_run(
         ti=ti,
-        triggering_asset_events={module.TRAFFIC_FLOW_BRONZE_ASSET: []},
+        triggering_asset_events={module.TRAFFIC_FLOW_SILVER_ASSET: []},
     )
 
     assert incident == "incident-1"

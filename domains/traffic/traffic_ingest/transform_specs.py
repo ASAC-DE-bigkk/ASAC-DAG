@@ -71,6 +71,31 @@ SILVER_DBT_PHASE_SPECS = (
     ),
 )
 
+FLOW_SILVER_DBT_PHASE_SPECS = (
+    DbtPhaseSpec(
+        "dbt_deps_flow_silver",
+        "deps",
+        workload=DbtWorkload.LOCAL,
+        threads=None,
+    ),
+    DbtPhaseSpec(
+        "dbt_run_flow_silver",
+        "run",
+        "ask_seoul_traffic_transform_flow_silver_model",
+        fresh_parse=True,
+        snapshot_required=True,
+        pin_critical=True,
+    ),
+    DbtPhaseSpec(
+        "dbt_test_flow_silver",
+        "test",
+        "ask_seoul_traffic_transform_flow_silver_tests",
+        silver_persisted=True,
+        snapshot_required=True,
+        pin_critical=True,
+    ),
+)
+
 GOLD_DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_deps_gold",
@@ -153,6 +178,7 @@ DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
 __all__ = [
     "DBT_PHASE_SPECS",
     "DBT_PHASE_TASK_IDS",
+    "FLOW_SILVER_DBT_PHASE_SPECS",
     "GOLD_DBT_PHASE_SPECS",
     "SILVER_DBT_PHASE_SPECS",
     "DbtPhaseSpec",
