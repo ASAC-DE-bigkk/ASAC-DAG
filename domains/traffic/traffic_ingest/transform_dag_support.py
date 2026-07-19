@@ -25,6 +25,7 @@ from traffic_ingest.assets import (
 )
 from traffic_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL
 from traffic_ingest.external_snapshot import ExternalSnapshotUnavailableError
+from traffic_ingest.run_manifest import RunNotPublishableError
 from traffic_ingest.silver_snapshot_fence import (
     SilverSnapshotEvidence,
     collect_silver_snapshot_evidence,
@@ -42,6 +43,7 @@ TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
 SILVER_SUCCESS_MARKER_KEY = "ask_seoul.traffic.silver_transform.last_success.v1"
 GOLD_SUCCESS_MARKER_KEY = "ask_seoul.traffic.gold_transform.last_success.v1"
 SILVER_OUTPUT_EVIDENCE_XCOM_KEY = "traffic_silver_output_evidence"
+STALE_INCIDENT_RUN_IDS_XCOM_KEY = "traffic_stale_incident_run_ids"
 SILVER_ASSET_CONTRACT = "traffic_incident_silver.v1"
 
 
@@ -105,9 +107,7 @@ def resolve_transform_snapshot_pair(
 
     incident_manifest = incident_manifest_factory()
     try:
-        latest_incident_run_id = str(
-            incident_manifest.latest_publishable_run_id()
-        )
+        latest_incident_run_id = str(incident_manifest.latest_publishable_run_id())
     except Exception as exc:
         raise AirflowFailException(
             "No publishable Traffic Incident Bronze snapshot is available"
@@ -219,6 +219,51 @@ def current_silver_output_evidence() -> SilverOutputEvidence:
     )
 
 
+def require_current_silver_output_evidence(
+    expected: SilverOutputEvidence,
+    *,
+    current_evidence_loader: Callable[[], SilverOutputEvidence],
+    mismatch_action: str,
+) -> SilverOutputEvidence:
+    """Fence Gold against a mutable Silver current table without hiding test races."""
+    if mismatch_action not in {"skip", "fail"}:
+        raise AirflowFailException("Traffic Silver evidence mismatch action is invalid")
+    current = current_evidence_loader()
+    if current != expected:
+        message = "Traffic Silver output changed after Gold snapshot resolution"
+        if mismatch_action == "skip":
+            raise AirflowSkipException(f"superseded {message}")
+        raise AirflowFailException(message)
+    return current
+
+
+def require_publishable_incident_snapshot(
+    manifest,
+    run_id: str,
+    *,
+    mismatch_action: str,
+) -> str:
+    """Distinguish an expected superseded run from manifest I/O failures."""
+    if mismatch_action not in {"skip", "fail"}:
+        raise AirflowFailException("Traffic manifest mismatch action is invalid")
+    try:
+        verified = manifest.require_publishable(run_id)
+    except RunNotPublishableError as exc:
+        message = f"Traffic Incident snapshot was superseded: {run_id}"
+        if mismatch_action == "skip":
+            raise AirflowSkipException(message) from exc
+        raise AirflowFailException(message) from exc
+    except Exception as exc:
+        raise AirflowFailException(
+            f"Traffic Incident manifest verification failed: {run_id}"
+        ) from exc
+    if str(verified) != run_id:
+        raise AirflowFailException(
+            f"Traffic Incident manifest identity mismatch: {run_id}"
+        )
+    return run_id
+
+
 def _silver_output_evidence_from_dict(value: object) -> SilverOutputEvidence:
     if not isinstance(value, dict) or set(value) != {
         "snapshot_id",
@@ -241,7 +286,9 @@ def _silver_output_evidence_from_dict(value: object) -> SilverOutputEvidence:
     )
 
 
-def load_success_marker(variable, *, key: str, pipeline: str) -> TransformSuccessMarker | None:
+def load_success_marker(
+    variable, *, key: str, pipeline: str
+) -> TransformSuccessMarker | None:
     try:
         raw_marker = variable.get(key, default=None)
     except Exception as exc:
@@ -277,7 +324,9 @@ def admit_transform(
             compacted_files_fingerprint=evidence.compacted_files_fingerprint,
         )
     except TransformAdmissionError as exc:
-        raise AirflowFailException("Traffic transform admission evidence is invalid") from exc
+        raise AirflowFailException(
+            "Traffic transform admission evidence is invalid"
+        ) from exc
     if decision.skip:
         raise AirflowSkipException("matching successful Traffic transform marker")
     return {"action": decision.action, "identity": identity.as_dict()}
@@ -313,7 +362,9 @@ def resolve_traffic_silver_snapshot_run(
     except TrafficAssetContractError as exc:
         raise AirflowFailException(str(exc)) from exc
     if not events:
-        raise AirflowFailException("traffic Silver requires an Incident Bronze asset event")
+        raise AirflowFailException(
+            "traffic Silver requires an Incident Bronze asset event"
+        )
     manifest = incident_manifest_factory()
     try:
         latest_run_id = str(manifest.latest_publishable_run_id())
@@ -327,8 +378,53 @@ def resolve_traffic_silver_snapshot_run(
         for event in events
         if str(event["bronze_dag_run_id"]) != latest_run_id
     ]
-    manifest.coalesce_many(stale_run_ids, replacement_run_id=latest_run_id)
+    task_instance = context.get("ti") or context.get("task_instance")
+    if task_instance is not None:
+        task_instance.xcom_push(
+            key=STALE_INCIDENT_RUN_IDS_XCOM_KEY,
+            value=stale_run_ids,
+        )
     return latest_run_id
+
+
+def coalesce_deferred_incident_runs(
+    task_instance,
+    *,
+    snapshot_task_id: str,
+    incident_manifest_factory: Callable[[], Any],
+    stale_xcom_key: str = STALE_INCIDENT_RUN_IDS_XCOM_KEY,
+) -> tuple[str, ...]:
+    """Invalidate superseded Bronze inputs only after replacement Silver is durable."""
+    replacement_run_id = task_instance.xcom_pull(task_ids=snapshot_task_id)
+    if not isinstance(replacement_run_id, str) or not replacement_run_id.strip():
+        raise AirflowFailException("Traffic replacement Silver snapshot is invalid")
+    raw_stale_run_ids = task_instance.xcom_pull(
+        task_ids=snapshot_task_id,
+        key=stale_xcom_key,
+    )
+    if raw_stale_run_ids is None:
+        return ()
+    if not isinstance(raw_stale_run_ids, Sequence) or isinstance(
+        raw_stale_run_ids, (str, bytes, bytearray)
+    ):
+        raise AirflowFailException("Traffic deferred coalescing evidence is invalid")
+
+    normalized: dict[str, None] = {}
+    for value in raw_stale_run_ids:
+        if not isinstance(value, str) or not value.strip():
+            raise AirflowFailException(
+                "Traffic deferred coalescing evidence is invalid"
+            )
+        run_id = value.strip()
+        if run_id != replacement_run_id:
+            normalized.setdefault(run_id, None)
+    stale_run_ids = tuple(normalized)
+    if stale_run_ids:
+        incident_manifest_factory().coalesce_many(
+            stale_run_ids,
+            replacement_run_id=replacement_run_id,
+        )
+    return stale_run_ids
 
 
 def _events_for_asset(context: Mapping[str, object], asset_uri: str) -> list[object]:
@@ -348,7 +444,9 @@ def _events_for_asset(context: Mapping[str, object], asset_uri: str) -> list[obj
     return events
 
 
-def _silver_materialization_from_event(event: object) -> tuple[str, SilverOutputEvidence, datetime]:
+def _silver_materialization_from_event(
+    event: object,
+) -> tuple[str, SilverOutputEvidence, datetime]:
     metadata = getattr(event, "extra", None)
     if not isinstance(metadata, dict) or set(metadata) != {
         "source_id",
@@ -367,14 +465,18 @@ def _silver_materialization_from_event(event: object) -> tuple[str, SilverOutput
     ):
         raise AirflowFailException("Traffic Silver Asset metadata is invalid")
     try:
-        incident_run_id = TransformIdentity.silver(metadata["incident_run_id"]).incident_run_id
+        incident_run_id = TransformIdentity.silver(
+            metadata["incident_run_id"]
+        ).incident_run_id
         evidence = _silver_output_evidence_from_dict(
             {
                 "snapshot_id": metadata["silver_snapshot_id"],
                 "compacted_files_fingerprint": metadata["compacted_files_fingerprint"],
             }
         )
-        event_at = datetime.fromisoformat(str(metadata["event_at"]).replace("Z", "+00:00"))
+        event_at = datetime.fromisoformat(
+            str(metadata["event_at"]).replace("Z", "+00:00")
+        )
     except (TransformAdmissionError, TypeError, ValueError) as exc:
         raise AirflowFailException("Traffic Silver Asset metadata is invalid") from exc
     if event_at.tzinfo is None:
@@ -427,8 +529,10 @@ def resolve_traffic_gold_snapshot_run(
     *,
     context: dict,
     variable,
+    incident_manifest_factory: Callable[[], Any],
     flow_manifest_factory: Callable[[], Any],
     citydata_snapshot_resolver: Callable[[], int],
+    current_silver_evidence_loader: Callable[[], SilverOutputEvidence],
     flow_xcom_key: str,
     citydata_xcom_key: str,
     silver_evidence_xcom_key: str = SILVER_OUTPUT_EVIDENCE_XCOM_KEY,
@@ -445,12 +549,25 @@ def resolve_traffic_gold_snapshot_run(
             variable, key=SILVER_SUCCESS_MARKER_KEY, pipeline="silver"
         )
         if marker is None:
-            raise AirflowFailException("No successful Traffic Silver marker is available")
+            raise AirflowFailException(
+                "No successful Traffic Silver marker is available"
+            )
         incident_run_id = marker.identity.incident_run_id
         evidence = SilverOutputEvidence(
             snapshot_id=marker.output_snapshot_id,
             compacted_files_fingerprint=marker.compacted_files_fingerprint,
         )
+
+    require_current_silver_output_evidence(
+        evidence,
+        current_evidence_loader=current_silver_evidence_loader,
+        mismatch_action="skip",
+    )
+    require_publishable_incident_snapshot(
+        incident_manifest_factory(),
+        incident_run_id,
+        mismatch_action="skip",
+    )
 
     try:
         flow_events = flow_silver_events(context)
@@ -464,7 +581,9 @@ def resolve_traffic_gold_snapshot_run(
     flow_run_id = None
     if compatible_flow_events:
         flow_run_id = str(compatible_flow_events[-1]["flow_dag_run_id"])
-        _require_publishable(flow_manifest_factory(), flow_run_id, domain="traffic flow")
+        _require_publishable(
+            flow_manifest_factory(), flow_run_id, domain="traffic flow"
+        )
 
     try:
         citydata_snapshot_id = citydata_snapshot_resolver()
@@ -551,9 +670,7 @@ def dbt_snapshot_variables(
         and not isinstance(citydata_crowding_snapshot_id, bool)
         and citydata_crowding_snapshot_id > 0
     ):
-        variables[citydata_crowding_snapshot_xcom_key] = (
-            citydata_crowding_snapshot_id
-        )
+        variables[citydata_crowding_snapshot_xcom_key] = citydata_crowding_snapshot_id
     return variables
 
 
@@ -682,6 +799,7 @@ __all__ = [
     "SILVER_ASSET_CONTRACT",
     "SILVER_OUTPUT_EVIDENCE_XCOM_KEY",
     "SILVER_SUCCESS_MARKER_KEY",
+    "STALE_INCIDENT_RUN_IDS_XCOM_KEY",
     "TRAFFIC_TRANSFORM_CRON_KST",
     "GoldSnapshotResolution",
     "SilverOutputEvidence",
@@ -689,12 +807,15 @@ __all__ = [
     "TransformFailurePorts",
     "admit_transform",
     "build_dbt_phase_task",
+    "coalesce_deferred_incident_runs",
     "compacted_files_fingerprint",
     "current_silver_output_evidence",
     "dbt_snapshot_variables",
     "load_success_marker",
     "resolve_transform_snapshot_pair",
     "record_classified_dbt_problem",
+    "require_current_silver_output_evidence",
+    "require_publishable_incident_snapshot",
     "resolve_traffic_gold_snapshot_run",
     "resolve_traffic_flow_silver_snapshot_run",
     "resolve_traffic_silver_snapshot_run",

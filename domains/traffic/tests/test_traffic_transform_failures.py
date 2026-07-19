@@ -58,7 +58,9 @@ def test_external_compaction_race_is_not_classified_as_a_generic_dbt_failure(
         try_number=1,
         dag_id="traffic_incident_transform",
         xcom_pull=lambda *, task_ids, key=None: "snapshot-a",
-        xcom_push=lambda **_kwargs: pytest.fail("race must not produce dbt failure XCom"),
+        xcom_push=lambda **_kwargs: pytest.fail(
+            "race must not produce dbt failure XCom"
+        ),
     )
 
     with pytest.raises(FakeAirflowFailException, match="^EXTERNAL_COMPACTION_RACE: "):
@@ -81,21 +83,21 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
     gold = load_gold_transform_module()
     classified_task_ids = {
         silver: [
-        "dbt_deps",
-        "dbt_source_freshness",
-        "dbt_test_traffic_incident_availability",
-        "dbt_test_traffic_bronze_source_contract",
-        "dbt_run_silver",
-        "dbt_test_silver",
+            "dbt_deps",
+            "dbt_source_freshness",
+            "dbt_test_traffic_incident_availability",
+            "dbt_test_traffic_bronze_source_contract",
+            "dbt_run_silver",
+            "dbt_test_silver",
         ],
         gold: [
-        "dbt_deps_gold",
-        "dbt_seed_asac_axes",
-        "dbt_run_common_admin_dong_dimension",
-        "dbt_test_common_admin_dong_dimension",
-        "dbt_test_asac_axes_seed_contract",
-        "dbt_run_gold",
-        "dbt_test_gold",
+            "dbt_deps_gold",
+            "dbt_seed_asac_axes",
+            "dbt_run_common_admin_dong_dimension",
+            "dbt_test_common_admin_dong_dimension",
+            "dbt_test_asac_axes_seed_contract",
+            "dbt_run_gold",
+            "dbt_test_gold",
         ],
     }
 
@@ -113,7 +115,9 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
                 assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
             assert task.kwargs["retries"] == 1
             assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
-            assert task.kwargs["on_failure_callback"] is module.record_traffic_dbt_problem
+            assert (
+                task.kwargs["on_failure_callback"] is module.record_traffic_dbt_problem
+            )
             assert "dbt_command" in task.kwargs["op_kwargs"]
             assert "selector" in task.kwargs["op_kwargs"]
 
@@ -183,6 +187,23 @@ def test_successful_pinned_dbt_phase_returns_citydata_snapshot_lineage(
     tmp_path, monkeypatch
 ):
     module = load_gold_transform_module()
+    evidence = module.SilverOutputEvidence(42, "a" * 64)
+    monkeypatch.setattr(
+        module,
+        "silver_output_evidence_from_resolver",
+        lambda *_args, **_kwargs: evidence,
+    )
+    monkeypatch.setattr(
+        module,
+        "current_silver_output_evidence",
+        lambda: evidence,
+    )
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            return run_id
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
     monkeypatch.setattr(module, "DBT_PROJECT", str(tmp_path / "dbt"))
     snapshot_id = 8738321387624398062
 
@@ -288,7 +309,9 @@ def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
 
     assert pushed["key"] == module.DBT_FAILURE_XCOM_KEY
     assert pushed["value"]["traffic_snapshot_dag_run_id"] == "snapshot-a"
-    assert pushed["value"]["traffic_citydata_crowding_snapshot_id"] == 8738321387624398062
+    assert (
+        pushed["value"]["traffic_citydata_crowding_snapshot_id"] == 8738321387624398062
+    )
     assert pushed["value"]["failure_classification"] == "data-contract-violation"
     assert pushed["value"]["silver_persisted"] is True
     assert pushed["value"]["dbt_run_results_path"].endswith("/run_results.json")
@@ -566,8 +589,7 @@ def test_final_dbt_failure_callback_persists_recovery_record_and_notifies(monkey
     assert problem_document["traffic_snapshot_dag_run_id"] == "snapshot-a"
     assert problem_document["traffic_flow_snapshot_dag_run_id"] == "flow-snapshot-a"
     assert (
-        problem_document["traffic_citydata_crowding_snapshot_id"]
-        == 8738321387624398062
+        problem_document["traffic_citydata_crowding_snapshot_id"] == 8738321387624398062
     )
     assert problem_document["dbt_test_names"] == [
         "assert_silver_traffic_location_contract"
