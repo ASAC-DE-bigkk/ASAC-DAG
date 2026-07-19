@@ -182,4 +182,3 @@ def test_write_history_snapshot_uses_compact_payload_and_sanitizes_failure():
     with pytest.raises(HistoryWriteError, match="RuntimeError") as exc_info:
         write_history_snapshot(_report(), storage=failing)
     assert "must-not-leak" not in str(exc_info.value)
-

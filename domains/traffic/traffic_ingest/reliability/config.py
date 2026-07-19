@@ -28,6 +28,9 @@ TRAFFIC_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
 TRAFFIC_FLOW_TABLE = "bronze_seoul_traffic_flow"
 TRAFFIC_FLOW_AUDIT_TABLE = "bronze_seoul_traffic_flow_request_audit"
 WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "TRAFFIC_DISCORD_WEBHOOK_URL")
+DAILY_REPORT_SCHEDULE = "0 9 * * *"
+# Retained for compatibility only. Pipeline Reliability v2 ignores legacy
+# cadence overrides so an old */15 setting cannot reactivate frequent reports.
 SCHEDULE_ENV = "ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 DISCORD_GREEN = 3066993
@@ -89,13 +92,9 @@ def discord_webhook_url(env: Mapping[str, str] = os.environ) -> str | None:
 def report_dag_schedule(env: Mapping[str, str] = os.environ) -> str | None:
     if not is_dev_target(env):
         return None
-    if SCHEDULE_ENV in env:
-        return env[SCHEDULE_ENV] or None
-    if GLOBAL_SCHEDULE_ENV in env:
-        return env[GLOBAL_SCHEDULE_ENV] or None
     if not discord_webhook_url(env):
         return None
-    return "0 9 * * *"
+    return DAILY_REPORT_SCHEDULE
 
 
 def sql_identifier(value: str) -> str:

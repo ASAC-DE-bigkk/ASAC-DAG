@@ -128,4 +128,3 @@ def build_weather_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     if report.get("detected_at"):
         embed["timestamp"] = str(report["detected_at"])
     return {"embeds": [embed]}
-

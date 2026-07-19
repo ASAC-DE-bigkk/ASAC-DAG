@@ -215,4 +215,3 @@ def test_malformed_marquez_payload_is_type_only_unknown():
     assert stage["status"] == "UNKNOWN"
     assert stage["error_type"] == "ValueError"
     assert "secret" not in str(result)
-

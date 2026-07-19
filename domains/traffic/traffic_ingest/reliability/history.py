@@ -198,4 +198,3 @@ def write_history_snapshot(
     except Exception as exc:
         raise HistoryWriteError(type(exc).__name__) from None
     return key
-
