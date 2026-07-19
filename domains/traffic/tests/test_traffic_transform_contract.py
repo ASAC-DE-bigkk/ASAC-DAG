@@ -1575,23 +1575,35 @@ def test_split_phase_specs_isolate_citydata_fence_and_test_cadence():
         module.TrafficTestTier.HOURLY: None,
         module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_asac_axes_contract",
     }
+    assert gold_specs["dbt_run_gold"].selector == (
+        "ask_seoul_traffic_transform_gold_models_without_commerce"
+    )
+    assert gold_specs["dbt_test_gold"].selector == (
+        "ask_seoul_traffic_transform_gold_full_tests_without_commerce"
+    )
     assert gold_specs["dbt_test_gold"].selector_by_test_tier == {
-        module.TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
-        module.TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
-        module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+        module.TrafficTestTier.GATE: (
+            "ask_seoul_traffic_transform_gold_gate_tests_without_commerce"
+        ),
+        module.TrafficTestTier.HOURLY: (
+            "ask_seoul_traffic_transform_gold_hourly_tests_without_commerce"
+        ),
+        module.TrafficTestTier.FULL: (
+            "ask_seoul_traffic_transform_gold_full_tests_without_commerce"
+        ),
     }
     assert gold_specs["dbt_run_gold"].selector_when_flow_missing == (
-        "ask_seoul_traffic_transform_gold_incident_models"
+        "ask_seoul_traffic_transform_gold_incident_models_without_commerce"
     )
     assert gold_specs["dbt_test_gold"].selector_by_test_tier_when_flow_missing == {
         module.TrafficTestTier.GATE: (
-            "ask_seoul_traffic_transform_gold_incident_gate_tests"
+            "ask_seoul_traffic_transform_gold_incident_gate_tests_without_commerce"
         ),
         module.TrafficTestTier.HOURLY: (
-            "ask_seoul_traffic_transform_gold_incident_hourly_tests"
+            "ask_seoul_traffic_transform_gold_incident_hourly_tests_without_commerce"
         ),
         module.TrafficTestTier.FULL: (
-            "ask_seoul_traffic_transform_gold_incident_full_tests"
+            "ask_seoul_traffic_transform_gold_incident_full_tests_without_commerce"
         ),
     }
     assert all(
@@ -1640,17 +1652,17 @@ def test_dbt_phase_task_adapter_forwards_split_runtime_contract():
             True,
             None,
             None,
-            {
-                TrafficTestTier.GATE: (
-                    "ask_seoul_traffic_transform_gold_incident_gate_tests"
-                ),
-                TrafficTestTier.HOURLY: (
-                    "ask_seoul_traffic_transform_gold_incident_hourly_tests"
-                ),
-                TrafficTestTier.FULL: (
-                    "ask_seoul_traffic_transform_gold_incident_full_tests"
-                ),
-            },
+                {
+                    TrafficTestTier.GATE: (
+                        "ask_seoul_traffic_transform_gold_incident_gate_tests_without_commerce"
+                    ),
+                    TrafficTestTier.HOURLY: (
+                        "ask_seoul_traffic_transform_gold_incident_hourly_tests_without_commerce"
+                    ),
+                    TrafficTestTier.FULL: (
+                        "ask_seoul_traffic_transform_gold_incident_full_tests_without_commerce"
+                    ),
+                },
         ),
     }
 
