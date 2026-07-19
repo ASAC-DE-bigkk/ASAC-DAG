@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import types
@@ -60,7 +61,14 @@ class FakePythonOperator:
         self.task_id = task_id
         self.python_callable = python_callable
         self.kwargs = kwargs
+        self.upstream_task_ids = set()
+        self.downstream_task_ids = set()
         FakeDAG._stack[-1].add_task(self)
+
+    def __rshift__(self, other):
+        self.downstream_task_ids.add(other.task_id)
+        other.upstream_task_ids.add(self.task_id)
+        return other
 
 
 class FakeVariable:
@@ -167,6 +175,35 @@ def test_weather_fingerprint_ignores_timestamps_and_distinguishes_failure_identi
         )
         is True
     )
+
+
+def test_weather_fingerprint_tracks_pipeline_stage_identity_not_duration():
+    module = load_module()
+    baseline = _weather_failure_report()
+    baseline["stages"] = [
+        {
+            "key": "maintenance",
+            "status": "UNKNOWN",
+            "reason": "unobserved",
+            "age_minutes": None,
+            "duration_ms": {"p95": None},
+        }
+    ]
+    failed = copy.deepcopy(baseline)
+    failed["stages"][0].update(
+        status="FAIL", reason="latest_terminal_failed", age_minutes=20
+    )
+    same_failure_new_duration = copy.deepcopy(failed)
+    same_failure_new_duration["stages"][0].update(
+        age_minutes=30, duration_ms={"p95": 200_000}
+    )
+
+    assert module.notification_fingerprint(failed) != module.notification_fingerprint(
+        baseline
+    )
+    assert module.notification_fingerprint(
+        same_failure_new_duration
+    ) == module.notification_fingerprint(failed)
 
 
 def test_weather_variable_tracking_is_fail_open():
@@ -425,3 +462,95 @@ def test_weather_formatter_error_remains_task_failure(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid report shape"):
         module.collect_and_notify(run_id="report-run")
+
+
+def test_weather_pipeline_reliability_dag_has_three_serial_tasks(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setenv(
+        "ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/webhook"
+    )
+    module = load_module()
+    dag = module.dag
+
+    assert dag.dag_id == "weather_bronze_reliability_report"
+    assert dag.kwargs["schedule"] == "0 9 * * *"
+    assert dag.kwargs["catchup"] is False
+    assert dag.kwargs["max_active_runs"] == 1
+    assert set(dag.task_dict) == {
+        "collect_weather_data_plane",
+        "compose_weather_pipeline_reliability",
+        "deliver_weather_pipeline_reliability",
+    }
+    collect = dag.task_dict["collect_weather_data_plane"]
+    compose = dag.task_dict["compose_weather_pipeline_reliability"]
+    deliver = dag.task_dict["deliver_weather_pipeline_reliability"]
+    assert collect.kwargs["pool"] == "trino_weather_heavy"
+    assert "pool" not in compose.kwargs
+    assert "pool" not in deliver.kwargs
+    assert collect.downstream_task_ids == {compose.task_id}
+    assert compose.downstream_task_ids == {deliver.task_id}
+    assert all(
+        task.kwargs["on_failure_callback"] is module.record_weather_problem
+        for task in dag.task_dict.values()
+    )
+
+
+def test_weather_daily_delivery_fingerprint_uses_v2_contract():
+    module = load_module()
+    logical_date = datetime(2026, 7, 19, tzinfo=timezone.utc)
+    payload = json.dumps(
+        {
+            "delivery_key": "date:2026-07-19",
+            "report_contract": "pipeline-reliability-daily-v2",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    assert module.daily_delivery_fingerprint(
+        {}, logical_date=logical_date, run_id="scheduled__day"
+    ) == __import__("hashlib").sha256(payload.encode("utf-8")).hexdigest()
+
+
+def test_weather_deliver_writes_history_before_send_and_records_after_success(
+    monkeypatch,
+):
+    module = load_module()
+    source_report = {
+        **_weather_failure_report(),
+        "report_date": "2026-07-19",
+        "domain": "weather",
+        "stages": [],
+        "source": {},
+        "bottleneck": None,
+    }
+    events = []
+    monkeypatch.setattr(
+        module,
+        "write_history_snapshot",
+        lambda report: events.append(("history", report["report_date"]))
+        or "history-key",
+    )
+    monkeypatch.setattr(module, "should_notify_fingerprint", lambda _value: True)
+    monkeypatch.setattr(
+        module,
+        "send_discord_report",
+        lambda report: events.append(("send", report["status"])) or True,
+    )
+    monkeypatch.setattr(
+        module,
+        "record_delivered_fingerprint",
+        lambda value: events.append(("record", value)) or True,
+    )
+
+    result = module.deliver_pipeline_reliability(
+        report=copy.deepcopy(source_report),
+        logical_date=datetime(2026, 7, 19, tzinfo=timezone.utc),
+        run_id="scheduled__day",
+    )
+
+    assert [event[0] for event in events] == ["history", "send", "record"]
+    assert result["history_object_key"] == "history-key"
+    assert result["discord_sent"] is True
+    assert result["notification_state_recorded"] is True
