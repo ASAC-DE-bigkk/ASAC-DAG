@@ -35,7 +35,11 @@ from .reliability.discord import (
     format_weather_discord_message,
     send_discord_message,
 )
-from .reliability.report import build_weather_reliability_report
+from .reliability.report import (
+    build_weather_reliability_report,
+    collect_weather_data_plane,
+    compose_weather_pipeline_report,
+)
 from .reliability.trino_repository import (
     _age_minutes,
     _fetch_one,
@@ -79,6 +83,8 @@ __all__ = [
     "WeatherReportConfig",
     "ask_seoul_schema",
     "build_weather_reliability_report",
+    "collect_weather_data_plane",
+    "compose_weather_pipeline_report",
     "collect_dag_run_summary",
     "collect_weather_summary",
     "discord_webhook_url",
