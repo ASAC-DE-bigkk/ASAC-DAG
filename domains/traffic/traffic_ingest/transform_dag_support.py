@@ -214,6 +214,8 @@ def build_dbt_phase_task(
             "silver_persisted": spec.silver_persisted,
             "fresh_parse": spec.fresh_parse,
             "snapshot_required": spec.snapshot_required,
+            "citydata_snapshot_required": spec.citydata_snapshot_required,
+            "silver_fence_mode": spec.silver_fence_mode,
             "threads": spec.threads,
             "selector_by_test_tier": spec.selector_by_test_tier,
         },

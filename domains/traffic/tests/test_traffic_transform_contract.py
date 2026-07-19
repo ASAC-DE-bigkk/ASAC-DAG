@@ -6,6 +6,7 @@ import pytest
 
 from traffic_transform_test_support import (
     FakeAirflowFailException,
+    FakeDAG,
     FakeVariable,
     load_transform_module,
     write_materialization_artifacts,
@@ -989,6 +990,139 @@ def test_axes_and_admin_missing_tier_key_fails_instead_of_noop():
             run_id="manual__tier",
             params={"target": "dev"},
         )
+
+
+def test_transform_phase_specs_have_single_pipeline_owner():
+    load_transform_module()
+    from traffic_ingest.transform_specs import (
+        DBT_PHASE_SPECS,
+        DBT_PHASE_TASK_IDS,
+        GOLD_DBT_PHASE_SPECS,
+        SILVER_DBT_PHASE_SPECS,
+    )
+
+    silver_ids = tuple(spec.task_id for spec in SILVER_DBT_PHASE_SPECS)
+    gold_ids = tuple(spec.task_id for spec in GOLD_DBT_PHASE_SPECS)
+
+    assert silver_ids == (
+        "dbt_deps",
+        "dbt_source_freshness",
+        "dbt_test_traffic_incident_availability",
+        "dbt_test_traffic_bronze_source_contract",
+        "dbt_run_silver",
+        "dbt_test_silver",
+    )
+    assert gold_ids == (
+        "dbt_deps_gold",
+        "dbt_seed_asac_axes",
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
+        "dbt_test_asac_axes_seed_contract",
+        "dbt_run_gold",
+        "dbt_test_gold",
+    )
+    assert set(silver_ids).isdisjoint(gold_ids)
+
+    compatibility_ids = (
+        "dbt_deps",
+        "dbt_source_freshness",
+        "dbt_test_traffic_incident_availability",
+        "dbt_test_traffic_bronze_source_contract",
+        "dbt_seed_asac_axes",
+        "dbt_run_common_admin_dong_dimension",
+        "dbt_test_common_admin_dong_dimension",
+        "dbt_test_asac_axes_seed_contract",
+        "dbt_run_silver",
+        "dbt_test_silver",
+        "dbt_run_gold",
+        "dbt_test_gold",
+    )
+    assert tuple(spec.task_id for spec in DBT_PHASE_SPECS) == compatibility_ids
+    assert DBT_PHASE_TASK_IDS == compatibility_ids
+
+
+def test_split_phase_specs_isolate_citydata_fence_and_test_cadence():
+    module = load_transform_module()
+    from traffic_ingest.transform_specs import (
+        GOLD_DBT_PHASE_SPECS,
+        SILVER_DBT_PHASE_SPECS,
+    )
+
+    all_specs = SILVER_DBT_PHASE_SPECS + GOLD_DBT_PHASE_SPECS
+    assert all(
+        not spec.citydata_snapshot_required for spec in SILVER_DBT_PHASE_SPECS
+    )
+    assert all(
+        spec.citydata_snapshot_required
+        for spec in GOLD_DBT_PHASE_SPECS
+        if spec.snapshot_required
+    )
+    assert {
+        spec.task_id: spec.silver_fence_mode
+        for spec in all_specs
+        if spec.silver_fence_mode is not None
+    } == {
+        "dbt_run_silver": "write",
+        "dbt_test_silver": "verify",
+    }
+
+    silver_test = next(
+        spec for spec in SILVER_DBT_PHASE_SPECS if spec.task_id == "dbt_test_silver"
+    )
+    assert silver_test.selector == "ask_seoul_traffic_transform_silver"
+    assert silver_test.selector_by_test_tier is None
+
+    gold_specs = {spec.task_id: spec for spec in GOLD_DBT_PHASE_SPECS}
+    assert gold_specs["dbt_deps_gold"].workload.value == "local"
+    assert gold_specs["dbt_deps_gold"].threads is None
+    assert gold_specs["dbt_test_common_admin_dong_dimension"].selector_by_test_tier == {
+        module.TrafficTestTier.GATE: None,
+        module.TrafficTestTier.HOURLY: None,
+        module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_common_admin",
+    }
+    assert gold_specs["dbt_test_asac_axes_seed_contract"].selector_by_test_tier == {
+        module.TrafficTestTier.GATE: None,
+        module.TrafficTestTier.HOURLY: None,
+        module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_asac_axes_contract",
+    }
+    assert gold_specs["dbt_test_gold"].selector_by_test_tier == {
+        module.TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
+        module.TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
+        module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+    }
+
+
+def test_dbt_phase_task_adapter_forwards_split_runtime_contract():
+    module = load_transform_module()
+    specs = {
+        spec.task_id: spec
+        for spec in module.DBT_PHASE_SPECS
+        if spec.task_id in {"dbt_run_silver", "dbt_test_gold"}
+    }
+
+    with FakeDAG("adapter_contract"):
+        tasks = {
+            task_id: module.build_dbt_phase_task(
+                spec,
+                python_callable=object(),
+                snapshot_task_id=module.SNAPSHOT_TASK_ID,
+                retry_delay=object(),
+                pin_critical_priority=module.PIN_CRITICAL_PRIORITY,
+                failure_callback=object(),
+            )
+            for task_id, spec in specs.items()
+        }
+
+    assert {
+        task_id: (
+            task.kwargs["op_kwargs"]["citydata_snapshot_required"],
+            task.kwargs["op_kwargs"]["silver_fence_mode"],
+        )
+        for task_id, task in tasks.items()
+    } == {
+        "dbt_run_silver": (False, "write"),
+        "dbt_test_gold": (True, None),
+    }
 
 
 def test_traffic_transform_bootstraps_asac_axes_before_silver():
