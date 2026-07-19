@@ -128,4 +128,3 @@ Gold 실패는 피하지만 Flow Silver를 생성하는 소유자가 계속 없�
   feature revision smoke를 통과한 뒤 draft PR 두 개를 ready로 전환해 `dev`에 merge한다.
 - merge 뒤 두 submodule을 exact `origin/dev` revision으로 맞추고 세 compose file을 명시한
   dev 명령으로 재배포한다.
-
