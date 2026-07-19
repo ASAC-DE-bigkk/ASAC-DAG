@@ -1,16 +1,15 @@
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
 TRAFFIC_SILVER_RELATION = "iceberg_dev.weather_traffic_bronze.silver_seoul_traffic_incident"
-_SNAPSHOTS_RELATION = (
-    'iceberg_dev.weather_traffic_bronze."silver_seoul_traffic_incident$snapshots"'
-)
-_FILES_RELATION = (
-    'iceberg_dev.weather_traffic_bronze."silver_seoul_traffic_incident$files"'
-)
+_RELATION_NAMESPACE, _RELATION_NAME = TRAFFIC_SILVER_RELATION.rsplit(".", 1)
+_SNAPSHOTS_RELATION = f'{_RELATION_NAMESPACE}."{_RELATION_NAME}$snapshots"'
+_FILES_RELATION = f'{_RELATION_NAMESPACE}."{_RELATION_NAME}$files"'
+_ALLOWED_OPERATIONS = frozenset({"append", "overwrite", "replace", "delete"})
 
 
 class SnapshotFenceTelemetryError(RuntimeError):
@@ -19,6 +18,17 @@ class SnapshotFenceTelemetryError(RuntimeError):
 
 class ExternalCompactionRace(RuntimeError):
     """An external rewrite changed Traffic Silver during a guarded phase."""
+
+
+def _is_timezone_aware_iso_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
 @dataclass(frozen=True)
@@ -52,9 +62,9 @@ class SilverSnapshotEvidence:
             or snapshot_id <= 0
         ):
             raise SnapshotFenceTelemetryError("snapshot id is invalid")
-        if committed_at is None or not str(committed_at):
+        if not _is_timezone_aware_iso_timestamp(committed_at):
             raise SnapshotFenceTelemetryError("snapshot commit time is invalid")
-        if not isinstance(operation, str) or not operation:
+        if not isinstance(operation, str) or operation not in _ALLOWED_OPERATIONS:
             raise SnapshotFenceTelemetryError("snapshot operation is invalid")
         if not isinstance(compacted_files, list) or any(
             not isinstance(path, str) or not path for path in compacted_files
@@ -63,7 +73,7 @@ class SilverSnapshotEvidence:
 
         return cls(
             snapshot_id=snapshot_id,
-            committed_at=str(committed_at),
+            committed_at=committed_at,
             operation=operation,
             compacted_files=tuple(sorted(compacted_files)),
         )
@@ -111,11 +121,14 @@ def collect_silver_snapshot_evidence(
             "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
         )
         snapshot_id, committed_at, operation = _snapshot_fields(cursor.fetchone())
+        if isinstance(committed_at, datetime):
+            committed_at = str(committed_at)
 
         cursor.execute(
             "SELECT file_path "
             f"FROM {_FILES_RELATION} "
-            "WHERE content = 0 AND file_path LIKE '%/compacted-%' "
+            "WHERE content = 0 "
+            "AND regexp_like(file_path, '(^|/)compacted-[^/]*$') "
             "ORDER BY file_path"
         )
         compacted_files = [_file_path(row) for row in cursor.fetchall()]
@@ -150,5 +163,5 @@ def assert_snapshot_unchanged(
     expected: SilverSnapshotEvidence,
     current: SilverSnapshotEvidence,
 ) -> None:
-    if current.snapshot_id != expected.snapshot_id:
+    if current != expected:
         raise ExternalCompactionRace("snapshot changed after Silver MERGE")

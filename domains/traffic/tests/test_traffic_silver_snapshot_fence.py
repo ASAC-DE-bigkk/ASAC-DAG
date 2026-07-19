@@ -1,4 +1,5 @@
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,12 +27,25 @@ def evidence(snapshot_id, operation, compacted_files):
     )
 
 
+def evidence_dict(**overrides):
+    value = {
+        "snapshot_id": 11,
+        "committed_at": "2026-07-19T00:00:00Z",
+        "operation": "overwrite",
+        "compacted_files": [],
+    }
+    value.update(overrides)
+    return value
+
+
 class FakeCursor:
-    def __init__(self, snapshot_row, file_rows):
+    def __init__(self, snapshot_row, file_rows, close_error=None):
         self.snapshot_row = snapshot_row
         self.file_rows = file_rows
+        self.close_error = close_error
         self.statements = []
         self.closed = False
+        self.close_calls = 0
 
     def execute(self, statement):
         self.statements.append(statement)
@@ -43,19 +57,30 @@ class FakeCursor:
         return self.file_rows
 
     def close(self):
+        self.close_calls += 1
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class FakeConnection:
-    def __init__(self, cursor):
+    def __init__(self, cursor, cursor_error=None, close_error=None):
         self._cursor = cursor
+        self.cursor_error = cursor_error
+        self.close_error = close_error
         self.closed = False
+        self.close_calls = 0
 
     def cursor(self):
+        if self.cursor_error is not None:
+            raise self.cursor_error
         return self._cursor
 
     def close(self):
+        self.close_calls += 1
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 def test_post_write_allows_existing_compacted_files_but_rejects_new_ones():
@@ -84,6 +109,21 @@ def test_test_fence_requires_exact_post_write_snapshot():
     assert_snapshot_unchanged(expected, expected)
     with pytest.raises(ExternalCompactionRace, match="snapshot changed"):
         assert_snapshot_unchanged(expected, evidence(12, "replace", ()))
+
+
+@pytest.mark.parametrize(
+    "changed_field",
+    [
+        {"committed_at": "2026-07-19T00:00:01Z"},
+        {"operation": "append"},
+        {"compacted_files": ("s3://dev/data/compacted-new.parquet",)},
+    ],
+)
+def test_test_fence_rejects_same_id_with_different_immutable_evidence(changed_field):
+    expected = evidence(11, "overwrite", ())
+
+    with pytest.raises(ExternalCompactionRace, match="snapshot changed"):
+        assert_snapshot_unchanged(expected, replace(expected, **changed_field))
 
 
 def test_evidence_parser_rejects_malformed_telemetry_and_sorts_paths():
@@ -122,6 +162,37 @@ def test_evidence_parser_rejects_malformed_telemetry_and_sorts_paths():
         )
 
 
+@pytest.mark.parametrize("operation", ["append", "overwrite", "replace", "delete"])
+def test_evidence_parser_accepts_only_needed_canonical_iceberg_operations(operation):
+    assert SilverSnapshotEvidence.from_dict(
+        evidence_dict(operation=operation)
+    ).operation == operation
+
+
+@pytest.mark.parametrize(
+    "committed_at",
+    [
+        True,
+        1721347200,
+        datetime(2026, 7, 19, tzinfo=timezone.utc),
+        None,
+        "",
+        "2026-07-19T00:00:00",
+        "not-a-timestamp",
+        " 2026-07-19T00:00:00Z",
+    ],
+)
+def test_evidence_parser_rejects_noncanonical_commit_times(committed_at):
+    with pytest.raises(SnapshotFenceTelemetryError, match="commit time is invalid"):
+        SilverSnapshotEvidence.from_dict(evidence_dict(committed_at=committed_at))
+
+
+@pytest.mark.parametrize("operation", [True, "", "replace ", " replace", "merge"])
+def test_evidence_parser_rejects_whitespace_and_unknown_operations(operation):
+    with pytest.raises(SnapshotFenceTelemetryError, match="operation is invalid"):
+        SilverSnapshotEvidence.from_dict(evidence_dict(operation=operation))
+
+
 def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources():
     cursor = FakeCursor(
         snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
@@ -145,13 +216,22 @@ def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources()
     assert cursor.closed
     assert connection.closed
     assert len(cursor.statements) == 2
-    assert all(
-        'iceberg_dev.weather_traffic_bronze."silver_seoul_traffic_incident$'
-        in statement
-        for statement in cursor.statements
+    snapshot_sql, files_sql = cursor.statements
+    assert snapshot_sql == (
+        "SELECT snapshot_id, committed_at, operation "
+        "FROM iceberg_dev.weather_traffic_bronze."
+        '"silver_seoul_traffic_incident$snapshots" '
+        "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
     )
-    assert any("$snapshots\"" in statement for statement in cursor.statements)
-    assert any("$files\"" in statement for statement in cursor.statements)
+    assert files_sql == (
+        "SELECT file_path "
+        "FROM iceberg_dev.weather_traffic_bronze."
+        '"silver_seoul_traffic_incident$files" '
+        "WHERE content = 0 "
+        "AND regexp_like(file_path, '(^|/)compacted-[^/]*$') "
+        "ORDER BY file_path"
+    )
+    assert "LIKE" not in files_sql
     assert all("SHOW TABLES" not in statement.upper() for statement in cursor.statements)
 
 
@@ -177,3 +257,47 @@ def test_collect_evidence_fails_closed_and_closes_resources_for_malformed_snapsh
 
     assert cursor.closed
     assert connection.closed
+
+
+def test_collect_closes_connection_when_cursor_construction_fails():
+    connection = FakeConnection(
+        None,
+        cursor_error=RuntimeError("cursor construction failed"),
+    )
+
+    with pytest.raises(RuntimeError, match="cursor construction failed"):
+        collect_silver_snapshot_evidence(connection_factory=lambda: connection)
+
+    assert connection.close_calls == 1
+
+
+def test_collect_attempts_connection_close_when_cursor_close_fails():
+    cursor = FakeCursor(
+        snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
+        file_rows=[],
+        close_error=RuntimeError("cursor close failed"),
+    )
+    connection = FakeConnection(cursor)
+
+    with pytest.raises(RuntimeError, match="cursor close failed"):
+        collect_silver_snapshot_evidence(connection_factory=lambda: connection)
+
+    assert cursor.close_calls == 1
+    assert connection.close_calls == 1
+
+
+def test_collect_attempts_cursor_close_when_connection_close_fails():
+    cursor = FakeCursor(
+        snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
+        file_rows=[],
+    )
+    connection = FakeConnection(
+        cursor,
+        close_error=RuntimeError("connection close failed"),
+    )
+
+    with pytest.raises(RuntimeError, match="connection close failed"):
+        collect_silver_snapshot_evidence(connection_factory=lambda: connection)
+
+    assert cursor.close_calls == 1
+    assert connection.close_calls == 1
