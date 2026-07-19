@@ -12,6 +12,26 @@ from traffic_transform_test_support import (
 from traffic_transform_test_support import restore_airflow_modules_after_dag_import  # noqa: F401
 
 
+def _use_current_silver_evidence(
+    monkeypatch,
+    module,
+    *,
+    snapshot_id=42,
+    fingerprint="a" * 64,
+):
+    monkeypatch.setattr(
+        module,
+        "current_silver_output_evidence",
+        lambda: module.SilverOutputEvidence(snapshot_id, fingerprint),
+    )
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            return run_id
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+
+
 def test_gold_dag_is_independent_and_owns_test_tier_marker():
     module = load_gold_transform_module()
     dag = module.dag
@@ -43,18 +63,36 @@ def test_gold_dag_is_independent_and_owns_test_tier_marker():
     }
 
 
-def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_bronze(monkeypatch):
+def test_gold_validation_fence_outranks_silver_writer_without_promoting_gold_run():
+    gold = load_gold_transform_module()
+
+    assert gold.PIN_CRITICAL_PRIORITY > 10
+    assert (
+        gold.dag.task_dict["dbt_test_gold"].kwargs["priority_weight"]
+        == gold.PIN_CRITICAL_PRIORITY
+    )
+    assert gold.dag.task_dict["dbt_run_gold"].kwargs["priority_weight"] == 1
+
+
+def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_bronze(
+    monkeypatch,
+):
     module = load_gold_transform_module()
-    FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = module.TransformSuccessMarker(
-        version=1,
-        pipeline="silver",
-        identity=module.TransformIdentity.silver("incident-1"),
-        output_snapshot_id=42,
-        compacted_files_fingerprint="a" * 64,
-    ).to_json()
+    _use_current_silver_evidence(monkeypatch, module)
+    FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = (
+        module.TransformSuccessMarker(
+            version=1,
+            pipeline="silver",
+            identity=module.TransformIdentity.silver("incident-1"),
+            output_snapshot_id=42,
+            compacted_files_fingerprint="a" * 64,
+        ).to_json()
+    )
     monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
     pushed = {}
-    ti = types.SimpleNamespace(xcom_push=lambda *, key, value: pushed.update({key: value}))
+    ti = types.SimpleNamespace(
+        xcom_push=lambda *, key, value: pushed.update({key: value})
+    )
 
     incident = module.resolve_traffic_gold_snapshot_run(
         ti=ti,
@@ -68,6 +106,7 @@ def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_br
 
 def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch):
     module = load_gold_transform_module()
+    _use_current_silver_evidence(monkeypatch, module)
     event = types.SimpleNamespace(
         extra={
             "source_id": "seoul_traffic_incident",
@@ -88,10 +127,13 @@ def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch)
         xcom_push=lambda *, key, value: pushed.update({key: value})
     )
 
-    assert module.resolve_traffic_gold_snapshot_run(
-        ti=ti,
-        triggering_asset_events=triggering_asset_events,
-    ) == "incident-1"
+    assert (
+        module.resolve_traffic_gold_snapshot_run(
+            ti=ti,
+            triggering_asset_events=triggering_asset_events,
+        )
+        == "incident-1"
+    )
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
     assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
     assert pushed[module.SILVER_OUTPUT_EVIDENCE_XCOM_KEY] == {
@@ -100,7 +142,235 @@ def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch)
     }
 
 
-def test_gold_admission_fails_closed_for_malformed_marker_and_skips_exact_tuple(monkeypatch):
+def test_gold_resolver_skips_superseded_silver_marker_before_external_reads(
+    monkeypatch,
+):
+    module = load_gold_transform_module()
+    FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = (
+        module.TransformSuccessMarker(
+            version=1,
+            pipeline="silver",
+            identity=module.TransformIdentity.silver("incident-old"),
+            output_snapshot_id=42,
+            compacted_files_fingerprint="a" * 64,
+        ).to_json()
+    )
+    _use_current_silver_evidence(
+        monkeypatch,
+        module,
+        snapshot_id=43,
+        fingerprint="b" * 64,
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: pytest.fail("stale Gold input must skip before Citydata"),
+    )
+
+    with pytest.raises(FakeAirflowSkipException, match="superseded"):
+        module.resolve_traffic_gold_snapshot_run(
+            triggering_asset_events={module.TRAFFIC_FLOW_SILVER_ASSET: []}
+        )
+
+
+def test_gold_resolver_skips_coalesced_manifest_before_external_reads(monkeypatch):
+    module = load_gold_transform_module()
+    from traffic_ingest.run_manifest import RunNotPublishableError
+
+    FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = (
+        module.TransformSuccessMarker(
+            version=1,
+            pipeline="silver",
+            identity=module.TransformIdentity.silver("incident-old"),
+            output_snapshot_id=42,
+            compacted_files_fingerprint="a" * 64,
+        ).to_json()
+    )
+    _use_current_silver_evidence(monkeypatch, module)
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            raise RunNotPublishableError(f"coalesced: {run_id}")
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: pytest.fail("coalesced Gold input must skip before Citydata"),
+    )
+
+    with pytest.raises(FakeAirflowSkipException, match="superseded"):
+        module.resolve_traffic_gold_snapshot_run(
+            triggering_asset_events={module.TRAFFIC_FLOW_SILVER_ASSET: []}
+        )
+
+
+def test_gold_resolver_fails_closed_on_manifest_operational_error(monkeypatch):
+    module = load_gold_transform_module()
+    FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = (
+        module.TransformSuccessMarker(
+            version=1,
+            pipeline="silver",
+            identity=module.TransformIdentity.silver("incident-old"),
+            output_snapshot_id=42,
+            compacted_files_fingerprint="a" * 64,
+        ).to_json()
+    )
+    _use_current_silver_evidence(monkeypatch, module)
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            raise RuntimeError(f"Trino unavailable: {run_id}")
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: pytest.fail("manifest failure must stop before Citydata"),
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="verification failed"):
+        module.resolve_traffic_gold_snapshot_run(
+            triggering_asset_events={module.TRAFFIC_FLOW_SILVER_ASSET: []}
+        )
+
+
+@pytest.mark.parametrize(
+    ("dbt_command", "expected_exception"),
+    [
+        ("run", FakeAirflowSkipException),
+        ("test", FakeAirflowFailException),
+    ],
+)
+def test_gold_snapshot_required_phases_recheck_current_silver_inside_pool_task(
+    monkeypatch,
+    dbt_command,
+    expected_exception,
+):
+    module = load_gold_transform_module()
+    monkeypatch.setattr(
+        module,
+        "silver_output_evidence_from_resolver",
+        lambda *_args, **_kwargs: module.SilverOutputEvidence(42, "a" * 64),
+    )
+    _use_current_silver_evidence(
+        monkeypatch,
+        module,
+        snapshot_id=43,
+        fingerprint="b" * 64,
+    )
+    monkeypatch.setattr(
+        module.transform_runtime,
+        "run_dbt_phase",
+        lambda **kwargs: (
+            kwargs["pre_execution_guard"]()
+            or pytest.fail("stale Gold input must not invoke dbt")
+        ),
+    )
+
+    with pytest.raises(expected_exception, match="Silver output changed"):
+        module.run_dbt_phase(
+            dbt_command=dbt_command,
+            selector="selector",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=True,
+            snapshot_required=True,
+            ti=types.SimpleNamespace(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("dbt_command", "expected_exception"),
+    [
+        ("run", FakeAirflowSkipException),
+        ("test", FakeAirflowFailException),
+    ],
+)
+def test_gold_snapshot_required_phases_recheck_manifest_inside_pool_task(
+    monkeypatch,
+    dbt_command,
+    expected_exception,
+):
+    module = load_gold_transform_module()
+    from traffic_ingest.run_manifest import RunNotPublishableError
+
+    evidence = module.SilverOutputEvidence(42, "a" * 64)
+    monkeypatch.setattr(
+        module,
+        "silver_output_evidence_from_resolver",
+        lambda *_args, **_kwargs: evidence,
+    )
+    monkeypatch.setattr(module, "current_silver_output_evidence", lambda: evidence)
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            raise RunNotPublishableError(f"coalesced: {run_id}")
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+    monkeypatch.setattr(
+        module.transform_runtime,
+        "run_dbt_phase",
+        lambda **kwargs: (
+            kwargs["pre_execution_guard"]()
+            or pytest.fail("coalesced Gold input must not invoke dbt")
+        ),
+    )
+
+    ti = types.SimpleNamespace(xcom_pull=lambda *, task_ids, key=None: "incident-old")
+    with pytest.raises(expected_exception, match="superseded"):
+        module.run_dbt_phase(
+            dbt_command=dbt_command,
+            selector="selector",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=True,
+            snapshot_required=True,
+            ti=ti,
+        )
+
+
+@pytest.mark.parametrize("dbt_command", ["run", "test"])
+def test_gold_snapshot_required_phases_fail_closed_on_manifest_operational_error(
+    monkeypatch,
+    dbt_command,
+):
+    module = load_gold_transform_module()
+    evidence = module.SilverOutputEvidence(42, "a" * 64)
+    monkeypatch.setattr(
+        module,
+        "silver_output_evidence_from_resolver",
+        lambda *_args, **_kwargs: evidence,
+    )
+    monkeypatch.setattr(module, "current_silver_output_evidence", lambda: evidence)
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            raise RuntimeError(f"Trino unavailable: {run_id}")
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+    monkeypatch.setattr(
+        module.transform_runtime,
+        "run_dbt_phase",
+        lambda **kwargs: (
+            kwargs["pre_execution_guard"]()
+            or pytest.fail("manifest failure must stop before dbt")
+        ),
+    )
+
+    ti = types.SimpleNamespace(xcom_pull=lambda *, task_ids, key=None: "incident-old")
+    with pytest.raises(FakeAirflowFailException, match="verification failed"):
+        module.run_dbt_phase(
+            dbt_command=dbt_command,
+            selector="selector",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            silver_persisted=True,
+            snapshot_required=True,
+            ti=ti,
+        )
+
+
+def test_gold_admission_fails_closed_for_malformed_marker_and_skips_exact_tuple(
+    monkeypatch,
+):
     module = load_gold_transform_module()
     ti = types.SimpleNamespace(
         xcom_pull=lambda *, task_ids, key=None: (
@@ -116,7 +386,9 @@ def test_gold_admission_fails_closed_for_malformed_marker_and_skips_exact_tuple(
         "current_silver_output_evidence",
         lambda **_kwargs: module.SilverOutputEvidence(42, "a" * 64),
     )
-    monkeypatch.setattr(module, "resolve_gold_citydata_snapshot_id", lambda **_kwargs: 7)
+    monkeypatch.setattr(
+        module, "resolve_gold_citydata_snapshot_id", lambda **_kwargs: 7
+    )
     FakeVariable.values[module.GOLD_SUCCESS_MARKER_KEY] = "{malformed"
     with pytest.raises(FakeAirflowFailException):
         module.admit_traffic_gold_snapshot(ti=ti)
@@ -124,7 +396,9 @@ def test_gold_admission_fails_closed_for_malformed_marker_and_skips_exact_tuple(
     FakeVariable.values[module.GOLD_SUCCESS_MARKER_KEY] = module.TransformSuccessMarker(
         version=1,
         pipeline="gold",
-        identity=module.TransformIdentity.gold("incident-1", flow_run_id=None, citydata_snapshot_id=7),
+        identity=module.TransformIdentity.gold(
+            "incident-1", flow_run_id=None, citydata_snapshot_id=7
+        ),
         output_snapshot_id=42,
         compacted_files_fingerprint="a" * 64,
     ).to_json()
@@ -132,7 +406,9 @@ def test_gold_admission_fails_closed_for_malformed_marker_and_skips_exact_tuple(
         module.admit_traffic_gold_snapshot(ti=ti)
 
 
-def test_gold_admission_uses_fresh_current_evidence_not_stale_resolver_xcom(monkeypatch):
+def test_gold_admission_uses_fresh_current_evidence_not_stale_resolver_xcom(
+    monkeypatch,
+):
     module = load_gold_transform_module()
     FakeVariable.values[module.GOLD_SUCCESS_MARKER_KEY] = module.TransformSuccessMarker(
         version=1,

@@ -5,6 +5,7 @@ import pytest
 
 from traffic_transform_test_support import (
     FakeAirflowFailException,
+    FakeAirflowSkipException,
     FakeVariable,
     load_gold_transform_module,
     load_transform_module,
@@ -26,11 +27,19 @@ def _marker(module, identity, *, snapshot_id=42, fingerprint="a" * 64):
     ).to_json()
 
 
-def _silver_ti(module, incident_run_id="incident-1", run_result=None):
+def _silver_ti(
+    module,
+    incident_run_id="incident-1",
+    run_result=None,
+    stale_run_ids=None,
+):
     return types.SimpleNamespace(
         xcom_pull=lambda *, task_ids, key=None: (
-            incident_run_id
+            list(stale_run_ids or ())
             if task_ids == module.SNAPSHOT_TASK_ID
+            and key == getattr(module, "STALE_INCIDENT_RUN_IDS_XCOM_KEY", "__missing__")
+            else incident_run_id
+            if task_ids == module.SNAPSHOT_TASK_ID and key is None
             else run_result
             if task_ids == "dbt_run_silver"
             else None
@@ -123,12 +132,16 @@ def test_silver_marker_is_a_separate_task_after_asset_publication():
     assert dag.task_dict["dbt_test_silver"].downstream_task_ids == {
         "publish_traffic_incident_silver_asset"
     }
-    assert dag.task_dict["publish_traffic_incident_silver_asset"].downstream_task_ids == {
-        "mark_traffic_silver_success"
-    }
+    assert dag.task_dict[
+        "publish_traffic_incident_silver_asset"
+    ].downstream_task_ids == {"mark_traffic_silver_success"}
     assert dag.task_dict["mark_traffic_silver_success"].downstream_task_ids == {
         "publish_dbt_run_metrics"
     }
+    publish_task = dag.task_dict["publish_traffic_incident_silver_asset"]
+    assert publish_task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+    assert publish_task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
+    assert publish_task.kwargs["weight_rule"] == "absolute"
 
 
 def test_silver_publication_never_writes_marker(monkeypatch):
@@ -149,6 +162,70 @@ def test_silver_publication_never_writes_marker(monkeypatch):
 
     assert metadata["silver_snapshot_id"] == 42
     assert FakeVariable.set_calls == []
+
+
+def test_silver_publication_coalesces_deferred_runs_before_emitting_asset(monkeypatch):
+    module = load_transform_module()
+    calls = []
+    evidence = {
+        "silver_snapshot_evidence": {
+            "snapshot_id": 42,
+            "committed_at": "2026-07-19T12:00:00+09:00",
+            "operation": "overwrite",
+            "compacted_files": ["a"],
+        }
+    }
+
+    class Manifest:
+        def coalesce_many(self, run_ids, *, replacement_run_id):
+            calls.append(("coalesce", list(run_ids), replacement_run_id))
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+    monkeypatch.setattr(
+        module,
+        "publish_through_alias",
+        lambda *_args, **_kwargs: calls.append(("publish",)),
+    )
+
+    module.publish_traffic_incident_silver_asset(
+        ti=_silver_ti(
+            module,
+            run_result=evidence,
+            stale_run_ids=["incident-old-a", "incident-old-b"],
+        ),
+        outlet_events={},
+    )
+
+    assert calls == [
+        ("coalesce", ["incident-old-a", "incident-old-b"], "incident-1"),
+        ("publish",),
+    ]
+
+
+def test_silver_admission_coalesces_deferred_runs_when_exact_output_skips(monkeypatch):
+    module = load_transform_module()
+    calls = []
+    FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = _marker(
+        module, module.TransformIdentity.silver("incident-1")
+    )
+    monkeypatch.setattr(
+        module,
+        "current_silver_output_evidence",
+        lambda: module.SilverOutputEvidence(42, "a" * 64),
+    )
+
+    class Manifest:
+        def coalesce_many(self, run_ids, *, replacement_run_id):
+            calls.append((list(run_ids), replacement_run_id))
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+
+    with pytest.raises(FakeAirflowSkipException):
+        module.admit_traffic_silver_snapshot(
+            ti=_silver_ti(module, stale_run_ids=["incident-old"])
+        )
+
+    assert calls == [(["incident-old"], "incident-1")]
 
 
 def test_silver_publication_failure_cannot_write_marker(monkeypatch):
@@ -213,9 +290,12 @@ def test_silver_admission_does_not_read_telemetry_without_matching_identity(
         lambda: calls.append("telemetry") or (_ for _ in ()).throw(RuntimeError()),
     )
 
-    assert module.admit_traffic_silver_snapshot(
-        ti=_silver_ti(module, incident_run_id=incident_run_id)
-    )["action"] == "RUN"
+    assert (
+        module.admit_traffic_silver_snapshot(
+            ti=_silver_ti(module, incident_run_id=incident_run_id)
+        )["action"]
+        == "RUN"
+    )
     assert calls == []
 
 
@@ -227,7 +307,9 @@ def test_silver_telemetry_failure_blocks_only_potential_skip(monkeypatch):
     monkeypatch.setattr(
         module,
         "current_silver_output_evidence",
-        lambda: (_ for _ in ()).throw(FakeAirflowFailException("telemetry unavailable")),
+        lambda: (_ for _ in ()).throw(
+            FakeAirflowFailException("telemetry unavailable")
+        ),
     )
 
     with pytest.raises(FakeAirflowFailException, match="telemetry unavailable"):
@@ -288,8 +370,7 @@ def test_metrics_use_earlier_failure_artifact():
     ti = types.SimpleNamespace(
         xcom_pull=lambda *, task_ids, key=None: (
             {"dbt_run_results_path": failure_path}
-            if task_ids == "dbt_source_freshness"
-            and key == module.DBT_FAILURE_XCOM_KEY
+            if task_ids == "dbt_source_freshness" and key == module.DBT_FAILURE_XCOM_KEY
             else None
         )
     )
@@ -353,10 +434,9 @@ def test_metrics_forward_domain_and_target(tmp_path, monkeypatch):
     monkeypatch.setattr(
         module,
         "dump_dbt_run_results",
-        lambda path, *, domain, target: captured.update(
-            path=path, domain=domain, target=target
-        )
-        or [{}],
+        lambda path, *, domain, target: (
+            captured.update(path=path, domain=domain, target=target) or [{}]
+        ),
     )
 
     assert module.publish_dbt_run_metrics(

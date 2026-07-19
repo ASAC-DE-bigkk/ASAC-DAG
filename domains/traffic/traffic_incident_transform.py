@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Param, Variable
+from airflow.sdk.exceptions import AirflowSkipException
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 for path in (DIR, os.path.dirname(DIR), os.path.dirname(os.path.dirname(DIR))):
@@ -46,11 +47,13 @@ from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     SILVER_ASSET_CONTRACT,
     SILVER_SUCCESS_MARKER_KEY,
+    STALE_INCIDENT_RUN_IDS_XCOM_KEY,  # noqa: F401
     SilverOutputEvidence,  # noqa: F401
     TransformFailurePorts,
     TransformIdentity,
     admit_transform,
     build_dbt_phase_task,
+    coalesce_deferred_incident_runs,
     current_silver_output_evidence,
     record_classified_dbt_problem,
     resolve_traffic_silver_snapshot_run as _resolve_traffic_silver_snapshot_run,
@@ -96,12 +99,20 @@ def resolve_traffic_snapshot_run(**context) -> str:
 def admit_traffic_silver_snapshot(**context) -> dict[str, object]:
     ti = context["ti"]
     incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
-    return admit_transform(
-        variable=Variable,
-        marker_key=SILVER_SUCCESS_MARKER_KEY,
-        identity=TransformIdentity.silver(incident_run_id),
-        current_evidence_loader=current_silver_output_evidence,
-    )
+    try:
+        return admit_transform(
+            variable=Variable,
+            marker_key=SILVER_SUCCESS_MARKER_KEY,
+            identity=TransformIdentity.silver(incident_run_id),
+            current_evidence_loader=current_silver_output_evidence,
+        )
+    except AirflowSkipException:
+        coalesce_deferred_incident_runs(
+            ti,
+            snapshot_task_id=SNAPSHOT_TASK_ID,
+            incident_manifest_factory=build_traffic_manifest,
+        )
+        raise
 
 
 def publish_traffic_incident_silver_asset(**context) -> dict[str, object]:
@@ -117,6 +128,11 @@ def publish_traffic_incident_silver_asset(**context) -> dict[str, object]:
         "is_publishable": True,
         "contract": SILVER_ASSET_CONTRACT,
     }
+    coalesce_deferred_incident_runs(
+        ti,
+        snapshot_task_id=SNAPSHOT_TASK_ID,
+        incident_manifest_factory=build_traffic_manifest,
+    )
     publish_through_alias(
         context,
         alias=TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS,
@@ -138,7 +154,18 @@ def mark_traffic_silver_success(**context) -> dict[str, object]:
     return {"marker": serialized}
 
 
-def run_dbt_phase(*, dbt_command: str, selector: str | None, snapshot_task_id: str, silver_persisted: bool, fresh_parse: bool = False, snapshot_required: bool = False, silver_fence_mode: str | None = None, threads: int | None = None, **context) -> dict[str, object]:
+def run_dbt_phase(
+    *,
+    dbt_command: str,
+    selector: str | None,
+    snapshot_task_id: str,
+    silver_persisted: bool,
+    fresh_parse: bool = False,
+    snapshot_required: bool = False,
+    silver_fence_mode: str | None = None,
+    threads: int | None = None,
+    **context,
+) -> dict[str, object]:
     return transform_runtime.run_dbt_phase(
         dbt_command=dbt_command,
         selector=selector,
@@ -232,6 +259,9 @@ with DAG(
         task_id="publish_traffic_incident_silver_asset",
         python_callable=publish_traffic_incident_silver_asset,
         outlets=[TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS],
+        pool=TRINO_HEAVY_POOL,
+        priority_weight=PIN_CRITICAL_PRIORITY,
+        weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
     )
     mark_success = PythonOperator(
@@ -245,7 +275,15 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
-    chain = [validate_runtime, resolve_snapshot, admit_snapshot, *dbt_phase_tasks.values(), publish_silver, mark_success, publish_metrics]
+    chain = [
+        validate_runtime,
+        resolve_snapshot,
+        admit_snapshot,
+        *dbt_phase_tasks.values(),
+        publish_silver,
+        mark_success,
+        publish_metrics,
+    ]
     for upstream, downstream in zip(chain, chain[1:]):
         upstream >> downstream
 

@@ -27,7 +27,10 @@ from traffic_ingest.silver_snapshot_fence import (
     collect_silver_snapshot_evidence,
 )
 from traffic_ingest.transform_dag_support import dbt_snapshot_variables
-from traffic_ingest.transform_metrics import DBT_FAILURE_XCOM_KEY, DBT_RUN_RESULTS_RECORD_KEY
+from traffic_ingest.transform_metrics import (
+    DBT_FAILURE_XCOM_KEY,
+    DBT_RUN_RESULTS_RECORD_KEY,
+)
 from traffic_ingest.transform_test_tier import _selector_for_test_tier
 
 
@@ -71,6 +74,7 @@ def run_dbt_phase(
     classify_failure: Callable[..., Any] = classify_dbt_failure,
     recovery_record_builder: Callable[..., dict[str, object]] = build_recovery_record,
     persisted_from_results: Callable[..., bool] = silver_persisted_from_results,
+    pre_execution_guard: Callable[[], None] | None = None,
     runner: Callable[..., Any] = subprocess.run,
     **context,
 ) -> dict[str, object]:
@@ -150,6 +154,9 @@ def run_dbt_phase(
     except Exception as exc:  # fence telemetry and external rewrites both fail closed
         _fail_closed_fence(exc)
 
+    if pre_execution_guard is not None:
+        pre_execution_guard()
+
     execution = traffic_dbt.execute_dbt_phase(
         dbt_command=dbt_command,
         selector=effective_selector,
@@ -173,7 +180,8 @@ def run_dbt_phase(
             print(completed.stderr, end="", file=sys.stderr)
     completed = execution.completed
     missing_artifact_error = (
-        "missing expected dbt artifacts: " + ", ".join(execution.missing_expected_artifacts)
+        "missing expected dbt artifacts: "
+        + ", ".join(execution.missing_expected_artifacts)
         if completed.returncode == 0 and execution.missing_expected_artifacts
         else ""
     )
@@ -199,7 +207,11 @@ def run_dbt_phase(
             _fail_closed_fence(exc)
         return result
 
-    results = load_results(execution.existing_run_results_path) if execution.existing_run_results_path else []
+    results = (
+        load_results(execution.existing_run_results_path)
+        if execution.existing_run_results_path
+        else []
+    )
     failure = classify_failure(
         returncode=completed.returncode or 2,
         results=results,

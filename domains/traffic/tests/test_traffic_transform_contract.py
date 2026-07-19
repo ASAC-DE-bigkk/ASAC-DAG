@@ -68,7 +68,9 @@ def _load_transform_runtime():
 def test_silver_write_captures_baseline_and_returns_post_write_evidence(monkeypatch):
     runtime = _load_transform_runtime()
     evidence = iter((_silver_evidence(10), _silver_evidence(11)))
-    monkeypatch.setattr(runtime, "collect_silver_snapshot_evidence", lambda: next(evidence))
+    monkeypatch.setattr(
+        runtime, "collect_silver_snapshot_evidence", lambda: next(evidence)
+    )
     monkeypatch.setattr(
         runtime.traffic_dbt,
         "execute_dbt_phase",
@@ -95,7 +97,9 @@ def test_silver_write_captures_baseline_and_returns_post_write_evidence(monkeypa
 def test_silver_verify_rejects_snapshot_change_before_dbt(monkeypatch):
     runtime = _load_transform_runtime()
     called = False
-    monkeypatch.setattr(runtime, "collect_silver_snapshot_evidence", lambda: _silver_evidence(12))
+    monkeypatch.setattr(
+        runtime, "collect_silver_snapshot_evidence", lambda: _silver_evidence(12)
+    )
 
     def execute_dbt_phase(**_kwargs):
         nonlocal called
@@ -126,7 +130,9 @@ def test_silver_verify_rejects_snapshot_change_before_dbt(monkeypatch):
 def test_silver_verify_rejects_snapshot_change_after_successful_dbt(monkeypatch):
     runtime = _load_transform_runtime()
     evidence = iter((_silver_evidence(11), _silver_evidence(12)))
-    monkeypatch.setattr(runtime, "collect_silver_snapshot_evidence", lambda: next(evidence))
+    monkeypatch.setattr(
+        runtime, "collect_silver_snapshot_evidence", lambda: next(evidence)
+    )
     monkeypatch.setattr(
         runtime.traffic_dbt,
         "execute_dbt_phase",
@@ -340,9 +346,12 @@ def test_snapshot_resolver_delegates_to_the_traffic_manifest(monkeypatch):
         }
     )
 
-    assert module.resolve_traffic_snapshot_run(
-        triggering_asset_events={module.TRAFFIC_BRONZE_ASSET: [event]}
-    ) == "traffic-run-42"
+    assert (
+        module.resolve_traffic_snapshot_run(
+            triggering_asset_events={module.TRAFFIC_BRONZE_ASSET: [event]}
+        )
+        == "traffic-run-42"
+    )
     assert calls == ["traffic-run-42"]
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "bronze_collection_run_manifest" not in source
@@ -355,9 +364,12 @@ def test_traffic_snapshot_resolver_rejects_missing_asset_events():
         module.resolve_traffic_snapshot_run(triggering_asset_events={})
 
 
-def test_traffic_snapshot_resolver_coalesces_older_asset_events_in_one_batch(monkeypatch):
+def test_traffic_snapshot_resolver_defers_older_asset_coalescing_until_publish(
+    monkeypatch,
+):
     module = load_transform_module()
     coalesced_batches = []
+    pushed = {}
     monkeypatch.setattr(
         module,
         "resolve_citydata_crowding_snapshot_id",
@@ -376,6 +388,9 @@ def test_traffic_snapshot_resolver_coalesces_older_asset_events_in_one_batch(mon
             coalesced_batches.append((list(run_ids), replacement_run_id))
 
     monkeypatch.setattr(module, "build_traffic_manifest", lambda: Manifest())
+    ti = types.SimpleNamespace(
+        xcom_push=lambda *, key, value: pushed.update({key: value})
+    )
 
     def event(run_id, event_at):
         return types.SimpleNamespace(
@@ -391,21 +406,50 @@ def test_traffic_snapshot_resolver_coalesces_older_asset_events_in_one_batch(mon
             }
         )
 
-    assert module.resolve_traffic_snapshot_run(
-        triggering_asset_events={
-            module.TRAFFIC_BRONZE_ASSET: [
-                event("traffic-old-a", "2026-07-15T12:00:00+09:00"),
-                event("traffic-old-b", "2026-07-15T12:00:30+09:00"),
-                event("traffic-new", "2026-07-15T12:01:00+09:00"),
-            ]
-        }
-    ) == "traffic-new"
-    assert coalesced_batches == [(["traffic-old-a", "traffic-old-b"], "traffic-new")]
+    assert (
+        module.resolve_traffic_snapshot_run(
+            ti=ti,
+            triggering_asset_events={
+                module.TRAFFIC_BRONZE_ASSET: [
+                    event("traffic-old-a", "2026-07-15T12:00:00+09:00"),
+                    event("traffic-old-b", "2026-07-15T12:00:30+09:00"),
+                    event("traffic-new", "2026-07-15T12:01:00+09:00"),
+                ]
+            },
+        )
+        == "traffic-new"
+    )
+    assert coalesced_batches == []
+    assert pushed[module.STALE_INCIDENT_RUN_IDS_XCOM_KEY] == [
+        "traffic-old-a",
+        "traffic-old-b",
+    ]
+
+
+def _pin_gold_phase_evidence(monkeypatch, module):
+    evidence = module.SilverOutputEvidence(42, "a" * 64)
+    monkeypatch.setattr(
+        module,
+        "silver_output_evidence_from_resolver",
+        lambda *_args, **_kwargs: evidence,
+    )
+    monkeypatch.setattr(
+        module,
+        "current_silver_output_evidence",
+        lambda: evidence,
+    )
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            return run_id
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
 
 
 def test_traffic_snapshot_resolver_batches_large_stale_backlog(monkeypatch):
     module = load_transform_module()
     coalesced_batches = []
+    pushed = {}
     monkeypatch.setattr(
         module,
         "resolve_citydata_crowding_snapshot_id",
@@ -455,14 +499,19 @@ def test_traffic_snapshot_resolver_batches_large_stale_backlog(monkeypatch):
         )
     )
 
-    assert module.resolve_traffic_snapshot_run(
-        triggering_asset_events={module.TRAFFIC_BRONZE_ASSET: events}
-    ) == "traffic-latest"
-    assert len(coalesced_batches) == 1
-    assert coalesced_batches[0][0] == sorted(
+    assert (
+        module.resolve_traffic_snapshot_run(
+            ti=types.SimpleNamespace(
+                xcom_push=lambda *, key, value: pushed.update({key: value})
+            ),
+            triggering_asset_events={module.TRAFFIC_BRONZE_ASSET: events},
+        )
+        == "traffic-latest"
+    )
+    assert coalesced_batches == []
+    assert pushed[module.STALE_INCIDENT_RUN_IDS_XCOM_KEY] == sorted(
         f"traffic-old-{index}" for index in range(80)
     )
-    assert coalesced_batches[0][1] == "traffic-latest"
 
 
 def test_traffic_snapshot_resolver_rejects_manifest_mismatch(monkeypatch):
@@ -535,6 +584,20 @@ def _incident_silver_event(*, incident_run_id="incident-42"):
             "contract": "traffic_incident_silver.v1",
         }
     )
+
+
+def _set_current_silver_evidence(monkeypatch, module):
+    monkeypatch.setattr(
+        module,
+        "current_silver_output_evidence",
+        lambda: module.SilverOutputEvidence(42, "a" * 64),
+    )
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            return run_id
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
 
 
 def _flow_silver_event(*, flow_run_id="flow-42", parent_incident_run_id="incident-42"):
@@ -617,6 +680,7 @@ def test_flow_silver_resolver_fails_closed_for_mismatched_parent():
 def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
     module = load_gold_transform_module()
     _set_silver_marker(module)
+    _set_current_silver_evidence(monkeypatch, module)
     flow_calls = []
     pushed = {}
 
@@ -631,12 +695,15 @@ def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
         xcom_push=lambda *, key, value: pushed.update({key: value})
     )
 
-    assert module.resolve_traffic_gold_snapshot_run(
-        ti=ti,
-        triggering_asset_events={
-            module.TRAFFIC_FLOW_SILVER_ASSET: [_flow_silver_event()]
-        },
-    ) == "incident-42"
+    assert (
+        module.resolve_traffic_gold_snapshot_run(
+            ti=ti,
+            triggering_asset_events={
+                module.TRAFFIC_FLOW_SILVER_ASSET: [_flow_silver_event()]
+            },
+        )
+        == "incident-42"
+    )
     assert flow_calls == ["flow-42"]
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] == "flow-42"
     assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
@@ -645,6 +712,7 @@ def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
 def test_gold_stale_incompatible_flow_becomes_none(monkeypatch):
     module = load_gold_transform_module()
     _set_silver_marker(module, "incident-new")
+    _set_current_silver_evidence(monkeypatch, module)
     pushed = {}
     monkeypatch.setattr(
         module,
@@ -656,23 +724,27 @@ def test_gold_stale_incompatible_flow_becomes_none(monkeypatch):
         xcom_push=lambda *, key, value: pushed.update({key: value})
     )
 
-    assert module.resolve_traffic_gold_snapshot_run(
-        ti=ti,
-        triggering_asset_events={
-            module.TRAFFIC_FLOW_SILVER_ASSET: [
-                _flow_silver_event(
-                    flow_run_id="flow-old",
-                    parent_incident_run_id="incident-old",
-                )
-            ]
-        },
-    ) == "incident-new"
+    assert (
+        module.resolve_traffic_gold_snapshot_run(
+            ti=ti,
+            triggering_asset_events={
+                module.TRAFFIC_FLOW_SILVER_ASSET: [
+                    _flow_silver_event(
+                        flow_run_id="flow-old",
+                        parent_incident_run_id="incident-old",
+                    )
+                ]
+            },
+        )
+        == "incident-new"
+    )
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
 
 
 def test_gold_resolver_fails_closed_when_citydata_unavailable(monkeypatch):
     module = load_gold_transform_module()
     _set_silver_marker(module)
+    _set_current_silver_evidence(monkeypatch, module)
     from traffic_ingest.external_snapshot import ExternalSnapshotUnavailableError
 
     monkeypatch.setattr(
@@ -690,6 +762,7 @@ def test_gold_resolver_fails_closed_when_citydata_unavailable(monkeypatch):
 def test_gold_resolver_propagates_citydata_query_errors_for_retry(monkeypatch):
     module = load_gold_transform_module()
     _set_silver_marker(module)
+    _set_current_silver_evidence(monkeypatch, module)
     monkeypatch.setattr(
         module,
         "resolve_citydata_crowding_snapshot_id",
@@ -843,6 +916,7 @@ def test_preflight_phase_uses_non_materializing_snapshot_sentinel(monkeypatch):
 
 def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch):
     module = load_gold_transform_module()
+    _pin_gold_phase_evidence(monkeypatch, module)
     captured = {}
     completed = types.SimpleNamespace(returncode=0, stdout="", stderr="")
     execution = types.SimpleNamespace(
@@ -980,6 +1054,7 @@ def test_snapshot_required_phase_rejects_missing_late_pin(monkeypatch):
 
 def test_gold_test_selector_is_chosen_from_current_run_tier(monkeypatch):
     module = load_gold_transform_module()
+    _pin_gold_phase_evidence(monkeypatch, module)
     captured = {}
 
     def execute_dbt_phase(**kwargs):
@@ -1050,6 +1125,7 @@ def _execute_gold_phase_with_flow(
     citydata=8738321387624398062,
 ):
     module = load_gold_transform_module()
+    _pin_gold_phase_evidence(monkeypatch, module)
     captured = {}
 
     def execute_dbt_phase(**kwargs):
@@ -1207,13 +1283,15 @@ def test_select_traffic_test_tier_freezes_current_run_decision():
 def test_mark_traffic_test_tier_writes_frozen_decision_in_conservative_order():
     module = load_gold_transform_module()
     ti = types.SimpleNamespace(
-        xcom_pull=lambda *, task_ids: {
-            "tier": module.TrafficTestTier.FULL.value,
-            "hour_bucket": "2026-07-18T10",
-            "day_bucket": "2026-07-18",
-        }
-        if task_ids == module.SELECT_TEST_TIER_TASK_ID
-        else None
+        xcom_pull=lambda *, task_ids: (
+            {
+                "tier": module.TrafficTestTier.FULL.value,
+                "hour_bucket": "2026-07-18T10",
+                "day_bucket": "2026-07-18",
+            }
+            if task_ids == module.SELECT_TEST_TIER_TASK_ID
+            else None
+        )
     )
 
     result = module.mark_traffic_test_tier(ti=ti)
@@ -1307,9 +1385,9 @@ def test_gold_selector_rejects_invalid_buckets_before_executor(
 def test_marker_rejects_invalid_buckets_before_variable_write(raw_decision):
     module = load_gold_transform_module()
     ti = types.SimpleNamespace(
-        xcom_pull=lambda *, task_ids: raw_decision
-        if task_ids == module.SELECT_TEST_TIER_TASK_ID
-        else None
+        xcom_pull=lambda *, task_ids: (
+            raw_decision if task_ids == module.SELECT_TEST_TIER_TASK_ID else None
+        )
     )
 
     with pytest.raises(FakeAirflowFailException, match="invalid traffic test decision"):
@@ -1539,9 +1617,7 @@ def test_split_phase_specs_isolate_citydata_fence_and_test_cadence():
     )
 
     all_specs = SILVER_DBT_PHASE_SPECS + GOLD_DBT_PHASE_SPECS
-    assert all(
-        not spec.citydata_snapshot_required for spec in SILVER_DBT_PHASE_SPECS
-    )
+    assert all(not spec.citydata_snapshot_required for spec in SILVER_DBT_PHASE_SPECS)
     assert all(
         spec.citydata_snapshot_required
         for spec in GOLD_DBT_PHASE_SPECS
@@ -1617,7 +1693,10 @@ def test_split_phase_specs_isolate_citydata_fence_and_test_cadence():
 def test_dbt_phase_task_adapter_forwards_split_runtime_contract():
     module = load_transform_module()
     from traffic_ingest.test_cadence import TrafficTestTier
-    from traffic_ingest.transform_specs import GOLD_DBT_PHASE_SPECS, SILVER_DBT_PHASE_SPECS
+    from traffic_ingest.transform_specs import (
+        GOLD_DBT_PHASE_SPECS,
+        SILVER_DBT_PHASE_SPECS,
+    )
 
     specs = {
         spec.task_id: spec
@@ -1652,17 +1731,17 @@ def test_dbt_phase_task_adapter_forwards_split_runtime_contract():
             True,
             None,
             None,
-                {
-                    TrafficTestTier.GATE: (
-                        "ask_seoul_traffic_transform_gold_incident_gate_tests_without_commerce"
-                    ),
-                    TrafficTestTier.HOURLY: (
-                        "ask_seoul_traffic_transform_gold_incident_hourly_tests_without_commerce"
-                    ),
-                    TrafficTestTier.FULL: (
-                        "ask_seoul_traffic_transform_gold_incident_full_tests_without_commerce"
-                    ),
-                },
+            {
+                TrafficTestTier.GATE: (
+                    "ask_seoul_traffic_transform_gold_incident_gate_tests_without_commerce"
+                ),
+                TrafficTestTier.HOURLY: (
+                    "ask_seoul_traffic_transform_gold_incident_hourly_tests_without_commerce"
+                ),
+                TrafficTestTier.FULL: (
+                    "ask_seoul_traffic_transform_gold_incident_full_tests_without_commerce"
+                ),
+            },
         ),
     }
 
@@ -1673,9 +1752,18 @@ def test_traffic_transform_uses_only_the_silver_phase_contract():
 
     expected_phase_contracts = {
         "dbt_deps": ("deps", None),
-        "dbt_source_freshness": ("source freshness", "ask_seoul_traffic_transform_source"),
-        "dbt_test_traffic_incident_availability": ("test", "ask_seoul_traffic_transform_availability"),
-        "dbt_test_traffic_bronze_source_contract": ("test", "traffic_transform_contract_gate"),
+        "dbt_source_freshness": (
+            "source freshness",
+            "ask_seoul_traffic_transform_source",
+        ),
+        "dbt_test_traffic_incident_availability": (
+            "test",
+            "ask_seoul_traffic_transform_availability",
+        ),
+        "dbt_test_traffic_bronze_source_contract": (
+            "test",
+            "traffic_transform_contract_gate",
+        ),
         "dbt_run_silver": ("run", "ask_seoul_traffic_transform_incident_silver"),
         "dbt_test_silver": ("test", "ask_seoul_traffic_transform_incident_silver"),
     }
@@ -1688,17 +1776,23 @@ def test_traffic_transform_uses_only_the_silver_phase_contract():
             dbt_command,
             selector,
         )
-    assert dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["silver_fence_mode"] == "write"
-    assert dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["silver_fence_mode"] == "verify"
+    assert (
+        dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["silver_fence_mode"]
+        == "write"
+    )
+    assert (
+        dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["silver_fence_mode"]
+        == "verify"
+    )
 
 
 def test_contract_gates_are_the_only_path_into_persisted_silver():
     module = load_transform_module()
     dag = module.dag
 
-    assert dag.task_dict["dbt_test_traffic_bronze_source_contract"].downstream_task_ids == {
-        "dbt_run_silver"
-    }
+    assert dag.task_dict[
+        "dbt_test_traffic_bronze_source_contract"
+    ].downstream_task_ids == {"dbt_run_silver"}
     assert dag.task_dict["dbt_run_silver"].upstream_task_ids == {
         "dbt_test_traffic_bronze_source_contract",
     }

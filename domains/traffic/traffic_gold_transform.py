@@ -42,6 +42,7 @@ from traffic_ingest.assets import (  # noqa: E402
 from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from traffic_ingest.external_snapshot import resolve_citydata_crowding_snapshot_id  # noqa: E402
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
+from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_ingest.transform_admission import TransformIdentity, TransformSuccessMarker  # noqa: E402, F401
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     GOLD_SUCCESS_MARKER_KEY,
@@ -53,7 +54,10 @@ from traffic_ingest.transform_dag_support import (  # noqa: E402
     build_dbt_phase_task,
     current_silver_output_evidence,
     record_classified_dbt_problem,
+    require_current_silver_output_evidence,
+    require_publishable_incident_snapshot,
     resolve_traffic_gold_snapshot_run as _resolve_traffic_gold_snapshot_run,
+    silver_output_evidence_from_resolver,
     write_success_marker,
 )
 from traffic_ingest.transform_metrics import (  # noqa: E402
@@ -79,11 +83,11 @@ DBT_PROJECT = traffic_dbt.dbt_project_dir()
 SNAPSHOT_TASK_ID = "resolve_traffic_gold_snapshot_run"
 FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
 CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY = "traffic_citydata_crowding_snapshot_id"
-PIN_CRITICAL_PRIORITY = 10
+# Gold validation must win the next slot after its priority-1 build. Silver
+# writers remain priority 10, preserving their precedence before Gold starts.
+PIN_CRITICAL_PRIORITY = 20
 DBT_RETRY_DELAY = timedelta(minutes=2)
-DEFAULT_PARAMS = {
-    "target": Param(default="dev", type="string", enum=["dev"])
-}
+DEFAULT_PARAMS = {"target": Param(default="dev", type="string", enum=["dev"])}
 record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
@@ -91,8 +95,10 @@ def resolve_traffic_gold_snapshot_run(**context) -> str:
     return _resolve_traffic_gold_snapshot_run(
         context=context,
         variable=Variable,
+        incident_manifest_factory=build_traffic_manifest,
         flow_manifest_factory=build_traffic_flow_manifest,
         citydata_snapshot_resolver=resolve_citydata_crowding_snapshot_id,
+        current_silver_evidence_loader=current_silver_output_evidence,
         flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,
         citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
     )
@@ -153,6 +159,24 @@ def run_dbt_phase(
     selector_by_test_tier_when_flow_missing=None,
     **context,
 ) -> dict[str, object]:
+    def guard_current_silver_output() -> None:
+        mismatch_action = "skip" if dbt_command == "run" else "fail"
+        expected_evidence = silver_output_evidence_from_resolver(
+            context["ti"],
+            snapshot_task_id=snapshot_task_id,
+        )
+        require_current_silver_output_evidence(
+            expected_evidence,
+            current_evidence_loader=current_silver_output_evidence,
+            mismatch_action=mismatch_action,
+        )
+        incident_run_id = context["ti"].xcom_pull(task_ids=snapshot_task_id)
+        require_publishable_incident_snapshot(
+            build_traffic_manifest(),
+            str(incident_run_id),
+            mismatch_action=mismatch_action,
+        )
+
     return transform_runtime.run_dbt_phase(
         dbt_command=dbt_command,
         selector=selector,
@@ -175,6 +199,9 @@ def run_dbt_phase(
         classify_failure=classify_dbt_failure,
         recovery_record_builder=build_recovery_record,
         persisted_from_results=silver_persisted_from_results,
+        pre_execution_guard=(
+            guard_current_silver_output if snapshot_required else None
+        ),
         runner=subprocess.run,
         **context,
     )
@@ -269,7 +296,15 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
-    chain = [validate_runtime, select_test_tier, resolve_snapshot, admit_snapshot, *dbt_phase_tasks.values(), mark_success, publish_metrics]
+    chain = [
+        validate_runtime,
+        select_test_tier,
+        resolve_snapshot,
+        admit_snapshot,
+        *dbt_phase_tasks.values(),
+        mark_success,
+        publish_metrics,
+    ]
     for upstream, downstream in zip(chain, chain[1:]):
         upstream >> downstream
 
