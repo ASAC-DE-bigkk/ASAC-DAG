@@ -29,6 +29,9 @@ class DbtPhaseSpec:
     silver_fence_mode: Literal["write", "verify"] | None = None
 
 
+INCIDENT_SILVER_SELECTOR = "ask_seoul_traffic_transform_incident_silver"
+
+
 SILVER_DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_deps",
@@ -54,7 +57,7 @@ SILVER_DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_run_silver",
         "run",
-        "ask_seoul_traffic_transform_silver",
+        INCIDENT_SILVER_SELECTOR,
         fresh_parse=True,
         snapshot_required=True,
         pin_critical=True,
@@ -63,7 +66,7 @@ SILVER_DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_test_silver",
         "test",
-        "ask_seoul_traffic_transform_silver",
+        INCIDENT_SILVER_SELECTOR,
         silver_persisted=True,
         snapshot_required=True,
         pin_critical=True,
@@ -180,6 +183,7 @@ __all__ = [
     "DBT_PHASE_TASK_IDS",
     "FLOW_SILVER_DBT_PHASE_SPECS",
     "GOLD_DBT_PHASE_SPECS",
+    "INCIDENT_SILVER_SELECTOR",
     "SILVER_DBT_PHASE_SPECS",
     "DbtPhaseSpec",
 ]
