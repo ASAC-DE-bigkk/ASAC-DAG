@@ -943,6 +943,161 @@ def test_gold_test_selector_is_chosen_from_current_run_tier(monkeypatch):
     assert len(result["selected_unique_ids"]) == 123
 
 
+def _execute_gold_phase_with_flow(
+    monkeypatch,
+    *,
+    dbt_command="run",
+    selector="ask_seoul_traffic_transform_gold",
+    selector_by_test_tier=None,
+    flow_run_id=None,
+    tier=None,
+    citydata=8738321387624398062,
+):
+    module = load_gold_transform_module()
+    captured = {}
+
+    def execute_dbt_phase(**kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(
+            attempts=[types.SimpleNamespace(returncode=0, stdout="", stderr="")],
+            completed=types.SimpleNamespace(returncode=0, stdout="", stderr=""),
+            existing_run_results_path=None,
+            existing_sources_path=None,
+            existing_manifest_path=None,
+            missing_expected_artifacts=(),
+            selected_unique_ids=(),
+        )
+
+    def xcom_pull(*, task_ids, key=None):
+        if task_ids == module.SELECT_TEST_TIER_TASK_ID:
+            return {
+                "tier": tier.value,
+                "hour_bucket": "2026-07-18T10",
+                "day_bucket": "2026-07-18",
+            }
+        if task_ids == module.SNAPSHOT_TASK_ID:
+            if key == module.FLOW_SNAPSHOT_XCOM_KEY:
+                return flow_run_id
+            if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY:
+                return citydata
+            return "incident-1"
+        return None
+
+    monkeypatch.setattr(module.traffic_dbt, "execute_dbt_phase", execute_dbt_phase)
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold" if dbt_command == "test" else "dbt_run_gold",
+        try_number=1,
+        xcom_pull=xcom_pull,
+    )
+
+    module.run_dbt_phase(
+        dbt_command=dbt_command,
+        selector=selector,
+        selector_by_test_tier=selector_by_test_tier,
+        selector_when_flow_missing="ask_seoul_traffic_transform_gold_incident_models",
+        selector_by_test_tier_when_flow_missing=(
+            {
+                module.TrafficTestTier.GATE: (
+                    "ask_seoul_traffic_transform_gold_incident_gate_tests"
+                ),
+                module.TrafficTestTier.HOURLY: (
+                    "ask_seoul_traffic_transform_gold_incident_hourly_tests"
+                ),
+                module.TrafficTestTier.FULL: (
+                    "ask_seoul_traffic_transform_gold_incident_full_tests"
+                ),
+            }
+            if selector_by_test_tier is not None
+            else None
+        ),
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        silver_persisted=True,
+        fresh_parse=dbt_command == "test",
+        snapshot_required=True,
+        citydata_snapshot_required=True,
+        threads=2,
+        ti=ti,
+        run_id="manual__flow-aware-selector",
+        params={"target": "dev"},
+    )
+
+    return captured
+
+
+def test_gold_run_uses_incident_selector_when_flow_snapshot_is_missing(monkeypatch):
+    captured = _execute_gold_phase_with_flow(monkeypatch, flow_run_id=None)
+
+    assert captured["selector"] == "ask_seoul_traffic_transform_gold_incident_models"
+
+
+def test_gold_run_uses_incident_selector_when_flow_snapshot_is_empty(monkeypatch):
+    captured = _execute_gold_phase_with_flow(monkeypatch, flow_run_id="")
+
+    assert captured["selector"] == "ask_seoul_traffic_transform_gold_incident_models"
+
+
+def test_gold_run_keeps_full_selector_when_flow_snapshot_is_present(monkeypatch):
+    captured = _execute_gold_phase_with_flow(monkeypatch, flow_run_id="flow-42")
+
+    assert captured["selector"] == "ask_seoul_traffic_transform_gold"
+
+
+@pytest.mark.parametrize(
+    ("tier_name", "expected_selector"),
+    [
+        ("GATE", "ask_seoul_traffic_transform_gold_incident_gate_tests"),
+        ("HOURLY", "ask_seoul_traffic_transform_gold_incident_hourly_tests"),
+        ("FULL", "ask_seoul_traffic_transform_gold_incident_full_tests"),
+    ],
+)
+def test_gold_test_uses_incident_selector_by_tier_when_flow_snapshot_is_missing(
+    monkeypatch, tier_name, expected_selector
+):
+    module = load_gold_transform_module()
+    captured = _execute_gold_phase_with_flow(
+        monkeypatch,
+        dbt_command="test",
+        selector="ask_seoul_traffic_transform_gold_full_tests",
+        selector_by_test_tier={
+            module.TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
+            module.TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
+            module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+        },
+        flow_run_id=None,
+        tier=getattr(module.TrafficTestTier, tier_name),
+    )
+
+    assert captured["selector"] == expected_selector
+
+
+@pytest.mark.parametrize(
+    ("tier_name", "expected_selector"),
+    [
+        ("GATE", "ask_seoul_traffic_transform_gold_gate_tests"),
+        ("HOURLY", "ask_seoul_traffic_transform_gold_hourly_tests"),
+        ("FULL", "ask_seoul_traffic_transform_gold_full_tests"),
+    ],
+)
+def test_gold_test_keeps_full_selector_by_tier_when_flow_snapshot_is_present(
+    monkeypatch, tier_name, expected_selector
+):
+    module = load_gold_transform_module()
+    captured = _execute_gold_phase_with_flow(
+        monkeypatch,
+        dbt_command="test",
+        selector="ask_seoul_traffic_transform_gold_full_tests",
+        selector_by_test_tier={
+            module.TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
+            module.TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
+            module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+        },
+        flow_run_id="flow-42",
+        tier=getattr(module.TrafficTestTier, tier_name),
+    )
+
+    assert captured["selector"] == expected_selector
+
+
 def test_select_traffic_test_tier_freezes_current_run_decision():
     module = load_gold_transform_module()
 
@@ -1152,18 +1307,22 @@ def test_axes_and_admin_tier_noop_returns_success_without_executor(monkeypatch):
         "execute_dbt_phase",
         lambda **kwargs: calls.append(kwargs),
     )
-    ti = types.SimpleNamespace(
-        task_id="dbt_test_asac_axes_seed_contract",
-        try_number=1,
-        xcom_pull=lambda *, task_ids, key=None: (
-            {
+
+    def xcom_pull(*, task_ids, key=None):
+        if task_ids == module.SELECT_TEST_TIER_TASK_ID:
+            return {
                 "tier": module.TrafficTestTier.GATE.value,
                 "hour_bucket": "2026-07-18T10",
                 "day_bucket": "2026-07-18",
             }
-            if task_ids == module.SELECT_TEST_TIER_TASK_ID
-            else "snapshot-a"
-        ),
+        if task_ids == module.SNAPSHOT_TASK_ID and key is None:
+            return None
+        pytest.fail(f"tier noop should not read {task_ids} XCom key={key}")
+
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_asac_axes_seed_contract",
+        try_number=1,
+        xcom_pull=xcom_pull,
     )
 
     result = module.run_dbt_phase(
@@ -1325,10 +1484,31 @@ def test_split_phase_specs_isolate_citydata_fence_and_test_cadence():
         module.TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
         module.TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
     }
+    assert gold_specs["dbt_run_gold"].selector_when_flow_missing == (
+        "ask_seoul_traffic_transform_gold_incident_models"
+    )
+    assert gold_specs["dbt_test_gold"].selector_by_test_tier_when_flow_missing == {
+        module.TrafficTestTier.GATE: (
+            "ask_seoul_traffic_transform_gold_incident_gate_tests"
+        ),
+        module.TrafficTestTier.HOURLY: (
+            "ask_seoul_traffic_transform_gold_incident_hourly_tests"
+        ),
+        module.TrafficTestTier.FULL: (
+            "ask_seoul_traffic_transform_gold_incident_full_tests"
+        ),
+    }
+    assert all(
+        spec.selector_when_flow_missing is None
+        and spec.selector_by_test_tier_when_flow_missing is None
+        for spec in all_specs
+        if spec.task_id not in {"dbt_run_gold", "dbt_test_gold"}
+    )
 
 
 def test_dbt_phase_task_adapter_forwards_split_runtime_contract():
     module = load_transform_module()
+    from traffic_ingest.test_cadence import TrafficTestTier
     from traffic_ingest.transform_specs import GOLD_DBT_PHASE_SPECS, SILVER_DBT_PHASE_SPECS
 
     specs = {
@@ -1354,11 +1534,28 @@ def test_dbt_phase_task_adapter_forwards_split_runtime_contract():
         task_id: (
             task.kwargs["op_kwargs"]["citydata_snapshot_required"],
             task.kwargs["op_kwargs"]["silver_fence_mode"],
+            task.kwargs["op_kwargs"]["selector_when_flow_missing"],
+            task.kwargs["op_kwargs"]["selector_by_test_tier_when_flow_missing"],
         )
         for task_id, task in tasks.items()
     } == {
-        "dbt_run_silver": (False, "write"),
-        "dbt_test_gold": (True, None),
+        "dbt_run_silver": (False, "write", None, None),
+        "dbt_test_gold": (
+            True,
+            None,
+            None,
+            {
+                TrafficTestTier.GATE: (
+                    "ask_seoul_traffic_transform_gold_incident_gate_tests"
+                ),
+                TrafficTestTier.HOURLY: (
+                    "ask_seoul_traffic_transform_gold_incident_hourly_tests"
+                ),
+                TrafficTestTier.FULL: (
+                    "ask_seoul_traffic_transform_gold_incident_full_tests"
+                ),
+            },
+        ),
     }
 
 

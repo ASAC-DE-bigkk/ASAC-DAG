@@ -61,6 +61,8 @@ def run_dbt_phase(
     silver_fence_mode: str | None = None,
     threads: int | None = None,
     selector_by_test_tier=None,
+    selector_when_flow_missing: str | None = None,
+    selector_by_test_tier_when_flow_missing=None,
     dbt_bin: str | None = None,
     dbt_project: str | None = None,
     flow_xcom_key: str = "traffic_flow_snapshot_dag_run_id",
@@ -83,9 +85,26 @@ def run_dbt_phase(
     try_number = getattr(ti, "try_number", None)
     params = context.get("params") or {}
     target = params.get("target", "dev")
+    effective_base_selector = selector
+    effective_selector_by_test_tier = selector_by_test_tier
+    if (
+        selector_when_flow_missing is not None
+        or selector_by_test_tier_when_flow_missing is not None
+    ):
+        try:
+            flow_run_id = ti.xcom_pull(task_ids=snapshot_task_id, key=flow_xcom_key)
+        except TypeError:
+            flow_run_id = None
+        if not flow_run_id:
+            if selector_when_flow_missing is not None:
+                effective_base_selector = selector_when_flow_missing
+            if selector_by_test_tier_when_flow_missing is not None:
+                effective_selector_by_test_tier = (
+                    selector_by_test_tier_when_flow_missing
+                )
     effective_selector, tier_skipped = _selector_for_test_tier(
-        selector=selector,
-        selector_by_test_tier=selector_by_test_tier,
+        selector=effective_base_selector,
+        selector_by_test_tier=effective_selector_by_test_tier,
         ti=ti,
     )
     if tier_skipped:

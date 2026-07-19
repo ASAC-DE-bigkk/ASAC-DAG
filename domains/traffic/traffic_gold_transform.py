@@ -138,7 +138,21 @@ def mark_traffic_gold_success(**context) -> dict[str, object]:
     return {"marker": serialized}
 
 
-def run_dbt_phase(*, dbt_command: str, selector: str | None, snapshot_task_id: str, silver_persisted: bool, fresh_parse: bool = False, snapshot_required: bool = False, citydata_snapshot_required: bool = False, threads: int | None = None, selector_by_test_tier=None, **context) -> dict[str, object]:
+def run_dbt_phase(
+    *,
+    dbt_command: str,
+    selector: str | None,
+    snapshot_task_id: str,
+    silver_persisted: bool,
+    fresh_parse: bool = False,
+    snapshot_required: bool = False,
+    citydata_snapshot_required: bool = False,
+    threads: int | None = None,
+    selector_by_test_tier=None,
+    selector_when_flow_missing: str | None = None,
+    selector_by_test_tier_when_flow_missing=None,
+    **context,
+) -> dict[str, object]:
     return transform_runtime.run_dbt_phase(
         dbt_command=dbt_command,
         selector=selector,
@@ -149,6 +163,10 @@ def run_dbt_phase(*, dbt_command: str, selector: str | None, snapshot_task_id: s
         citydata_snapshot_required=citydata_snapshot_required,
         threads=threads,
         selector_by_test_tier=selector_by_test_tier,
+        selector_when_flow_missing=selector_when_flow_missing,
+        selector_by_test_tier_when_flow_missing=(
+            selector_by_test_tier_when_flow_missing
+        ),
         dbt_bin=DBT_BIN,
         dbt_project=DBT_PROJECT,
         flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,

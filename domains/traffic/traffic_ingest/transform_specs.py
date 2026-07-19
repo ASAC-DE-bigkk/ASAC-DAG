@@ -21,6 +21,10 @@ class DbtPhaseSpec:
     workload: DbtWorkload = DbtWorkload.TRINO
     threads: int | None = 2
     selector_by_test_tier: dict[TrafficTestTier, str | None] | None = None
+    selector_when_flow_missing: str | None = None
+    selector_by_test_tier_when_flow_missing: (
+        dict[TrafficTestTier, str | None] | None
+    ) = None
     citydata_snapshot_required: bool = False
     silver_fence_mode: Literal["write", "verify"] | None = None
 
@@ -111,6 +115,7 @@ GOLD_DBT_PHASE_SPECS = (
         silver_persisted=True,
         snapshot_required=True,
         citydata_snapshot_required=True,
+        selector_when_flow_missing="ask_seoul_traffic_transform_gold_incident_models",
     ),
     DbtPhaseSpec(
         "dbt_test_gold",
@@ -125,6 +130,11 @@ GOLD_DBT_PHASE_SPECS = (
             TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_gate_tests",
             TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_hourly_tests",
             TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_full_tests",
+        },
+        selector_by_test_tier_when_flow_missing={
+            TrafficTestTier.GATE: "ask_seoul_traffic_transform_gold_incident_gate_tests",
+            TrafficTestTier.HOURLY: "ask_seoul_traffic_transform_gold_incident_hourly_tests",
+            TrafficTestTier.FULL: "ask_seoul_traffic_transform_gold_incident_full_tests",
         },
     ),
 )

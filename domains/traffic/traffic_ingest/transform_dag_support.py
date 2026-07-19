@@ -537,6 +537,10 @@ def build_dbt_phase_task(
             "silver_fence_mode": spec.silver_fence_mode,
             "threads": spec.threads,
             "selector_by_test_tier": spec.selector_by_test_tier,
+            "selector_when_flow_missing": spec.selector_when_flow_missing,
+            "selector_by_test_tier_when_flow_missing": (
+                spec.selector_by_test_tier_when_flow_missing
+            ),
         },
         "retries": 1,
         "retry_delay": retry_delay,
