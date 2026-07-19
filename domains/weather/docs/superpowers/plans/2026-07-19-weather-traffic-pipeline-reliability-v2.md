@@ -68,7 +68,7 @@
 - Consumes: Marquez `GET /api/v1/namespaces/{namespace}/jobs/{job}/runs?limit=500`
 - Produces: `StagePolicy`, `summarize_stage_runs()`, `collect_pipeline_stages()`
 
-- [ ] **Step 1: stage 상태 RED test 작성**
+- [x] **Step 1: stage 상태 RED test 작성**
 
 각 도메인 test에서 실제 Marquez run response shape를 완전한 dict fixture로 만든다.
 
@@ -88,7 +88,7 @@ def test_latest_success_with_recovered_failure_is_warn():
 stale RUNNING, latest FAILED, fresh RUNNING+recent success, no observation, malformed response,
 p50/p95 duration cases를 각각 독립 test로 작성한다.
 
-- [ ] **Step 2: RED 확인**
+- [x] **Step 2: RED 확인**
 
 Run:
 
@@ -99,7 +99,7 @@ python -m pytest -q -p no:cacheprovider domains/traffic/tests/test_traffic_relia
 
 Expected: import 또는 missing symbol로 FAIL.
 
-- [ ] **Step 3: 최소 구현**
+- [x] **Step 3: 최소 구현**
 
 두 domain module은 서로 import하지 않고 같은 public contract를 소유한다.
 
@@ -120,11 +120,11 @@ def collect_pipeline_stages(*, policies: tuple[StagePolicy, ...], detected_at: d
 API URL과 namespace/job path는 config의 exact allowlist에서만 만들고 `urllib.parse.quote(...,
 safe="")`를 사용한다. exception message는 버리고 `error_type`만 반환한다.
 
-- [ ] **Step 4: GREEN·domain regression 확인**
+- [x] **Step 4: GREEN·domain regression 확인**
 
 Run Task 1 tests, then both existing reliability test groups. Expected: PASS.
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```powershell
 git add domains/traffic domains/weather
@@ -144,7 +144,7 @@ git commit -m "feat(reliability): add pipeline lineage summaries"
 - Consumes: final report dict, KST report date, R2 object client
 - Produces: `compact_history_snapshot()`, `history_object_key()`, `load_recent_history()`, `write_history_snapshot()`
 
-- [ ] **Step 1: RED tests 작성**
+- [x] **Step 1: RED tests 작성**
 
 ```python
 def test_history_key_is_domain_and_kst_date_scoped():
@@ -160,16 +160,16 @@ def test_compact_snapshot_excludes_errors_and_run_payloads():
 
 7 exact GET, missing key, malformed JSON, wrong domain/version, write failure type-only logging을 test한다.
 
-- [ ] **Step 2: RED 확인**
+- [x] **Step 2: RED 확인**
 
 Run both new history test files. Expected: missing module/symbol FAIL.
 
-- [ ] **Step 3: 최소 구현**
+- [x] **Step 3: 최소 구현**
 
 R2 client는 `common.storage.r2_env`를 사용하되 endpoint/key/token 값을 log·payload에 넣지
 않는다. `load_recent_history`는 list operation 없이 날짜별 exact key만 읽는다.
 
-- [ ] **Step 4: GREEN 확인 후 commit**
+- [x] **Step 4: GREEN 확인 후 commit**
 
 Run history + lineage suites. Expected: PASS.
 
@@ -194,7 +194,7 @@ git commit -m "feat(reliability): persist compact daily trends"
 - Consumes: existing landing ledger, pending receipts, Incident/Flow manifest, Traffic audit, stage summaries, history
 - Produces: `collect_traffic_data_plane()`, `compose_traffic_pipeline_report()`
 
-- [ ] **Step 1: RED tests 작성**
+- [x] **Step 1: RED tests 작성**
 
 다음을 독립 test로 고정한다.
 
@@ -206,11 +206,11 @@ git commit -m "feat(reliability): persist compact daily trends"
 - Asset stage count를 landing expected count와 비교하지 않는다.
 - bottleneck은 관측된 stage p95 중 최대이며 `pool_wait`라고 이름 붙이지 않는다.
 
-- [ ] **Step 2: RED 확인**
+- [x] **Step 2: RED 확인**
 
 Run Traffic repository/composition tests. Expected: missing v2 key/function assertion FAIL.
 
-- [ ] **Step 3: 최소 구현**
+- [x] **Step 3: 최소 구현**
 
 ```python
 def collect_traffic_data_plane(cursor=None, detected_at: datetime | None = None) -> dict[str, Any]: ...
@@ -222,7 +222,7 @@ def compose_traffic_pipeline_report(*, data_plane: dict[str, Any], stages: dict[
 호출한다. report name은 `traffic_pipeline_reliability_v2`로 올리되 기존 top-level data key는
 한 release 동안 유지한다.
 
-- [ ] **Step 4: GREEN 확인 후 commit**
+- [x] **Step 4: GREEN 확인 후 commit**
 
 Run all Traffic reliability tests. Expected: PASS.
 
@@ -242,21 +242,21 @@ Run all Traffic reliability tests. Expected: PASS.
 - Consumes: Weather Bronze/manifest, transform/source-freshness/maintenance stage summary, history
 - Produces: `collect_weather_data_plane()`, `compose_weather_pipeline_report()`
 
-- [ ] **Step 1: RED tests 작성**
+- [x] **Step 1: RED tests 작성**
 
 Traffic과 같은 precedence를 적용하되 Weather KMA base/grid/raw page coverage를 보존한다.
 maintenance 미관측은 `UNKNOWN` informational, 실제 최신 maintenance FAILED는 FAIL로 test한다.
 
-- [ ] **Step 2: RED 확인**
+- [x] **Step 2: RED 확인**
 
 Run Weather repository/composition tests. Expected: v2 assertion FAIL.
 
-- [ ] **Step 3: 최소 구현**
+- [x] **Step 3: 최소 구현**
 
 기존 `build_weather_reliability_report()` compatibility facade와 기존 Weather dict field를
 유지하면서 pipeline/stages/trend/bottleneck을 추가한다.
 
-- [ ] **Step 4: GREEN 확인 후 commit**
+- [x] **Step 4: GREEN 확인 후 commit**
 
 Run all Weather reliability tests. Expected: PASS.
 
@@ -273,21 +273,21 @@ Run all Weather reliability tests. Expected: PASS.
 - Consumes: v2 report dict
 - Produces: `build_*_discord_payload(report) -> dict`, `send_discord_report(report, webhook_url=None) -> bool`
 
-- [ ] **Step 1: RED tests 작성**
+- [x] **Step 1: RED tests 작성**
 
 PASS/WARN/FAIL color, five named fields, 7-day icons, bottleneck label, field/total limits, Korean
 UTF-8, webhook redaction을 test한다. formatter는 report status로 색상을 결정해야 한다.
 
-- [ ] **Step 2: RED 확인**
+- [x] **Step 2: RED 확인**
 
 Run both Discord suites. Expected: missing payload API FAIL.
 
-- [ ] **Step 3: 최소 구현**
+- [x] **Step 3: 최소 구현**
 
 기존 `format_*_discord_message()`는 readable text compatibility facade로 유지한다. transport는
 구조화 payload를 JSON UTF-8로 보내며 response status >=400은 False를 반환한다.
 
-- [ ] **Step 4: GREEN 확인 후 commit**
+- [x] **Step 4: GREEN 확인 후 commit**
 
 Run both Discord suites. Expected: PASS.
 
@@ -303,26 +303,26 @@ Run both Discord suites. Expected: PASS.
 **Interfaces:**
 - Produces task graph: `collect_data_plane >> compose_pipeline_reliability >> deliver_pipeline_reliability`
 
-- [ ] **Step 1: RED DAG contract tests 작성**
+- [x] **Step 1: RED DAG contract tests 작성**
 
 각 DAG에서 정확히 세 task, domain heavy pool은 collect task에만 적용, 09:00 schedule,
 `max_active_runs=1`, 모든 task failure callback, lineage enable, daily idempotency를 assert한다.
 
-- [ ] **Step 2: RED 확인**
+- [x] **Step 2: RED 확인**
 
 Run both DAG tests. Expected: 기존 single-task topology 때문에 FAIL.
 
-- [ ] **Step 3: 최소 DAG 구현**
+- [x] **Step 3: 최소 DAG 구현**
 
 collect task는 data-plane dict, compose task는 XCom data와 Marquez/history를 합친 report,
 deliver task는 history write와 Discord 전송·fingerprint persistence 결과를 반환한다.
 delivery fingerprint contract는 `pipeline-reliability-daily-v2`이며 성공 전 claim을 금지한다.
 
-- [ ] **Step 4: GREEN·failure alert regression 확인**
+- [x] **Step 4: GREEN·failure alert regression 확인**
 
 Run DAG, architecture, failure-alert contract suites. Expected: PASS.
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```powershell
 git add domains/traffic domains/weather
@@ -337,12 +337,12 @@ git commit -m "feat(reliability): report end-to-end pipeline health"
 - Modify: `domains/traffic/README.md`
 - Modify: `domains/weather/README.md`
 
-- [ ] **Step 1: README 계약 갱신**
+- [x] **Step 1: README 계약 갱신**
 
 Bronze-only 설명을 Pipeline Reliability v2, 09:00 daily, immediate failure callback,
 Trino/R2/Marquez source, 7-day observed trend로 교체한다.
 
-- [ ] **Step 2: 정적·전체 unit 검증**
+- [x] **Step 2: 정적·전체 unit 검증**
 
 ```powershell
 $env:PYTHONDONTWRITEBYTECODE='1'

@@ -21,7 +21,7 @@ KMA `getVilageFcst` 수집부터 Weather Silver/Gold 변환, 유지보수, 신�
 | `weather_vilage_fcst_transform.py` | root dbt project의 Weather tag를 source→Silver→Gold 순서로 실행한다. |
 | `weather_w1_contract_smoke.py` | Weather W1 bridge/tag 계약을 격리 검증한다. |
 | `weather_iceberg_maintenance.py` | Weather Iceberg 유지보수 작업을 조율한다. |
-| `weather_reliability_report.py` | Bronze·manifest 요약을 읽어 Discord 신뢰성 리포트를 보낸다. |
+| `weather_reliability_report.py` | 매일 09:00 KST에 Weather data plane과 전체 pipeline stage를 분리 수집해 구조화된 Discord 신뢰성 리포트를 보낸다. |
 
 DAG entrypoint는 순서와 Airflow wiring만 소유한다. 도메인 로직은 아래 모듈에 둔다.
 
@@ -51,8 +51,11 @@ DAG entrypoint는 순서와 Airflow wiring만 소유한다. 도메인 로직은 
 | `weather_ingest/reliability_report.py` | 기존 import를 보존하는 compatibility facade |
 | `weather_ingest/reliability/config.py` | 환경설정, identifier, 상수 |
 | `weather_ingest/reliability/trino_repository.py` | Bronze·manifest read-only 요약 |
-| `weather_ingest/reliability/report.py` | 최종 상태와 report dict 조립 |
-| `weather_ingest/reliability/discord.py` | 메시지 formatting과 webhook transport |
+| `weather_ingest/reliability/lineage.py` | allowlist된 Marquez job의 최신 상태·staleness·p50/p95 요약 |
+| `weather_ingest/reliability/history.py` | 날짜가 고정된 R2 snapshot과 관측 기반 7일 trend |
+| `weather_ingest/reliability/report.py` | data/control plane 우선순위와 최종 Pipeline Reliability v2 조립 |
+| `weather_ingest/reliability/card.py` | 상태 기반 Discord embed card 조립 |
+| `weather_ingest/reliability/discord.py` | 기존 text 호환 formatter와 webhook transport |
 | `config/seoul_kma_grids.csv` | 서울을 덮는 KMA `nx, ny` grid 계약 |
 
 ## Run manifest 소유권과 호환 경로
@@ -71,8 +74,26 @@ Bronze DAG -> KmaLanding -> R2 raw/checkpoint -> PyIceberg append/Trino verify
            -> WeatherRunManifest SUCCESS + is_publishable
 Transform DAG -> dbt tag run/test -> invocation 전용 manifest.json/run_results.json
               -> lineage/metrics
-Reliability DAG -> Trino Bronze/manifest summary -> report -> Discord
+Reliability DAG (09:00 KST) -> Trino Bronze/manifest (weather heavy pool)
+                               -> Marquez stages + exact-date R2 history (no Trino)
+                               -> structured Discord card + daily delivery state
 ```
+
+## Pipeline Reliability v2 운영 계약
+
+- DAG ID는 `weather_bronze_reliability_report`를 유지하지만 보고 범위는 Weather Bronze,
+  source freshness, Silver/Gold transform, Iceberg maintenance까지다.
+- `collect_weather_data_plane`만 `trino_weather_heavy`를 사용한다. compose와 deliver는 Trino slot을
+  점유하지 않으며 `collect -> compose -> deliver` 순서로 실행한다.
+- 최근 24시간 KMA 발표시각, grid slot, raw pagination page, freshness, publishability가 data truth다.
+  이 영역의 실패는 Marquez 성공보다 우선해 `FAIL`이다.
+- Marquez는 allowlist job의 최신 run, staleness, 회복된 실패, p50/p95 runtime을 보조 관측한다.
+  maintenance 미관측은 정보성 `UNKNOWN`이고, 실제 최신 maintenance 실패가 관측되면 `FAIL`이다.
+- 7일 추세는 R2 prefix list 없이 이전 날짜의 exact key 7개만 읽는다. 아직 저장되지 않은 날짜는
+  0이나 실패가 아니라 `UNKNOWN`이다.
+- 정규 리포트는 매일 09:00 KST 한 번이다. 15분 reliability report는 없으며, 정규 DAG/task 실패는
+  `problem_failure_callback`을 통해 즉시 별도 Discord 알림을 보낸다.
+- daily fingerprint는 Discord 성공 뒤에만 기록하고 history snapshot은 날짜 key에 멱등 overwrite한다.
 
 ## dbt 선택·manifest·lineage
 

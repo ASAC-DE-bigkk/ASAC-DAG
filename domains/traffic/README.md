@@ -27,7 +27,7 @@
 | `traffic_flow_transform.py` | Flow Bronze와 matching Incident Silver를 고정해 Flow Silver run/test 후 Flow Silver Asset을 발행한다. |
 | `traffic_gold_transform.py` | Incident Silver 또는 compatible Flow Silver Asset을 받아 exact Silver/Flow와 read-only Citydata snapshot을 고정하고 Gold run/test를 실행한다. |
 | `traffic_snapshot_recovery.py` | 특정 publishable snapshot을 격리된 recovery relation으로 검증하는 dev 전용 수동 DAG다. |
-| `traffic_reliability_report.py` | landing ledger·receipt backlog·Bronze manifest를 읽어 Discord 신뢰성 리포트를 보낸다. |
+| `traffic_reliability_report.py` | 매일 09:00 KST에 Traffic data plane과 전체 pipeline stage를 분리 수집해 구조화된 Discord 신뢰성 리포트를 보낸다. |
 
 `traffic_snapshot_recovery`는 `snapshot_dag_run_id`를 입력받아
 `recovery_silver_seoul_traffic_incident`부터 검증하며 canonical Silver/Gold relation은 쓰지 않는다.
@@ -59,8 +59,11 @@ DAG entrypoint는 순서와 Airflow wiring만 소유한다. 도메인 로직은 
 | `traffic_ingest/reliability/trino_repository.py` | Bronze·manifest read-only 요약 |
 | `traffic_ingest/reliability/ledger.py` | landing slot invariant와 연속 실패 구간 |
 | `traffic_ingest/reliability/backlog.py` | pending receipt 수와 oldest age |
-| `traffic_ingest/reliability/report.py` | 최종 상태와 report dict 조립 |
-| `traffic_ingest/reliability/discord.py` | 메시지 formatting과 webhook transport |
+| `traffic_ingest/reliability/lineage.py` | allowlist된 Marquez job의 최신 상태·staleness·p50/p95 요약 |
+| `traffic_ingest/reliability/history.py` | 날짜가 고정된 R2 snapshot과 관측 기반 7일 trend |
+| `traffic_ingest/reliability/report.py` | data/control plane 우선순위와 최종 Pipeline Reliability v2 조립 |
+| `traffic_ingest/reliability/card.py` | 상태 기반 Discord embed card 조립 |
+| `traffic_ingest/reliability/discord.py` | 기존 text 호환 formatter와 webhook transport |
 
 ## 핵심 실행 흐름
 
@@ -79,8 +82,26 @@ Flow Silver Transform -> Flow Bronze Asset AND matching Incident Silver Asset
 Gold Transform -> Incident Silver Asset OR compatible Flow Silver Asset
                -> exact Incident/Flow + read-only Citydata snapshot pin -> admission
                -> Gold run/test -> success marker -> lineage/metrics
-Reliability -> landing slot + receipt backlog + Bronze manifest -> Discord
+Reliability (09:00 KST) -> Trino/R2 data plane (traffic heavy pool)
+                       -> Marquez stages + exact-date R2 history (no Trino)
+                       -> structured Discord card + daily delivery state
 ```
+
+## Pipeline Reliability v2 운영 계약
+
+- DAG ID는 `traffic_bronze_reliability_report`를 유지하지만 보고 범위는 Incident landing/Bronze,
+  Flow Bronze, Incident/Flow Silver, Traffic Gold, source freshness, maintenance까지다.
+- `collect_traffic_data_plane`만 `trino_traffic_heavy`를 사용한다. compose와 deliver는 Trino slot을
+  점유하지 않으며 `collect -> compose -> deliver` 순서로 실행한다.
+- Trino/R2의 수집·coverage·publishability·pending backlog가 data truth다. 이 영역의 실패는
+  Marquez 성공보다 우선해 `FAIL`이다.
+- Marquez는 allowlist job의 최신 run, staleness, 회복된 실패, p50/p95 runtime을 보조 관측한다.
+  API 미관측은 데이터 실패로 위장하지 않고 `UNKNOWN/WARN`으로 표시한다.
+- 7일 추세는 R2 prefix list 없이 이전 날짜의 exact key 7개만 읽는다. 아직 저장되지 않은 날짜는
+  0이나 실패가 아니라 `UNKNOWN`이다.
+- 정규 리포트는 매일 09:00 KST 한 번이다. 15분 reliability report는 없으며, 정규 DAG/task 실패는
+  `problem_failure_callback`을 통해 즉시 별도 Discord 알림을 보낸다.
+- daily fingerprint는 Discord 성공 뒤에만 기록하고 history snapshot은 날짜 key에 멱등 overwrite한다.
 
 Materializer의 빈 fallback 실행은 성공으로 끝나지만 Asset을 발행하지 않는다. 따라서
 의도적인 `skipped` terminal task나 `all_done`/`one_failed` 보조 task 없이도 DAG 상태와
