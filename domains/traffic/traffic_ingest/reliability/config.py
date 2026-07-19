@@ -16,6 +16,7 @@ KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger("traffic_ingest.reliability_report")
 
 TRAFFIC_BRONZE_DAG_ID = "traffic_incident_bronze"
+TRAFFIC_FLOW_BRONZE_DAG_ID = "traffic_flow_bronze"
 TRAFFIC_LANDING_DAG_ID = "traffic_incident_landing"
 # ``traffic_incident_bronze`` runs on a five-minute cron in the dev smoke flow.
 # The interval is added to the first-to-last failed slot so the reported window
@@ -24,6 +25,8 @@ TRAFFIC_SCHEDULE_INTERVAL_MINUTES = 5
 TRAFFIC_RUN_STALE_MINUTES = 15
 TRAFFIC_TABLE = "bronze_seoul_traffic_incident"
 TRAFFIC_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
+TRAFFIC_FLOW_TABLE = "bronze_seoul_traffic_flow"
+TRAFFIC_FLOW_AUDIT_TABLE = "bronze_seoul_traffic_flow_request_audit"
 WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "TRAFFIC_DISCORD_WEBHOOK_URL")
 SCHEDULE_ENV = "ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"

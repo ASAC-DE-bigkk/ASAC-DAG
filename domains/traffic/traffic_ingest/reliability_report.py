@@ -14,6 +14,9 @@ from .reliability.config import (
     SCHEDULE_ENV,
     TRAFFIC_AUDIT_TABLE,
     TRAFFIC_BRONZE_DAG_ID,
+    TRAFFIC_FLOW_AUDIT_TABLE,
+    TRAFFIC_FLOW_BRONZE_DAG_ID,
+    TRAFFIC_FLOW_TABLE,
     TRAFFIC_LANDING_DAG_ID,
     TRAFFIC_RUN_STALE_MINUTES,
     TRAFFIC_SCHEDULE_INTERVAL_MINUTES,
@@ -42,7 +45,11 @@ from .reliability.discord import (
     send_discord_message,
 )
 from .reliability.ledger import collect_scheduled_run_summary
-from .reliability.report import build_traffic_reliability_report
+from .reliability.report import (
+    build_traffic_reliability_report,
+    collect_traffic_data_plane,
+    compose_traffic_pipeline_report,
+)
 from .reliability.trino_repository import (
     _age_minutes,
     _fetch_one,
@@ -69,6 +76,9 @@ __all__ = [
     "SCHEDULE_ENV",
     "TRAFFIC_AUDIT_TABLE",
     "TRAFFIC_BRONZE_DAG_ID",
+    "TRAFFIC_FLOW_AUDIT_TABLE",
+    "TRAFFIC_FLOW_BRONZE_DAG_ID",
+    "TRAFFIC_FLOW_TABLE",
     "TRAFFIC_LANDING_DAG_ID",
     "TRAFFIC_RUN_STALE_MINUTES",
     "TRAFFIC_SCHEDULE_INTERVAL_MINUTES",
@@ -91,6 +101,8 @@ __all__ = [
     "_traffic_cutoffs",
     "ask_seoul_schema",
     "build_traffic_reliability_report",
+    "collect_traffic_data_plane",
+    "compose_traffic_pipeline_report",
     "collect_dag_run_summary",
     "collect_scheduled_run_summary",
     "collect_traffic_summary",

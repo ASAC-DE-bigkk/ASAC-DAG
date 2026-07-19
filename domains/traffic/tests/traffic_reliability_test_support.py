@@ -92,6 +92,13 @@ def stub_report_dependencies(monkeypatch):
 
     monkeypatch.setattr(
         composition,
+        "collect_pipeline_stages",
+        lambda **_kwargs: {"source": "marquez", "status": "PASS", "stages": []},
+    )
+    monkeypatch.setattr(composition, "load_recent_history", lambda *_args: [])
+
+    monkeypatch.setattr(
+        composition,
         "collect_dag_run_summary",
         lambda *args: {
             "dag_id": args[2],
