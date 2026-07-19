@@ -1559,7 +1559,7 @@ def test_split_phase_specs_isolate_citydata_fence_and_test_cadence():
     silver_test = next(
         spec for spec in SILVER_DBT_PHASE_SPECS if spec.task_id == "dbt_test_silver"
     )
-    assert silver_test.selector == "ask_seoul_traffic_transform_silver"
+    assert silver_test.selector == "ask_seoul_traffic_transform_incident_silver"
     assert silver_test.selector_by_test_tier is None
 
     gold_specs = {spec.task_id: spec for spec in GOLD_DBT_PHASE_SPECS}
@@ -1664,8 +1664,8 @@ def test_traffic_transform_uses_only_the_silver_phase_contract():
         "dbt_source_freshness": ("source freshness", "ask_seoul_traffic_transform_source"),
         "dbt_test_traffic_incident_availability": ("test", "ask_seoul_traffic_transform_availability"),
         "dbt_test_traffic_bronze_source_contract": ("test", "traffic_transform_contract_gate"),
-        "dbt_run_silver": ("run", "ask_seoul_traffic_transform_silver"),
-        "dbt_test_silver": ("test", "ask_seoul_traffic_transform_silver"),
+        "dbt_run_silver": ("run", "ask_seoul_traffic_transform_incident_silver"),
+        "dbt_test_silver": ("test", "ask_seoul_traffic_transform_incident_silver"),
     }
     assert set(dag.task_ids) >= set(expected_phase_contracts)
     assert list(module.dbt_phase_tasks) == list(expected_phase_contracts)
