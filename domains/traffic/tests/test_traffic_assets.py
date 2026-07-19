@@ -38,8 +38,15 @@ def test_traffic_assets_are_owned_by_the_traffic_domain():
     assert assets.TRAFFIC_INCIDENT_RAW_ASSET == "r2://traffic/incident/raw-snapshot"
     assert assets.TRAFFIC_INCIDENT_BRONZE_ASSET == "iceberg://traffic/bronze"
     assert assets.TRAFFIC_FLOW_BRONZE_ASSET == "iceberg://traffic/flow/bronze"
+    assert assets.TRAFFIC_INCIDENT_SILVER_ASSET == "iceberg://traffic/incident/silver"
+    assert assets.TRAFFIC_INCIDENT_SILVER_ASSET_REF.uri == (
+        "iceberg://traffic/incident/silver"
+    )
     assert assets.TRAFFIC_INCIDENT_MATERIALIZED_ALIAS.name == (
         "traffic_incident_materialized"
+    )
+    assert assets.TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS.name == (
+        "traffic_incident_silver_materialized"
     )
     assert assets.TRAFFIC_FLOW_MATERIALIZED_ALIAS.name == "traffic_flow_materialized"
 
