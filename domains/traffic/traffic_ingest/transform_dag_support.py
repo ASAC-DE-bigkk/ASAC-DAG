@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk.exceptions import AirflowFailException
+from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 
 from traffic_ingest.assets import (
     TRAFFIC_FLOW_BRONZE_ASSET,
@@ -20,16 +23,50 @@ from traffic_ingest.assets import (
 )
 from traffic_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL
 from traffic_ingest.external_snapshot import ExternalSnapshotUnavailableError
+from traffic_ingest.silver_snapshot_fence import (
+    SilverSnapshotEvidence,
+    collect_silver_snapshot_evidence,
+)
+from traffic_ingest.transform_admission import (
+    TransformAdmissionError,
+    TransformIdentity,
+    TransformSuccessMarker,
+    admission_decision,
+)
 from traffic_ingest.transform_specs import DbtPhaseSpec
 
 
 TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
+SILVER_SUCCESS_MARKER_KEY = "ask_seoul.traffic.silver_transform.last_success.v1"
+GOLD_SUCCESS_MARKER_KEY = "ask_seoul.traffic.gold_transform.last_success.v1"
+SILVER_OUTPUT_EVIDENCE_XCOM_KEY = "traffic_silver_output_evidence"
+SILVER_ASSET_CONTRACT = "traffic_incident_silver.v1"
 
 
 @dataclass(frozen=True)
 class SnapshotPair:
     incident_run_id: str
     flow_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SilverOutputEvidence:
+    snapshot_id: int
+    compacted_files_fingerprint: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "snapshot_id": self.snapshot_id,
+            "compacted_files_fingerprint": self.compacted_files_fingerprint,
+        }
+
+
+@dataclass(frozen=True)
+class GoldSnapshotResolution:
+    incident_run_id: str
+    flow_run_id: str | None
+    citydata_snapshot_id: int
+    silver_output_evidence: SilverOutputEvidence
 
 
 def _require_publishable(manifest, run_id: str, *, domain: str) -> str:
@@ -135,6 +172,279 @@ def resolve_traffic_snapshot_run(
             value=citydata_crowding_snapshot_id,
         )
     return pair.incident_run_id
+
+
+def compacted_files_fingerprint(compacted_files: object) -> str:
+    if not isinstance(compacted_files, (list, tuple)) or any(
+        not isinstance(path, str) or not path for path in compacted_files
+    ):
+        raise AirflowFailException("Silver compacted file evidence is invalid")
+    canonical = json.dumps(
+        sorted(compacted_files), ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def silver_output_evidence_from_dbt_run(
+    task_instance,
+    *,
+    task_id: str = "dbt_run_silver",
+) -> SilverOutputEvidence:
+    try:
+        result = task_instance.xcom_pull(task_ids=task_id)
+        raw_evidence = result["silver_snapshot_evidence"]
+        evidence = SilverSnapshotEvidence.from_dict(raw_evidence)
+    except Exception as exc:
+        raise AirflowFailException("Silver output evidence is unavailable") from exc
+    return SilverOutputEvidence(
+        snapshot_id=evidence.snapshot_id,
+        compacted_files_fingerprint=compacted_files_fingerprint(
+            evidence.compacted_files
+        ),
+    )
+
+
+def current_silver_output_evidence() -> SilverOutputEvidence:
+    try:
+        evidence = collect_silver_snapshot_evidence()
+    except Exception as exc:
+        raise AirflowFailException("Silver output evidence is unavailable") from exc
+    return SilverOutputEvidence(
+        snapshot_id=evidence.snapshot_id,
+        compacted_files_fingerprint=compacted_files_fingerprint(
+            evidence.compacted_files
+        ),
+    )
+
+
+def _silver_output_evidence_from_dict(value: object) -> SilverOutputEvidence:
+    if not isinstance(value, dict) or set(value) != {
+        "snapshot_id",
+        "compacted_files_fingerprint",
+    }:
+        raise AirflowFailException("Silver output evidence is invalid")
+    try:
+        marker = TransformSuccessMarker(
+            version=1,
+            pipeline="silver",
+            identity=TransformIdentity.silver("evidence-validation"),
+            output_snapshot_id=value["snapshot_id"],
+            compacted_files_fingerprint=value["compacted_files_fingerprint"],
+        )
+    except TransformAdmissionError as exc:
+        raise AirflowFailException("Silver output evidence is invalid") from exc
+    return SilverOutputEvidence(
+        snapshot_id=marker.output_snapshot_id,
+        compacted_files_fingerprint=marker.compacted_files_fingerprint,
+    )
+
+
+def load_success_marker(variable, *, key: str, pipeline: str) -> TransformSuccessMarker | None:
+    try:
+        raw_marker = variable.get(key, default=None)
+    except Exception as exc:
+        raise AirflowFailException("Traffic transform marker is unavailable") from exc
+    if raw_marker is None:
+        return None
+    try:
+        marker = TransformSuccessMarker.from_json(raw_marker)
+    except TransformAdmissionError as exc:
+        raise AirflowFailException("Traffic transform marker is malformed") from exc
+    if marker.pipeline != pipeline:
+        raise AirflowFailException("Traffic transform marker pipeline is invalid")
+    return marker
+
+
+def admit_transform(
+    *,
+    variable,
+    marker_key: str,
+    identity: TransformIdentity,
+    evidence: SilverOutputEvidence,
+) -> dict[str, object]:
+    marker = load_success_marker(variable, key=marker_key, pipeline=identity.pipeline)
+    try:
+        decision = admission_decision(
+            marker,
+            identity,
+            output_snapshot_id=evidence.snapshot_id,
+            compacted_files_fingerprint=evidence.compacted_files_fingerprint,
+        )
+    except TransformAdmissionError as exc:
+        raise AirflowFailException("Traffic transform admission evidence is invalid") from exc
+    if decision.skip:
+        raise AirflowSkipException("matching successful Traffic transform marker")
+    return {"action": decision.action, "identity": identity.as_dict()}
+
+
+def write_success_marker(
+    *,
+    variable,
+    marker_key: str,
+    identity: TransformIdentity,
+    evidence: SilverOutputEvidence,
+) -> str:
+    marker = TransformSuccessMarker(
+        version=1,
+        pipeline=identity.pipeline,
+        identity=identity,
+        output_snapshot_id=evidence.snapshot_id,
+        compacted_files_fingerprint=evidence.compacted_files_fingerprint,
+    )
+    serialized = marker.to_json()
+    variable.set(marker_key, serialized)
+    return serialized
+
+
+def resolve_traffic_silver_snapshot_run(
+    *,
+    context: dict,
+    incident_manifest_factory: Callable[[], Any],
+) -> str:
+    """Pin and coalesce only the latest publishable Incident Bronze run."""
+    try:
+        events = incident_bronze_events(context)
+    except TrafficAssetContractError as exc:
+        raise AirflowFailException(str(exc)) from exc
+    if not events:
+        raise AirflowFailException("traffic Silver requires an Incident Bronze asset event")
+    manifest = incident_manifest_factory()
+    try:
+        latest_run_id = str(manifest.latest_publishable_run_id())
+    except Exception as exc:
+        raise AirflowFailException(
+            "No publishable Traffic Incident Bronze snapshot is available"
+        ) from exc
+    _require_publishable(manifest, latest_run_id, domain="traffic")
+    stale_run_ids = [
+        str(event["bronze_dag_run_id"])
+        for event in events
+        if str(event["bronze_dag_run_id"]) != latest_run_id
+    ]
+    manifest.coalesce_many(stale_run_ids, replacement_run_id=latest_run_id)
+    return latest_run_id
+
+
+def _events_for_asset(context: dict, asset_uri: str) -> list[object]:
+    triggering = context.get("triggering_asset_events") or {}
+    if not isinstance(triggering, dict):
+        raise AirflowFailException("Traffic triggering Asset events are malformed")
+    events: list[object] = []
+    for asset, values in triggering.items():
+        if str(getattr(asset, "uri", asset)) != asset_uri:
+            continue
+        events.extend(values if isinstance(values, (list, tuple)) else [values])
+    return events
+
+
+def _silver_materialization_from_event(event: object) -> tuple[str, SilverOutputEvidence, datetime]:
+    metadata = getattr(event, "extra", None)
+    if not isinstance(metadata, dict) or set(metadata) != {
+        "source_id",
+        "incident_run_id",
+        "silver_snapshot_id",
+        "compacted_files_fingerprint",
+        "event_at",
+        "is_publishable",
+        "contract",
+    }:
+        raise AirflowFailException("Traffic Silver Asset metadata is invalid")
+    if (
+        metadata["source_id"] != "seoul_traffic_incident"
+        or metadata["is_publishable"] is not True
+        or metadata["contract"] != SILVER_ASSET_CONTRACT
+    ):
+        raise AirflowFailException("Traffic Silver Asset metadata is invalid")
+    try:
+        incident_run_id = TransformIdentity.silver(metadata["incident_run_id"]).incident_run_id
+        evidence = _silver_output_evidence_from_dict(
+            {
+                "snapshot_id": metadata["silver_snapshot_id"],
+                "compacted_files_fingerprint": metadata["compacted_files_fingerprint"],
+            }
+        )
+        event_at = datetime.fromisoformat(str(metadata["event_at"]).replace("Z", "+00:00"))
+    except (TransformAdmissionError, TypeError, ValueError) as exc:
+        raise AirflowFailException("Traffic Silver Asset metadata is invalid") from exc
+    if event_at.tzinfo is None:
+        raise AirflowFailException("Traffic Silver Asset metadata is invalid")
+    return incident_run_id, evidence, event_at
+
+
+def resolve_traffic_gold_snapshot_run(
+    *,
+    context: dict,
+    variable,
+    flow_manifest_factory: Callable[[], Any],
+    citydata_snapshot_resolver: Callable[[], int],
+    flow_xcom_key: str,
+    citydata_xcom_key: str,
+    silver_evidence_xcom_key: str = SILVER_OUTPUT_EVIDENCE_XCOM_KEY,
+) -> str:
+    """Pin a Silver parent, optional compatible Flow, and Citydata scalar."""
+    silver_events = _events_for_asset(context, "iceberg://traffic/incident/silver")
+    if silver_events:
+        incident_run_id, evidence, _ = max(
+            (_silver_materialization_from_event(event) for event in silver_events),
+            key=lambda item: (item[2], item[0]),
+        )
+    else:
+        marker = load_success_marker(
+            variable, key=SILVER_SUCCESS_MARKER_KEY, pipeline="silver"
+        )
+        if marker is None:
+            raise AirflowFailException("No successful Traffic Silver marker is available")
+        incident_run_id = marker.identity.incident_run_id
+        evidence = SilverOutputEvidence(
+            snapshot_id=marker.output_snapshot_id,
+            compacted_files_fingerprint=marker.compacted_files_fingerprint,
+        )
+
+    try:
+        flow_events = flow_bronze_events(context)
+    except TrafficAssetContractError as exc:
+        raise AirflowFailException(str(exc)) from exc
+    compatible_flow_events = [
+        event
+        for event in flow_events
+        if str(event["parent_incident_run_id"]) == incident_run_id
+    ]
+    flow_run_id = None
+    if compatible_flow_events:
+        flow_run_id = str(compatible_flow_events[-1]["flow_dag_run_id"])
+        _require_publishable(flow_manifest_factory(), flow_run_id, domain="traffic flow")
+
+    try:
+        citydata_snapshot_id = citydata_snapshot_resolver()
+    except ExternalSnapshotUnavailableError as exc:
+        raise AirflowFailException(str(exc)) from exc
+    if (
+        not isinstance(citydata_snapshot_id, int)
+        or isinstance(citydata_snapshot_id, bool)
+        or citydata_snapshot_id <= 0
+    ):
+        raise AirflowFailException("Traffic Citydata snapshot is invalid")
+    task_instance = context.get("ti") or context.get("task_instance")
+    if task_instance is not None:
+        task_instance.xcom_push(key=flow_xcom_key, value=flow_run_id)
+        task_instance.xcom_push(key=citydata_xcom_key, value=citydata_snapshot_id)
+        task_instance.xcom_push(key=silver_evidence_xcom_key, value=evidence.as_dict())
+    return incident_run_id
+
+
+def silver_output_evidence_from_resolver(
+    task_instance,
+    *,
+    snapshot_task_id: str,
+    evidence_xcom_key: str = SILVER_OUTPUT_EVIDENCE_XCOM_KEY,
+) -> SilverOutputEvidence:
+    try:
+        value = task_instance.xcom_pull(
+            task_ids=snapshot_task_id, key=evidence_xcom_key
+        )
+    except Exception as exc:
+        raise AirflowFailException("Silver output evidence is unavailable") from exc
+    return _silver_output_evidence_from_dict(value)
 
 
 @dataclass(frozen=True)
@@ -311,13 +621,28 @@ def record_classified_dbt_problem(
 
 
 __all__ = [
+    "GOLD_SUCCESS_MARKER_KEY",
+    "SILVER_ASSET_CONTRACT",
+    "SILVER_OUTPUT_EVIDENCE_XCOM_KEY",
+    "SILVER_SUCCESS_MARKER_KEY",
     "TRAFFIC_TRANSFORM_CRON_KST",
+    "GoldSnapshotResolution",
+    "SilverOutputEvidence",
     "SnapshotPair",
     "TransformFailurePorts",
+    "admit_transform",
     "build_dbt_phase_task",
+    "compacted_files_fingerprint",
+    "current_silver_output_evidence",
     "dbt_snapshot_variables",
+    "load_success_marker",
     "resolve_transform_snapshot_pair",
     "record_classified_dbt_problem",
+    "resolve_traffic_gold_snapshot_run",
+    "resolve_traffic_silver_snapshot_run",
     "resolve_traffic_snapshot_run",
+    "silver_output_evidence_from_dbt_run",
+    "silver_output_evidence_from_resolver",
     "transform_schedule",
+    "write_success_marker",
 ]

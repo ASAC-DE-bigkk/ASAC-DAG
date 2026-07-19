@@ -22,6 +22,7 @@ _AIRFLOW_MODULE_NAMES = (
     "airflow.utils.trigger_rule",
     "traffic_ingest.assets",
     "traffic_ingest.transform_dag_support",
+    "traffic_ingest.transform_admission",
 )
 
 
@@ -156,6 +157,10 @@ class FakeAirflowFailException(Exception):
     pass
 
 
+class FakeAirflowSkipException(Exception):
+    pass
+
+
 class FakeTriggerRule:
     ALL_DONE = "all_done"
     ONE_FAILED = "one_failed"
@@ -187,6 +192,7 @@ def install_airflow_fakes():
     airflow_sdk.Variable = FakeVariable
     airflow_sdk_exceptions = types.ModuleType("airflow.sdk.exceptions")
     airflow_sdk_exceptions.AirflowFailException = FakeAirflowFailException
+    airflow_sdk_exceptions.AirflowSkipException = FakeAirflowSkipException
     airflow_utils = types.ModuleType("airflow.utils")
     airflow_trigger_rule = types.ModuleType("airflow.utils.trigger_rule")
     airflow_trigger_rule.TriggerRule = FakeTriggerRule
@@ -217,6 +223,24 @@ def load_transform_module():
     module_path = Path(__file__).resolve().parents[1] / "traffic_incident_transform.py"
     spec = importlib.util.spec_from_file_location(
         "traffic_incident_transform_under_test", module_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
+def load_gold_transform_module():
+    sys.modules.pop("traffic_ingest.assets", None)
+    sys.modules.pop("traffic_ingest.transform_dag_support", None)
+    install_airflow_fakes()
+    module_path = Path(__file__).resolve().parents[1] / "traffic_gold_transform.py"
+    spec = importlib.util.spec_from_file_location(
+        "traffic_gold_transform_under_test", module_path
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

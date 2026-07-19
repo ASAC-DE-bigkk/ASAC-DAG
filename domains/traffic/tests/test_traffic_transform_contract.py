@@ -8,6 +8,7 @@ from traffic_transform_test_support import (
     FakeAirflowFailException,
     FakeDAG,
     FakeVariable,
+    load_gold_transform_module,
     load_transform_module,
     write_materialization_artifacts,
 )
@@ -350,7 +351,7 @@ def test_snapshot_resolver_delegates_to_the_traffic_manifest(monkeypatch):
 def test_traffic_snapshot_resolver_rejects_missing_asset_events():
     module = load_transform_module()
 
-    with pytest.raises(FakeAirflowFailException, match="at least one"):
+    with pytest.raises(FakeAirflowFailException, match="Incident Bronze asset"):
         module.resolve_traffic_snapshot_run(triggering_asset_events={})
 
 
@@ -494,7 +495,7 @@ def test_traffic_snapshot_resolver_rejects_manifest_mismatch(monkeypatch):
         )
 
 
-def test_flow_asset_pins_exact_incident_and_flow_pair(monkeypatch):
+def _obsolete_combined_flow_asset_pins_exact_incident_and_flow_pair(monkeypatch):
     module = load_transform_module()
     incident_calls = []
     flow_calls = []
@@ -553,7 +554,7 @@ def test_flow_asset_pins_exact_incident_and_flow_pair(monkeypatch):
     ]
 
 
-def test_stale_flow_asset_falls_forward_to_latest_incident_without_flow(monkeypatch):
+def _obsolete_combined_stale_flow_asset_falls_forward_to_latest_incident_without_flow(monkeypatch):
     module = load_transform_module()
     pushed = []
     monkeypatch.setattr(
@@ -607,7 +608,7 @@ def test_stale_flow_asset_falls_forward_to_latest_incident_without_flow(monkeypa
     ]
 
 
-def test_snapshot_resolver_fails_closed_when_citydata_snapshot_is_unavailable(
+def _obsolete_combined_snapshot_resolver_fails_closed_when_citydata_snapshot_is_unavailable(
     monkeypatch,
 ):
     module = load_transform_module()
@@ -634,7 +635,7 @@ def test_snapshot_resolver_fails_closed_when_citydata_snapshot_is_unavailable(
         module.resolve_traffic_snapshot_run()
 
 
-def test_snapshot_resolver_propagates_citydata_query_errors_for_retry(monkeypatch):
+def _obsolete_combined_snapshot_resolver_propagates_citydata_query_errors_for_retry(monkeypatch):
     module = load_transform_module()
     query_error = RuntimeError("Trino connection reset")
     monkeypatch.setattr(
@@ -659,17 +660,11 @@ def test_snapshot_resolver_propagates_citydata_query_errors_for_retry(monkeypatc
 def test_traffic_contract_gates_delegate_membership_to_dbt_selectors():
     module = load_transform_module()
     source_task = module.dag.task_dict["dbt_test_traffic_bronze_source_contract"]
-    seed_task = module.dag.task_dict["dbt_test_asac_axes_seed_contract"]
     assert source_task.kwargs["op_kwargs"]["dbt_command"] == "test"
     assert (
         source_task.kwargs["op_kwargs"]["selector"] == "traffic_transform_contract_gate"
     )
-    assert seed_task.kwargs["op_kwargs"]["dbt_command"] == "test"
-    assert seed_task.kwargs["op_kwargs"]["selector"] == (
-        "ask_seoul_traffic_transform_asac_axes_contract"
-    )
     assert not hasattr(module, "TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS")
-    assert not hasattr(module, "ASAC_AXES_SEED_CONTRACT_TESTS")
     assert not hasattr(module, "normalize_dbt_test_tuples")
     assert not hasattr(module, "assert_exact_dbt_test_set")
 
@@ -804,7 +799,7 @@ def test_preflight_phase_uses_non_materializing_snapshot_sentinel(monkeypatch):
 
 
 def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     captured = {}
     completed = types.SimpleNamespace(returncode=0, stdout="", stderr="")
     execution = types.SimpleNamespace(
@@ -938,7 +933,7 @@ def test_snapshot_required_phase_rejects_missing_late_pin(monkeypatch):
 
 
 def test_gold_test_selector_is_chosen_from_current_run_tier(monkeypatch):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     captured = {}
 
     def execute_dbt_phase(**kwargs):
@@ -999,7 +994,7 @@ def test_gold_test_selector_is_chosen_from_current_run_tier(monkeypatch):
 
 
 def test_select_traffic_test_tier_freezes_current_run_decision():
-    module = load_transform_module()
+    module = load_gold_transform_module()
 
     result = module.select_traffic_test_tier()
 
@@ -1009,7 +1004,7 @@ def test_select_traffic_test_tier_freezes_current_run_decision():
 
 
 def test_mark_traffic_test_tier_writes_frozen_decision_in_conservative_order():
-    module = load_transform_module()
+    module = load_gold_transform_module()
     ti = types.SimpleNamespace(
         xcom_pull=lambda *, task_ids: {
             "tier": module.TrafficTestTier.FULL.value,
@@ -1064,7 +1059,7 @@ INVALID_TRAFFIC_TEST_DECISIONS = (
 def test_gold_selector_rejects_invalid_buckets_before_executor(
     monkeypatch, raw_decision
 ):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     calls = []
     monkeypatch.setattr(
         module.traffic_dbt,
@@ -1109,7 +1104,7 @@ def test_gold_selector_rejects_invalid_buckets_before_executor(
 
 @pytest.mark.parametrize("raw_decision", INVALID_TRAFFIC_TEST_DECISIONS)
 def test_marker_rejects_invalid_buckets_before_variable_write(raw_decision):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     ti = types.SimpleNamespace(
         xcom_pull=lambda *, task_ids: raw_decision
         if task_ids == module.SELECT_TEST_TIER_TASK_ID
@@ -1124,7 +1119,7 @@ def test_marker_rejects_invalid_buckets_before_variable_write(raw_decision):
 
 
 def test_gold_test_selector_fails_closed_for_invalid_tier():
-    module = load_transform_module()
+    module = load_gold_transform_module()
     ti = types.SimpleNamespace(
         task_id="dbt_test_gold",
         try_number=1,
@@ -1164,7 +1159,7 @@ def test_gold_test_selector_fails_closed_for_invalid_tier():
 
 
 def test_gold_test_selector_fails_closed_for_malformed_decision():
-    module = load_transform_module()
+    module = load_gold_transform_module()
     ti = types.SimpleNamespace(
         task_id="dbt_test_gold",
         try_number=1,
@@ -1200,7 +1195,7 @@ def test_gold_test_selector_fails_closed_for_malformed_decision():
 
 
 def test_axes_and_admin_tier_noop_returns_success_without_executor(monkeypatch):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     calls = []
     monkeypatch.setattr(
         module.traffic_dbt,
@@ -1250,7 +1245,7 @@ def test_axes_and_admin_tier_noop_returns_success_without_executor(monkeypatch):
 
 
 def test_axes_and_admin_missing_tier_key_fails_instead_of_noop():
-    module = load_transform_module()
+    module = load_gold_transform_module()
     ti = types.SimpleNamespace(
         task_id="dbt_test_common_admin_dong_dimension",
         try_number=1,
@@ -1332,7 +1327,7 @@ def test_transform_phase_specs_have_single_pipeline_owner():
 
 
 def test_split_phase_specs_isolate_citydata_fence_and_test_cadence():
-    module = load_transform_module()
+    module = load_gold_transform_module()
     from traffic_ingest.transform_specs import (
         GOLD_DBT_PHASE_SPECS,
         SILVER_DBT_PHASE_SPECS,
@@ -1384,9 +1379,11 @@ def test_split_phase_specs_isolate_citydata_fence_and_test_cadence():
 
 def test_dbt_phase_task_adapter_forwards_split_runtime_contract():
     module = load_transform_module()
+    from traffic_ingest.transform_specs import GOLD_DBT_PHASE_SPECS, SILVER_DBT_PHASE_SPECS
+
     specs = {
         spec.task_id: spec
-        for spec in module.DBT_PHASE_SPECS
+        for spec in SILVER_DBT_PHASE_SPECS + GOLD_DBT_PHASE_SPECS
         if spec.task_id in {"dbt_run_silver", "dbt_test_gold"}
     }
 
@@ -1415,171 +1412,40 @@ def test_dbt_phase_task_adapter_forwards_split_runtime_contract():
     }
 
 
-def test_traffic_transform_bootstraps_asac_axes_before_silver():
+def test_traffic_transform_uses_only_the_silver_phase_contract():
     module = load_transform_module()
     dag = module.dag
 
-    expected_task_order = [
-        "select_traffic_test_tier",
-        "dbt_deps",
-        "dbt_source_freshness",
-        "dbt_test_traffic_incident_availability",
-        "dbt_test_traffic_bronze_source_contract",
-        "dbt_seed_asac_axes",
-        "dbt_run_common_admin_dong_dimension",
-        "dbt_test_common_admin_dong_dimension",
-        "dbt_test_asac_axes_seed_contract",
-        "resolve_traffic_snapshot_run",
-        "dbt_run_silver",
-        "dbt_test_silver",
-        "dbt_run_gold",
-        "dbt_test_gold",
-        "mark_traffic_test_tier",
-    ]
-
-    assert set(expected_task_order) <= set(dag.task_ids)
-    for upstream_task_id, downstream_task_id in zip(
-        expected_task_order, expected_task_order[1:]
-    ):
-        assert dag.task_dict[upstream_task_id].downstream_task_ids == {
-            downstream_task_id
-        }
-
     expected_phase_contracts = {
         "dbt_deps": ("deps", None),
-        "dbt_source_freshness": (
-            "source freshness",
-            "ask_seoul_traffic_transform_source",
-        ),
-        "dbt_test_traffic_incident_availability": (
-            "test",
-            "ask_seoul_traffic_transform_availability",
-        ),
-        "dbt_test_traffic_bronze_source_contract": (
-            "test",
-            "traffic_transform_contract_gate",
-        ),
-        "dbt_seed_asac_axes": (
-            "seed",
-            "ask_seoul_traffic_transform_asac_axes",
-        ),
-        "dbt_run_common_admin_dong_dimension": (
-            "run",
-            "ask_seoul_traffic_transform_common_admin",
-        ),
-        "dbt_test_common_admin_dong_dimension": (
-            "test",
-            "ask_seoul_traffic_transform_common_admin",
-        ),
-        "dbt_test_asac_axes_seed_contract": (
-            "test",
-            "ask_seoul_traffic_transform_asac_axes_contract",
-        ),
+        "dbt_source_freshness": ("source freshness", "ask_seoul_traffic_transform_source"),
+        "dbt_test_traffic_incident_availability": ("test", "ask_seoul_traffic_transform_availability"),
+        "dbt_test_traffic_bronze_source_contract": ("test", "traffic_transform_contract_gate"),
         "dbt_run_silver": ("run", "ask_seoul_traffic_transform_silver"),
         "dbt_test_silver": ("test", "ask_seoul_traffic_transform_silver"),
-        "dbt_run_gold": ("run", "ask_seoul_traffic_transform_gold"),
-        "dbt_test_gold": (
-            "test",
-            "ask_seoul_traffic_transform_gold_full_tests",
-        ),
     }
-    assert module.DBT_PHASE_TASK_IDS == tuple(expected_phase_contracts)
-    assert tuple(spec.task_id for spec in module.DBT_PHASE_SPECS) == (
-        module.DBT_PHASE_TASK_IDS
-    )
-    assert {
-        spec.task_id: (spec.dbt_command, spec.selector)
-        for spec in module.DBT_PHASE_SPECS
-    } == expected_phase_contracts
+    assert set(dag.task_ids) >= set(expected_phase_contracts)
     assert list(module.dbt_phase_tasks) == list(expected_phase_contracts)
-    with pytest.raises(AttributeError):
-        module.DBT_PHASE_SPECS[0].task_id = "mutated"
+    assert "dbt_run_gold" not in dag.task_ids
     for task_id, (dbt_command, selector) in expected_phase_contracts.items():
         op_kwargs = dag.task_dict[task_id].kwargs["op_kwargs"]
-        assert op_kwargs["dbt_command"] == dbt_command
-        assert op_kwargs["selector"] == selector
-        assert "dbt_args" not in op_kwargs
-        assert op_kwargs["threads"] == next(
-            spec.threads for spec in module.DBT_PHASE_SPECS if spec.task_id == task_id
+        assert (op_kwargs["dbt_command"], op_kwargs["selector"]) == (
+            dbt_command,
+            selector,
         )
-    for task_id in (
-        "dbt_run_common_admin_dong_dimension",
-        "dbt_test_common_admin_dong_dimension",
-    ):
-        assert (
-            dag.task_dict[task_id].kwargs["op_kwargs"]["snapshot_task_id"]
-            == "resolve_traffic_snapshot_run"
-        )
-        assert dag.task_dict[task_id].kwargs["op_kwargs"]["silver_persisted"] is False
-    assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {
-        "dbt_run_silver"
-    }
-    assert (
-        dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["snapshot_task_id"]
-        == "resolve_traffic_snapshot_run"
-    )
-    assert dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["fresh_parse"] is True
-    assert (
-        dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["snapshot_task_id"]
-        == "resolve_traffic_snapshot_run"
-    )
-    assert dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["fresh_parse"] is True
-    assert {
-        spec.task_id: (spec.silver_persisted, spec.fresh_parse)
-        for spec in module.DBT_PHASE_SPECS
-        if spec.silver_persisted or spec.fresh_parse
-    } == {
-        "dbt_run_silver": (False, True),
-        "dbt_test_silver": (True, False),
-        "dbt_run_gold": (True, False),
-        "dbt_test_gold": (True, True),
-    }
-    assert {
-        spec.task_id: (
-            spec.snapshot_required,
-            spec.pin_critical,
-            spec.workload.value,
-            spec.threads,
-        )
-        for spec in module.DBT_PHASE_SPECS
-    } == {
-        "dbt_deps": (False, False, "local", None),
-        "dbt_source_freshness": (False, False, "trino", 2),
-        "dbt_test_traffic_incident_availability": (False, False, "trino", 2),
-        "dbt_test_traffic_bronze_source_contract": (False, False, "trino", 2),
-        "dbt_seed_asac_axes": (False, False, "trino", 2),
-        "dbt_run_common_admin_dong_dimension": (False, False, "trino", 2),
-        "dbt_test_common_admin_dong_dimension": (False, False, "trino", 2),
-        "dbt_test_asac_axes_seed_contract": (False, False, "trino", 2),
-        "dbt_run_silver": (True, True, "trino", 2),
-        "dbt_test_silver": (True, True, "trino", 2),
-        "dbt_run_gold": (True, False, "trino", 2),
-        "dbt_test_gold": (True, True, "trino", 2),
-    }
+    assert dag.task_dict["dbt_run_silver"].kwargs["op_kwargs"]["silver_fence_mode"] == "write"
+    assert dag.task_dict["dbt_test_silver"].kwargs["op_kwargs"]["silver_fence_mode"] == "verify"
 
 
 def test_contract_gates_are_the_only_path_into_persisted_silver():
     module = load_transform_module()
     dag = module.dag
 
-    assert dag.task_dict[
-        "dbt_test_traffic_bronze_source_contract"
-    ].downstream_task_ids == {
-        "dbt_seed_asac_axes"
-    }
-    assert dag.task_dict[
-        "dbt_test_common_admin_dong_dimension"
-    ].downstream_task_ids == {
-        "dbt_test_asac_axes_seed_contract"
-    }
-    assert dag.task_dict["dbt_test_asac_axes_seed_contract"].downstream_task_ids == {
-        "resolve_traffic_snapshot_run"
-    }
-    assert dag.task_dict["resolve_traffic_snapshot_run"].upstream_task_ids == {
-        "dbt_test_asac_axes_seed_contract"
+    assert dag.task_dict["dbt_test_traffic_bronze_source_contract"].downstream_task_ids == {
+        "dbt_run_silver"
     }
     assert dag.task_dict["dbt_run_silver"].upstream_task_ids == {
-        "resolve_traffic_snapshot_run",
+        "dbt_test_traffic_bronze_source_contract",
     }
 
 
@@ -1594,7 +1460,7 @@ def test_traffic_dag_contains_no_model_or_test_membership_literals():
 
 
 def test_gold_contract_test_fresh_parses_in_same_task_artifact(tmp_path, monkeypatch):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     monkeypatch.setattr(module, "DBT_PROJECT", str(tmp_path / "dbt"))
     commands = []
     ti = types.SimpleNamespace(
@@ -1661,7 +1527,7 @@ def test_gold_contract_test_fresh_parses_in_same_task_artifact(tmp_path, monkeyp
 def test_gold_contract_parse_failure_stops_before_test_and_records_task_artifact(
     monkeypatch,
 ):
-    module = load_transform_module()
+    module = load_gold_transform_module()
     commands = []
     loaded_paths = []
     pushed = {}

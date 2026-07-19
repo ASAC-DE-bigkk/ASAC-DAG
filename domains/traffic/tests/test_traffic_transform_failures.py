@@ -7,6 +7,7 @@ from traffic_transform_test_support import (
     FakeAirflowException,
     FakeAirflowFailException,
     FakePythonOperator,
+    load_gold_transform_module,
     load_transform_module,
     write_materialization_artifacts,
 )
@@ -75,39 +76,45 @@ def test_external_compaction_race_is_not_classified_as_a_generic_dbt_failure(
 
 
 def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
-    module = load_transform_module()
-    dag = module.dag
-    classified_task_ids = [
+    silver = load_transform_module()
+    gold = load_gold_transform_module()
+    classified_task_ids = {
+        silver: [
         "dbt_deps",
         "dbt_source_freshness",
         "dbt_test_traffic_incident_availability",
         "dbt_test_traffic_bronze_source_contract",
+        "dbt_run_silver",
+        "dbt_test_silver",
+        ],
+        gold: [
+        "dbt_deps_gold",
         "dbt_seed_asac_axes",
         "dbt_run_common_admin_dong_dimension",
         "dbt_test_common_admin_dong_dimension",
         "dbt_test_asac_axes_seed_contract",
-        "dbt_run_silver",
-        "dbt_test_silver",
         "dbt_run_gold",
         "dbt_test_gold",
-    ]
+        ],
+    }
 
-    for task_id in classified_task_ids:
-        task = dag.task_dict[task_id]
-        assert isinstance(task, FakePythonOperator)
-        assert task.python_callable is module.run_dbt_phase
-        if task_id == "dbt_deps":
-            assert "pool" not in task.kwargs or task.kwargs["pool"] in (
-                None,
-                "default_pool",
-            )
-        else:
-            assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
-        assert task.kwargs["retries"] == 1
-        assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
-        assert task.kwargs["on_failure_callback"] is module.record_traffic_dbt_problem
-        assert "dbt_command" in task.kwargs["op_kwargs"]
-        assert "selector" in task.kwargs["op_kwargs"]
+    for module, task_ids in classified_task_ids.items():
+        for task_id in task_ids:
+            task = module.dag.task_dict[task_id]
+            assert isinstance(task, FakePythonOperator)
+            assert task.python_callable is module.run_dbt_phase
+            if task_id in {"dbt_deps", "dbt_deps_gold"}:
+                assert "pool" not in task.kwargs or task.kwargs["pool"] in (
+                    None,
+                    "default_pool",
+                )
+            else:
+                assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+            assert task.kwargs["retries"] == 1
+            assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
+            assert task.kwargs["on_failure_callback"] is module.record_traffic_dbt_problem
+            assert "dbt_command" in task.kwargs["op_kwargs"]
+            assert "selector" in task.kwargs["op_kwargs"]
 
 
 def test_dbt_deps_and_selected_phases_use_only_supported_isolated_paths(
