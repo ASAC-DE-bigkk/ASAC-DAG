@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 from ..run_manifest import MANIFEST_TABLE as MANIFEST_TABLE
+from .lineage import StagePolicy
 
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -17,12 +18,36 @@ LOGGER = logging.getLogger("weather_ingest.reliability_report")
 WEATHER_BRONZE_DAG_ID = "weather_vilage_fcst_bronze"
 WEATHER_TABLE = "bronze_kma_vilage_fcst"
 WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "WEATHER_DISCORD_WEBHOOK_URL")
+DAILY_REPORT_SCHEDULE = "0 9 * * *"
+# Retained for compatibility only. Pipeline Reliability v2 ignores legacy
+# cadence overrides so an old */15 setting cannot reactivate frequent reports.
 SCHEDULE_ENV = "ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 DISCORD_GREEN = 3066993
 DISCORD_YELLOW = 16776960
 DISCORD_RED = 15158332
 KMA_BASE_INTERVAL_HOURS = 3
+MARQUEZ_BASE_URL = "http://marquez-api:5000/api/v1"
+MARQUEZ_NAMESPACE = "ask-seoul-dev-airflow"
+WEATHER_PIPELINE_STAGE_POLICIES = (
+    StagePolicy("bronze", "Weather Bronze", "weather_vilage_fcst_bronze", 360),
+    StagePolicy(
+        "source_freshness",
+        "Weather source freshness",
+        "weather_vilage_fcst_transform.dbt_source_freshness",
+        360,
+    ),
+    StagePolicy(
+        "transform", "Weather Silver/Gold", "weather_vilage_fcst_transform", 360
+    ),
+    StagePolicy(
+        "maintenance",
+        "Iceberg maintenance",
+        "ask_seoul_iceberg_maintenance",
+        1_560,
+        required=False,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -50,13 +75,9 @@ def discord_webhook_url(env: Mapping[str, str] = os.environ) -> str | None:
 def report_dag_schedule(env: Mapping[str, str] = os.environ) -> str | None:
     if not is_dev_target(env):
         return None
-    if SCHEDULE_ENV in env:
-        return env[SCHEDULE_ENV] or None
-    if GLOBAL_SCHEDULE_ENV in env:
-        return env[GLOBAL_SCHEDULE_ENV] or None
     if not discord_webhook_url(env):
         return None
-    return "0 9 * * *"
+    return DAILY_REPORT_SCHEDULE
 
 
 def sql_identifier(value: str) -> str:

@@ -9,6 +9,7 @@ from datetime import timedelta
 from typing import Any
 
 from ..run_ledger import _as_utc_datetime
+from .card import build_traffic_discord_payload
 from .config import (
     SCHEDULED_FAILURE_REASON_FALLBACK,
     DISCORD_GREEN,
@@ -299,6 +300,50 @@ def send_discord_message(message: str, webhook_url: str | None = None) -> bool:
     request = urllib.request.Request(
         webhook_url,
         data=_discord_payload(message),
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "ask-seoul-traffic-report/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if response.status >= 400:
+                LOGGER.warning(
+                    "Traffic report Discord notification failed: status=%s",
+                    response.status,
+                )
+                return False
+    except urllib.error.HTTPError as exc:
+        LOGGER.warning(
+            "Traffic report Discord notification failed: status=%s error_type=%s",
+            exc.code,
+            type(exc).__name__,
+        )
+        return False
+    except Exception as exc:
+        LOGGER.warning(
+            "Traffic report Discord notification failed: error_type=%s",
+            type(exc).__name__,
+        )
+        return False
+    return True
+
+
+def send_discord_report(
+    report: Mapping[str, Any], webhook_url: str | None = None
+) -> bool:
+    webhook_url = webhook_url or discord_webhook_url()
+    if not webhook_url:
+        LOGGER.info(
+            "Discord webhook is not configured; skip traffic report notification."
+        )
+        return False
+    request = urllib.request.Request(
+        webhook_url,
+        data=json.dumps(
+            build_traffic_discord_payload(report), ensure_ascii=False
+        ).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
             "User-Agent": "ask-seoul-traffic-report/1.0",

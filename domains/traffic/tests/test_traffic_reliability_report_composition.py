@@ -75,7 +75,7 @@ def test_build_traffic_report_passes_for_fresh_complete_data(monkeypatch):
 
 def test_traffic_report_uses_landing_ledger_and_bronze_manifest(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
-    captured = {}
+    captured = {"manifest_dag_ids": []}
     monkeypatch.setattr(
         composition,
         "collect_scheduled_run_summary",
@@ -92,9 +92,9 @@ def test_traffic_report_uses_landing_ledger_and_bronze_manifest(monkeypatch):
     monkeypatch.setattr(
         composition,
         "collect_dag_run_summary",
-        lambda _cursor, _config, dag_id, _detected_at: captured.update(
-            manifest_dag_id=dag_id
-        )
+        lambda _cursor, _config, dag_id, _detected_at: captured[
+            "manifest_dag_ids"
+        ].append(dag_id)
         or {
             "dag_id": dag_id,
             "latest_terminal_status": "SUCCESS",
@@ -114,7 +114,7 @@ def test_traffic_report_uses_landing_ledger_and_bronze_manifest(monkeypatch):
 
     assert result["status"] == "PASS"
     assert captured == {
-        "manifest_dag_id": "traffic_incident_bronze",
+        "manifest_dag_ids": ["traffic_incident_bronze", "traffic_flow_bronze"],
         "cadence_dag_id": "traffic_incident_landing",
     }
 
@@ -307,3 +307,194 @@ def test_traffic_report_keeps_publishability_when_latest_manifest_is_running(mon
     assert result["publishability_ok"] is True
     assert result["dag_runs"]["latest_status"] == "STARTED"
     assert result["dag_runs"]["latest_terminal_status"] == "SUCCESS"
+
+
+def _pipeline_data_plane(status="PASS"):
+    return {
+        "report_name": "traffic_bronze_reliability",
+        "detected_at": "2026-07-19T09:00:00+09:00",
+        "catalog": "iceberg_dev",
+        "schema": "ask_seoul",
+        "lookback_hours": 24,
+        "status": status,
+        "traffic": {
+            "status": status,
+            "freshness_minutes": 3,
+            "coverage_ok": status != "FAIL",
+        },
+        "dag_runs": {
+            "dag_id": "traffic_incident_bronze",
+            "publishability_ok": True,
+        },
+        "flow_dag_runs": {
+            "dag_id": "traffic_flow_bronze",
+            "publishability_ok": True,
+        },
+        "scheduled_runs": {
+            "expected": 288,
+            "success": 288,
+            "failed": 0,
+            "running": 0,
+        },
+        "materialization_backlog": {
+            "count": 0,
+            "oldest_age_minutes": None,
+            "status": "PASS",
+        },
+        "publishability_ok": True,
+        "blast_radius": [],
+    }
+
+
+def _pipeline_stages(status="PASS", stage_status="PASS", observed=1):
+    return {
+        "source": "marquez",
+        "status": status,
+        "stages": [
+            {
+                "key": "gold",
+                "label": "Traffic Gold",
+                "status": stage_status,
+                "reason": None,
+                "observed": observed,
+                "age_minutes": 20,
+                "duration_ms": {"p50": 80_000, "p95": 120_000},
+            },
+            {
+                "key": "flow_silver",
+                "label": "Flow Silver",
+                "status": "PASS",
+                "reason": None,
+                "observed": 1,
+                "age_minutes": 12,
+                "duration_ms": {"p50": 20_000, "p95": 30_000},
+            },
+        ],
+    }
+
+
+def test_collect_traffic_data_plane_includes_incident_and_flow_manifests(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    observed_dag_ids = []
+    monkeypatch.setattr(
+        composition,
+        "collect_dag_run_summary",
+        lambda _cursor, _config, dag_id, _detected_at: observed_dag_ids.append(dag_id)
+        or {
+            "dag_id": dag_id,
+            "latest_terminal_status": "SUCCESS",
+            "latest_terminal_is_publishable": True,
+        },
+    )
+    cursor = RecordingCursor(
+        rows=[
+            (1, 25, 25, 1000, 0, datetime(2026, 7, 19, 8, 59, tzinfo=timezone.utc)),
+        ]
+    )
+
+    result = composition.collect_traffic_data_plane(
+        cursor=cursor,
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert observed_dag_ids == ["traffic_incident_bronze", "traffic_flow_bronze"]
+    assert result["dag_runs"]["dag_id"] == "traffic_incident_bronze"
+    assert result["flow_dag_runs"]["dag_id"] == "traffic_flow_bronze"
+    assert result["publishability_ok"] is True
+
+
+def test_pipeline_data_failure_wins_over_control_plane_pass():
+    result = composition.compose_traffic_pipeline_report(
+        data_plane=_pipeline_data_plane("FAIL"),
+        stages=_pipeline_stages(),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["data_plane_status"] == "FAIL"
+
+
+def test_pipeline_control_plane_unavailable_degrades_pass_to_warn():
+    result = composition.compose_traffic_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages={"status": "UNKNOWN", "stages": []},
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "WARN"
+    assert result["control_plane_status"] == "UNKNOWN"
+
+
+def test_pipeline_latest_stage_failure_is_fail():
+    result = composition.compose_traffic_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=_pipeline_stages(status="FAIL", stage_status="FAIL"),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "FAIL"
+
+
+def test_pipeline_recovered_stage_failure_is_warn():
+    stages = _pipeline_stages(status="WARN", stage_status="WARN")
+    stages["stages"][0]["reason"] = "recovered_failure"
+
+    result = composition.compose_traffic_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=stages,
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "WARN"
+
+
+def test_asset_stage_is_not_compared_with_landing_expected_count():
+    result = composition.compose_traffic_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=_pipeline_stages(observed=1),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "PASS"
+    assert result["scheduled_runs"]["expected"] == 288
+    assert result["stages"][0]["observed"] == 1
+
+
+def test_pipeline_bottleneck_is_largest_observed_stage_p95_not_pool_wait():
+    result = composition.compose_traffic_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=_pipeline_stages(),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["bottleneck"] == {
+        "key": "gold",
+        "label": "Traffic Gold",
+        "status": "PASS",
+        "p95_ms": 120_000,
+    }
+    assert "pool_wait" not in json.dumps(result["bottleneck"])
+
+
+def test_pipeline_trend_uses_current_day_and_six_prior_observations():
+    history = [
+        {"report_date": f"2026-07-{day:02d}", "status": "PASS"}
+        for day in range(12, 19)
+    ]
+
+    result = composition.compose_traffic_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=_pipeline_stages(),
+        history=history,
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert len(result["trend"]) == 7
+    assert result["trend"][0]["report_date"] == "2026-07-13"
+    assert result["trend"][-1] == {"report_date": "2026-07-19", "status": "PASS"}

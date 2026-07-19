@@ -144,3 +144,139 @@ def test_weather_send_discord_swallows_failure_without_logging_webhook(
     assert discord.send_discord_message("hello", webhook_url=secret_url) is False
     assert "SECRET_TOKEN" not in caplog.text
     assert secret_url not in caplog.text
+
+
+def _weather_pipeline_report(status="PASS"):
+    return {
+        "report_name": "weather_pipeline_reliability_v2",
+        "domain": "weather",
+        "report_date": "2026-07-19",
+        "detected_at": "2026-07-19T09:00:00+09:00",
+        "lookback_hours": 24,
+        "status": status,
+        "data_plane_status": "PASS",
+        "control_plane_status": status,
+        "source": {
+            "status": "PASS",
+            "freshness_minutes": 20,
+            "coverage_percent": 100.0,
+            "publishability_ok": True,
+        },
+        "weather": {
+            "base_time_count": 8,
+            "expected_base_time_count": 8,
+            "grid_slot_count": 640,
+            "expected_grid_slot_count": 640,
+            "raw_object_count": 800,
+            "additional_raw_page_count": 160,
+        },
+        "stages": [
+            {
+                "key": "bronze",
+                "label": "Weather Bronze",
+                "status": "PASS",
+                "age_minutes": 20,
+                "duration_ms": {"p50": 40_000, "p95": 60_000},
+            },
+            {
+                "key": "transform",
+                "label": "Weather Silver/Gold",
+                "status": status,
+                "age_minutes": 30,
+                "duration_ms": {"p50": 100_000, "p95": 180_000},
+            },
+        ],
+        "bottleneck": {
+            "key": "transform",
+            "label": "Weather Silver/Gold",
+            "status": status,
+            "p95_ms": 180_000,
+        },
+        "trend": [
+            {"report_date": "2026-07-17", "status": "UNKNOWN"},
+            {"report_date": "2026-07-18", "status": "PASS"},
+            {"report_date": "2026-07-19", "status": status},
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "color"),
+    [
+        ("PASS", discord.DISCORD_GREEN),
+        ("WARN", discord.DISCORD_YELLOW),
+        ("FAIL", discord.DISCORD_RED),
+    ],
+)
+def test_weather_pipeline_card_uses_report_status_and_five_named_fields(
+    status, color
+):
+    payload = discord.build_weather_discord_payload(
+        _weather_pipeline_report(status)
+    )
+    embed = payload["embeds"][0]
+
+    assert embed["color"] == color
+    assert [field["name"] for field in embed["fields"]] == [
+        "상태",
+        "수집 품질",
+        "파이프라인",
+        "관측 병목",
+        "7일 추세",
+    ]
+    assert "Weather Silver/Gold" in embed["fields"][3]["value"]
+    assert "◻️ 07-17" in embed["fields"][4]["value"]
+    assert "매일 09:00 KST" in embed["footer"]["text"]
+
+
+def test_weather_pipeline_card_respects_discord_limits_and_utf8():
+    report_value = _weather_pipeline_report("WARN")
+    report_value["stages"] = [
+        {
+            "key": str(index),
+            "label": "긴 단계 이름 " * 200,
+            "status": "WARN",
+            "age_minutes": index,
+            "duration_ms": {"p50": 1, "p95": 2},
+        }
+        for index in range(40)
+    ]
+
+    payload = discord.build_weather_discord_payload(report_value)
+    embed = payload["embeds"][0]
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert len(embed["title"]) <= 256
+    assert len(embed.get("description", "")) <= 4096
+    assert len(embed["fields"]) <= 25
+    assert all(len(field["name"]) <= 256 for field in embed["fields"])
+    assert all(len(field["value"]) <= 1024 for field in embed["fields"])
+    assert "파이프라인" in serialized
+
+
+def test_weather_send_discord_report_posts_structured_payload(monkeypatch):
+    calls = []
+
+    class Response:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        discord.urllib.request,
+        "urlopen",
+        lambda request, timeout: calls.append((request, timeout)) or Response(),
+    )
+
+    assert discord.send_discord_report(
+        _weather_pipeline_report(), webhook_url="https://discord.example/webhook"
+    )
+    request, timeout = calls[0]
+    payload = json.loads(request.data.decode("utf-8"))
+    assert payload["embeds"][0]["fields"][2]["name"] == "파이프라인"
+    assert request.get_method() == "POST"
+    assert timeout == 10

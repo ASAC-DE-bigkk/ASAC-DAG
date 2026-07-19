@@ -156,3 +156,138 @@ def test_traffic_send_discord_swallows_failure_without_logging_webhook(
     assert discord.send_discord_message("hello", webhook_url=secret_url) is False
     assert "SECRET_TOKEN" not in caplog.text
     assert secret_url not in caplog.text
+
+
+def _traffic_pipeline_report(status="PASS"):
+    return {
+        "report_name": "traffic_pipeline_reliability_v2",
+        "domain": "traffic",
+        "report_date": "2026-07-19",
+        "detected_at": "2026-07-19T09:00:00+09:00",
+        "lookback_hours": 24,
+        "status": status,
+        "data_plane_status": "PASS",
+        "control_plane_status": status,
+        "source": {
+            "status": "PASS",
+            "freshness_minutes": 3,
+            "coverage_percent": 100.0,
+            "pending_count": 0,
+            "publishability_ok": True,
+        },
+        "scheduled_runs": {
+            "expected": 288,
+            "success": 288,
+            "failed": 0,
+            "running": 0,
+        },
+        "stages": [
+            {
+                "key": "flow_silver",
+                "label": "Flow Silver",
+                "status": "PASS",
+                "age_minutes": 12,
+                "duration_ms": {"p50": 20_000, "p95": 30_000},
+            },
+            {
+                "key": "gold",
+                "label": "Traffic Gold",
+                "status": status,
+                "age_minutes": 20,
+                "duration_ms": {"p50": 80_000, "p95": 120_000},
+            },
+        ],
+        "bottleneck": {
+            "key": "gold",
+            "label": "Traffic Gold",
+            "status": status,
+            "p95_ms": 120_000,
+        },
+        "trend": [
+            {"report_date": "2026-07-17", "status": "UNKNOWN"},
+            {"report_date": "2026-07-18", "status": "WARN"},
+            {"report_date": "2026-07-19", "status": status},
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "color"),
+    [
+        ("PASS", discord.DISCORD_GREEN),
+        ("WARN", discord.DISCORD_YELLOW),
+        ("FAIL", discord.DISCORD_RED),
+    ],
+)
+def test_traffic_pipeline_card_uses_report_status_and_five_named_fields(
+    status, color
+):
+    payload = discord.build_traffic_discord_payload(
+        _traffic_pipeline_report(status)
+    )
+    embed = payload["embeds"][0]
+
+    assert embed["color"] == color
+    assert [field["name"] for field in embed["fields"]] == [
+        "상태",
+        "수집 품질",
+        "파이프라인",
+        "관측 병목",
+        "7일 추세",
+    ]
+    assert "Traffic Gold" in embed["fields"][3]["value"]
+    assert "◻️ 07-17" in embed["fields"][4]["value"]
+    assert "매일 09:00 KST" in embed["footer"]["text"]
+
+
+def test_traffic_pipeline_card_respects_discord_limits_and_utf8():
+    report_value = _traffic_pipeline_report("WARN")
+    report_value["stages"] = [
+        {
+            "key": str(index),
+            "label": "긴 단계 이름 " * 200,
+            "status": "WARN",
+            "age_minutes": index,
+            "duration_ms": {"p50": 1, "p95": 2},
+        }
+        for index in range(40)
+    ]
+
+    payload = discord.build_traffic_discord_payload(report_value)
+    embed = payload["embeds"][0]
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert len(embed["title"]) <= 256
+    assert len(embed.get("description", "")) <= 4096
+    assert len(embed["fields"]) <= 25
+    assert all(len(field["name"]) <= 256 for field in embed["fields"])
+    assert all(len(field["value"]) <= 1024 for field in embed["fields"])
+    assert "파이프라인" in serialized
+
+
+def test_traffic_send_discord_report_posts_structured_payload(monkeypatch):
+    calls = []
+
+    class Response:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        discord.urllib.request,
+        "urlopen",
+        lambda request, timeout: calls.append((request, timeout)) or Response(),
+    )
+
+    assert discord.send_discord_report(
+        _traffic_pipeline_report(), webhook_url="https://discord.example/webhook"
+    )
+    request, timeout = calls[0]
+    payload = json.loads(request.data.decode("utf-8"))
+    assert payload["embeds"][0]["fields"][2]["name"] == "파이프라인"
+    assert request.get_method() == "POST"
+    assert timeout == 10

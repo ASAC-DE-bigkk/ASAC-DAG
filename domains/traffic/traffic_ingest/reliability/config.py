@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 from ..run_manifest import MANIFEST_TABLE as MANIFEST_TABLE
+from .lineage import StagePolicy
 
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -15,6 +16,7 @@ KST = ZoneInfo("Asia/Seoul")
 LOGGER = logging.getLogger("traffic_ingest.reliability_report")
 
 TRAFFIC_BRONZE_DAG_ID = "traffic_incident_bronze"
+TRAFFIC_FLOW_BRONZE_DAG_ID = "traffic_flow_bronze"
 TRAFFIC_LANDING_DAG_ID = "traffic_incident_landing"
 # ``traffic_incident_bronze`` runs on a five-minute cron in the dev smoke flow.
 # The interval is added to the first-to-last failed slot so the reported window
@@ -23,13 +25,43 @@ TRAFFIC_SCHEDULE_INTERVAL_MINUTES = 5
 TRAFFIC_RUN_STALE_MINUTES = 15
 TRAFFIC_TABLE = "bronze_seoul_traffic_incident"
 TRAFFIC_AUDIT_TABLE = "bronze_seoul_traffic_incident_request_audit"
+TRAFFIC_FLOW_TABLE = "bronze_seoul_traffic_flow"
+TRAFFIC_FLOW_AUDIT_TABLE = "bronze_seoul_traffic_flow_request_audit"
 WEBHOOK_ENVS = ("ASK_SEOUL_DISCORD_WEBHOOK_URL", "TRAFFIC_DISCORD_WEBHOOK_URL")
+DAILY_REPORT_SCHEDULE = "0 9 * * *"
+# Retained for compatibility only. Pipeline Reliability v2 ignores legacy
+# cadence overrides so an old */15 setting cannot reactivate frequent reports.
 SCHEDULE_ENV = "ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE"
 GLOBAL_SCHEDULE_ENV = "ASK_SEOUL_REPORT_DAG_SCHEDULE"
 DISCORD_GREEN = 3066993
 DISCORD_YELLOW = 16776960
 DISCORD_RED = 15158332
 SCHEDULED_FAILURE_REASON_FALLBACK = "원인 미확인"
+MARQUEZ_BASE_URL = "http://marquez-api:5000/api/v1"
+MARQUEZ_NAMESPACE = "ask-seoul-dev-airflow"
+TRAFFIC_PIPELINE_STAGE_POLICIES = (
+    StagePolicy("landing", "Raw landing", "traffic_incident_landing", 20),
+    StagePolicy("incident_bronze", "Incident Bronze", "traffic_incident_bronze", 60),
+    StagePolicy("flow_bronze", "Flow Bronze", "traffic_flow_bronze", 30),
+    StagePolicy(
+        "incident_source_freshness",
+        "Incident source freshness",
+        "traffic_incident_transform.dbt_source_freshness",
+        120,
+    ),
+    StagePolicy(
+        "incident_silver", "Incident Silver", "traffic_incident_transform", 120
+    ),
+    StagePolicy("flow_silver", "Flow Silver", "traffic_flow_transform", 120),
+    StagePolicy("gold", "Traffic Gold", "traffic_gold_transform", 240),
+    StagePolicy(
+        "maintenance",
+        "Iceberg maintenance",
+        "ask_seoul_iceberg_maintenance",
+        1_560,
+        required=False,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -60,13 +92,9 @@ def discord_webhook_url(env: Mapping[str, str] = os.environ) -> str | None:
 def report_dag_schedule(env: Mapping[str, str] = os.environ) -> str | None:
     if not is_dev_target(env):
         return None
-    if SCHEDULE_ENV in env:
-        return env[SCHEDULE_ENV] or None
-    if GLOBAL_SCHEDULE_ENV in env:
-        return env[GLOBAL_SCHEDULE_ENV] or None
     if not discord_webhook_url(env):
         return None
-    return "0 9 * * *"
+    return DAILY_REPORT_SCHEDULE
 
 
 def sql_identifier(value: str) -> str:

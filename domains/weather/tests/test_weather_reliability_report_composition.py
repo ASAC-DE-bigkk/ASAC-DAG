@@ -281,3 +281,180 @@ def test_weather_summary_uses_load_date_and_collected_at_bounds(monkeypatch):
     assert (
         "collected_at >= TIMESTAMP '2026-07-01 09:00:00.000000'" in cursor.statements[0]
     )
+
+
+def _pipeline_data_plane(status="PASS"):
+    return {
+        "report_name": "weather_bronze_reliability",
+        "detected_at": "2026-07-19T09:00:00+09:00",
+        "catalog": "iceberg_dev",
+        "schema": "ask_seoul",
+        "lookback_hours": 24,
+        "status": status,
+        "weather": {
+            "status": status,
+            "freshness_minutes": 20,
+            "coverage_ok": status != "FAIL",
+            "grid_slot_count": 640,
+            "expected_grid_slot_count": 640,
+        },
+        "dag_runs": {
+            "dag_id": "weather_vilage_fcst_bronze",
+            "publishability_ok": True,
+        },
+        "publishability_ok": True,
+        "blast_radius": [],
+    }
+
+
+def _pipeline_stages(status="PASS", transform_status="PASS"):
+    return {
+        "source": "marquez",
+        "status": status,
+        "stages": [
+            {
+                "key": "transform",
+                "label": "Weather Silver/Gold",
+                "status": transform_status,
+                "reason": None,
+                "observed": 8,
+                "age_minutes": 30,
+                "duration_ms": {"p50": 100_000, "p95": 180_000},
+            },
+            {
+                "key": "maintenance",
+                "label": "Iceberg maintenance",
+                "status": "UNKNOWN",
+                "reason": "unobserved",
+                "required": False,
+                "observed": 0,
+                "age_minutes": None,
+                "duration_ms": {"p50": None, "p95": None},
+            },
+        ],
+    }
+
+
+def test_pipeline_data_failure_wins_over_control_plane_pass():
+    result = composition.compose_weather_pipeline_report(
+        data_plane=_pipeline_data_plane("FAIL"),
+        stages=_pipeline_stages(),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["data_plane_status"] == "FAIL"
+
+
+def test_pipeline_control_plane_unavailable_degrades_pass_to_warn():
+    result = composition.compose_weather_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages={"status": "UNKNOWN", "stages": []},
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "WARN"
+    assert result["control_plane_status"] == "UNKNOWN"
+
+
+def test_pipeline_transform_failure_is_fail():
+    result = composition.compose_weather_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=_pipeline_stages(status="FAIL", transform_status="FAIL"),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "FAIL"
+
+
+def test_pipeline_recovered_transform_failure_is_warn():
+    stages = _pipeline_stages(status="WARN", transform_status="WARN")
+    stages["stages"][0]["reason"] = "recovered_failure"
+
+    result = composition.compose_weather_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=stages,
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "WARN"
+
+
+def test_unobserved_optional_maintenance_is_informational():
+    result = composition.compose_weather_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=_pipeline_stages(),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "PASS"
+    assert result["stages"][-1]["status"] == "UNKNOWN"
+
+
+def test_observed_maintenance_failure_is_fail():
+    stages = _pipeline_stages(status="FAIL")
+    stages["stages"][-1].update(
+        status="FAIL", reason="latest_terminal_failed", observed=1
+    )
+
+    result = composition.compose_weather_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=stages,
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["status"] == "FAIL"
+
+
+def test_weather_pipeline_source_exposes_exact_coverage_percentage():
+    data_plane = _pipeline_data_plane()
+    data_plane["weather"]["grid_slot_count"] = 600
+
+    result = composition.compose_weather_pipeline_report(
+        data_plane=data_plane,
+        stages=_pipeline_stages(),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["source"]["coverage_percent"] == 93.75
+
+
+def test_weather_pipeline_bottleneck_is_largest_observed_stage_p95():
+    result = composition.compose_weather_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=_pipeline_stages(),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert result["bottleneck"] == {
+        "key": "transform",
+        "label": "Weather Silver/Gold",
+        "status": "PASS",
+        "p95_ms": 180_000,
+    }
+
+
+def test_weather_pipeline_trend_uses_current_day_and_six_prior_observations():
+    history = [
+        {"report_date": f"2026-07-{day:02d}", "status": "PASS"}
+        for day in range(12, 19)
+    ]
+
+    result = composition.compose_weather_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=_pipeline_stages(),
+        history=history,
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+    )
+
+    assert len(result["trend"]) == 7
+    assert result["trend"][0]["report_date"] == "2026-07-13"
+    assert result["trend"][-1] == {"report_date": "2026-07-19", "status": "PASS"}

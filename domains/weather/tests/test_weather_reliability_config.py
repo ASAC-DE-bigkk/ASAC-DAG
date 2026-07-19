@@ -23,3 +23,14 @@ def test_weather_report_schedule_requires_dev_target_and_webhook(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
     monkeypatch.setenv("ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE", "*/5 * * * *")
     assert report.report_dag_schedule() is None
+
+
+def test_weather_report_schedule_ignores_legacy_high_frequency_overrides(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setenv(
+        "ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/webhook"
+    )
+    monkeypatch.setenv("ASK_SEOUL_WEATHER_REPORT_DAG_SCHEDULE", "*/15 * * * *")
+    monkeypatch.setenv("ASK_SEOUL_REPORT_DAG_SCHEDULE", "*/15 * * * *")
+
+    assert report.report_dag_schedule() == "0 9 * * *"
