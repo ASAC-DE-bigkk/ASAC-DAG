@@ -32,8 +32,10 @@ from .reliability.discord import (
     _icon,
     _status_icon,
     _status_label,
+    build_weather_discord_payload,
     format_weather_discord_message,
     send_discord_message,
+    send_discord_report,
 )
 from .reliability.report import (
     build_weather_reliability_report,
@@ -82,6 +84,7 @@ __all__ = [
     "WEBHOOK_ENVS",
     "WeatherReportConfig",
     "ask_seoul_schema",
+    "build_weather_discord_payload",
     "build_weather_reliability_report",
     "collect_weather_data_plane",
     "compose_weather_pipeline_report",
@@ -94,6 +97,7 @@ __all__ = [
     "report_config",
     "report_dag_schedule",
     "send_discord_message",
+    "send_discord_report",
     "sql_identifier",
     "trino_catalog",
     "trino_cursor",

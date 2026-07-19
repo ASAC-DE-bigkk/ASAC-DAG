@@ -61,6 +61,14 @@ OWNERS = {
         "load_recent_history",
         "write_history_snapshot",
     },
+    "card.py": {
+        "_duration",
+        "_field",
+        "_pipeline_value",
+        "_trend_value",
+        "_truncate",
+        "build_traffic_discord_payload",
+    },
     "report.py": {
         "_pipeline_status",
         "_select_bottleneck",
@@ -83,6 +91,7 @@ OWNERS = {
         "format_traffic_discord_message",
         "scheduled_failure_identities",
         "send_discord_message",
+        "send_discord_report",
     },
 }
 
@@ -93,6 +102,7 @@ ALLOWED_INTERNAL_IMPORTS = {
     "backlog.py": {"config"},
     "lineage.py": set(),
     "history.py": set(),
+    "card.py": {"config"},
     "report.py": {
         "backlog",
         "config",
@@ -101,7 +111,7 @@ ALLOWED_INTERNAL_IMPORTS = {
         "lineage",
         "trino_repository",
     },
-    "discord.py": {"config"},
+    "discord.py": {"card", "config"},
 }
 
 PUBLIC_API = {
@@ -127,6 +137,7 @@ PUBLIC_API = {
     "WEBHOOK_ENVS",
     "ask_seoul_schema",
     "build_traffic_reliability_report",
+    "build_traffic_discord_payload",
     "collect_traffic_data_plane",
     "collect_scheduled_run_summary",
     "collect_dag_run_summary",
@@ -139,6 +150,7 @@ PUBLIC_API = {
     "report_config",
     "report_dag_schedule",
     "send_discord_message",
+    "send_discord_report",
     "scheduled_failure_identities",
     "sql_identifier",
     "trino_catalog",

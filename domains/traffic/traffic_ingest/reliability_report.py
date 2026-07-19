@@ -40,9 +40,11 @@ from .reliability.discord import (
     _icon,
     _status_icon,
     _status_label,
+    build_traffic_discord_payload,
     format_traffic_discord_message,
     scheduled_failure_identities,
     send_discord_message,
+    send_discord_report,
 )
 from .reliability.ledger import collect_scheduled_run_summary
 from .reliability.report import (
@@ -100,6 +102,7 @@ __all__ = [
     "_status_label",
     "_traffic_cutoffs",
     "ask_seoul_schema",
+    "build_traffic_discord_payload",
     "build_traffic_reliability_report",
     "collect_traffic_data_plane",
     "compose_traffic_pipeline_report",
@@ -114,6 +117,7 @@ __all__ = [
     "report_dag_schedule",
     "scheduled_failure_identities",
     "send_discord_message",
+    "send_discord_report",
     "sql_identifier",
     "trino_catalog",
     "trino_cursor",
