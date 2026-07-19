@@ -7,6 +7,7 @@ from traffic_transform_test_support import (
     FakeAirflowException,
     FakeAirflowFailException,
     FakePythonOperator,
+    load_flow_transform_module,
     load_gold_transform_module,
     load_transform_module,
     write_materialization_artifacts,
@@ -292,6 +293,55 @@ def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
     assert pushed["value"]["silver_persisted"] is True
     assert pushed["value"]["dbt_run_results_path"].endswith("/run_results.json")
     assert pushed["value"]["dbt_manifest_path"].endswith("/manifest.json")
+
+
+def test_flow_silver_dbt_failure_records_the_exact_flow_parent(tmp_path, monkeypatch):
+    module = load_flow_transform_module()
+    monkeypatch.setattr(module, "DBT_PROJECT", str(tmp_path / "dbt"))
+    pushed = {}
+
+    def xcom_pull(*, task_ids, key=None):
+        if task_ids != module.SNAPSHOT_TASK_ID:
+            return None
+        if key == module.FLOW_SNAPSHOT_XCOM_KEY:
+            return "flow-snapshot-a"
+        return "incident-snapshot-a"
+
+    ti = types.SimpleNamespace(
+        task_id="dbt_run_flow_silver",
+        try_number=1,
+        xcom_pull=xcom_pull,
+        xcom_push=lambda key, value: pushed.update(key=key, value=value),
+    )
+
+    def fail_after_preflight(command, **_kwargs):
+        if command[1] == "ls":
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout='{"unique_id":"model.asac_seoul.silver_seoul_traffic_flow","resource_type":"model"}\n',
+                stderr="",
+            )
+        write_materialization_artifacts(command)
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fail_after_preflight)
+    monkeypatch.setattr(module, "load_dbt_results", lambda _path: [])
+
+    with pytest.raises(FakeAirflowFailException):
+        module.run_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_traffic_transform_flow_silver_model",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            snapshot_required=True,
+            silver_persisted=False,
+            ti=ti,
+            run_id="manual__flow_failure",
+            params={"target": "dev"},
+        )
+
+    assert pushed["key"] == module.DBT_FAILURE_XCOM_KEY
+    assert pushed["value"]["traffic_snapshot_dag_run_id"] == "incident-snapshot-a"
+    assert pushed["value"]["traffic_flow_snapshot_dag_run_id"] == "flow-snapshot-a"
 
 
 def test_failed_silver_run_reports_the_model_that_already_persisted(
