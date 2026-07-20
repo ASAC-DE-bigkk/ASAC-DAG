@@ -1,14 +1,5 @@
 # Paths excluded from Airflow DAG-file scanning at the dags root.
-# Syntax: gitignore-style glob, matched against paths relative to this directory.
+# Syntax: regexp (default), matched against paths relative to this directory.
 # plugins/ holds callback modules (mounted as /opt/airflow/plugins, ASK-Seoul#23)
 # — importable, but never a DAG entry file.
 plugins/
-
-# Dev scope guard: Airflow may discover DAG files only under Weather or Traffic.
-# This limits file scanning only; callback modules remain importable via plugins/.
-/*
-!/domains/
-!/domains/weather/
-!/domains/weather/**
-!/domains/traffic/
-!/domains/traffic/**
