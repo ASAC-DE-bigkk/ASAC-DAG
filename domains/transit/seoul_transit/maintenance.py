@@ -68,6 +68,31 @@ def cutoff_bronze_ts(now: datetime | None = None) -> str:
     return week_cutoff(now).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def archive_watermark_required(now: datetime | None = None) -> str:
+    """purge 안전 조건 — gold 아카이브가 이 시각(KST 벽시계)까지는 소비했어야 한다.
+
+    purge 는 week_cutoff **미만** 의 bronze/raw 를 지운다. 그런데 gold 아카이브가
+    유일한 장기 저장소이므로(#286), 변환이 그 구간을 아직 집계하지 않은 상태에서 원본을
+    지우면 **그 주 데이터는 어디에도 남지 않는다**. 그래서 "아카이브가 컷오프 시각까지
+    도달했는가"를 확인하고 purge 한다.
+
+    비교는 KST 벽시계로 한다 — gold 의 bucket_at 이 KST 벽시계 계약(#48)이기 때문.
+    week_cutoff 는 '이번 주 월요일 00:00 KST' 이므로 그 KST 표현이 곧 요구 워터마크다.
+    """
+    return week_cutoff(now).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def is_archive_caught_up(max_bucket_at: str | None, now: datetime | None = None) -> bool:
+    """아카이브 최신 버킷이 요구 워터마크 이상인가. None(빈 아카이브)이면 False.
+
+    문자열 비교로 충분하다 — 둘 다 'YYYY-MM-DD HH:MM:SS' 고정폭 포맷이라 사전식
+    순서가 시간 순서와 일치한다(타임존 변환은 호출 측이 이미 끝냈다).
+    """
+    if not max_bucket_at:
+        return False
+    return max_bucket_at[:19] >= archive_watermark_required(now)
+
+
 def is_expired_key(key: str, ingest_cutoff: str) -> bool:
     """키의 ingest_ts 가 컷오프 미만이면 만료 — raw 객체·pending 마커 공용.
     ingest_ts 세그먼트가 없는 키는 건드리지 않는다."""

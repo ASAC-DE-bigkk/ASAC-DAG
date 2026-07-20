@@ -170,12 +170,14 @@ def test_run_results_path_under_project_target():
     )
 
 
-# ── 스케줄: @hourly 기본 + env 오버라이드 ────────────────────────────────────────
-def test_schedule_defaults_hourly(monkeypatch):
+# ── 스케줄: */15 기본 + env 오버라이드 ───────────────────────────────────────────
+def test_schedule_defaults_every_15min(monkeypatch):
+    # #443: 사용자향 '지금' 카드 신선도 때문에 @hourly → */15. 실측 build 344초.
+    # 되돌릴 때는 G1(dong_now)의 최대 지연이 1시간이 된다는 점을 함께 판단할 것.
     monkeypatch.delenv("TRANSIT_TRANSFORM_SCHEDULE", raising=False)
     module = load_transform_module()
-    assert module.transform_schedule() == "@hourly"
-    assert module.dag.kwargs["schedule"] == "@hourly"
+    assert module.transform_schedule() == "*/15 * * * *"
+    assert module.dag.kwargs["schedule"] == "*/15 * * * *"
 
 
 def test_schedule_env_override(monkeypatch):

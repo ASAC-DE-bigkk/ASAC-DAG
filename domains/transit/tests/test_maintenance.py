@@ -83,3 +83,29 @@ def test_purge_sql_statements():
 def test_purge_sql_rejects_malformed_cutoff():
     with pytest.raises(ValueError):
         maintenance.purge_sql("cat.transit.bronze_parking", "2026-07-12' OR 1=1 --")
+
+# ── purge 선행 게이트 (#443 — 아카이브가 삭제 구간을 소비했는가) ─────────────────
+def test_archive_watermark_is_week_boundary_in_kst_wallclock():
+    # gold 의 bucket_at 은 KST 벽시계 계약(#48)이라 워터마크도 KST 로 낸다.
+    # _THU(07-16 목) 기준 이번 주 월요일 = 07-13 00:00 KST.
+    assert maintenance.archive_watermark_required(_THU) == "2026-07-13 00:00:00"
+
+
+def test_archive_caught_up_requires_reaching_boundary():
+    # 경계 이상이면 통과 — 아카이브가 지울 구간을 이미 집계했다는 뜻.
+    assert maintenance.is_archive_caught_up("2026-07-13 00:00:00", _THU) is True
+    assert maintenance.is_archive_caught_up("2026-07-16 11:45:00", _THU) is True
+    # 경계 미만이면 차단 — 지금 지우면 그 구간이 어디에도 안 남는다.
+    assert maintenance.is_archive_caught_up("2026-07-12 23:45:00", _THU) is False
+
+
+def test_archive_caught_up_blocks_when_archive_empty_or_missing():
+    # 빈 아카이브(개시 직후·변환 미수행)에서 purge 가 돌면 원본만 사라진다.
+    assert maintenance.is_archive_caught_up(None, _THU) is False
+    assert maintenance.is_archive_caught_up("", _THU) is False
+
+
+def test_archive_caught_up_tolerates_fractional_seconds():
+    # Trino 의 timestamp(6) 문자열은 소수 초를 달고 나온다 — 앞 19자만 비교한다.
+    assert maintenance.is_archive_caught_up("2026-07-13 00:00:00.000000", _THU) is True
+    assert maintenance.is_archive_caught_up("2026-07-12 23:59:59.999999", _THU) is False

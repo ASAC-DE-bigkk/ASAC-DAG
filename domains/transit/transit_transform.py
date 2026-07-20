@@ -72,8 +72,18 @@ record_transit_problem = problem_failure_callback(domain=DOMAIN)
 
 
 def transform_schedule() -> str:
-    """@hourly 기본, env TRANSIT_TRANSFORM_SCHEDULE 로 오버라이드(seoul_transit.config 재사용)."""
-    return config.schedule_for("transit_transform", "@hourly")
+    """*/15 기본, env TRANSIT_TRANSFORM_SCHEDULE 로 오버라이드(seoul_transit.config 재사용).
+
+    15분으로 당긴 근거(#443): 사용자향 '지금' 카드(G1)는 지하철 3분·주차 5분 수집인데
+    @hourly 면 최대 1시간 묵은 값을 보여준다. 실측 dbt build 소요는 344초(2026-07-20,
+    dev 전 모델+테스트)라 15분 창에 들어간다.
+
+    ⚠️ 여유가 무한하지 않다: 프로파일 3종(리듬·주차·노선)은 아카이브 전량을 매 런
+    재집계하고 event_access 는 행사×역·주차 거리 계산을 매 런 반복한다 — 아카이브가
+    쌓이면 소요가 늘어난다. build 가 15분에 근접하면 무거운 모델을 별도 주기(tag 선택)로
+    분리할 것. max_active_runs=1 이라 초과분은 큐잉되며 겹쳐 돌지는 않는다.
+    """
+    return config.schedule_for("transit_transform", "*/15 * * * *")
 
 
 def transform_gate_open(now=None) -> bool:

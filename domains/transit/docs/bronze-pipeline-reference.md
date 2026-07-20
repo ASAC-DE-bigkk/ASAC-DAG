@@ -51,6 +51,8 @@
 `tests/test_bus_collect_window.py` 의 예산 테스트가 깨지므로 재계산이 강제된다.
 (3분 전면 수집 복귀는 트래픽 증량 승인 후 — #369 잔여.)
 | `TRANSIT_LOADER_SCHEDULE` | `*/10` | loader 주기 |
+| `TRANSIT_TRANSFORM_SCHEDULE` | `*/15` | dbt 변환 주기 (#443) — 실측 build 344초. 프로파일·event_access 가 아카이브 성장에 따라 늘어나므로 주기에 근접하면 무거운 모델 분리 |
+| `TRANSIT_ARCHIVE_TABLE` | `gold_transit_dong_15min` | purge 선행 게이트가 보는 아카이브 테이블 (#443) |
 | `TRANSIT_LOADER_INSERT_MAX_CHARS` | `700000` | INSERT 문 길이 캡 (QUERY_TEXT_TOO_LARGE 회피) |
 
 - 지하철 일괄은 **경로형** `realtimeStationArrival/ALL` 필수 — start/end 형은 1000행 캡.
@@ -105,3 +107,12 @@
 - 버스 collector 런타임(*/20 현행): API 수집 ~4초 + R2 순차 PUT(728객체) ~4.5분.
   주기 상향 전제 조건과 개선 방향은 #369 에서 관리.
 - 검증 절차는 repo 루트 `.claude/skills/verify/SKILL.md` 참고.
+
+## 주 경계 purge 안전 게이트 (#443)
+
+`transit_maintenance` 는 purge 전에 **gold 아카이브가 삭제 대상 구간을 이미 소비했는지** 확인한다
+(`assert_archive_caught_up` → `gold_transit_dong_15min.max(bucket_at) >= 이번 주 월요일 00:00 KST`).
+
+원본(R2 raw·bronze)은 주 경계로 지워지고 gold 아카이브가 유일한 장기 저장소이므로(ASAC-DBT #286),
+변환이 밀린 상태에서 purge 가 돌면 그 주 데이터는 어디에도 남지 않는다. 미도달이면 **실패가 아니라
+skip** 으로 막고 다음 `@daily` 런에서 재평가한다 — 삭제는 되돌릴 수 없으므로 "확신 없으면 안 지운다".
