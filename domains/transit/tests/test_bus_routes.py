@@ -116,6 +116,56 @@ def test_collect_bus_raw_preserves_route_page_order(monkeypatch):
     assert [r["route"] for r in out] == routes
 
 
+# ── 티어링 (#440) ────────────────────────────────────────────────────────────────
+def _ref(monkeypatch, routes):
+    from seoul_transit import r2_landing
+    monkeypatch.setattr(r2_landing, "get_json", lambda key: {"routes": routes})
+    monkeypatch.setattr(config, "BUS_ROUTES", ["ALL"])
+
+
+def test_resolve_routes_tier1_only_filters_types(monkeypatch):
+    _ref(monkeypatch, [
+        {"busRouteId": "1", "routeType": "3"},   # 간선 → tier1
+        {"busRouteId": "2", "routeType": "6"},   # 광역 → tier1
+        {"busRouteId": "3", "routeType": "4"},   # 지선 → tier2
+        {"busRouteId": "4", "routeType": "15"},  # 심야 → tier2
+        {"busRouteId": "5", "routeType": "8"},   # 경기 → 제외
+    ])
+    assert bus.resolve_routes(include_tier2=False) == ["1", "2"]
+    assert bus.resolve_routes(include_tier2=True) == ["1", "2", "3", "4"]
+
+
+def test_resolve_routes_explicit_list_ignores_tiering(monkeypatch):
+    monkeypatch.setattr(config, "BUS_ROUTES", ["100100025"])
+    assert bus.resolve_routes(include_tier2=False) == ["100100025"]
+
+
+# ── 쿼터/인증 가드 (#440 — headerCd 무경보 구멍 차단) ────────────────────────────
+def _fake_fetch_cd(cd_by_route):
+    def fetch(url, timeout=20, rate_limit=None):
+        route = url.rsplit("=", 1)[1]
+        cd = cd_by_route.get(route, "0")
+        body = "<itemList>x</itemList>" if cd == "0" else ""
+        return f"<msgHeader><headerCd>{cd}</headerCd></msgHeader>{body}"
+    return fetch
+
+
+def test_quota_guard_raises_on_majority_key_faults(monkeypatch):
+    routes = [f"r{i}" for i in range(10)]
+    monkeypatch.setattr(bus, "get_text_mt", _fake_fetch_cd({r: "7" for r in routes[:6]}))
+    with pytest.raises(RuntimeError, match="키 이상"):
+        bus.collect_bus_raw("key", "bus_position", routes=routes)
+
+
+def test_quota_guard_tolerates_no_data_cd4(monkeypatch):
+    # 미운행 '결과 없음'(cd=4)은 다수여도 정상 — 쿼터 가드 미발동, rows=-1 보존
+    routes = [f"r{i}" for i in range(10)]
+    monkeypatch.setattr(bus, "get_text_mt", _fake_fetch_cd({r: "4" for r in routes[:8]}))
+    out = bus.collect_bus_raw("key", "bus_position", routes=routes)
+    assert len(out) == 10
+    assert sum(1 for r in out if r["rows"] == -1) == 8
+
+
 def test_collect_bus_raw_total_failure_always_raises(monkeypatch):
     # 리뷰 #369: 허용선 바닥값(5) 때문에 소규모 명시 목록(롤백 모드)의 100% 실패가
     # 빈 번들로 성공 마감되던 결함 — 전량 실패는 허용선과 무관하게 raise.

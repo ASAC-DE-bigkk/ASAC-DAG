@@ -58,6 +58,16 @@ BUS_ROUTE_TYPES_EXCLUDE = {
     s.strip() for s in os.environ.get("BUS_ROUTE_TYPES_EXCLUDE", "7,8").split(",") if s.strip()
 }
 
+# ── 버스 티어링(#440) — 운영계정 10,000콜/일 예산의 차등 배분 ────────────────────
+# tier1(주요: 3 간선+6 광역 ~165노선)은 매 런, tier2(그 외 ~563노선)는 지정 시각
+# (KST, 정각 런)에만 포함. 예산: 165×48 + 563×3 = 9,609 < 10,000.
+BUS_TIER1_TYPES = {
+    s.strip() for s in os.environ.get("BUS_TIER1_TYPES", "3,6").split(",") if s.strip()
+}
+BUS_TIER2_HOURS = {
+    int(s) for s in os.environ.get("BUS_TIER2_HOURS", "7,13,19").split(",") if s.strip()
+}
+
 # 노선별 호출 병렬도 — HttpCore 는 스레드 안전이 아니라 스레드-로컬 코어로 병렬화(api.get_text_mt).
 BUS_COLLECT_WORKERS = int(os.environ.get("BUS_COLLECT_WORKERS", "8"))
 
