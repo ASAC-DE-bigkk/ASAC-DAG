@@ -269,6 +269,11 @@ def build_kma_bronze_dag(
         schedule=schedule,
         catchup=False,
         max_active_runs=1,
+        # dagrun_timeout(런): 한 run 이 이 시간을 넘으면 실패 처리해 단일 active 슬롯을
+        # 무한정 점유하지 못하게 한다. 2026-07-20 OOM 인시던트에서 load_kma_bronze 가
+        # ~4시간 running 으로 매달려 후속 스케줄을 막았다. 최악 land(~19분)+재시도보다는
+        # 넉넉하고, 3시간 스케줄 간격보다는 짧게 잡아 연속 run 이 겹치지 않게 한다.
+        dagrun_timeout=timedelta(minutes=60),
         on_failure_callback=record_kma_run_failed,
         tags=tags,
     ) as built_dag:

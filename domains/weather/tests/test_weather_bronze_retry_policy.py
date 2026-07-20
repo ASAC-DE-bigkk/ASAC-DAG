@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -272,3 +273,20 @@ def test_weather_load_boundary_preserves_transient_error(monkeypatch):
         )
 
     assert raised.value is error
+
+
+def test_weather_bronze_dag_bounds_runtime_with_dagrun_timeout():
+    # A hung run must not hold the single active slot indefinitely: the 2026-07-20
+    # OOM incident left load_kma_bronze "running" for ~4h. dagrun_timeout must sit
+    # above the worst-case land (~19m) plus retries yet below the 3h schedule gap so
+    # consecutive scheduled runs never overlap under max_active_runs=1.
+    dag = dag_module.build_kma_bronze_dag(
+        dag_id="weather_vilage_fcst_bronze",
+        schedule=None,
+        description="test",
+        tags=["test"],
+    )
+
+    assert dag.dagrun_timeout is not None
+    assert dag.dagrun_timeout >= timedelta(minutes=30)
+    assert dag.dagrun_timeout < timedelta(hours=3)
