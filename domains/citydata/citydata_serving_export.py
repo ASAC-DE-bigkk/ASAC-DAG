@@ -210,9 +210,12 @@ def _export(**context) -> None:
             rows = cur.fetchall()
             print(f"[serving export] {name}: {len(rows)} rows")
 
-            # #3 검증: 스냅샷 테이블이 비면 이상(place_latest 는 121곳). 빈 export = 상류 이상.
+            # #3 검증 + 빈-데이터 보호: 스냅샷 테이블이 비면(place_latest 는 121곳) 상류 이상.
+            # 이때 D1 을 덮어쓰지 않고 **직전 정상 스냅샷을 유지**한다 — R2 502 등 일시 실패로
+            # 골드가 잠깐 비어도 공개 API 가 빈 응답을 서빙하지 않게(2026-07-21 사건 대응).
             if not rows and name in FRESHNESS_CHECK:
-                issues.append(f"{name}: 0행 (상류 골드 비어있음)")
+                issues.append(f"{name}: 0행 (상류 골드 비어있음) — D1 미갱신, 직전 스냅샷 유지")
+                continue
 
             # #1 신선도: 실시간 스냅샷의 최신 측정 시각이 임계 이상 뒤처지면 stale.
             if name in FRESHNESS_CHECK and time_idx is not None and rows:
