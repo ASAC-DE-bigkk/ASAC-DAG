@@ -43,3 +43,40 @@ def test_full_152_bounded():
     batches = plan_batches(counts, _BUDGET)
     _valid(batches, counts)
     assert ["mail_order_sale"] in batches
+
+
+def test_oversized_path_builds_entity_projections(monkeypatch):
+    """대형 dataset 버킷 경로가 원형(entity/entity_history)까지 적재하는지 — 2026-07-20 회귀.
+
+    버그: history·current 만 돌려 대형 4종이 entity 에서 통째로 누락(실측 0행/5행).
+    entity 가 table 이던 시절엔 후속 전량 재생성이 덮어써 가려졌으나, 증분 전환 후엔
+    이 경로가 유일한 적재 지점이라 드러났다.
+    """
+    from silver import chunked_run
+
+    cmds: list[str] = []
+    monkeypatch.setattr(chunked_run, "_run", lambda cmd, label: cmds.append(cmd))
+    monkeypatch.setattr(chunked_run, "_dbt", lambda p, b, t, args: args)
+    import commerce_core.trino_mem as _tm
+    monkeypatch.setattr(_tm, "pace", lambda *a, **k: None)
+    monkeypatch.setattr(chunked_run, "_delete_dataset_rows", lambda *a, **k: None)
+    monkeypatch.setattr(chunked_run, "_unmark_datasets", lambda *a, **k: None)
+    monkeypatch.setattr(chunked_run, "dataset_row_counts", lambda *a, **k: {"big": 1_000_000})
+    monkeypatch.setattr(chunked_run, "_dynamic_budget", lambda ceil_rows: 250_000)
+
+    chunked_run.run_silver_chunked(
+        select="silver_license_history silver_license_current "
+               "silver_license_entity silver_license_entity_history",
+        project_dir="/p", dbt_bin="/dbt", target="dev",
+        state={"cold_start": True, "history_incomplete": ["big"], "current_incomplete": []})
+
+    joined = "\n".join(cmds)
+    # 버킷 경로(history/current)는 기존대로 유지
+    assert "--select silver_license_history --vars" in joined
+    assert "--select silver_license_current --vars" in joined
+    # 원형 프로젝션이 같은 dataset 스코프로 실행돼야 한다(핵심 회귀)
+    assert "silver_license_entity silver_license_entity_history" in joined, \
+        "대형 dataset 경로가 entity/entity_history 를 건너뛰면 원형에서 통째로 누락된다"
+    ent_cmds = [c for c in cmds if "silver_license_entity silver_license_entity_history" in c]
+    assert ent_cmds, "원형 프로젝션 실행 명령이 없다"
+    assert all("big" in c for c in ent_cmds),         f"entity 실행이 dataset 스코프(include_datasets)를 받아야 한다: {ent_cmds}"

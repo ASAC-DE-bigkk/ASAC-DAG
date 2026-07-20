@@ -59,8 +59,16 @@ def agg_counts() -> dict[str, int]:
     return out
 
 
-def send_gold_report(*, elapsed_seconds: float | None = None) -> dict:
-    """집계 테이블 현황 → Discord. 반환: 요약 counts (행수 -1 = 미빌드/실패 → 실패색)."""
+def send_gold_report(*, elapsed_seconds: float | None = None,
+                     catalog: dict | None = None, load: dict | None = None) -> dict:
+    """집계 테이블 현황 → Discord. 반환: 요약 counts (행수 -1 = 미빌드/실패 → 실패색).
+
+    catalog/load 는 **전량 재구축(commerce_load_gold_refresh)** 경로가 넘기는 선택 컨텍스트다
+    (build_catalog / load_details_full 의 XCom). 정기 gold DAG 는 넘기지 않는다.
+    2026-07-20 실측: refresh 호출부가 이 두 인자를 넘기는데 시그니처에 없어 report_gold 가
+    항상 `TypeError` 로 실패했다(= refresh DAG 가 끝까지 성공한 적이 없음). 인자를 받아
+    리포트 본문에 반영한다.
+    """
     from common.discord import COLOR_FAIL, COLOR_OK, send_embed
 
     counts = agg_counts()
@@ -71,8 +79,19 @@ def send_gold_report(*, elapsed_seconds: float | None = None) -> dict:
     head = f"**집계(gold) 현황** — {len(counts)}객체"
     if elapsed_seconds is not None:
         head += f" · ⏱ {_fmt_elapsed(elapsed_seconds)}"
+    # 전량 재구축 경로 컨텍스트(있을 때만 한 줄 추가)
+    extra = []
+    if catalog:
+        extra.append(f"카탈로그 v{catalog.get('version', '?')}·{catalog.get('specs', '?')}스펙")
+    if load:
+        loaded = load.get("loaded") or {}
+        extra.append(f"detail 재적재 {len(loaded)}객체·{_num(sum(loaded.values()))}행"
+                     if loaded else "detail 재적재 없음")
+    if extra:
+        head += "\n　· 전량 재구축: " + " / ".join(extra)
     icon, color = ("❌", COLOR_FAIL) if failed else ("✅", COLOR_OK)
-    title = f"{icon} [commerce] commerce_load_gold (gold 집계) — {len(counts) - len(failed)}/{len(counts)} OK"
+    dag_label = "commerce_load_gold_refresh (전량 재구축)" if (catalog or load) else "commerce_load_gold (gold 집계)"
+    title = f"{icon} [commerce] {dag_label} — {len(counts) - len(failed)}/{len(counts)} OK"
     try:
         send_embed(title, head + "\n" + body, color=color, domain=_DOMAIN)
     except Exception as exc:  # noqa: BLE001

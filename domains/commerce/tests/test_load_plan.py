@@ -143,3 +143,26 @@ def test_commit_watermark_stops_before_failure():
     failed = {("gr", "2026-07-02_010000_001")}
     wm = load_plan.commit_watermark({}, resolved_runs=resolved, failed_run_ids=failed)
     assert wm["gr"] == "2026-07-01_010000_001"
+
+
+def test_first_load_identical_outside_base_window_does_not_advance_watermark():
+    # 2026-07-20 실측 스킵버그 회귀: first_load 인데 base 파일 run 이 lookback 창 밖이고
+    # 창 안은 identical 뿐이면 — 워터마크를 전진시키면 base 가 영구 skip 된다.
+    # 가드 후: resolved_runs 에 못 들어가 wm 미전진 → 다음 무제한 run 이 base 를 재계획.
+    st = _FakeStorage()
+    _seed_run(st, "2026-07-01_010000_001", {"gr": {"status": "completed", "file": True, "count": 5}})
+    for d in ("2026-07-04", "2026-07-05"):
+        _seed_run(st, f"{d}_010000_001", {"gr": {"status": "completed", "file": False}})
+    # 창=2일 → base(07-01) 제외, identical(07-04/05)만 후보
+    plan = _plan(st, ["gr"], today="2026-07-05", lookback_days=2)
+    assert plan["units"] == []                       # 적재할 것 없음(base 는 창 밖)
+    assert "gr" not in plan["resolved_runs"]        # 워터마크 전진 금지(핵심)
+    # 무제한 재계획 → base 정상 배정
+    plan2 = _plan(st, ["gr"], today="2026-07-05", lookback_days=None)
+    assert [u["run_id"][:10] for u in plan2["units"]] == ["2026-07-01"]
+    assert plan2["units"][0]["is_base"] is True
+    # base 적재 후(wm 존재)에는 identical 전진이 정상 동작(기존 계약 불변)
+    plan3 = _plan(st, ["gr"], watermark={"gr": "2026-07-01_010000_001"},
+                  today="2026-07-05", lookback_days=None)
+    assert plan3["units"] == []
+    assert plan3["resolved_runs"]["gr"] == ["2026-07-04_010000_001", "2026-07-05_010000_001"]

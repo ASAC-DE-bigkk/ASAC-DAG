@@ -80,6 +80,7 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
         wm = watermark.get(short, "")
         first_load = not wm                                   # 이 데이터셋 bronze 최초 적재?
         base_done = False                                     # 첫 파일(전체 재적재)을 이미 배정했나
+        ds_resolved: list[tuple[str, str]] = []               # (rdate, rid) — 데이터셋별 버퍼(아래 가드)
         cands = _within_lookback([r for r in all_runs if r > wm], today, lookback_days)
         for rid in cands:
             rdate = rid[:10]
@@ -105,10 +106,23 @@ def resolve_load_plan(storage: Storage, *, prefix: str, datasets: list[str],
                         "collected_at": m.get("collected_at", ""),
                         "service_name": m.get("source_name"),  # page-NDJSON parse_page 용
                         "engine": "pyiceberg" if is_base else "trino", "is_base": is_base})
-                resolved.add((rdate, short))
-                resolved_runs.setdefault(short, []).append(rid)
+                ds_resolved.append((rdate, rid))
             elif 0 <= load_state.days_between(rdate, today) <= load_state.RETRY_LOOKBACK_DAYS:
                 new_incomplete.add((rdate, short))            # 관측용(현재-2일 이내)
+
+        # 워터마크 전진 가드(2026-07-20 실측 스킵버그): first_load 인데 이 계획에서 base(첫 파일)가
+        # 한 번도 배정되지 않았다면 — lookback 창이 base 파일 run 을 배제한 경우(예: 기본 3일 창,
+        # base 는 열흘 전) — identical run 들로 워터마크를 전진시키지 않는다. 전진하면 base 가
+        # 영구 skip 된다(11개 데이터셋 실측, from-zero 재빌드 드릴에서 발견). wm 미전진이면 다음
+        # lookback=0/확장 run 이 base 를 정상 재계획한다. base 가 같은 계획에 있으면 기존 계약
+        # 그대로(앞선 identical 포함 전진 — 실패 시 commit_watermark 가 실패 run 직전에서 멈춤).
+        if first_load and not base_done and ds_resolved:
+            log.warning("first_load '%s': base 파일 run 이 lookback 창 밖 — identical %d개 전진 보류"
+                        "(다음 무제한 run 이 base 재계획)", short, len(ds_resolved))
+            continue
+        for rdate, rid in ds_resolved:
+            resolved.add((rdate, short))
+            resolved_runs.setdefault(short, []).append(rid)
 
     pending_keep, pending_expired = load_state.reconcile_pending(
         pending, resolved=resolved, new_incomplete=new_incomplete, today=today)

@@ -327,6 +327,17 @@ def run_silver_chunked(*, select: str, project_dir: str, dbt_bin: str, target: s
                 cmd = _dbt(project_dir, dbt_bin, target,
                            f"run --select silver_license_current --vars {json.dumps(vj)}")
                 _run(cmd, f"청크 배치 {i} current key_bucket {b + 1}/{k}")
+            # phase 3 — 원형 프로젝션(entity/entity_history). **누락 시 대형 dataset 이 원형에서
+            # 통째로 빠진다**(2026-07-20 from-zero 드릴 실측: 대형 4종이 entity 0행/5행).
+            # 과거엔 entity 가 table(전량 재생성)이라 후속 Cosmos run 이 덮어써 가려졌으나,
+            # entity 증분 전환 후에는 이 경로가 유일한 적재 지점이다. record_json 을 읽지 않는
+            # 좁은 프로젝션이라 버킷 분할 없이 dataset 스코프 1회로 안전(메모리는 행폭 지배).
+            trino_mem.pace(f"{ds} entity")
+            vj = json.dumps({"include_datasets": [ds]}, ensure_ascii=False)
+            _run(_dbt(project_dir, dbt_bin, target,
+                      f"run --select silver_license_entity silver_license_entity_history "
+                      f"--vars {json.dumps(vj)}"),
+                 f"청크 배치 {i} 원형(entity/entity_history) {ds}")
             bucketed += 1
             continue
         trino_mem.pace(f"batch {i}")
