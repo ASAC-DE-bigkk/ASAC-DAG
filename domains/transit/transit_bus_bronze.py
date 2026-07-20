@@ -7,9 +7,18 @@ transit_bronze_loader 가 pending 마커를 소비해 수행. dag_id 는 이력 
 서울 전 노선(~728, 인천7·경기8 제외) 로드, 스레드풀 병렬 호출.
 ⚠️ 부트스트랩: transit_bus_route_master 를 최초 1회 실행해야 reference 가 생긴다.
 
-티어링(#440, 운영계정 10,000콜/일 예산): tier1(간선·광역 ~165)은 매 30분,
-tier2(그 외 ~563)는 BUS_TIER2_HOURS(기본 07·13·19시 KST) 정각 런에만 포함 —
-165×48 + 563×3 = 9,609콜/일. headerCd 쿼터/인증 이상 과반이면 런 실패(무경보 차단).
+티어링(#440, 운영계정 10,000콜/일 예산): tier1(간선·광역 ~165)은 수집 창의 매 런,
+tier2(그 외 ~563)는 BUS_TIER2_HOURS(기본 09·19시 KST) 정시 런에만 포함.
+headerCd 쿼터/인증 이상 과반이면 런 실패(무경보 차단).
+
+수집 시간창(#440 후속): DAG 은 */10 로 깨어나되 실제 호출은 collect_plan() 이 정한다.
+  평일 — 출퇴근(07~09·17~19시) 10분 간격, 그 외 창 내 시각은 시간당 1런
+  주말 — 낮(09~20시) 20분 간격, 그 외 창 내 시각은 시간당 1런
+  공통 — 01~05시 제외(실측 02·03시 관측 16·19대로 사실상 운행 중단),
+         00시는 막차·심야버스 시간대라 포함(실측 12,355건)
+호출량 평일 9,211 / 주말 8,221 (상한 10,000). 예산표는 config.BUS_WEEKDAY_HOURS 주석.
+빠진 01~05시는 gold 프로파일(요일×시간 리듬 등)에서 빈 칸으로 남는다 — 원본이 주 단위로
+삭제되므로 소급 복구 불가. 창을 되살리려면 BUS_WEEKDAY_HOURS 에 시각을 더하되 예산 재계산.
 
 수집 제외(#212 유지): `bus_arrival` 은 silver 미소비로 수집하지 않는다.
 코드·테이블·파서는 유지 — SOURCES 에서 해당 항목만 주석 처리. 재개 시 주석 해제 + PR.
@@ -82,23 +91,65 @@ def _land_objects(dataset: str, raws: list, run_id: str) -> dict:
     return res
 
 
-def _include_tier2_now() -> bool:
-    """티어링(#440) — 이 런에 tier2(지선·마을 등)를 포함할지 벽시계(KST)로 판정.
+def collect_plan(now: datetime | None = None) -> tuple[bool, bool]:
+    """이 런에서 (수집할지, tier2 를 포함할지)를 벽시계(KST)로 판정한다.
 
-    */30 스케줄에서 각 시각의 전반부(분<30) 런은 시간당 정확히 1개 → BUS_TIER2_HOURS
-    시각의 그 런에만 전 노선을 포함한다. (재시도가 후반부로 밀리면 tier2 가 빠질 수
-    있는 엣지는 수용 — 다음 tier2 시각에 회복.)
+    DAG 는 */10 로 깨어나고 실제 수집 여부는 여기서 정한다 — 크론 하나로 요일 유형별
+    다른 시간창·간격을 구현하기 위해서다(요일별 크론 2개는 DAG 자체를 갈라야 함).
+
+    판정 순서(#440 후속):
+      0) BUS_COLLECT_NOT_BEFORE 이전이면 무조건 호출하지 않는다(정책 전환 게이트).
+      1) 수집 창(HOURS) 밖 시각 — 01~05시 등 — 이면 호출하지 않는다.
+      2) dense 시각(평일 출퇴근·주말 낮)이면 DENSE_INTERVAL_MIN 배수 분에 수집.
+      3) 창 안이지만 dense 가 아니면 **정시(분<10) 1런만** — 시간당 1회.
+    근거·예산표는 config 의 BUS_WEEKDAY_HOURS 주석.
+
+    tier2 는 BUS_TIER2_HOURS 시각의 정시 런에만 붙인다 — dense/시간당 어느 쪽이든
+    정시 런은 시간당 정확히 1개라 중복되지 않는다. 재시도가 다음 런으로 밀리면 그
+    회차의 tier2 는 빠지고 다음 tier2 시각에 회복된다(#440 과 동일한 수용 범위).
     """
-    from datetime import datetime
+    now = now or datetime.now(config.KST)
+    if config.BUS_COLLECT_NOT_BEFORE:
+        # fromisoformat 은 tz 없는 문자열을 naive 로 읽으므로 KST 를 명시해 붙인다.
+        gate = datetime.fromisoformat(config.BUS_COLLECT_NOT_BEFORE)
+        if gate.tzinfo is None:
+            gate = gate.replace(tzinfo=config.KST)
+        if now < gate:
+            return False, False
 
-    now = datetime.now(config.KST)
-    return now.hour in config.BUS_TIER2_HOURS and now.minute < 30
+    is_weekend = now.weekday() >= 5  # 5=토, 6=일
+    hours = config.BUS_WEEKEND_HOURS if is_weekend else config.BUS_WEEKDAY_HOURS
+    if now.hour not in hours:
+        return False, False
+
+    dense_hours = (
+        config.BUS_WEEKEND_DENSE_HOURS if is_weekend else config.BUS_WEEKDAY_DENSE_HOURS
+    )
+    if now.hour in dense_hours:
+        interval = (
+            config.BUS_WEEKEND_DENSE_INTERVAL_MIN
+            if is_weekend
+            else config.BUS_WEEKDAY_DENSE_INTERVAL_MIN
+        )
+        should_collect = now.minute % interval == 0
+    else:
+        should_collect = now.minute < 10  # 시간당 1회(정시 런)
+
+    if not should_collect:
+        return False, False
+    return True, (now.hour in config.BUS_TIER2_HOURS and now.minute < 10)
 
 
 def ingest_bus() -> dict:
+    should_collect, include_tier2 = collect_plan()
+    if not should_collect:
+        # 재개 게이트 이전이거나 수집 창 밖(01~05시, dense 아닌 시각의 비정시 런 등) —
+        # 호출 없이 종료. 창 정의는 config.BUS_WEEKDAY_HOURS/BUS_WEEKEND_HOURS.
+        print(f"skip: 호출 없음 (재개 게이트={config.BUS_COLLECT_NOT_BEFORE or '없음'})")
+        return {}
+
     key = config.load_bus_key()  # URL 인코딩된 서비스키
     dag_run_id = current_dag_run_id()
-    include_tier2 = _include_tier2_now()
     routes = resolve_routes(include_tier2=include_tier2)
     counts = {}
     for _table, dataset in SOURCES.items():
@@ -118,7 +169,9 @@ with DAG(
     dag_id="transit_bus_bronze",
     description="서울 TOPIS 버스 위치(전 노선) → R2 XML 랜딩 + loader 마커. 적재는 transit_bronze_loader.",
     start_date=datetime(2026, 1, 1),
-    schedule=config.schedule_for("bus", "*/30 * * * *"),
+    # */10 은 "깨어나는 주기"일 뿐 호출 주기가 아니다 — 실제 수집 여부·간격은
+    # collect_plan() 이 요일 유형별 시간창으로 판정한다(창 밖 런은 호출 0건으로 종료).
+    schedule=config.schedule_for("bus", "*/10 * * * *"),
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},

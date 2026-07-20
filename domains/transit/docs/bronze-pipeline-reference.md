@@ -39,7 +39,17 @@
 | `BUS_COLLECT_WORKERS` | `8` | 노선 병렬 호출 워커 (스레드-로컬 HttpCore — 공유 코어는 스레드 불안전) |
 | `SUBWAY_SCHEDULE` | `*/3` | 지하철 수집 주기 (2026-07-16 상향 — 480콜/일) |
 | `PARKING_SCHEDULE` | `*/5` | 주차 수집 주기 (원천 갱신 ~5분 — 288콜/일) |
-| `BUS_SCHEDULE` | `*/30` | 버스 수집 주기 — **티어링(#440)**: tier1(`BUS_TIER1_TYPES` 기본 3 간선+6 광역, ~165노선) 매 런, tier2(그 외 ~563)는 `BUS_TIER2_HOURS`(기본 07·13·19 KST) 정각 런에만 = 9,609콜/일 (운영계정 실측 10,000 쿼터 내. */3 복귀는 트래픽 증량 승인 후) |
+| `BUS_SCHEDULE` | `*/10` | 버스 DAG 이 **깨어나는** 주기 — 실제 호출 여부·간격은 아래 시간창이 결정 |
+| `BUS_WEEKDAY_DENSE_HOURS` | `7,8,9,17,18,19` | 평일 출퇴근 — `BUS_WEEKDAY_DENSE_INTERVAL_MIN`(10분) 간격 |
+| `BUS_WEEKEND_DENSE_HOURS` | `9`~`20` | 주말 낮 — `BUS_WEEKEND_DENSE_INTERVAL_MIN`(20분) 간격 |
+| `BUS_WEEKDAY_HOURS` / `BUS_WEEKEND_HOURS` | `0,6`~`23` | 수집 창 전체. dense 가 아닌 시각은 **시간당 1런**. 01~05시 제외(실측 02·03시 관측 16·19대 = 운행 사실상 중단), 00시는 막차·심야버스라 포함 |
+| `BUS_TIER2_HOURS` | `9,19` | 전 노선(tier2 ~563 포함) 스냅샷 시각 — **두 요일 창에 모두 있는 시각**이어야 함 |
+| `BUS_COLLECT_NOT_BEFORE` | `2026-07-21T09:00` | 이 시각(KST) 전에는 호출하지 않는 재개 게이트. 정책 전환일의 혼재 데이터·쿼터 분리용. 지나면 no-op |
+
+버스 호출 예산(운영계정 10,000콜/일): 평일 tier1 165×49런 + tier2 563×2 = **9,211**,
+주말 165×43런 + 1,126 = **8,221**. 창·간격을 바꾸면
+`tests/test_bus_collect_window.py` 의 예산 테스트가 깨지므로 재계산이 강제된다.
+(3분 전면 수집 복귀는 트래픽 증량 승인 후 — #369 잔여.)
 | `TRANSIT_LOADER_SCHEDULE` | `*/10` | loader 주기 |
 | `TRANSIT_LOADER_INSERT_MAX_CHARS` | `700000` | INSERT 문 길이 캡 (QUERY_TEXT_TOO_LARGE 회피) |
 
