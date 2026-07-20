@@ -68,6 +68,17 @@ DAILY_TABLES = [
 DAILY_FULL_HOUR_KST = 8  # 이 시각(KST) run 은 DAILY 포함 전체 export
 EXPORT_TABLES = FAST_TABLES + DAILY_TABLES  # 카탈로그 정본 목록 (D1 에는 전 종 존재)
 
+# ── 서빙 신뢰성 게이트 (#1 신선도 · #3 검증) ──────────────────────
+# 서울시 citydata API 는 실측 대비 ~30분 지연 발표(event_at vs collected_at, 실측 p50=31분).
+# 따라서 '지금'과 비교하면 항상 지연으로 보인다 — 내재 지연 + 파이프라인 여유를 더한 임계.
+# 이 임계를 넘으면 '수집·변환이 실제로 멈춘 것'(7/18 좀비 사고 = 2일 지연) → 경보.
+STALE_THRESHOLD_MIN = 90  # event_at 이 KST-now 보다 이만큼 뒤처지면 stale
+# 실시간 스냅샷만 신선도 검사(그 time_axis 가 '최신 측정'을 뜻함). 일별/예보/명부성은 제외.
+FRESHNESS_CHECK = {
+    "gold_citydata_place_latest", "gold_citydata_place_scorecard",
+    "gold_citydata_ppltn_trend", "gold_citydata_ppltn_anomaly",
+}
+
 _SQLITE_TYPE = {"integer": "INTEGER", "bigint": "INTEGER", "smallint": "INTEGER",
                 "tinyint": "INTEGER", "boolean": "INTEGER", "double": "REAL", "real": "REAL"}
 _INSERT_BATCH = 100  # D1 HTTP API 요청당 INSERT 행수 (요청 크기 제한 여유)
@@ -137,6 +148,9 @@ def _export(**context) -> None:
     tables = EXPORT_TABLES if full else FAST_TABLES
     print(f"[serving export] mode={'full' if full else 'fast'} · {len(tables)} tables")
 
+    kst_now = pendulum.now(KST).naive()  # event_at 은 KST 벽시계 naive 저장 → naive 로 비교
+    issues = []  # 서빙 신뢰성 문제 (신선도·빈 테이블·컬럼 계약)
+
     catalog_rows = []
     total_rows = 0
     for name in tables:
@@ -145,10 +159,24 @@ def _export(**context) -> None:
         col_defs = [(r[0], r[1]) for r in cur.fetchall()]
         colnames = [c for c, _ in col_defs]
         time_axis = next((c for c, t in col_defs if t.startswith(("timestamp", "date"))), None)
+        time_idx = colnames.index(time_axis) if time_axis else None
 
         cur.execute(f"SELECT * FROM {rel}")
         rows = cur.fetchall()
         print(f"[serving export] {name}: {len(rows)} rows")
+
+        # #3 검증: 스냅샷 테이블이 비면 이상(place_latest 는 121곳이 있어야). 빈 export = 상류 이상.
+        if not rows and name in FRESHNESS_CHECK:
+            issues.append(f"{name}: 0행 (상류 골드 비어있음)")
+
+        # #1 신선도: 실시간 스냅샷의 최신 측정 시각이 임계 이상 뒤처지면 stale.
+        if name in FRESHNESS_CHECK and time_idx is not None and rows:
+            latest = max((r[time_idx] for r in rows if r[time_idx] is not None), default=None)
+            if latest is not None:
+                latest_naive = latest.replace(tzinfo=None) if getattr(latest, "tzinfo", None) else latest
+                lag = (kst_now - pendulum.instance(pendulum.parse(str(latest_naive))).naive()).in_minutes()
+                if lag > STALE_THRESHOLD_MIN:
+                    issues.append(f"{name}: 최신 {latest_naive} = {lag}분 지연 (임계 {STALE_THRESHOLD_MIN})")
 
         _d1(f'DROP TABLE IF EXISTS "{name}"; CREATE TABLE "{name}" ('
             + ", ".join(f'"{c}" {_sqlite_type(t)}' for c, t in col_defs) + ");", token)
@@ -180,6 +208,28 @@ def _export(**context) -> None:
         "actual_rows": total_rows,
     })
     print(f"[serving export] ✓ {len(catalog_rows)} tables, {total_rows} rows → D1")
+
+    # 서빙 신뢰성 게이트: export 는 성공했으나 '낡거나 빈' 데이터가 나갔으면 경보(#1·#3).
+    # export 실패와 별개 — '성공한 stale 서빙'(7/18 좀비류 사각지대)의 서빙 버전.
+    _report_serving_health(issues)
+
+
+def _report_serving_health(issues: list[str]) -> None:
+    if not issues:
+        print("[serving export] 신뢰성 게이트 통과 — 신선·비어있지 않음")
+        return
+    msg = "⚠️ citydata 서빙 신선도/검증 경보\n" + "\n".join(f" • {i}" for i in issues)
+    msg += "\n(export 자체는 성공 — 상류 골드 갱신 정체 또는 빈 데이터 의심)"
+    print(msg)
+    try:
+        from common.discord import resolve_webhook, send_text
+        if not resolve_webhook("citydata"):
+            print("[serving export] webhook 미설정 — 로그만")
+            return
+        if send_text(msg, domain="citydata"):
+            print("[serving export] 신뢰성 경보 전송 완료")
+    except Exception as exc:  # noqa: BLE001 -- 알림 실패가 export 판정을 가리지 않게
+        print(f"[serving export] 신뢰성 경보 전송 실패(무시): {exc}")
 
 
 with DAG(
