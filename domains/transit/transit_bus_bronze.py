@@ -7,6 +7,10 @@ transit_bronze_loader 가 pending 마커를 소비해 수행. dag_id 는 이력 
 서울 전 노선(~728, 인천7·경기8 제외) 로드, 스레드풀 병렬 호출.
 ⚠️ 부트스트랩: transit_bus_route_master 를 최초 1회 실행해야 reference 가 생긴다.
 
+티어링(#440, 운영계정 10,000콜/일 예산): tier1(간선·광역 ~165)은 매 30분,
+tier2(그 외 ~563)는 BUS_TIER2_HOURS(기본 07·13·19시 KST) 정각 런에만 포함 —
+165×48 + 563×3 = 9,609콜/일. headerCd 쿼터/인증 이상 과반이면 런 실패(무경보 차단).
+
 수집 제외(#212 유지): `bus_arrival` 은 silver 미소비로 수집하지 않는다.
 코드·테이블·파서는 유지 — SOURCES 에서 해당 항목만 주석 처리. 재개 시 주석 해제 + PR.
 ⚠️ 실시간 데이터는 소급 수집 불가 — 중단 구간은 영구 이력 공백으로 남는다.
@@ -31,7 +35,7 @@ from common.errors.airflow import problem_failure_callback
 from common.runmetrics import track
 
 from seoul_transit import config, loader
-from seoul_transit.bus import collect_bus_raw
+from seoul_transit.bus import collect_bus_raw, resolve_routes
 from seoul_transit.r2_landing import land
 
 # 경로 세그먼트는 config 로 중앙화(#369 리뷰) — maintenance 보존 경로와 공유.
@@ -78,19 +82,35 @@ def _land_objects(dataset: str, raws: list, run_id: str) -> dict:
     return res
 
 
+def _include_tier2_now() -> bool:
+    """티어링(#440) — 이 런에 tier2(지선·마을 등)를 포함할지 벽시계(KST)로 판정.
+
+    */30 스케줄에서 각 시각의 전반부(분<30) 런은 시간당 정확히 1개 → BUS_TIER2_HOURS
+    시각의 그 런에만 전 노선을 포함한다. (재시도가 후반부로 밀리면 tier2 가 빠질 수
+    있는 엣지는 수용 — 다음 tier2 시각에 회복.)
+    """
+    from datetime import datetime
+
+    now = datetime.now(config.KST)
+    return now.hour in config.BUS_TIER2_HOURS and now.minute < 30
+
+
 def ingest_bus() -> dict:
     key = config.load_bus_key()  # URL 인코딩된 서비스키
     dag_run_id = current_dag_run_id()
+    include_tier2 = _include_tier2_now()
+    routes = resolve_routes(include_tier2=include_tier2)
     counts = {}
     for _table, dataset in SOURCES.items():
-        raws = collect_bus_raw(key, dataset)
+        raws = collect_bus_raw(key, dataset, routes=routes)
         landed = _land_objects(dataset, raws, dag_run_id)
         loader.enqueue_pending(
             dataset=dataset, source=SOURCE, landed=landed, run_id=dag_run_id,
             ts_collected=raws[0]["ts_collected"] if raws else None,
         )
         counts[dataset] = len(raws)
-    print(f"collect counts: {counts}")
+    print(f"collect counts: {counts} (tier2={'포함' if include_tier2 else '제외'}, "
+          f"대상 {len(routes)}노선)")
     return counts
 
 
@@ -98,7 +118,7 @@ with DAG(
     dag_id="transit_bus_bronze",
     description="서울 TOPIS 버스 위치(전 노선) → R2 XML 랜딩 + loader 마커. 적재는 transit_bronze_loader.",
     start_date=datetime(2026, 1, 1),
-    schedule=config.schedule_for("bus", "*/3 * * * *"),
+    schedule=config.schedule_for("bus", "*/30 * * * *"),
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},
