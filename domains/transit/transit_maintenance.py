@@ -45,6 +45,55 @@ DOMAIN = config.TRANSIT_DOMAIN
 record_transit_problem = problem_failure_callback(domain=DOMAIN, source_system="maintenance")
 
 
+ARCHIVE_TABLE = os.environ.get("TRANSIT_ARCHIVE_TABLE", "gold_transit_dong_15min")
+
+
+def assert_archive_caught_up() -> dict:
+    """purge 선행 게이트 — gold 아카이브가 삭제 대상 구간을 이미 소비했는지 확인한다.
+
+    원본(R2 raw·bronze)은 주 경계로 지워지고 gold 아카이브가 유일한 장기 저장소라(#286),
+    변환이 밀린 상태로 purge 가 돌면 그 주 데이터는 어디에도 남지 않는다. 그래서
+    "아카이브 최신 버킷 >= 이번 주 월요일 00:00 KST" 를 만족할 때만 downstream 을 진행한다.
+
+    실패가 아니라 **skip** 으로 막는다: 변환이 늦은 것 자체는 이 DAG 의 잘못이 아니고,
+    다음 @daily 런에서 자동으로 재평가된다. 삭제는 되돌릴 수 없으므로 "확신 없으면 안 지운다".
+    아카이브 테이블이 아직 없거나 비어 있어도(개시 직후) 같은 이유로 막는다.
+    """
+    from airflow.exceptions import AirflowSkipException
+    import trino.dbapi
+
+    conn = trino.dbapi.connect(
+        host=os.environ.get("TRINO_HOST", "trino"),
+        port=int(os.environ.get("TRINO_PORT", "8080")),
+        user=os.environ.get("TRINO_USER", "airflow"),
+        catalog=CATALOG, schema=SCHEMA,
+        http_scheme=os.environ.get("TRINO_HTTP_SCHEME", "http"),
+    )
+    cur = conn.cursor()
+    cat, sch = maintenance.sql_identifier(CATALOG), maintenance.sql_identifier(SCHEMA)
+    cur.execute(f"SELECT table_name FROM {cat}.information_schema.tables "
+                f"WHERE table_schema = '{SCHEMA}' AND table_name = '{ARCHIVE_TABLE}'")
+    if not cur.fetchall():
+        raise AirflowSkipException(
+            f"아카이브 테이블 {ARCHIVE_TABLE} 없음 — 변환 미수행 상태로 판단해 purge 보류"
+        )
+
+    qualified = f"{cat}.{sch}.{maintenance.sql_identifier(ARCHIVE_TABLE)}"
+    cur.execute(f"SELECT cast(max(bucket_at) as varchar) FROM {qualified}")
+    row = cur.fetchone()
+    max_bucket_at = row[0] if row else None
+    required = maintenance.archive_watermark_required()
+
+    if not maintenance.is_archive_caught_up(max_bucket_at):
+        raise AirflowSkipException(
+            f"아카이브 미도달 — {ARCHIVE_TABLE}.max(bucket_at)={max_bucket_at or '없음'} "
+            f"< 요구 {required} (KST). 변환이 이 구간을 집계한 뒤 purge 한다."
+        )
+
+    print(f"archive caught up: max(bucket_at)={max_bucket_at} >= {required} (KST) — purge 진행")
+    return {"max_bucket_at": max_bucket_at, "required": required}
+
+
 def purge_r2_raw() -> dict:
     """실시간 dataset raw(ingest_ts < 이번 주 월요일 00:00 KST) + 만료 pending 마커 삭제.
 
@@ -122,6 +171,12 @@ with DAG(
     max_active_runs=1,
     tags=["seoul", "transit", "maintenance", "retention", "trino", "iceberg"],
 ) as dag:
+    # purge 선행 게이트: 아카이브가 삭제 구간을 소비했는지 확인(미도달이면 skip).
+    archive_gate = PythonOperator(
+        task_id="assert_archive_caught_up",
+        python_callable=assert_archive_caught_up,
+        on_failure_callback=record_transit_problem,
+    )
     purge_r2 = PythonOperator(
         task_id="purge_r2_raw",
         python_callable=track(layer="bronze", domain="transit")(purge_r2_raw),
@@ -132,4 +187,4 @@ with DAG(
         python_callable=track(layer="bronze", domain="transit")(purge_bronze),
         on_failure_callback=record_transit_problem,
     )
-    purge_r2 >> purge_tables
+    archive_gate >> purge_r2 >> purge_tables
