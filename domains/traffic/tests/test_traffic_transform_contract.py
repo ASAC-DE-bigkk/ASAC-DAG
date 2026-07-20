@@ -6,6 +6,7 @@ import pytest
 
 from traffic_transform_test_support import (
     FakeAirflowFailException,
+    FakeAirflowSkipException,
     FakeDAG,
     FakeVariable,
     load_gold_transform_module,
@@ -63,6 +64,131 @@ def _load_transform_runtime():
     from traffic_ingest import transform_runtime
 
     return transform_runtime
+
+
+class _LatestPublishableManifest:
+    def __init__(self, latest_run_id):
+        self.latest_run_id = latest_run_id
+
+    def latest_publishable_run_id(self):
+        return self.latest_run_id
+
+
+def test_latest_publishable_guard_accepts_current_pin():
+    module = load_transform_module()
+
+    assert (
+        module.require_latest_publishable_incident_snapshot(
+            _LatestPublishableManifest("incident-new"),
+            "incident-new",
+        )
+        == "incident-new"
+    )
+
+
+def test_latest_publishable_guard_skips_superseded_pin():
+    module = load_transform_module()
+
+    with pytest.raises(FakeAirflowSkipException, match="superseded"):
+        module.require_latest_publishable_incident_snapshot(
+            _LatestPublishableManifest("incident-new"),
+            "incident-old",
+        )
+
+
+def test_latest_publishable_guard_fails_closed_on_manifest_error():
+    module = load_transform_module()
+
+    class BrokenManifest:
+        def latest_publishable_run_id(self):
+            raise OSError("Trino unavailable")
+
+    with pytest.raises(FakeAirflowFailException, match="verification failed"):
+        module.require_latest_publishable_incident_snapshot(
+            BrokenManifest(),
+            "incident-old",
+        )
+
+
+@pytest.mark.parametrize("invalid_latest", [None, "", 42])
+def test_latest_publishable_guard_fails_closed_on_invalid_identity(invalid_latest):
+    module = load_transform_module()
+
+    with pytest.raises(FakeAirflowFailException, match="identity is invalid"):
+        module.require_latest_publishable_incident_snapshot(
+            _LatestPublishableManifest(invalid_latest),
+            "incident-old",
+        )
+
+
+def test_snapshot_required_phase_skips_before_dbt_when_pin_is_superseded(
+    monkeypatch,
+):
+    module = load_transform_module()
+    called = False
+
+    def execute_dbt_phase(**_kwargs):
+        nonlocal called
+        called = True
+        return _successful_runtime_execution()
+
+    monkeypatch.setattr(
+        module,
+        "build_traffic_manifest",
+        lambda: _LatestPublishableManifest("incident-new"),
+    )
+    monkeypatch.setattr(
+        module.transform_runtime,
+        "collect_silver_snapshot_evidence",
+        lambda: _silver_evidence(10),
+    )
+    monkeypatch.setattr(
+        module.transform_runtime.traffic_dbt,
+        "execute_dbt_phase",
+        execute_dbt_phase,
+    )
+
+    with pytest.raises(FakeAirflowSkipException, match="superseded"):
+        module.run_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_traffic_transform_incident_silver",
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            snapshot_required=True,
+            silver_persisted=False,
+            silver_fence_mode="write",
+            ti=_runtime_ti(),
+            run_id="asset_triggered__stale",
+            params={"target": "dev"},
+        )
+
+    assert called is False
+
+
+def test_preflight_phase_does_not_query_latest_publishable_manifest(monkeypatch):
+    module = load_transform_module()
+    monkeypatch.setattr(
+        module,
+        "build_traffic_manifest",
+        lambda: pytest.fail("preflight must not query the manifest"),
+    )
+    monkeypatch.setattr(
+        module.transform_runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **_kwargs: _successful_runtime_execution(),
+    )
+
+    result = module.run_dbt_phase(
+        dbt_command="source freshness",
+        selector="ask_seoul_traffic_transform_source",
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        snapshot_required=False,
+        silver_persisted=False,
+        ti=_runtime_ti(task_id="dbt_source_freshness"),
+        run_id="asset_triggered__preflight",
+        params={"target": "dev"},
+    )
+
+    assert result["status"] == "success"
 
 
 def test_silver_write_captures_baseline_and_returns_post_write_evidence(monkeypatch):

@@ -56,6 +56,7 @@ from traffic_ingest.transform_dag_support import (  # noqa: E402
     coalesce_deferred_incident_runs,
     current_silver_output_evidence,
     record_classified_dbt_problem,
+    require_latest_publishable_incident_snapshot,
     resolve_traffic_silver_snapshot_run as _resolve_traffic_silver_snapshot_run,
     silver_output_evidence_from_dbt_run,
     write_success_marker,
@@ -166,6 +167,19 @@ def run_dbt_phase(
     threads: int | None = None,
     **context,
 ) -> dict[str, object]:
+    pre_execution_guard = None
+    if snapshot_required:
+        task_instance = context["ti"]
+        pinned_run_id = task_instance.xcom_pull(task_ids=snapshot_task_id)
+
+        def revalidate_pinned_snapshot() -> None:
+            require_latest_publishable_incident_snapshot(
+                build_traffic_manifest(),
+                pinned_run_id,
+            )
+
+        pre_execution_guard = revalidate_pinned_snapshot
+
     return transform_runtime.run_dbt_phase(
         dbt_command=dbt_command,
         selector=selector,
@@ -181,6 +195,7 @@ def run_dbt_phase(
         classify_failure=classify_dbt_failure,
         recovery_record_builder=build_recovery_record,
         persisted_from_results=silver_persisted_from_results,
+        pre_execution_guard=pre_execution_guard,
         runner=subprocess.run,
         **context,
     )

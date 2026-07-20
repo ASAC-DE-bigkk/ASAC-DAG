@@ -264,6 +264,28 @@ def require_publishable_incident_snapshot(
     return run_id
 
 
+def require_latest_publishable_incident_snapshot(manifest, run_id: str) -> str:
+    """Skip an immutable pin only when a newer publishable Bronze run overtook it."""
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise AirflowFailException("Traffic pinned snapshot identity is invalid")
+    try:
+        latest_run_id = manifest.latest_publishable_run_id()
+    except Exception as exc:
+        raise AirflowFailException(
+            f"Traffic latest publishable snapshot verification failed: {run_id}"
+        ) from exc
+    if not isinstance(latest_run_id, str) or not latest_run_id.strip():
+        raise AirflowFailException(
+            "Traffic latest publishable snapshot identity is invalid"
+        )
+    if latest_run_id != run_id:
+        raise AirflowSkipException(
+            "superseded Traffic Incident snapshot: "
+            f"pinned={run_id}, latest={latest_run_id}"
+        )
+    return run_id
+
+
 def _silver_output_evidence_from_dict(value: object) -> SilverOutputEvidence:
     if not isinstance(value, dict) or set(value) != {
         "snapshot_id",
@@ -815,6 +837,7 @@ __all__ = [
     "resolve_transform_snapshot_pair",
     "record_classified_dbt_problem",
     "require_current_silver_output_evidence",
+    "require_latest_publishable_incident_snapshot",
     "require_publishable_incident_snapshot",
     "resolve_traffic_gold_snapshot_run",
     "resolve_traffic_flow_silver_snapshot_run",

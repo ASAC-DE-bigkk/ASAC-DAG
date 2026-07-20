@@ -35,6 +35,12 @@ def test_external_compaction_race_is_not_classified_as_a_generic_dbt_failure(
         compacted_files=(),
     )
     evidence = iter((baseline, raced))
+
+    class CurrentManifest:
+        def latest_publishable_run_id(self):
+            return "snapshot-a"
+
+    monkeypatch.setattr(module, "build_traffic_manifest", CurrentManifest)
     monkeypatch.setattr(
         transform_runtime,
         "collect_silver_snapshot_evidence",
