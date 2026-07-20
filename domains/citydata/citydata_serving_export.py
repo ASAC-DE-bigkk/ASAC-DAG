@@ -52,14 +52,21 @@ D1_API = (
 CITYDATA_SCHEMA = os.environ.get("CITYDATA_SCHEMA", "seoul_citydata")
 MANIFEST_PATH = "/opt/airflow/dbt/domains/citydata/target/manifest.json"
 
-# d1_direct 소형(스냅샷)·일별 — hourly 3종·demographics(20만 행)는 분할 적재 붙일 때 확장.
-EXPORT_TABLES = [
+# 주기 이원화 — D1 무료 한도(일 10만 행 쓰기) 안에서 신선도 극대화:
+#   FAST  (매시): 실시간 스냅샷 소형 7종 (~2.5천 행/run × 24 ≈ 6만 행/일)
+#   DAILY (08시 run 에서만 추가): 일별 집계·forecast (~1.2만 행/일)
+# hourly 크로스 3종·demographics(20만 행)는 분할 적재 붙일 때 확장.
+FAST_TABLES = [
     "gold_citydata_place_latest", "gold_citydata_place_scorecard", "gold_citydata_hot_commerce",
-    "gold_citydata_ppltn_trend", "gold_citydata_ppltn_anomaly", "gold_citydata_ppltn_forecast",
+    "gold_citydata_ppltn_trend", "gold_citydata_ppltn_anomaly",
     "gold_citydata_ppltn_x_commerce_dong", "gold_citydata_charger_availability",
-    "gold_citydata_ppltn_daily", "gold_citydata_cmrcl_daily",
+]
+DAILY_TABLES = [
+    "gold_citydata_ppltn_forecast", "gold_citydata_ppltn_daily", "gold_citydata_cmrcl_daily",
     "gold_citydata_purchasing_power_daily", "gold_citydata_ppltn_x_culture_daily",
 ]
+DAILY_FULL_HOUR_KST = 8  # 이 시각(KST) run 은 DAILY 포함 전체 export
+EXPORT_TABLES = FAST_TABLES + DAILY_TABLES  # 카탈로그 정본 목록 (D1 에는 전 종 존재)
 
 _SQLITE_TYPE = {"integer": "INTEGER", "bigint": "INTEGER", "smallint": "INTEGER",
                 "tinyint": "INTEGER", "boolean": "INTEGER", "double": "REAL", "real": "REAL"}
@@ -124,9 +131,15 @@ def _export(**context) -> None:
     meta = _load_serving_meta()
     now = pendulum.now("UTC").isoformat()
 
+    # 이번 run 의 대상: 매시 FAST, DAILY_FULL_HOUR_KST(08시) run 은 DAILY 포함 전체.
+    end = context.get("data_interval_end") or pendulum.now("UTC")
+    full = end.in_timezone(KST).hour == DAILY_FULL_HOUR_KST or context["params"].get("full")
+    tables = EXPORT_TABLES if full else FAST_TABLES
+    print(f"[serving export] mode={'full' if full else 'fast'} · {len(tables)} tables")
+
     catalog_rows = []
     total_rows = 0
-    for name in EXPORT_TABLES:
+    for name in tables:
         rel = f"{settings.catalog}.{CITYDATA_SCHEMA}.{name}"
         cur.execute(f"SHOW COLUMNS FROM {rel}")
         col_defs = [(r[0], r[1]) for r in cur.fetchall()]
@@ -152,17 +165,17 @@ def _export(**context) -> None:
                                         ensure_ascii=False), len(rows), now))
         total_rows += len(rows)
 
-    cat_sql = ("DROP TABLE IF EXISTS _catalog; "
-               "CREATE TABLE _catalog (name TEXT PRIMARY KEY, description TEXT, "
+    # fast run 은 미포함 테이블(DAILY)의 카탈로그 행을 보존해야 하므로 upsert (DROP 금지).
+    cat_sql = ("CREATE TABLE IF NOT EXISTS _catalog (name TEXT PRIMARY KEY, description TEXT, "
                "serving_tier TEXT, tests TEXT, time_axis TEXT, columns TEXT, "
                "row_count INTEGER, exported_at TEXT); "
                "CREATE TABLE IF NOT EXISTS _request_log (ts TEXT, path TEXT, query TEXT);\n")
-    cat_sql += "\n".join("INSERT INTO _catalog VALUES (" + ", ".join(_lit(v) for v in r) + ");"
-                         for r in catalog_rows)
+    cat_sql += "\n".join("INSERT OR REPLACE INTO _catalog VALUES ("
+                         + ", ".join(_lit(v) for v in r) + ");" for r in catalog_rows)
     _d1(cat_sql, token)
 
     context["ti"].xcom_push(key="ops_run_completeness", value={
-        "expected_raw_objects": len(EXPORT_TABLES),
+        "expected_raw_objects": len(tables),
         "actual_raw_objects": len(catalog_rows),
         "actual_rows": total_rows,
     })
@@ -171,16 +184,16 @@ def _export(**context) -> None:
 
 with DAG(
     dag_id="citydata_serving_export",
-    description="citydata 골드 12종 → Cloudflare D1 전량 교체 스냅샷 (Workers API 서빙 데이터 갱신).",
+    description="citydata 골드 → Cloudflare D1 전량 교체 스냅샷. 매시 FAST 7종 · 08시 run 전체 12종.",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
-    schedule="40 8 * * *",  # 매일 08:40 KST — slow tier·ops digest 이후
+    schedule="40 * * * *",  # 매시 40분 (08:40 run 은 DAILY 포함 전체) — D1 무료 쓰기 한도 내
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=5),
                   # 전량 교체 스냅샷이라 재시도 안전(멱등). hang 방지 상한 30분.
                   "execution_timeout": timedelta(minutes=30),
                   "on_success_callback": _run_md_ok},
-    params={"target": "dev"},
+    params={"target": "dev", "full": False},  # full=True 수동 트리거 시 전체 export
     tags=["serving", "citydata", "d1", "gold"],
 ) as dag:
     PythonOperator(
