@@ -210,7 +210,11 @@ with DAG(
     schedule="*/5 * * * *",
     catchup=False,
     max_active_runs=1,
+    # execution_timeout: 5분 주기 태스크가 10분을 넘으면 비정상 — hang 을 끊어 retry/실패로
+    # 보낸다. 7/17 R2 502 여파로 load_bronze 가 60시간 hang → max_active_runs=1 이라
+    # 후속 스케줄 전면 차단(7/18~20 수집 공백)된 사고의 재발 방지 (#444).
     default_args={"retries": 1, "retry_delay": timedelta(minutes=1),
+                  "execution_timeout": timedelta(minutes=10),
                   "on_success_callback": _run_md_ok},
     params=DEFAULT_PARAMS,
     tags=["ingest", "citydata", "population", "bronze", "r2", "iceberg"],
