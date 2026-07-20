@@ -8,7 +8,8 @@ silver = 결측 처리·표준화·중복 제거·**테이블 단위 정리·JOI
   dbt_gold(Cosmos — gold_license_dong_summary run+test) ──> report_gold
 
 - 집계 확장 시 models/gold/ 에 모델 추가 + GOLD_SELECT 에 등록(D1 export 후보는 PROJECT.md §4.3).
-- 유지보수(신설 테이블 optimize/expire/orphan)는 silver DAG 의 maintain_gold_tables 가 담당.
+- 유지보수(silver 원형·detail + gold 집계 optimize/expire/orphan)는 silver DAG 의
+  maintain_silver_gold_tables 가 담당(gold 전용 아님 — 대상은 silver+gold 혼합).
 """
 from __future__ import annotations
 

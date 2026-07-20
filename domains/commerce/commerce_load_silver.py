@@ -226,12 +226,22 @@ def commerce_load_silver():
                 "catalog_version": version}
 
     @task
-    def maintain_gold_tables() -> list[dict]:
-        """신설 Iceberg 테이블 유지보수(#226 확장, 사용자 확정 2026-07-15 재승인) —
-        **메타 통합(expire: 옛 버전 포인터 정리) + 본 데이터 병합(optimize: 소파일 컴팩션)
+    def maintain_silver_gold_tables() -> list[dict]:
+        """**silver 원형·detail + gold 집계** Iceberg 테이블 유지보수(#226 확장, 2026-07-15 재승인).
+
+        대상(= 이 태스크가 실제로 손대는 레이어):
+          - silver 원형: silver_license_entity, silver_license_entity_history
+          - silver detail: silver_<domain>_detail 78종(카탈로그 구동)
+          - gold 집계: AGG_TABLES 22종
+          - meta: meta_detail_catalog(보조)
+        **bronze 는 대상 아님** — bronze 유지보수는 commerce_load_bronze 의 iceberg_maintenance 가
+        따로 담당한다(구 이름 `maintain_gold_tables` 는 실제 대상과 어긋나 오독을 유발 —
+        2026-07-20 from-zero 드릴에서 지적, `maintain_silver_gold_tables` 로 개명).
+
+        동작: **메타 통합(expire: 옛 버전 포인터 정리) + 본 데이터 병합(optimize: 소파일 컴팩션)
         + orphan 청소**. 데이터 행은 0 삭제(실증: history 가 동일 정책으로 매일 관리되며
         6/30 부터 전량 보존). OOM 근거: 최중량 silver_license_history(289만×record_json)의
-        일일 optimize 가 이 박스에서 무사고 — 신설 테이블은 그보다 좁음."""
+        일일 optimize 가 이 박스에서 무사고 — 대상 테이블은 그보다 좁음."""
         from bronze import maintenance
         from gold import loader
 
@@ -270,7 +280,7 @@ def commerce_load_silver():
     [enrich_admin_dong_ref(), enrich_fill_jibun(), ensure_silver_marker()] >> seed
     # 원형 파이프라인 편승(#70): dbt(원형 4모델) → 마킹 → detail(카탈로그 구동) → 유지보수 → 리포트
     (seed >> dbt_silver >> notify_masked_address_summary() >> mark_silver_done()
-     >> build_detail_catalog() >> load_details() >> maintain_gold_tables() >> report_silver())
+     >> build_detail_catalog() >> load_details() >> maintain_silver_gold_tables() >> report_silver())
 
 
 commerce_load_silver()

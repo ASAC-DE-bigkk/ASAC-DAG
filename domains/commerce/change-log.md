@@ -5,6 +5,66 @@
 
 ---
 
+## 2026-07-20
+
+### 75. from-zero 재빌드 드릴 — bronze/silver/gold 결함 3건 수정 + 태스크 개명 (#458·#459·#460)
+
+request:
+- dev 원격 기준으로 bronze/silver/gold 를 **완전히 0부터** 재실행되는지 검증(raw 는 보존, 3레이어만
+  전량 삭제). 마지막에 raw 수집을 켜 오늘 미수집분까지 전구간 온전 검증. weather 전용 airflowignore
+  스코프 가드는 오적용이니 교정. 집계의 년/월/주 증분 불가 단위 대응 여부 확인. 완료 후 bronze/silver/
+  gold 단위 이슈·PR. 유지보수 태스크 이름이 실제 대상과 어긋나니 개명. 드릴 결과 change-log 기록.
+
+response:
+- **airflowignore 교정(선반영)**: root `.airflowignore` 의 weather/traffic 전용 스코프 가드 제거 →
+  전 도메인 재파싱(dev 에서 #442 로 이미 동일 교정돼 rebase 시 흡수). commerce DAG 8종 재노출 확인.
+- **Teardown(dev 전용, prod 없음 확인)**: bronze 4 + silver 83 + gold 22 = **109 테이블 drop**
+  (PyIceberg, purge 없음 — #74 안전 경로) + bronze/silver 상태 gate 파일 4개만 리셋(receipts 보존).
+  commerce_dataset_taxonomy(seed)·meta_detail_catalog·raw(불변) 보존. R2 write rate-limit
+  (TooManyRequests) 대응 재시도·페이싱 필요.
+- **재빌드 순서**: bronze(commerce_load_bronze, raw 21 run 06-30~07-19 → 152종) → silver
+  (commerce_load_silver, 청크 seed cold build — history window OOM 회피) → gold
+  (commerce_load_gold_refresh, 24모델 full-refresh). from-scratch 는 수동 `dbt --full-refresh`
+  금지, DAG 청크 seed 경유가 정본(#59 원칙 — 무거운 layer 는 이제 silver).
+- **결함 3건 수정(전부 cold rebuild 에서만 발현)**:
+  - **① bronze first_load 워터마크 스킵**(`bronze/load_plan.py`, #458): base 파일 run 이 lookback
+    창 밖일 때 창 안 identical run 이 워터마크를 최신으로 전진 → base 영구 skip(11개 dataset 실측,
+    1회차 2,274행/80ds 만 적재). 수정: first_load 인데 base 미배정이면 워터마크 전진 보류. 회귀
+    테스트 10/10.
+  - **② silver 청크 대형경로 원형 누락 + entity_history 전역 워터마크**(#459): 대형 dataset 버킷
+    경로가 history·current 만 돌고 entity/entity_history 를 건너뜀(대형 4종 entity 0행 — entity
+    증분 전환으로 표면화) + entity_history 의 전역 collected_at 워터마크가 청크 배치에서 dataset 을
+    통째로 탈락시킴(152→5종). 수정: `chunked_run.py` 에 원형 phase 추가 + entity_history 를
+    include_datasets 스코프 워터마크로. 실제 재현→복구 검증. dbt 측 수정은 ASAC-DBT PR.
+  - **③ gold refresh 완주 불가**(`gold/report.py`, #460): commerce_load_gold_refresh 가
+    send_gold_report(catalog=, load=) 로 호출하나 시그니처에 없어 매 실행 TypeError → **이 DAG 는
+    끝까지 성공한 적이 없고 Discord 알림도 발송된 적 없음**. 수정: catalog/load 선택 인자 수용.
+    회귀 테스트 4/4.
+  - (부수) silver_license_entity **table→incremental 전환**(ASAC-DBT): 매 run 523MB sibling 고아
+    원천 제거(#74 계열). 이 전환이 ②를 표면화시킨 계기 → 두 리포 PR 함께 머지 필요.
+- **운영 노트(코드 아님)**: 전량 재적재 중 PyIceberg base 적재가 Trino delete 파일의
+  `DELTA_LENGTH_BYTE_ARRAY` 인코딩을 PyArrow 가 못 읽어 실패(`Not yet implemented: … DeltaLength
+  ByteArrayDecoder`). 전 재적재 전 `ALTER TABLE bronze_localdata_license EXECUTE optimize(
+  file_size_threshold => '10GB')` 로 delete 파일 강제 병합(기본 threshold 는 0파일 처리로 무효).
+- **태스크 개명**: silver DAG 의 `maintain_silver_gold_tables` → **`maintain_silver_gold_tables`**. 실제
+  대상은 silver 원형 2 + silver detail 78 + gold 집계 22 + meta 1(= silver+gold 혼합, **bronze
+  아님** — bronze 유지보수는 commerce_load_bronze 의 iceberg_maintenance). 이름이 gold 전용으로
+  읽혀 오독 유발하던 것 교정. commerce_load_gold docstring 참조도 갱신.
+- **검증(dev 실측 정본)**: bronze 152/152 ds·2,795,606행·데이터단위 746=발행가능 매니페스트 746 /
+  silver entity=current=2,788,155·entity_history=history=2,795,295·둘 다 152ds·무마킹 0·마커 746 /
+  gold refresh success 51/51·22종·flow 3종 재실행 INSERT 0 rows 멱등·Discord 알림 정상 발송. 테스트
+  load_plan 10/10 · silver_chunked 5/5 · gold_report 4/4.
+- **집계 년/월/주 증분(확인 요청)**: flow daily/monthly/yearly 는 **완결기간만 append**(당일/당월/당해
+  원천 배제) → 미완결 현재기간은 별도 d1_current 트랙(전량 교체 스냅샷 + 조회시점 상대기간 계산)이
+  담당하는 설계로 **올바르게 분리**됨. 단 d1_current(agg_license_daily/monthly)·D1 export 는
+  설계·준비완료 상태이고 **미구현**(별도 과제). 주(week) 전용 집계 테이블은 없음 — '이번주'는 daily
+  롤링 400일 조회시점 롤업(본질상 미완결이라 append 대상 아님, 정합).
+- **PR/이슈**: 이슈 ASAC-DAG #458(bronze)·#459(silver)·#460(gold). PR ASAC-DAG #461(결함 3건 +
+  orphan 감사 수정 + 개명 + 언어규정) · ASAC-DBT #302(entity 증분 + entity_history 워터마크). 두 PR
+  함께 머지. 드릴 후 commerce DAG 8종 paused(standby) 복원(§7.3 계약).
+
+---
+
 ## 2026-07-15
 
 ### 74. R2 orphan(__dbt_tmp) 전량 정리 + gold description(culture 스타일) + 정리 도구 제도화
@@ -95,7 +155,7 @@ request:
 response:
 - **메타/데이터 관리(질의 대응)**: ① "메타 통합+데이터 병합" = expire_snapshots+optimize 가
   정확히 그것(데이터 행 0 삭제 — history 가 동일 정책으로 매일 관리되며 6/30 부터 전량 보존 실증).
-  OOM 근거: 최중량 history(289만×record_json) 일일 optimize 무사고 → `maintain_gold_tables`
+  OOM 근거: 최중량 history(289만×record_json) 일일 optimize 무사고 → `maintain_silver_gold_tables`
   복원(재승인). ② metadata.json **파일 사본** 상한: PyIceberg 로
   write.metadata.delete-after-commit+previous-versions-max=50 — 82테이블 적용(set 81·fail 0,
   스냅샷 수 불변 실증). Trino 는 해당 속성 차단 → ensure_metadata_retention()이 매 실행 ensure.
