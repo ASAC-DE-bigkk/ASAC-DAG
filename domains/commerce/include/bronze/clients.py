@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 from dataclasses import dataclass
 
 from common.http import HttpCore                 # 공통 재시도·redaction·rate limit·typed 예외 (#78)
@@ -107,13 +109,25 @@ class _NetioTransport:
 
 class SeoulOpenApiClient:
     def __init__(self, key: str, base_url: str, *, timeout: int = 30,
-                 max_attempts: int = 3, backoff_seconds: float = 2.0) -> None:
+                 max_attempts: int = 3, backoff_seconds: float = 2.0,
+                 parse_retries: int | None = None,
+                 parse_backoff_seconds: float | None = None) -> None:
         if not key:
             raise SeoulAuthError("INFO-100", "SEOUL_API_KEY_COMM 미설정", "<config>")
         import requests  # 지연 임포트
 
         self._key = key
         self._base = base_url.rstrip("/")
+        # 200 + 비-JSON 재시도(2026-07-21 실측): 과부하 시 LOCALDATA 는 HTTP 200 에 빈/HTML 본문을
+        # 실어 준다. HttpCore 의 재시도는 HTTP status(429/5xx)만 봐서 이 케이스를 못 잡고, parse_page
+        # 가 ERROR-PARSE(fatal)로 처리해 **한 페이지 실패 = dataset incomplete**(mail_order_sale
+        # 2719페이지 실측). parse 층에서 일시 오류로 보고 재시도한다. 인증 오류는 재시도하지 않는다.
+        self._parse_retries = max(0, int(
+            parse_retries if parse_retries is not None
+            else os.getenv("SEOUL_PARSE_RETRIES", "3") or 3))
+        self._parse_backoff = max(0.0, float(
+            parse_backoff_seconds if parse_backoff_seconds is not None
+            else os.getenv("SEOUL_PARSE_BACKOFF_SECONDS", str(backoff_seconds)) or backoff_seconds))
         # rate_limit 은 None — commerce 는 기존 SEOUL_REQUEST_DELAY_SECONDS 간격을
         # 그대로 유지한다(HttpCore rate limit 과 이중 지연 방지, 처리량 동작 보존).
         self._core = HttpCore(
@@ -131,10 +145,26 @@ class SeoulOpenApiClient:
     def fetch_page(self, service: str, start: int, end: int) -> Page:
         # 전송·재시도·URL redaction 로깅은 HttpCore 소관(URL 경로의 키는 로그/예외에서 마스킹).
         # 업무 오류(INFO-100 등) 분류는 parse_page 가 담당 — HTTP 200 응답 본문에서 판정한다.
-        try:
-            response = self._core.get(self._url(service, start, end))
-        except HttpProblemError as exc:
-            # 재시도 소진/HTTP 오류. 이 메시지는 bronze 마커(error 필드)로 영구 저장되므로 마스킹.
-            raise SeoulApiError("ERROR-NETWORK",
-                                f"max retries exceeded: {redact(str(exc))}", service)
-        return parse_page(response.content, service)
+        # 추가로, 200+비-JSON(ERROR-PARSE)은 과부하성 일시 오류라 parse 층에서 재시도한다(위 __init__).
+        last_parse_exc: SeoulApiError | None = None
+        for attempt in range(self._parse_retries + 1):
+            try:
+                response = self._core.get(self._url(service, start, end))
+            except HttpProblemError as exc:
+                # 재시도 소진/HTTP 오류. 이 메시지는 bronze 마커(error 필드)로 영구 저장되므로 마스킹.
+                raise SeoulApiError("ERROR-NETWORK",
+                                    f"max retries exceeded: {redact(str(exc))}", service)
+            try:
+                return parse_page(response.content, service)
+            except SeoulAuthError:
+                raise                                   # 인증 오류 — 재시도 금지(빠른 전체 실패)
+            except SeoulApiError as exc:
+                # ERROR-PARSE(비-JSON/스키마 드리프트 본문)만 일시 오류로 보고 재시도.
+                # INFO-200 등 정상 업무 코드는 parse_page 가 Page 로 반환하거나 다른 코드로 raise → 전파.
+                if exc.code != "ERROR-PARSE" or attempt >= self._parse_retries:
+                    raise
+                last_parse_exc = exc
+                log.warning("[%s] ERROR-PARSE 재시도 %d/%d(과부하성 비-JSON 응답 추정)",
+                            service, attempt + 1, self._parse_retries)
+                time.sleep(self._parse_backoff * (2 ** attempt))
+        raise last_parse_exc  # 방어(루프가 raise 하므로 도달 불가)
