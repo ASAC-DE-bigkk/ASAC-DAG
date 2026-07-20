@@ -210,9 +210,13 @@ with DAG(
     schedule="*/5 * * * *",
     catchup=False,
     max_active_runs=1,
-    # execution_timeout: 5분 주기 태스크가 10분을 넘으면 비정상 — hang 을 끊어 retry/실패로
-    # 보낸다. 7/17 R2 502 여파로 load_bronze 가 60시간 hang → max_active_runs=1 이라
-    # 후속 스케줄 전면 차단(7/18~20 수집 공백)된 사고의 재발 방지 (#444).
+    # 2겹 hang 방어 (#444). 둘 다 Airflow 네이티브 — 태스크에서 메타DB 접근이 막힌
+    # Airflow 3 에서 유일하게 견고한 방식(별도 watchdog DAG 는 ORM/DB 차단으로 불가).
+    #  · execution_timeout(태스크): 5분 주기 태스크가 10분 넘으면 hang → retry/실패로 전환
+    #  · dagrun_timeout(런): 어느 태스크든 run 이 15분 넘으면 run 실패 → 실패 콜백 알림.
+    # 7/17 R2 502 여파로 load_bronze 60시간 hang → max_active_runs=1 이라 후속 스케줄
+    # 전면 차단(7/18~20 수집 공백)된 사고의 재발 방지.
+    dagrun_timeout=timedelta(minutes=15),
     default_args={"retries": 1, "retry_delay": timedelta(minutes=1),
                   "execution_timeout": timedelta(minutes=10),
                   "on_success_callback": _run_md_ok},
