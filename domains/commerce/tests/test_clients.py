@@ -50,3 +50,50 @@ def test_parse_non_numeric_total_raises_apierror_not_valueerror():
     with pytest.raises(SeoulApiError) as ei:
         parse_page(raw, "S")
     assert ei.value.code == "ERROR-PARSE"
+
+
+# ── fetch_page 재시도(2026-07-21 실측: 200+비-JSON 과부하 응답 → dataset incomplete) ──
+class _FakeCore:
+    """HttpCore 대역 — get() 이 미리 정한 본문 시퀀스를 순서대로 반환."""
+    def __init__(self, bodies):
+        self._bodies = list(bodies)
+        self.calls = 0
+
+    def get(self, url, **kw):
+        from common.http.contract import TransportResponse
+        body = self._bodies[min(self.calls, len(self._bodies) - 1)]
+        self.calls += 1
+        return TransportResponse(status=200, content=body, headers={})
+
+
+def _client(bodies, **kw):
+    from bronze.clients import SeoulOpenApiClient
+    c = SeoulOpenApiClient(key="k", base_url="http://x",
+                           parse_backoff_seconds=0.0, **kw)
+    c._core = _FakeCore(bodies)
+    return c
+
+
+def test_fetch_page_retries_error_parse_then_succeeds(monkeypatch):
+    monkeypatch.setattr("bronze.clients.time.sleep", lambda *_: None)
+    good = _env("S", [{"A": "1"}], total=1)
+    c = _client([b"<html>overloaded</html>", b"", good], parse_retries=3)
+    p = c.fetch_page("S", 1, 1)
+    assert p.rows == [{"A": "1"}]
+    assert c._core.calls == 3          # 비-JSON 2회 재시도 후 성공
+
+
+def test_fetch_page_error_parse_exhausts_and_raises():
+    c = _client([b"<html>down</html>"], parse_retries=2)
+    with pytest.raises(SeoulApiError) as e:
+        c.fetch_page("S", 1, 1)
+    assert e.value.code == "ERROR-PARSE"
+    assert c._core.calls == 3          # 1 + 2 재시도
+
+
+def test_fetch_page_auth_error_not_retried():
+    auth = _env("S", [], code="INFO-100")   # 인증 오류 봉투
+    c = _client([auth, auth], parse_retries=3)
+    with pytest.raises(SeoulAuthError):
+        c.fetch_page("S", 1, 1)
+    assert c._core.calls == 1          # 인증 오류는 즉시 실패(재시도 금지)
