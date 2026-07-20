@@ -76,6 +76,40 @@ def transform_schedule() -> str:
     return config.schedule_for("transit_transform", "@hourly")
 
 
+def transform_gate_open(now=None) -> bool:
+    """TRANSIT_TRANSFORM_NOT_BEFORE(KST) 이전이면 변환을 돌리지 않는다.
+
+    버스 수집 정책 전환(BUS_COLLECT_NOT_BEFORE, 2026-07-21 09:00)에 맞춰 gold 아카이브를
+    드롭하고 개시일(dbt var transit_archive_start_at) 이후부터 새로 쌓기로 했다. 그 사이
+    아카이브 테이블은 **의도적으로 비어 있는데**, 공통축 커버리지 테스트는 빈 테이블을
+    실패로 규정한다(asac_axes #48: "빈 테이블(total=0)도 실패로 본다"). 게이트 없이 돌면
+    데이터가 들어올 때까지 매시 빌드가 실패해 경보만 쌓인다 — 그래서 첫 수집이 랜딩된
+    뒤부터 돌도록 늦춘다(수집 09:00 → 변환 09:30).
+
+    시각이 지나면 무해한 no-op. 빈 값이면 게이트 없음.
+    """
+    from datetime import datetime
+
+    raw = os.environ.get("TRANSIT_TRANSFORM_NOT_BEFORE", "2026-07-21T09:30").strip()
+    if not raw:
+        return True
+    gate = datetime.fromisoformat(raw)
+    if gate.tzinfo is None:
+        gate = gate.replace(tzinfo=config.KST)
+    return (now or datetime.now(config.KST)) >= gate
+
+
+def check_transform_gate(**_context) -> None:
+    """게이트가 닫혀 있으면 downstream(dbt) 을 건너뛴다."""
+    from airflow.exceptions import AirflowSkipException
+
+    if not transform_gate_open():
+        raise AirflowSkipException(
+            "변환 재개 게이트 이전 — gold 아카이브 개시일 전까지 대기 "
+            f"(TRANSIT_TRANSFORM_NOT_BEFORE={os.environ.get('TRANSIT_TRANSFORM_NOT_BEFORE', '2026-07-21T09:30')})"
+        )
+
+
 def dbt_command(args: str) -> str:
     """dbt 실행 bash — weather/traffic transform 과 동일한 조립(경로·env·target 분기)."""
     project = shlex.quote(DBT_PROJECT)
@@ -114,6 +148,13 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["ask_seoul", "transit", "transform", "silver", "dbt"],
 ) as dag:
+    # 재개 게이트(gold 아카이브 개시일 대기) — 닫혀 있으면 skip 으로 downstream 차단.
+    # 실패가 아니라 skip 이라 경보를 만들지 않는다.
+    gate = PythonOperator(
+        task_id="check_transform_gate",
+        python_callable=check_transform_gate,
+    )
+
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=dbt_command("deps"),
@@ -136,4 +177,4 @@ with DAG(
         on_failure_callback=record_transit_problem,
     )
 
-    dbt_deps >> dbt_build >> publish_metrics
+    gate >> dbt_deps >> dbt_build >> publish_metrics

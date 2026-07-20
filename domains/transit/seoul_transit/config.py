@@ -59,14 +59,63 @@ BUS_ROUTE_TYPES_EXCLUDE = {
 }
 
 # ── 버스 티어링(#440) — 운영계정 10,000콜/일 예산의 차등 배분 ────────────────────
-# tier1(주요: 3 간선+6 광역 ~165노선)은 매 런, tier2(그 외 ~563노선)는 지정 시각
-# (KST, 정각 런)에만 포함. 예산: 165×48 + 563×3 = 9,609 < 10,000.
+# tier1(주요: 3 간선+6 광역 ~165노선)은 수집 창의 매 런, tier2(그 외 ~563노선)는
+# BUS_TIER2_HOURS 시각의 정시 런에만 포함.
 BUS_TIER1_TYPES = {
     s.strip() for s in os.environ.get("BUS_TIER1_TYPES", "3,6").split(",") if s.strip()
 }
+# tier2 시각은 평일·주말 수집 창에 모두 들어가는 값이어야 한다(기본 9·19시 — 아래 두
+# 창의 교집합에 속함). 창 밖 시각을 넣으면 그 요일 유형에서는 tier2 가 영영 수집되지 않는다.
 BUS_TIER2_HOURS = {
-    int(s) for s in os.environ.get("BUS_TIER2_HOURS", "7,13,19").split(",") if s.strip()
+    int(s) for s in os.environ.get("BUS_TIER2_HOURS", "9,19").split(",") if s.strip()
 }
+
+# ── 수집 시간창(요일 유형별) — 이용이 적은 시간대의 예산을 붐비는 시간대로 이전 ────
+# 배경(실측, gold_transit_dong_15min 시간대별 집계): 01~05시는 관측 차량이 423·16·19·
+# 1,032·2,556대로 02~03시는 사실상 운행 중단. 반면 혼잡도 피크는 퇴근 17~18시
+# (3.35→3.43), 출근 07~08시(3.18→3.29), 00시는 막차·심야버스로 12,355건 관측된다.
+# 따라서 01~05시만 통째로 빼고, 남는 예산으로 출퇴근 갱신 주기를 30분→10분으로 당긴다.
+#
+# 시간대는 두 종류로 나뉜다:
+#   dense  — 촘촘히 볼 시간대. DENSE_INTERVAL_MIN 간격(평일 출퇴근 10분/주말 낮 20분)
+#   그 외  — 수집 창(HOURS)에는 있으나 dense 가 아닌 시각. **정시 1런만**(시간당 1회)
+#
+# 예산(각 요일 유형이 독립적으로 10,000콜/일 이하여야 함):
+#   평일 tier1 165 × (dense 6h × 6런 + 그 외 13h × 1런 = 49런) = 8,085
+#        + tier2 563 × 2회 = 1,126 → 9,211
+#   주말 tier1 165 × (dense 12h × 3런 + 그 외 7h × 1런 = 43런) = 7,095
+#        + tier2 563 × 2회 = 1,126 → 8,221
+# 창이나 간격을 바꿀 때는 이 표를 반드시 다시 계산할 것 — 초과하면 쿼터 소진으로
+# 그날 남은 수집이 통째로 실패한다(#440 의 쿼터 가드가 런을 실패시킴).
+# 수집 재개 게이트(KST, ISO 8601) — 이 시각 전에는 호출하지 않는다. 빈 값이면 게이트 없음.
+# 2026-07-20 수집 정책 변경(시간창 도입) 당일에 두 정책이 섞인 데이터가 쌓이는 것을 막고,
+# 그날 이미 소진했을 수 있는 쿼터와 분리해 **다음 날 09:00 부터 새 정책으로 깨끗이 시작**
+# 하려고 넣었다(사용자 지시). 09시는 dense 시각이자 tier2 시각이라 첫 런이 전 노선
+# 스냅샷으로 열린다. 이 시각이 지나면 게이트는 무해한 no-op — 다음 정리 때 제거 가능.
+BUS_COLLECT_NOT_BEFORE = os.environ.get("BUS_COLLECT_NOT_BEFORE", "2026-07-21T09:00").strip()
+
+BUS_WEEKDAY_HOURS = {
+    int(s) for s in os.environ.get(
+        "BUS_WEEKDAY_HOURS", "0,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"
+    ).split(",") if s.strip()
+}
+BUS_WEEKDAY_DENSE_HOURS = {
+    int(s) for s in os.environ.get("BUS_WEEKDAY_DENSE_HOURS", "7,8,9,17,18,19").split(",") if s.strip()
+}
+BUS_WEEKEND_HOURS = {
+    int(s) for s in os.environ.get(
+        "BUS_WEEKEND_HOURS", "0,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"
+    ).split(",") if s.strip()
+}
+BUS_WEEKEND_DENSE_HOURS = {
+    int(s) for s in os.environ.get(
+        "BUS_WEEKEND_DENSE_HOURS", "9,10,11,12,13,14,15,16,17,18,19,20"
+    ).split(",") if s.strip()
+}
+# dense 시간대의 런 간격(분). DAG 스케줄(*/10)이 만드는 분(0·10·…·50) 중 이 값의 배수인
+# 런만 수집하는 방식이라 **10의 배수여야 한다**(아니면 그 시간대는 정시 1런만 남는다).
+BUS_WEEKDAY_DENSE_INTERVAL_MIN = int(os.environ.get("BUS_WEEKDAY_DENSE_INTERVAL_MIN", "10"))
+BUS_WEEKEND_DENSE_INTERVAL_MIN = int(os.environ.get("BUS_WEEKEND_DENSE_INTERVAL_MIN", "20"))
 
 # 노선별 호출 병렬도 — HttpCore 는 스레드 안전이 아니라 스레드-로컬 코어로 병렬화(api.get_text_mt).
 BUS_COLLECT_WORKERS = int(os.environ.get("BUS_COLLECT_WORKERS", "8"))
