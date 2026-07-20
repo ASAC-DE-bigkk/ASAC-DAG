@@ -80,8 +80,19 @@ class FakeAirflowSkipException(Exception):
 
 
 class FakeTaskInstance:
-    def __init__(self, values=None):
+    def __init__(
+        self,
+        values=None,
+        *,
+        states=None,
+        dag_id="ask_seoul_iceberg_maintenance",
+        run_id="manual__test",
+    ):
         self.values = dict(values or {})
+        self.states = dict(states or {})
+        self.dag_id = dag_id
+        self.run_id = run_id
+        self.state_requests = []
         self.current_task_id = None
 
     def xcom_pull(self, task_ids, key="return_value"):
@@ -90,14 +101,19 @@ class FakeTaskInstance:
     def xcom_push(self, key, value):
         self.values[(self.current_task_id, key)] = value
 
+    def get_task_states(self, **kwargs):
+        self.state_requests.append(kwargs)
+        return {
+            self.run_id: {
+                task_id: self.states.get(task_id)
+                for task_id in kwargs.get("task_ids", ())
+            }
+        }
+
 
 class FakeDagRun:
-    def __init__(self, run_id="manual__test", states=None):
+    def __init__(self, run_id="manual__test"):
         self.run_id = run_id
-        self.states = dict(states or {})
-
-    def get_task_instance(self, task_id):
-        return types.SimpleNamespace(state=self.states.get(task_id))
 
 
 def install_airflow_fakes():
@@ -379,6 +395,45 @@ def test_non_selected_gate_preserves_an_existing_circuit():
     }
 
 
+def test_table_gate_batches_airflow3_task_state_lookup_without_dag_run_db_access():
+    module = load_maintenance_module()
+    table = module.CANONICAL_TABLES[0]
+    task_ids = [
+        module.action_task_id(1, table, operation) for operation in module.OPERATIONS
+    ]
+    ti = FakeTaskInstance(
+        {
+            (module.PLAN_TASK_ID, "return_value"): immutable_plan_payload(module, [table]),
+            **{
+                (task_id, module.RESULT_XCOM_KEY): action_result(
+                    module,
+                    table=table,
+                    operation=operation,
+                )
+                for task_id, operation in zip(task_ids, module.OPERATIONS, strict=True)
+            },
+        },
+        states={task_id: "success" for task_id in task_ids},
+        run_id="manual__airflow3-gate",
+    )
+
+    result = module._table_gate(
+        table=table,
+        action_task_ids=task_ids,
+        ti=ti,
+        dag_run=types.SimpleNamespace(run_id=ti.run_id),
+    )
+
+    assert result == {"table": table, "status": "SUCCEEDED", "circuit_open": False}
+    assert ti.state_requests == [
+        {
+            "dag_id": module.dag.dag_id,
+            "task_ids": task_ids,
+            "run_ids": [ti.run_id],
+        }
+    ]
+
+
 def test_table_gate_opens_circuit_for_stale_action_identity():
     module = load_maintenance_module()
     table = module.CANONICAL_TABLES[0]
@@ -398,11 +453,12 @@ def test_table_gate_opens_circuit_for_stale_action_identity():
         }
     )
 
+    ti.states.update({task_id: "success" for task_id in task_ids})
     result = module._table_gate(
         table=table,
         action_task_ids=task_ids,
         ti=ti,
-        dag_run=FakeDagRun(states={task_id: "success" for task_id in task_ids}),
+        dag_run=FakeDagRun(),
     )
 
     assert result["status"] == "CIRCUIT_OPEN"
@@ -428,13 +484,14 @@ def test_table_gate_opens_circuit_when_success_xcom_has_failed_task_instance():
         }
     )
 
+    ti.states.update(
+        {"optimize": "success", "expire": "failed", "orphan": "success"}
+    )
     result = module._table_gate(
         table=table,
         action_task_ids=task_ids,
         ti=ti,
-        dag_run=FakeDagRun(
-            states={"optimize": "success", "expire": "failed", "orphan": "success"}
-        ),
+        dag_run=FakeDagRun(),
     )
 
     assert result["status"] == "CIRCUIT_OPEN"
@@ -460,13 +517,14 @@ def test_table_gate_opens_circuit_for_hard_kill_after_last_action_xcom():
         }
     )
 
+    ti.states.update(
+        {"optimize": "success", "expire": "success", "orphan": "failed"}
+    )
     result = module._table_gate(
         table=table,
         action_task_ids=task_ids,
         ti=ti,
-        dag_run=FakeDagRun(
-            states={"optimize": "success", "expire": "success", "orphan": "failed"}
-        ),
+        dag_run=FakeDagRun(),
     )
 
     assert result["status"] == "CIRCUIT_OPEN"
@@ -486,13 +544,14 @@ def test_table_gate_allows_only_confirmed_table_local_failure():
         }
     )
 
+    ti.states.update(
+        {"optimize": "failed", "expire": "upstream_failed", "orphan": "skipped"}
+    )
     result = module._table_gate(
         table=table,
         action_task_ids=task_ids,
         ti=ti,
-        dag_run=FakeDagRun(
-            states={"optimize": "failed", "expire": "upstream_failed", "orphan": "skipped"}
-        ),
+        dag_run=FakeDagRun(),
     )
 
     assert result == {"table": table, "status": "TABLE_FAILED", "circuit_open": False}
@@ -534,6 +593,7 @@ def test_table_gate_rejects_incomplete_or_invalid_table_failure_evidence(
         }
     )
 
+    ti.states[task_id] = "failed"
     control = module._table_gate(
         table=table,
         action_task_ids=[
@@ -542,7 +602,7 @@ def test_table_gate_rejects_incomplete_or_invalid_table_failure_evidence(
             module.action_task_id(1, table, "remove_orphan_files"),
         ],
         ti=ti,
-        dag_run=FakeDagRun(states={task_id: "failed"}),
+        dag_run=FakeDagRun(),
     )
 
     assert control["status"] == "CIRCUIT_OPEN"
@@ -564,6 +624,7 @@ def test_minimal_failed_result_opens_circuit_and_blocks_next_table_executor(monk
             ),
         }
     )
+    ti.states[failed_task] = "failed"
     control = module._table_gate(
         table=failed_table,
         action_task_ids=[
@@ -572,7 +633,7 @@ def test_minimal_failed_result_opens_circuit_and_blocks_next_table_executor(monk
             module.action_task_id(1, failed_table, "remove_orphan_files"),
         ],
         ti=ti,
-        dag_run=FakeDagRun(states={failed_task: "failed"}),
+        dag_run=FakeDagRun(),
     )
     ti.values[(failed_gate, "return_value")] = control
 
@@ -609,6 +670,7 @@ def test_table_gate_requires_a_failed_task_instance_for_table_local_failure():
         }
     )
 
+    ti.states[task_id] = "success"
     control = module._table_gate(
         table=table,
         action_task_ids=[
@@ -617,7 +679,7 @@ def test_table_gate_requires_a_failed_task_instance_for_table_local_failure():
             module.action_task_id(1, table, "remove_orphan_files"),
         ],
         ti=ti,
-        dag_run=FakeDagRun(states={task_id: "success"}),
+        dag_run=FakeDagRun(),
     )
 
     assert control["status"] == "CIRCUIT_OPEN"
@@ -643,11 +705,12 @@ def test_table_gate_opens_circuit_for_unknown_action_status():
         }
     )
 
+    ti.states.update({task_id: "success" for task_id in task_ids})
     result = module._table_gate(
         table=table,
         action_task_ids=task_ids,
         ti=ti,
-        dag_run=FakeDagRun(states={task_id: "success" for task_id in task_ids}),
+        dag_run=FakeDagRun(),
     )
 
     assert result["status"] == "CIRCUIT_OPEN"
@@ -930,13 +993,14 @@ def test_later_action_rejects_invalid_predecessor_before_executor(
 
     monkeypatch.setattr(module, "execute_maintenance_action", executor)
 
+    ti.states[previous_task_id] = state
     with pytest.raises(FakeAirflowSkipException):
         module._run_action(
             table=table,
             operation=operation,
             previous_task_id=previous_task_id,
             ti=ti,
-            dag_run=FakeDagRun(states={previous_task_id: state}),
+            dag_run=FakeDagRun(),
         )
 
     assert called is False
@@ -971,16 +1035,75 @@ def test_later_action_runs_only_after_a_valid_successful_predecessor(
 
     monkeypatch.setattr(module, "execute_maintenance_action", executor)
 
+    ti.states[previous_task_id] = "success"
     result = module._run_action(
         table=table,
         operation=operation,
         previous_task_id=previous_task_id,
         ti=ti,
-        dag_run=FakeDagRun(states={previous_task_id: "success"}),
+        dag_run=FakeDagRun(),
     )
 
     assert result["status"] == "SUCCEEDED"
     assert len(calls) == 1
+
+
+def test_later_action_uses_airflow3_task_state_api_without_dag_run_db_access(
+    monkeypatch,
+):
+    module = load_maintenance_module()
+    table = module.CANONICAL_TABLES[0]
+    previous_task_id = module.action_task_id(1, table, "optimize")
+    run_id = "manual__airflow3-runtime"
+
+    class Airflow3TaskInstance(FakeTaskInstance):
+        dag_id = module.dag.dag_id
+
+        def __init__(self, values):
+            super().__init__(values)
+            self.run_id = run_id
+            self.state_requests = []
+
+        def get_task_states(self, **kwargs):
+            self.state_requests.append(kwargs)
+            return {run_id: {previous_task_id: "success"}}
+
+    ti = Airflow3TaskInstance(
+        {
+            (module.PLAN_TASK_ID, "return_value"): immutable_plan_payload(module, [table]),
+            (previous_task_id, module.RESULT_XCOM_KEY): action_result(
+                module,
+                table=table,
+                operation="optimize",
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        module,
+        "execute_maintenance_action",
+        lambda *args, **kwargs: action_result(
+            module,
+            table=table,
+            operation="expire_snapshots",
+        ),
+    )
+
+    result = module._run_action(
+        table=table,
+        operation="expire_snapshots",
+        previous_task_id=previous_task_id,
+        ti=ti,
+        dag_run=types.SimpleNamespace(run_id=run_id),
+    )
+
+    assert result["status"] == "SUCCEEDED"
+    assert ti.state_requests == [
+        {
+            "dag_id": module.dag.dag_id,
+            "task_ids": [previous_task_id],
+            "run_ids": [run_id],
+        }
+    ]
 
 
 def test_later_action_rejects_a_noncanonical_predecessor_task_before_executor(monkeypatch):
@@ -1008,7 +1131,7 @@ def test_later_action_rejects_a_noncanonical_predecessor_task_before_executor(mo
             operation="expire_snapshots",
             previous_task_id=wrong_predecessor,
             ti=ti,
-            dag_run=FakeDagRun(states={wrong_predecessor: "success"}),
+            dag_run=FakeDagRun(),
         )
 
 
@@ -1036,12 +1159,13 @@ def test_valid_missing_predecessor_synthesizes_identity_preserving_result_withou
         lambda *args, **kwargs: pytest.fail("executor must not be reached"),
     )
 
+    ti.states[previous_task_id] = "success"
     result = module._run_action(
         table=table,
         operation="expire_snapshots",
         previous_task_id=previous_task_id,
         ti=ti,
-        dag_run=FakeDagRun(states={previous_task_id: "success"}),
+        dag_run=FakeDagRun(),
     )
 
     assert result == action_result(
@@ -1084,16 +1208,17 @@ def test_missing_predecessor_evidence_opens_gate_circuit_and_blocks_later_table_
             operation="expire_snapshots",
             previous_task_id=optimize,
             ti=ti,
-            dag_run=FakeDagRun(states={optimize: "success"}),
+            dag_run=FakeDagRun(),
         )
 
+    ti.states.update(
+        {optimize: "success", expire: "skipped", orphan: "upstream_failed"}
+    )
     gate = module._table_gate(
         table=first_table,
         action_task_ids=[optimize, expire, orphan],
         ti=ti,
-        dag_run=FakeDagRun(
-            states={optimize: "success", expire: "skipped", orphan: "upstream_failed"}
-        ),
+        dag_run=FakeDagRun(),
     )
     ti.values[(first_gate, "return_value")] = gate
 
@@ -1129,11 +1254,12 @@ def test_hard_kill_propagates_through_nonselected_table_blocks_later_table_and_f
             ),
         }
     )
+    ti.states[first_actions[0]] = "failed"
     first_control = module._table_gate(
         table=first_table,
         action_task_ids=first_actions,
         ti=ti,
-        dag_run=FakeDagRun(states={first_actions[0]: "failed"}),
+        dag_run=FakeDagRun(),
     )
     ti.values[(first_gate, "return_value")] = first_control
     second_control = module._table_gate(
@@ -1197,6 +1323,17 @@ def test_confirmed_table_failure_allows_next_table_but_final_report_fails(monkey
             ),
         }
     )
+    ti.states.update(
+        {
+            failed_action: "failed",
+            module.action_task_id(
+                1, failed_table, "expire_snapshots"
+            ): "upstream_failed",
+            module.action_task_id(
+                1, failed_table, "remove_orphan_files"
+            ): "skipped",
+        }
+    )
     failed_control = module._table_gate(
         table=failed_table,
         action_task_ids=[
@@ -1205,13 +1342,7 @@ def test_confirmed_table_failure_allows_next_table_but_final_report_fails(monkey
             module.action_task_id(1, failed_table, "remove_orphan_files"),
         ],
         ti=ti,
-        dag_run=FakeDagRun(
-            states={
-                failed_action: "failed",
-                module.action_task_id(1, failed_table, "expire_snapshots"): "upstream_failed",
-                module.action_task_id(1, failed_table, "remove_orphan_files"): "skipped",
-            }
-        ),
+        dag_run=FakeDagRun(),
     )
     ti.values[(failed_gate, "return_value")] = failed_control
     calls = []
