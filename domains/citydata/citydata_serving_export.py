@@ -65,8 +65,12 @@ DAILY_TABLES = [
     "gold_citydata_ppltn_forecast", "gold_citydata_ppltn_daily", "gold_citydata_cmrcl_daily",
     "gold_citydata_purchasing_power_daily", "gold_citydata_ppltn_x_culture_daily",
 ]
+# 이력·누적형 — 전량 교체하면 매 export 전 기간 재기록(1년 106만 행) → 한도 초과.
+# 매시 최근 N시간 time_bucket 만 삭제→재삽입(late-arrival 여유). 시간당 ~242행 쓰기.
+HOURLY_APPEND_TABLES = ["gold_citydata_ppltn_hourly"]
+HOURLY_APPEND_LOOKBACK_H = 2  # D1 에서 재적재할 최근 시간 수 (늦게 도착한 슬라이스 반영)
 DAILY_FULL_HOUR_KST = 8  # 이 시각(KST) run 은 DAILY 포함 전체 export
-EXPORT_TABLES = FAST_TABLES + DAILY_TABLES  # 카탈로그 정본 목록 (D1 에는 전 종 존재)
+EXPORT_TABLES = FAST_TABLES + DAILY_TABLES + HOURLY_APPEND_TABLES  # 카탈로그 정본 목록
 
 # ── 서빙 신뢰성 게이트 (#1 신선도 · #3 검증) ──────────────────────
 # 서울시 citydata API 는 실측 대비 ~30분 지연 발표(event_at vs collected_at, 실측 p50=31분).
@@ -99,7 +103,7 @@ def _lit(v) -> str:
     return "'" + str(v).replace("'", "''") + "'"
 
 
-def _d1(sql: str, token: str) -> None:
+def _d1(sql: str, token: str) -> list[dict]:
     import requests
 
     resp = requests.post(D1_API, json={"sql": sql},
@@ -107,6 +111,9 @@ def _d1(sql: str, token: str) -> None:
     body = resp.json()
     if not body.get("success"):
         raise AirflowException(f"D1 API 실패: {json.dumps(body.get('errors'))[:300]}")
+    # 마지막 statement 의 결과 행 (SELECT 시). 없으면 빈 리스트.
+    result = body.get("result") or []
+    return (result[-1].get("results") or []) if result else []
 
 
 def _load_serving_meta() -> dict[str, dict]:
@@ -130,6 +137,39 @@ def _load_serving_meta() -> dict[str, dict]:
     }
 
 
+def _export_append(name: str, rel: str, col_defs: list, cur, token: str) -> tuple[int, int]:
+    """이력·누적 테이블 append 적재. DROP 안 함 — 최근 LOOKBACK 시간만 삭제→재삽입(late-arrival
+    여유) + 그 이후 신규. D1 이 비었으면(최초) 전체 백필. 반환: (upsert 행수, D1 총 행수)."""
+    colnames = [c for c, _ in col_defs]
+    _d1(f'CREATE TABLE IF NOT EXISTS "{name}" ('
+        + ", ".join(f'"{c}" {_sqlite_type(t)}' for c, t in col_defs) + ");", token)
+
+    info = _d1(f'SELECT count(*) c, max(time_bucket) m FROM "{name}";', token)
+    d1_count = (info[0].get("c") if info else 0) or 0
+    d1_max = info[0].get("m") if info else None
+
+    where = ""
+    cutoff = None
+    if d1_count and d1_max:
+        cutoff = pendulum.parse(str(d1_max).replace(" ", "T")).subtract(
+            hours=HOURLY_APPEND_LOOKBACK_H).format("YYYY-MM-DD HH:00:00")
+        where = f" WHERE time_bucket >= timestamp '{cutoff}'"
+        _d1(f'DELETE FROM "{name}" WHERE time_bucket >= \'{cutoff}\';', token)
+
+    cur.execute(f"SELECT * FROM {rel}{where}")
+    rows = cur.fetchall()
+    head = f'INSERT INTO "{name}" ("' + '", "'.join(colnames) + '") VALUES\n'
+    for i in range(0, len(rows), _INSERT_BATCH):
+        values = ",\n".join("(" + ", ".join(_lit(v) for v in r) + ")"
+                            for r in rows[i:i + _INSERT_BATCH])
+        _d1(head + values + ";", token)
+
+    total = (_d1(f'SELECT count(*) c FROM "{name}";', token)[0].get("c")) or 0
+    print(f"[serving export] {name}: append({'백필' if cutoff is None else 'from '+cutoff}) "
+          f"· {len(rows)}행 upsert · D1 총 {total}")
+    return len(rows), total
+
+
 def _export(**context) -> None:
     token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
     if not token:
@@ -142,10 +182,11 @@ def _export(**context) -> None:
     meta = _load_serving_meta()
     now = pendulum.now("UTC").isoformat()
 
-    # 이번 run 의 대상: 매시 FAST, DAILY_FULL_HOUR_KST(08시) run 은 DAILY 포함 전체.
+    # 이번 run 의 대상: 매시 FAST + HOURLY(append), DAILY_FULL_HOUR_KST(08시) run 은 전체.
+    # hourly 는 append 라 매시 돌아도 쓰기 부담 작음(최근 2시간만) → 항상 포함.
     end = context.get("data_interval_end") or pendulum.now("UTC")
     full = end.in_timezone(KST).hour == DAILY_FULL_HOUR_KST or context["params"].get("full")
-    tables = EXPORT_TABLES if full else FAST_TABLES
+    tables = EXPORT_TABLES if full else (FAST_TABLES + HOURLY_APPEND_TABLES)
     print(f"[serving export] mode={'full' if full else 'fast'} · {len(tables)} tables")
 
     kst_now = pendulum.now(KST).naive()  # event_at 은 KST 벽시계 naive 저장 → naive 로 비교
@@ -161,37 +202,42 @@ def _export(**context) -> None:
         time_axis = next((c for c, t in col_defs if t.startswith(("timestamp", "date"))), None)
         time_idx = colnames.index(time_axis) if time_axis else None
 
-        cur.execute(f"SELECT * FROM {rel}")
-        rows = cur.fetchall()
-        print(f"[serving export] {name}: {len(rows)} rows")
+        if name in HOURLY_APPEND_TABLES:
+            # 이력·누적: 최근 구간만 upsert(전량 교체 금지 — 한도 초과). catalog row_count = D1 총.
+            _, cat_count = _export_append(name, rel, col_defs, cur, token)
+        else:
+            cur.execute(f"SELECT * FROM {rel}")
+            rows = cur.fetchall()
+            print(f"[serving export] {name}: {len(rows)} rows")
 
-        # #3 검증: 스냅샷 테이블이 비면 이상(place_latest 는 121곳이 있어야). 빈 export = 상류 이상.
-        if not rows and name in FRESHNESS_CHECK:
-            issues.append(f"{name}: 0행 (상류 골드 비어있음)")
+            # #3 검증: 스냅샷 테이블이 비면 이상(place_latest 는 121곳). 빈 export = 상류 이상.
+            if not rows and name in FRESHNESS_CHECK:
+                issues.append(f"{name}: 0행 (상류 골드 비어있음)")
 
-        # #1 신선도: 실시간 스냅샷의 최신 측정 시각이 임계 이상 뒤처지면 stale.
-        if name in FRESHNESS_CHECK and time_idx is not None and rows:
-            latest = max((r[time_idx] for r in rows if r[time_idx] is not None), default=None)
-            if latest is not None:
-                latest_naive = latest.replace(tzinfo=None) if getattr(latest, "tzinfo", None) else latest
-                lag = (kst_now - pendulum.instance(pendulum.parse(str(latest_naive))).naive()).in_minutes()
-                if lag > STALE_THRESHOLD_MIN:
-                    issues.append(f"{name}: 최신 {latest_naive} = {lag}분 지연 (임계 {STALE_THRESHOLD_MIN})")
+            # #1 신선도: 실시간 스냅샷의 최신 측정 시각이 임계 이상 뒤처지면 stale.
+            if name in FRESHNESS_CHECK and time_idx is not None and rows:
+                latest = max((r[time_idx] for r in rows if r[time_idx] is not None), default=None)
+                if latest is not None:
+                    latest_naive = latest.replace(tzinfo=None) if getattr(latest, "tzinfo", None) else latest
+                    lag = (kst_now - pendulum.instance(pendulum.parse(str(latest_naive))).naive()).in_minutes()
+                    if lag > STALE_THRESHOLD_MIN:
+                        issues.append(f"{name}: 최신 {latest_naive} = {lag}분 지연 (임계 {STALE_THRESHOLD_MIN})")
 
-        _d1(f'DROP TABLE IF EXISTS "{name}"; CREATE TABLE "{name}" ('
-            + ", ".join(f'"{c}" {_sqlite_type(t)}' for c, t in col_defs) + ");", token)
-        head = f'INSERT INTO "{name}" ("' + '", "'.join(colnames) + '") VALUES\n'
-        for i in range(0, len(rows), _INSERT_BATCH):
-            values = ",\n".join("(" + ", ".join(_lit(v) for v in r) + ")"
-                                for r in rows[i:i + _INSERT_BATCH])
-            _d1(head + values + ";", token)
+            _d1(f'DROP TABLE IF EXISTS "{name}"; CREATE TABLE "{name}" ('
+                + ", ".join(f'"{c}" {_sqlite_type(t)}' for c, t in col_defs) + ");", token)
+            head = f'INSERT INTO "{name}" ("' + '", "'.join(colnames) + '") VALUES\n'
+            for i in range(0, len(rows), _INSERT_BATCH):
+                values = ",\n".join("(" + ", ".join(_lit(v) for v in r) + ")"
+                                    for r in rows[i:i + _INSERT_BATCH])
+                _d1(head + values + ";", token)
+            cat_count = len(rows)
+            total_rows += len(rows)
 
         m = meta.get(name, {})
         catalog_rows.append((name, m.get("description", ""), m.get("serving_tier"),
                              json.dumps(m.get("tests", []), ensure_ascii=False), time_axis,
                              json.dumps([{"name": c, "type": t} for c, t in col_defs],
-                                        ensure_ascii=False), len(rows), now))
-        total_rows += len(rows)
+                                        ensure_ascii=False), cat_count, now))
 
     # fast run 은 미포함 테이블(DAILY)의 카탈로그 행을 보존해야 하므로 upsert (DROP 금지).
     cat_sql = ("CREATE TABLE IF NOT EXISTS _catalog (name TEXT PRIMARY KEY, description TEXT, "
