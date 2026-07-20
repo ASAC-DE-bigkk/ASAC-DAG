@@ -212,7 +212,6 @@ def _run_action(
 
     previous = _valid_predecessor_action_result(
         ti=ti,
-        dag_run=context.get("dag_run"),
         plan_payload=plan_payload,
         table=table,
         operation=operation,
@@ -247,16 +246,50 @@ def _run_action(
     return result
 
 
-def _task_state(dag_run, task_id):
-    if dag_run is None:
+def _normalize_task_state(state):
+    if state is None:
         return None
-    task_instance = dag_run.get_task_instance(task_id)
-    state = getattr(task_instance, "state", None)
-    return str(getattr(state, "value", state)).lower() if state is not None else None
+    return str(getattr(state, "value", state)).lower()
+
+
+def _task_states(ti, task_ids):
+    task_ids = list(task_ids)
+    if not task_ids:
+        return {}
+    dag_id = getattr(ti, "dag_id", None)
+    run_id = getattr(ti, "run_id", None)
+    get_task_states = getattr(ti, "get_task_states", None)
+    if (
+        not isinstance(dag_id, str)
+        or not dag_id
+        or not isinstance(run_id, str)
+        or not run_id
+        or not callable(get_task_states)
+    ):
+        return {}
+
+    states_by_run = get_task_states(
+        dag_id=dag_id,
+        task_ids=task_ids,
+        run_ids=[run_id],
+    )
+    if not isinstance(states_by_run, dict):
+        return {}
+    run_states = states_by_run.get(run_id)
+    if not isinstance(run_states, dict):
+        return {}
+    return {
+        task_id: _normalize_task_state(run_states.get(task_id))
+        for task_id in task_ids
+    }
+
+
+def _task_state(ti, task_id):
+    return _task_states(ti, [task_id]).get(task_id)
 
 
 def _valid_predecessor_action_result(
-    *, ti, dag_run, plan_payload, table, operation, previous_task_id
+    *, ti, plan_payload, table, operation, previous_task_id
 ):
     try:
         table_index = CANONICAL_TABLES.index(table) + 1
@@ -279,7 +312,7 @@ def _valid_predecessor_action_result(
         return None
     if result["circuit_breaker"] is not False:
         return None
-    if _task_state(dag_run, expected_task_id) != "success":
+    if _task_state(ti, expected_task_id) != "success":
         return None
     return result
 
@@ -327,7 +360,6 @@ def _is_confirmed_table_local_failure(result, state):
 
 def _table_gate(*, table, action_task_ids, previous_gate_task_id=None, **context):
     ti = context["ti"]
-    dag_run = context["dag_run"]
     plan_payload = ti.xcom_pull(task_ids=PLAN_TASK_ID)
     if not _is_immutable_plan_payload(plan_payload):
         return _open_circuit(table=table, reason="INVALID_IMMUTABLE_PLAN")
@@ -355,11 +387,12 @@ def _table_gate(*, table, action_task_ids, previous_gate_task_id=None, **context
     ):
         return _open_circuit(table=table, reason="INVALID_ACTION_TOPOLOGY")
 
+    task_states = _task_states(ti, action_task_ids)
     statuses = []
     table_failed = False
     for task_id, operation in zip(action_task_ids, OPERATIONS, strict=True):
         result = _pull_result(ti, task_id)
-        state = _task_state(dag_run, task_id)
+        state = task_states.get(task_id)
         if table_failed:
             if result is not None or state not in {"skipped", "upstream_failed"}:
                 return _open_circuit(
