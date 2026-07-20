@@ -15,7 +15,6 @@ from common.runtime_guard import RuntimeTargetError  # noqa: E402
 from weather_ingest.iceberg_maintenance import (  # noqa: E402
     APPROVED_DEV_CATALOG,
     APPROVED_DEV_SCHEMA,
-    MaintenancePlan,
     MaintenancePlanError,
     classify_action_exception,
     collect_maintenance_fingerprint,
@@ -44,7 +43,7 @@ def dev_env():
         "DBT_TARGET": "dev",
         "TRINO_DEV_ICEBERG_CATALOG": APPROVED_DEV_CATALOG,
         "ASK_SEOUL_SCHEMA": APPROVED_DEV_SCHEMA,
-        "WEATHER_SCHEMA": APPROVED_DEV_SCHEMA,
+        "WEATHER_SCHEMA": "weather",
     }
 
 
@@ -221,18 +220,6 @@ def test_resolve_plan_requires_fixed_retention_and_schema():
             env=unsafe_env,
         )
 
-    unsafe_weather_env = dev_env()
-    unsafe_weather_env["WEATHER_SCHEMA"] = "weather"
-    with pytest.raises(MaintenancePlanError, match="approved dev schema"):
-        resolve_maintenance_plan(
-            target="dev",
-            retention="7d",
-            tables=(ALLOWED_TABLES[0],),
-            allowed_tables=ALLOWED_TABLES,
-            dag_run_id="manual__weather_schema",
-            env=unsafe_weather_env,
-        )
-
     with pytest.raises(MaintenancePlanError, match="target must be exactly dev"):
         resolve_maintenance_plan(
             target="DEV",
@@ -242,6 +229,22 @@ def test_resolve_plan_requires_fixed_retention_and_schema():
             dag_run_id="manual__target_case",
             env=dev_env(),
         )
+
+
+def test_resolve_plan_keeps_weather_dbt_schema_independent_from_bronze_maintenance():
+    env = dev_env()
+    env["WEATHER_SCHEMA"] = "weather"
+
+    plan = resolve_maintenance_plan(
+        target="dev",
+        retention="7d",
+        tables=(ALLOWED_TABLES[0],),
+        allowed_tables=ALLOWED_TABLES,
+        dag_run_id="manual__independent_weather_schema",
+        env=env,
+    )
+
+    assert plan.schema == APPROVED_DEV_SCHEMA
 
 
 class ExistsCursor:

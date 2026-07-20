@@ -173,11 +173,10 @@ def resolve_maintenance_plan(
         raise MaintenancePlanError("maintenance target must be exactly dev")
     if str(values.get("TRINO_DEV_ICEBERG_CATALOG", "")).strip() != APPROVED_DEV_CATALOG:
         raise MaintenancePlanError("maintenance catalog must be the approved dev catalog")
-    if any(
-        str(values.get(name, "")).strip() != APPROVED_DEV_SCHEMA
-        for name in ("ASK_SEOUL_SCHEMA", "WEATHER_SCHEMA")
-    ):
-        raise MaintenancePlanError("maintenance schema aliases must use the approved dev schema")
+    if str(values.get("ASK_SEOUL_SCHEMA", "")).strip() != APPROVED_DEV_SCHEMA:
+        raise MaintenancePlanError(
+            "maintenance source schema must use the approved dev schema"
+        )
     if retention != FIXED_RETENTION:
         raise MaintenancePlanError("maintenance retention must be 7d")
 
