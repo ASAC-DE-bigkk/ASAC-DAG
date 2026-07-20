@@ -63,29 +63,26 @@ def _recovery(rows: tuple[DeliveryEvidence, ...]) -> dict[str, Any]:
         for index, failed in enumerate(ordered):
             if failed.state not in FAILURE_STATES:
                 continue
+            detected_at = failed.detected_at or failed.scheduled_at
             recovery = next(
                 (
                     candidate
                     for candidate in ordered[index + 1 :]
                     if candidate.gold_delivered is True
                     and candidate.gold_available_at is not None
+                    and candidate.gold_available_at >= detected_at
                 ),
                 None,
             )
             if recovery is None:
                 unrecovered += 1
                 continue
-            detected_at = failed.detected_at or failed.scheduled_at
             minutes = (
                 recovery.gold_available_at - detected_at
             ).total_seconds() / 60
-            if minutes < 0:
-                raise ValueError(
-                    "recovery cannot precede failure detection: "
-                    f"{failed.domain}/{failed.scheduled_run_id}"
-                )
             events.append(
                 {
+                    "domain": failed.domain,
                     "failed_run_id": failed.scheduled_run_id,
                     "recovered_by_run_id": recovery.scheduled_run_id,
                     "minutes": float(minutes),

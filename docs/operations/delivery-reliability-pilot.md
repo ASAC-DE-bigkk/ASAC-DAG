@@ -83,8 +83,8 @@ grain, naive timestamps, and negative counts fail with exit code 2.
 - SLA delivery: Gold delivery latency is within the row's `sla_minutes`.
 - Freshness: `gold_available_at - scheduled_at`; report exposes sample count,
   median, and maximum.
-- MTTR: failure `detected_at` (or scheduled time when unavailable) to the next
-  successful Gold delivery in the same domain.
+- MTTR: failure `detected_at` (or scheduled time when unavailable) to the first
+  successful Gold delivery after that detection time in the same domain.
 - Every rate includes its numerator and evaluable denominator. An empty
   denominator produces `NOT_AVAILABLE`, never `0%`.
 

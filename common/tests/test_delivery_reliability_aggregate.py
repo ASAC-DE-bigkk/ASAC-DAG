@@ -119,6 +119,7 @@ def test_freshness_distribution_and_mttr_use_next_successful_gold_delivery():
         "mttr_minutes": 185.0,
         "events": [
             {
+                "domain": "weather",
                 "failed_run_id": "scheduled__2026-07-19T00:00:00Z",
                 "recovered_by_run_id": "scheduled__2026-07-19T03:00:00Z",
                 "minutes": 185.0,
@@ -211,7 +212,7 @@ def test_overall_mttr_never_recovers_a_failure_with_another_domain():
     assert recovery["mttr_minutes"] is None
 
 
-def test_mttr_rejects_recovery_evidence_that_precedes_detection():
+def test_mttr_uses_first_success_after_failure_detection():
     failure = row(
         0,
         bronze_status="FAILED",
@@ -223,5 +224,13 @@ def test_mttr_rejects_recovery_evidence_that_precedes_detection():
         detected_at="2026-07-19T03:30:00Z",
     )
 
-    with pytest.raises(ValueError, match="recovery cannot precede failure detection"):
-        build_pilot_report([failure, row(3)], observed_at=OBSERVED_AT)
+    recovery = build_pilot_report(
+        [failure, row(3), row(6)], observed_at=OBSERVED_AT
+    )["domains"]["weather"]["recovery"]
+
+    assert recovery["recovered_failures"] == 1
+    assert recovery["unrecovered_failures"] == 0
+    assert recovery["mttr_minutes"] == 160.0
+    assert recovery["events"][0]["recovered_by_run_id"] == (
+        "scheduled__2026-07-19T06:00:00Z"
+    )
