@@ -44,6 +44,10 @@ class Dataset:
     # 크롤 주기(#206): "daily"=자정 일배치, "weekly"=주간 refresh 전용(자정런 제외).
     # 정적 dim(시설 상세)은 매일 재크롤이 낭비 + 자정 KOPIS 400(#201) 압력이라 분리.
     refresh: str = "daily"
+    # 야간 top-up(#466): True 면 detail_mode="missing" 런에서 "같은 런 목록에 있으나
+    # bronze 상세가 없는 id"만 크롤한다. 신규 시설의 목록↔상세 갭(주간 refresh 대기)을
+    # 하루 내로 줄이는 용도 — 전수 재크롤은 여전히 주간 refresh(full) 소관.
+    missing_only_nightly: bool = False
 
 
 # --- KOPIS (XML) -- 공연예술통합전산망 --------------------------------------------
@@ -98,7 +102,9 @@ KOPIS_DATASETS = [
         base_params={"signgucode": "11"},  # 11 = 서울
         freshness_sla_hours=24 * 8,  # 좌표 차원(느린 변화)
         key_fields=("mt10id", "fcltynm"),
-        refresh="weekly",  # 정적 dim — culture_facility_refresh 가 주 1회 전수 크롤(#206)
+        # 야간은 missing-only top-up(#466), 전수 재크롤은 주간 refresh(#206)가 담당.
+        refresh="daily",
+        missing_only_nightly=True,
     ),
     Dataset(
         name="kopis_festival",
@@ -275,8 +281,9 @@ def plan_dataset_names(wanted: list[str] | None, *, include_detail: bool) -> lis
 
     상세(kopis_detail)는 마지막으로 정렬(#146) — 목록이 먼저 랜딩될 확률을 높여
     detail 의 "랜딩된 raw 에서 id 재사용" 경로를 살린다. ``wanted`` 가 비면 스케줄
-    run — refresh="weekly" 데이터셋(#206 시설 상세)은 제외한다. 주간 트리거·수동
-    run 은 이름을 명시하므로 그대로 포함된다.
+    run — refresh="weekly" 데이터셋은 제외한다(시설 상세는 #466 부터 daily 편입,
+    야간은 missing top-up 모드). 주간 트리거·수동 run 은 이름을 명시하므로 그대로
+    포함된다.
     """
     chosen = set(wanted or [])
     return [
@@ -294,4 +301,5 @@ WEEKLY_FACILITY_REFRESH_CONF = {
     "datasets": ["kopis_facility", "kopis_facility_detail"],
     "max_detail": 2000,
     "include_detail": True,
+    "detail_mode": "full",  # 주간은 전수 재크롤 — 야간 missing top-up(#466)과 구분
 }

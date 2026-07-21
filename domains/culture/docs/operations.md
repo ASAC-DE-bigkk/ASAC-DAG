@@ -31,11 +31,12 @@ python scripts/run_culture_ingest.py --target dev --env-file ../../../sample/.en
 | 파라미터 | 뜻 | 기본 |
 |---|---|---|
 | `target` | `dev` / `prod` (그 외 값은 **즉시 실패**) | dev |
-| `datasets` | 적재할 슬러그(빈 값 = daily 전체 — weekly 인 시설 상세 제외, #206) | [] |
+| `datasets` | 적재할 슬러그(빈 값 = daily 전체 — 시설 상세는 야간 missing top-up 모드로 포함, #466) | [] |
 | `date_from`/`date_to` | YYYYMMDD (비면 롤링창) | "" |
 | `lookback_days` | 날짜창 크기 (boxoffice ≤ 31) | 31 |
 | `include_detail` | KOPIS 상세 엔드포인트 크롤 | True |
 | `max_detail` | 상세 크롤당 id 상한 (공연 상세용 — 시설 상세는 주간 DAG가 2000으로 오버라이드) | 200 |
+| `detail_mode` | `missing`(야간 top-up: 목록에 있으나 bronze 상세 없는 시설만, #466) / `full`(전수) | missing |
 | `kopis_rows` | KOPIS 목록 페이지 크기 | 100 |
 | `fail_on_violation` | 계약 위반 시 run 실패 | False |
 | `engine` | bronze 적재 엔진 `pyiceberg`(기본) / `trino`(롤백 레버) — 그 외 값은 즉시 실패 | pyiceberg |
@@ -57,10 +58,12 @@ bronze Iceberg 적재는 파라미터가 아니라 **`load_bronze` 태스크가 
   **Airflow 로 그 날짜+1일을 logical date 로 재실행**한다(예: 6/1 박스오피스 = logical
   date 6/2 → load_date 2026-06-02 → targetDt 20260601). CLI `--date-from/--date-to`는
   KOBIS 에 무효(전국/서울 모두 항상 전일분).
-- **시설 상세 주간 분리(#206)**: `kopis_facility_detail`은 자정 일배치에서 제외
-  (`refresh="weekly"`). `culture_facility_refresh`(일 05:30 KST)가 목록+상세를
-  `max_detail=2000`으로 전수 크롤한다. 수동 전수 크롤:
-  `airflow dags trigger culture_bronze --conf '{"datasets": ["kopis_facility", "kopis_facility_detail"], "max_detail": 2000}'`
+- **시설 상세 이원화(#206·#466)**: 야간 일배치는 `detail_mode="missing"`으로
+  "목록에 있으나 bronze 상세가 없는" 신규 시설만 top-up 한다(평상시 0건 → API 호출
+  없이 skip; 신규 시설 목록↔상세 갭이 하루 내로 닫혀 gold not_null 야간 실패를
+  방지). 전수 재크롤은 `culture_facility_refresh`(일 05:30 KST)가 `detail_mode="full"`
+  + `max_detail=2000`으로 수행. 수동 전수 크롤:
+  `airflow dags trigger culture_bronze --conf '{"datasets": ["kopis_facility", "kopis_facility_detail"], "max_detail": 2000, "detail_mode": "full"}'`
 
 ```bash
 # 예: boxoffice만 특정 주간 재수집 (dev, 로컬 CLI)

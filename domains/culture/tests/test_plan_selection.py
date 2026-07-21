@@ -8,9 +8,9 @@ from culture_ingest.source.datasets import (
 )
 
 
-def test_scheduled_run_excludes_weekly_datasets():
+def test_scheduled_run_includes_facility_detail():
     names = plan_dataset_names([], include_detail=True)
-    assert "kopis_facility_detail" not in names  # weekly(정적 dim)는 자정런 제외
+    assert "kopis_facility_detail" in names      # #466: 야간 top-up 편입(missing 모드)
     assert "kopis_performance_detail" in names   # 공연 상세(fact)는 유지
     assert "kopis_facility" in names             # 시설 목록은 유지
 
@@ -39,3 +39,4 @@ def test_weekly_refresh_conf_contract():
     assert "kopis_facility_detail" in WEEKLY_FACILITY_REFRESH_CONF["datasets"]
     assert WEEKLY_FACILITY_REFRESH_CONF["max_detail"] >= 1700  # 시설 1,686 + 여유
     assert WEEKLY_FACILITY_REFRESH_CONF["include_detail"] is True
+    assert WEEKLY_FACILITY_REFRESH_CONF["detail_mode"] == "full"  # 주간은 전수(#466)
