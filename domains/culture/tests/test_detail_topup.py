@@ -12,17 +12,22 @@ def _xml_facility_page(*ids: str) -> bytes:
 
 
 class _DetailOnlyKopis:
-    """detail 만 허용 — 목록 API(list_ids)가 불리면 실패시키는 스텁."""
+    """detail 만 허용 — 목록 API(list_ids)는 allow_list_ids 있을 때만 응답하는 스텁."""
 
-    def __init__(self):
+    def __init__(self, allow_list_ids: list[str] | None = None):
         self.detail_ids: list[str] = []
+        self._fallback_ids = allow_list_ids
+        self.list_ids_limit = "unset"
 
     def detail(self, path: str, identifier: str) -> Page:
         self.detail_ids.append(identifier)
         return Page(index=1, body=_xml_facility_page(identifier), row_count=1, ext="xml")
 
-    def list_ids(self, *a, **k):
-        raise AssertionError("missing 모드는 목록 API 폴백이 없어야 함(#466)")
+    def list_ids(self, path, base_params, id_field, limit):
+        if self._fallback_ids is None:
+            raise AssertionError("목록이 랜딩돼 있으면 API 재조회가 없어야 함(#146)")
+        self.list_ids_limit = limit
+        return list(self._fallback_ids)
 
 
 class _Clients:
@@ -91,12 +96,16 @@ def test_missing_mode_skips_when_known_ids_unavailable(tmp_path):
     assert res.error == "skipped (detail top-up: bronze id set unavailable)"
 
 
-def test_missing_mode_skips_when_list_not_landed(tmp_path):
-    # missing 모드는 같은 런 목록이 전제 — 미착지면 API 재조회 없이 skip(주간이 백스톱)
+def test_missing_mode_falls_back_to_api_when_list_not_landed(tmp_path):
+    # 매핑 태스크 병렬이라 목록 미착지가 정상 경로에서 발생(E2E 실측 7/21) —
+    # full 모드처럼 API 재조회로 폴백하되, 안티조인은 그대로 적용한다. limit=None(전체).
     landing = _landing(tmp_path)  # 목록 랜딩 없음
-    res = ingest_dataset(DS, _Clients(_DetailOnlyKopis()), landing,
-                         _opts(known_detail_ids=[]))
-    assert res.error == "skipped (detail top-up: same-run list not landed)"
+    kopis = _DetailOnlyKopis(allow_list_ids=["FC001", "FC002", "FC003"])
+    res = ingest_dataset(DS, _Clients(kopis), landing,
+                         _opts(known_detail_ids=["FC001", "FC002"]))
+    assert not res.error
+    assert kopis.detail_ids == ["FC003"]  # 폴백 목록에도 안티조인 적용
+    assert kopis.list_ids_limit is None   # 전체 목록 — cap 은 차집합 후
 
 
 def test_full_mode_keeps_current_behavior(tmp_path):

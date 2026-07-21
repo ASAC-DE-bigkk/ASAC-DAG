@@ -35,7 +35,8 @@ plan (facility_detail 포함, detail_mode=missing)
   → fetch kopis_facility_detail (기존 정렬대로 마지막):
       1. 같은 런 착지 목록에서 ID 추출 — missing 모드에선 cap 없이 전체 목록
          (현행은 max_detail로 먼저 잘라 목록 후미의 신규 시설을 놓칠 수 있음).
-         목록 미착지면 API 재조회 폴백 없이 skip(주간 전수가 백스톱)
+         목록 미착지면 full 과 같이 API 재조회 폴백(전체) 후 안티조인 — 매핑
+         태스크가 병렬이라 미착지가 정상 경로에서 발생(E2E 실측 7/21, #146 동일 사유)
       2. plan이 주입한 bronze 기존 detail ID 집합(Trino) 대조 → 차집합 = 신규 시설만
       3. 차집합 空 → API 호출 0으로 skipped 종료 / 있으면 그 건만 fetch
          (차집합에 max_detail cap 적용 — 안티조인 이후)

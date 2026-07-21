@@ -214,7 +214,9 @@ def _fetch_kopis_detail(ds, clients, landing, opts, prefix, append) -> dict:
 
     detail_mode="missing"(#466, missing_only_nightly 데이터셋 한정): 같은 런 목록 전체 −
     known_detail_ids(plan 이 bronze 에서 로드) 차집합만 크롤 — 신규 시설 top-up.
-    전제(known·목록 착지)가 깨지면 API 폴백 없이 skip — 주간 전수(full)가 백스톱.
+    known 미확보(plan 조회 실패)면 skip — 주간 전수(full)가 백스톱. 목록 미착지는
+    매핑 태스크 병렬성 때문에 정상 경로에서 발생(E2E 실측 7/21) → full 과 같이 API
+    재조회로 폴백하되 안티조인은 그대로 적용한다.
     """
     if not opts.include_detail:
         raise _FetchAbort("skipped (include_detail=False)")  # 옵션 꺼져 있으면 건너뜀
@@ -225,7 +227,10 @@ def _fetch_kopis_detail(ds, clients, landing, opts, prefix, append) -> dict:
             raise _FetchAbort("skipped (detail top-up: bronze id set unavailable)")
         all_ids = _ids_from_landed_list(ds, landing, None)  # cap 없이 전체 — cap 은 차집합 후
         if all_ids is None:
-            raise _FetchAbort("skipped (detail top-up: same-run list not landed)")
+            # 폴백(#146과 동일 사유): fetch_raw 매핑 인스턴스는 병렬이라 목록이 아직
+            # 미착지일 수 있다. limit=None = 전체 목록 — cap 은 차집합 후.
+            id_params = _with_date_window(ds.id_source_endpoint, ds.base_params, opts)
+            all_ids = clients.kopis.list_ids(ds.id_source_endpoint, id_params, ds.id_field, None)
         listed = len(all_ids)
         known = set(opts.known_detail_ids)
         ids = [i for i in all_ids if i not in known][:opts.max_detail]

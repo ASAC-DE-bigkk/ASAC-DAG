@@ -155,14 +155,17 @@ class KopisClient:
         body = self._get(path, params)
         return Page(index=1, body=body, row_count=_count_tag(body, row_tag), ext="xml")
 
-    def list_ids(self, path: str, base_params: dict, id_field: str, limit: int) -> list[str]:
-        """목록 엔드포인트에서 최대 ``limit``개의 id를 수집한다(상세 크롤용)."""
+    def list_ids(self, path: str, base_params: dict, id_field: str, limit: int | None) -> list[str]:
+        """목록 엔드포인트에서 최대 ``limit``개의 id를 수집한다(상세 크롤용).
+
+        ``limit=None`` = 전체(#466 missing 모드 폴백 — cap 은 안티조인 이후 적용).
+        """
         ids: list[str] = []
         for page in self.list_pages(path, base_params, rows=100, max_pages=None):
             ids.extend(extract_ids(page.body, id_field))
-            if len(ids) >= limit:
+            if limit is not None and len(ids) >= limit:
                 break
-        return ids[:limit]
+        return ids if limit is None else ids[:limit]
 
 
 class SeoulClient:
