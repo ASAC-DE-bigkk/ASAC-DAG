@@ -199,3 +199,58 @@ def test_config_defaults_full_scope(monkeypatch):
         assert cfg.BUS_ROUTE_TYPES_EXCLUDE == {"7", "8"}
     finally:
         importlib.reload(config)  # 다른 테스트가 실제 env 기준 config 를 보게 복원
+
+
+# ── bronze 적재 (#471 — routeType·tier 원천화) ──────────────────────────────────
+def test_tier_for_maps_tier1_types_only():
+    t1 = {"3", "6"}
+    assert bus_routes.tier_for("3", t1) == 1   # 간선
+    assert bus_routes.tier_for("6", t1) == 1   # 광역
+    assert bus_routes.tier_for("4", t1) == 2   # 지선 → tier2
+    assert bus_routes.tier_for("11", t1) == 2  # 심야 → tier2
+    assert bus_routes.tier_for(None, t1) == 2  # 미상 → tier2(안전한 방향)
+    assert bus_routes.tier_for("", t1) == 2
+
+
+def test_build_master_rows_sets_tier_and_keeps_source_route_type():
+    routes = [
+        {"busRouteId": "100100001", "busRouteNm": "간선A", "routeType": "3"},
+        {"busRouteId": "100100002", "busRouteNm": "지선B", "routeType": "4"},
+        {"busRouteId": None, "busRouteNm": "결측", "routeType": "3"},  # id 없으면 제외
+    ]
+    rows = bus_routes.build_master_rows(routes, {"3", "6"})
+    assert len(rows) == 2
+    assert rows[0] == {"bus_route_id": "100100001", "bus_route_nm": "간선A",
+                       "route_type": "3", "tier": 1}
+    assert rows[1]["tier"] == 2 and rows[1]["route_type"] == "4"
+
+
+def test_master_replace_sql_is_delete_then_insert_with_escaping():
+    rows = [{"bus_route_id": "100100001", "bus_route_nm": "정촌'행",  # 작은따옴표 이스케이프
+             "route_type": "3", "tier": 1}]
+    stmts = bus_routes.master_load_sql(
+        "iceberg_dev.transit.bronze_bus_route_master", rows,
+        load_date="2026-07-21", collected_at="2026-07-21 13:45:00.000000",
+        dag_run_id="scheduled__x",
+    )
+    assert stmts[0] == "DELETE FROM iceberg_dev.transit.bronze_bus_route_master WHERE load_date = '2026-07-21'"  # 그 load_date 만
+    assert "INSERT INTO" in stmts[1]
+    assert "'정촌''행'" in stmts[1]                       # '' 이스케이프
+    assert ", 1, " in stmts[1]                           # tier 는 정수 리터럴(따옴표 없음)
+    assert "timestamp '2026-07-21 13:45:00.000000'" in stmts[1]
+
+
+def test_master_replace_sql_refuses_empty_rows():
+    # 빈 rows 로는 DELETE 만 남아 전건 소실 위험 — 호출 자체를 막는다.
+    with pytest.raises(ValueError):
+        bus_routes.master_load_sql(
+            "t", [], load_date="2026-07-21", collected_at="2026-07-21 00:00:00.000000",
+            dag_run_id="x",
+        )
+
+
+def test_master_ddl_types_route_codes_varchar_tier_integer():
+    ddl = bus_routes.master_ddl("iceberg_dev.transit.bronze_bus_route_master")
+    assert "route_type varchar" in ddl   # 코드류 varchar(선행 0 보존)
+    assert "tier integer" in ddl
+    assert "bus_route_id varchar" in ddl
