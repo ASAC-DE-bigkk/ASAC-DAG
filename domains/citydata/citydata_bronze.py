@@ -226,7 +226,7 @@ with DAG(
     fetch_raw = PythonOperator(
         task_id="fetch_raw", python_callable=_fetch_raw,
         on_failure_callback=[record_citydata_problem, _run_md_fail])
-    # 적재 성공 시 Asset 발행 → citydata_transform 자동 기동 (#274). 크론 오프셋 대신
+    # 적재 성공 시 Asset 발행 → citydata_transform_cosmos 자동 기동 (#274). 크론 오프셋 대신
     # bronze 완료 이벤트로 변환을 묶어 "덜 끝난 bronze 를 읽는" 경합을 제거한다.
     load_bronze = PythonOperator(
         task_id="load_bronze", python_callable=_load_bronze,

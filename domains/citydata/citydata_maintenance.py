@@ -49,7 +49,7 @@ DEFAULT_PARAMS = {"target": "dev", "retention": "3d", "cleanup_hours": 6, "drain
 # delete+insert 가 같은 행을 지우면 Iceberg 커밋 충돌 → 중복 발생. 그래서 maintenance
 # 동안 transform 을 pause 한다. bronze 는 append(새 ingest_ts)라 optimize 와 덜 충돌하고
 # 수집 SLA 를 위해 유지한다.
-TRANSFORM_DAG = "citydata_transform"
+TRANSFORM_DAG = "citydata_transform_cosmos"  # 활성 변환(Cosmos). 구 citydata_transform 은 삭제됨
 
 
 def _dags_cli(action: str) -> None:
