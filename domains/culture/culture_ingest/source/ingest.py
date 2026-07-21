@@ -62,6 +62,11 @@ class IngestOptions:
     max_rows: int | None = None  # 서울 행 수 상한 (None = 전체)
     max_detail: int = 200  # KOPIS 상세 엔드포인트에서 크롤할 id 상한
     include_detail: bool = False  # kopis_detail 데이터셋 실행 여부
+    # 야간 top-up(#466): "missing"=같은 런 목록 − known_detail_ids 만 크롤(플래그 데이터셋
+    # 한정), "full"=현행 전수(앞에서부터 max_detail 개). known 은 plan 이 Trino 로 읽어
+    # 주입(fail-open 시 None → top-up skip). 기본 "full" = 기존 호출자(CLI·주간 conf) 보존.
+    detail_mode: str = "full"
+    known_detail_ids: list | None = None
     # 볼륨 HWM 계약(#147)용: {dataset: 직전 good 런 rows}. plan 이 직전 run_report 에서
     # 읽어 주입한다. None/미포함 데이터셋은 볼륨 검사 생략.
     baselines: dict | None = None
@@ -114,7 +119,7 @@ def _manifest(ds: Dataset, ctx: RunContext, result: DatasetResult, params: dict)
     }
 
 
-def _ids_from_landed_list(ds: Dataset, landing: Landing, limit: int) -> list[str] | None:
+def _ids_from_landed_list(ds: Dataset, landing: Landing, limit: int | None) -> list[str] | None:
     """같은 run 에 이미 랜딩된 sibling 목록 raw 에서 상세 크롤용 id 를 추출한다(#146).
 
     detail 이 목록을 API 로 **재조회**하던 것을 제거해 자정 KOPIS 호출을 줄인다.
@@ -139,9 +144,10 @@ def _ids_from_landed_list(ds: Dataset, landing: Landing, limit: int) -> list[str
         except Exception:  # noqa: BLE001 -- 페이지 유실 = 신뢰 불가 → 폴백
             return None
         ids.extend(extract_ids(body, ds.id_field))  # 추출 정의는 clients.extract_ids 단일(#363)
-        if len(ids) >= limit:
+        if limit is not None and len(ids) >= limit:
             break
-    return ids[:limit]
+    # limit=None(#466 missing 모드) — cap 은 안티조인 이후여야 목록 후미 신규를 안 놓친다.
+    return ids if limit is None else ids[:limit]
 
 
 class _FetchAbort(Exception):
@@ -204,17 +210,37 @@ def _fetch_kcisa_list(ds, clients, landing, opts, prefix, append) -> dict:
 
 
 def _fetch_kopis_detail(ds, clients, landing, opts, prefix, append) -> dict:
-    """상세: 목록에서 id를 모아 건별 상세를 id=<값>.xml로 적재."""
+    """상세: 목록에서 id를 모아 건별 상세를 id=<값>.xml로 적재.
+
+    detail_mode="missing"(#466, missing_only_nightly 데이터셋 한정): 같은 런 목록 전체 −
+    known_detail_ids(plan 이 bronze 에서 로드) 차집합만 크롤 — 신규 시설 top-up.
+    전제(known·목록 착지)가 깨지면 API 폴백 없이 skip — 주간 전수(full)가 백스톱.
+    """
     if not opts.include_detail:
         raise _FetchAbort("skipped (include_detail=False)")  # 옵션 꺼져 있으면 건너뜀
-    # 목록 재조회 제거(#146): 같은 run 에 랜딩된 목록 raw 에서 id 재사용.
-    ids = _ids_from_landed_list(ds, landing, opts.max_detail)
-    if ids is None:
-        # 폴백: 목록이 아직 안 랜딩된 실행 문맥(단독 실행·순서 역전)만 API 재조회.
-        id_params = _with_date_window(ds.id_source_endpoint, ds.base_params, opts)
-        ids = clients.kopis.list_ids(ds.id_source_endpoint, id_params, ds.id_field, opts.max_detail)
+    missing_mode = opts.detail_mode == "missing" and ds.missing_only_nightly
+    listed = 0
+    if missing_mode:
+        if opts.known_detail_ids is None:
+            raise _FetchAbort("skipped (detail top-up: bronze id set unavailable)")
+        all_ids = _ids_from_landed_list(ds, landing, None)  # cap 없이 전체 — cap 은 차집합 후
+        if all_ids is None:
+            raise _FetchAbort("skipped (detail top-up: same-run list not landed)")
+        listed = len(all_ids)
+        known = set(opts.known_detail_ids)
+        ids = [i for i in all_ids if i not in known][:opts.max_detail]
+        if not ids:
+            raise _FetchAbort("skipped (detail top-up: no missing ids)")
+        print(f"  [detail] {ds.name}: top-up {len(ids)}/{listed} id (기존 {len(known)}건 제외)")
     else:
-        print(f"  [detail] {ds.name}: 목록 재조회 생략 — 랜딩된 raw 에서 id {len(ids)}개 재사용(#146)")
+        # 목록 재조회 제거(#146): 같은 run 에 랜딩된 목록 raw 에서 id 재사용.
+        ids = _ids_from_landed_list(ds, landing, opts.max_detail)
+        if ids is None:
+            # 폴백: 목록이 아직 안 랜딩된 실행 문맥(단독 실행·순서 역전)만 API 재조회.
+            id_params = _with_date_window(ds.id_source_endpoint, ds.base_params, opts)
+            ids = clients.kopis.list_ids(ds.id_source_endpoint, id_params, ds.id_field, opts.max_detail)
+        else:
+            print(f"  [detail] {ds.name}: 목록 재조회 생략 — 랜딩된 raw 에서 id {len(ids)}개 재사용(#146)")
     detail_errors: list[str] = []
     landed = 0
     for identifier in ids:
@@ -243,6 +269,8 @@ def _fetch_kopis_detail(ds, clients, landing, opts, prefix, append) -> dict:
         **ds.base_params,
         "id_field": ds.id_field,
         "max_detail": opts.max_detail,
+        "detail_mode": opts.detail_mode if ds.missing_only_nightly else "full",
+        "listed_ids": listed,  # missing 모드에서만 >0 — 같은 런 목록 전체 크기
         "ids": len(ids),
         "detail_skipped": len(detail_errors),
     }
