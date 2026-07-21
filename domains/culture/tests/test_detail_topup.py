@@ -111,6 +111,40 @@ def test_full_mode_keeps_current_behavior(tmp_path):
     assert kopis.detail_ids == ["FC001", "FC002"]
 
 
+# ── plan-측 기존 ID 로드 (Trino, fail-open) ──────────────────────────────────
+
+from culture_ingest.source.ingest import load_existing_detail_ids
+
+
+class _FakeTrinoWarehouse:
+    def __init__(self, rows=None, error: Exception | None = None):
+        self._rows = rows or []
+        self._error = error
+        self.sql: str | None = None
+
+    def qualified(self, dataset: str) -> str:
+        return f"iceberg.culture.bronze_{dataset}"
+
+    def execute(self, sql: str):
+        self.sql = sql
+        if self._error:
+            raise self._error
+        return self._rows
+
+
+def test_load_existing_detail_ids_returns_distinct_ids():
+    wh = _FakeTrinoWarehouse(rows=[["FC001"], ["FC002"], [None]])
+    ids = load_existing_detail_ids("dev", warehouse=wh)
+    assert ids == ["FC001", "FC002"]  # None/빈 값 행은 제거
+    assert "json_extract_scalar(record_json, '$.mt10id')" in wh.sql
+    assert "bronze_kopis_facility_detail" in wh.sql
+
+
+def test_load_existing_detail_ids_fails_open():
+    wh = _FakeTrinoWarehouse(error=RuntimeError("trino down"))
+    assert load_existing_detail_ids("dev", warehouse=wh) is None  # fail-open → top-up skip
+
+
 def test_missing_mode_ignores_non_flagged_detail(tmp_path):
     # missing_only_nightly=False 인 다른 detail(공연 상세)은 missing 모드여도 현행 동작
     landing = _landing(tmp_path)

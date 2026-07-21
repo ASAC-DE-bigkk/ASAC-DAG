@@ -15,12 +15,13 @@ raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 
 파라미터 (트리거 시 덮어쓰기 가능):
   target          "dev" | "prod"            (기본 dev -> 버킷 seoul-dev)
   datasets        적재할 데이터셋 슬러그; 빈 값 -> 활성 전체 중 daily 만
-                  (kopis_facility_detail 은 refresh="weekly" — culture_facility_refresh
-                  가 일요일 05:30 KST 에 전수 크롤, #206)
+                  (kopis_facility_detail 은 야간 missing top-up(#466),
+                  전수 재크롤은 culture_facility_refresh 일요일 05:30 KST, #206)
   date_from/to    YYYYMMDD; 비면 -> 롤링 [end-lookback_days, end]
   lookback_days   날짜창 크기 (boxoffice는 <=31)                       기본 31
   include_detail  KOPIS 상세 엔드포인트도 크롤(상한 있음)               기본 True
   max_detail      상세 크롤당 id 상한                                  기본 200
+  detail_mode     "missing"(야간 top-up, #466) | "full"(전수)          기본 missing
   kopis_rows      KOPIS 목록 페이지 크기                               기본 100
   fail_on_violation  계약 위반 시 run 실패                             기본 False
 """
@@ -62,7 +63,7 @@ from culture_ingest.common.config import (  # noqa: E402
     RunContext,
     normalize_target,
 )
-from culture_ingest.source.datasets import plan_dataset_names  # noqa: E402
+from culture_ingest.source.datasets import BY_NAME, plan_dataset_names  # noqa: E402
 from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     annihilation_reason,
@@ -70,6 +71,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
     ingest_one,
     load_baselines_for_target,
     load_bronze,
+    load_existing_detail_ids,
     normalize_mapped_results,
     write_run_report,
 )
@@ -90,6 +92,7 @@ DEFAULT_PARAMS = {
     "lookback_days": 31,
     "include_detail": True,
     "max_detail": 200,
+    "detail_mode": "missing",  # 야간 facility detail top-up(#466) — 주간 conf 가 "full" 로 덮음
     "kopis_rows": 100,
     "fail_on_violation": False,  # True면 계약 위반(완전성·드리프트·freshness) 시 run 실패
     "engine": "pyiceberg",  # bronze 적재 엔진 — trino 는 전환기 롤백 레버(#203)
@@ -151,6 +154,13 @@ def _plan(**context) -> list[dict]:
     names = plan_dataset_names(params.get("datasets") or [], include_detail=include_detail)
     # 볼륨 HWM(#147): 직전 run_report 의 데이터셋별 rows 를 기준선으로 로드(fail-open).
     baselines = load_baselines_for_target(target, before_ingest_ts=ingest_ts)
+    # 야간 top-up(#466): missing 모드면 플래그 데이터셋의 기존 bronze id 를 로드(fail-open).
+    detail_mode = str(params.get("detail_mode", "missing"))
+    known_detail_ids = None
+    if detail_mode == "missing" and any(BY_NAME[n].missing_only_nightly for n in names):
+        known_detail_ids = load_existing_detail_ids(target)
+        print(f"plan: top-up known ids = "
+              f"{'로드 실패(fail-open)' if known_detail_ids is None else len(known_detail_ids)}")
     print(
         f"plan: {len(names)} datasets, window {date_from}~{date_to}, ingest_ts={ingest_ts}, "
         f"baselines={len(baselines)}개"
@@ -168,6 +178,8 @@ def _plan(**context) -> list[dict]:
             "max_detail": int(params["max_detail"]),
             "kopis_rows": int(params["kopis_rows"]),
             "baseline_rows": baselines.get(name),
+            "detail_mode": detail_mode,
+            "known_detail_ids": known_detail_ids if BY_NAME[name].missing_only_nightly else None,
         }
         for name in names
     ]
@@ -185,6 +197,8 @@ def _fetch_raw(
     max_detail: int,
     kopis_rows: int,
     baseline_rows: int | None = None,
+    detail_mode: str = "full",
+    known_detail_ids: list | None = None,
     **context,
 ) -> dict:
     """데이터셋 1개의 원본을 R2 raw에 박제 (매핑 태스크 1개, bronze 적재는 load_bronze가).
@@ -197,6 +211,8 @@ def _fetch_raw(
         kopis_rows=kopis_rows,
         max_detail=max_detail,
         include_detail=include_detail,
+        detail_mode=detail_mode,
+        known_detail_ids=known_detail_ids,
         baselines={name: baseline_rows} if baseline_rows else None,
     )
     result = ingest_one(name, ctx=ctx, opts=opts, target=target)

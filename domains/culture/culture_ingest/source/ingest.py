@@ -524,6 +524,32 @@ def load_baselines_for_target(
     )
 
 
+def load_existing_detail_ids(
+    target: str,
+    *,
+    dataset: str = "kopis_facility_detail",
+    id_field: str = "mt10id",
+    warehouse=None,
+) -> list[str] | None:
+    """야간 top-up(#466)용 — bronze 상세 테이블의 distinct id 를 Trino 로 읽는다.
+
+    plan 태스크가 호출해 op_kwargs 로 주입한다(기존 detail id 는 런 중 불변이라
+    plan 시점 조회로 충분). 실패는 fail-open(None) — fetch 의 missing 모드가
+    top-up 을 skip 하고 야간 런은 계속된다(주간 전수가 백스톱, baselines #147 선례).
+    """
+    try:
+        wh = warehouse or BronzeWarehouse(build_warehouse_settings(target))
+        sql = (
+            f"select distinct json_extract_scalar(record_json, '$.{id_field}') "
+            f"from {wh.qualified(dataset)}"
+        )
+        return [row[0] for row in wh.execute(sql) if row and row[0]]
+    except Exception as exc:  # noqa: BLE001 -- 조회 실패가 야간 런을 죽이면 안 됨
+        print(f"  [top-up] 기존 detail id 로드 실패(fail-open, top-up skip): "
+              f"{redact(f'{type(exc).__name__}: {exc}')}")
+        return None
+
+
 def build_clients(env_file: str | None = None) -> Clients:
     """인증키를 읽어 검증한 뒤 KOPIS/서울 클라이언트를 만든다.
 
