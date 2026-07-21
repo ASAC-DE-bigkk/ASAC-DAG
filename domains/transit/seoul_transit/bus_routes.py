@@ -67,3 +67,85 @@ def build_reference(routes: list[dict], *, run_id: str, ingest_ts: str) -> dict:
         "run_id": run_id,
         "ingest_ts": ingest_ts,
     }
+
+
+# ── bronze 적재 (routeType·tier 원천화, ASAC-DBT dim_transit_bus_route_tier 소비) ──
+# 배경: tier dim 이 tier 를 수집 런 시각으로 역산하던 것을 원천(routeType) 조인으로
+# 바꾼다. tier 판정은 collector 수집 정책(BUS_TIER1_TYPES)과 **같은 값**이어야 하므로
+# 여기(정책을 아는 유일한 곳)에서 계산해 bronze 에 넣는다 — dbt 로 값 복제 금지.
+BUS_ROUTE_MASTER_TABLE = "bronze_bus_route_master"
+BUS_ROUTE_MASTER_COLUMNS = (
+    "bus_route_id", "bus_route_nm", "route_type", "tier",
+    "load_date", "collected_at", "dag_run_id",
+)
+
+
+def tier_for(route_type: str | None, tier1_types: set[str]) -> int:
+    """routeType → tier. tier1_types(간선·광역, config.BUS_TIER1_TYPES)면 1, 그 외 2.
+
+    routeType 미상(None/공백)은 tier2 로 본다 — tier1 은 명시적으로만(안전한 방향:
+    시간대 비교 파생 *_t1 에서 빠질 뿐 전 티어 지표에는 남는다).
+    """
+    return 1 if route_type in tier1_types else 2
+
+
+def build_master_rows(routes: list[dict], tier1_types: set[str]) -> list[dict]:
+    """parse_routes 결과 → bronze 행(계보 제외). busRouteId 없는 행은 제외(파서가 이미 필터)."""
+    return [
+        {
+            "bus_route_id": r["busRouteId"],
+            "bus_route_nm": r.get("busRouteNm"),
+            "route_type": r.get("routeType"),
+            "tier": tier_for(r.get("routeType"), tier1_types),
+        }
+        for r in routes
+        if r.get("busRouteId")
+    ]
+
+
+def _sql_str(value: object) -> str:
+    """varchar 리터럴 — None 은 NULL, 작은따옴표 이스케이프. 코드류는 varchar(선행 0 보존)."""
+    if value is None or value == "":
+        return "NULL"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def master_ddl(qualified_table: str) -> str:
+    """bronze_bus_route_master DDL — 원천 코드류는 varchar, tier 만 integer."""
+    return (
+        f"CREATE TABLE IF NOT EXISTS {qualified_table} (\n"
+        "  bus_route_id varchar,\n  bus_route_nm varchar,\n  route_type varchar,\n"
+        "  tier integer,\n  load_date varchar,\n  collected_at timestamp(6),\n"
+        "  dag_run_id varchar\n) WITH (format = 'PARQUET')"
+    )
+
+
+def master_load_sql(
+    qualified_table: str, rows: list[dict], *,
+    load_date: str, collected_at: str, dag_run_id: str,
+) -> list[str]:
+    """load_date 단위 멱등 적재 SQL — 그 load_date 만 DELETE 후 INSERT VALUES.
+
+    기존 마스터 적재(subway/park)와 같은 관례. 전건 DELETE 를 쓰지 않는 이유:
+    DELETE·INSERT 가 별도 트랜잭션이라(Trino 자동커밋), 전건 삭제 후 INSERT 가 실패하면
+    테이블이 통째로 빈다 — tier 의 유일 원천이라 dim 이 빈 조인이 되고 gold *_t1 이 전부
+    사라진다. 삭제를 이 load_date 로 한정하면 INSERT 실패 시에도 지난 스냅샷이 남고,
+    dim 은 max(load_date) 만 읽어 항상 마지막 성공분을 본다. 같은 load_date 재실행은
+    그 날짜만 교체(멱등). 빈 rows 로는 호출하지 않는다(호출 측이 위생 가드 후 진입).
+    """
+    if not rows:
+        raise ValueError("master_load_sql: rows 비어 있음 — 삭제만 남아 위험")
+    values = ",\n".join(
+        "({}, {}, {}, {}, {}, timestamp {}, {})".format(
+            _sql_str(r["bus_route_id"]), _sql_str(r["bus_route_nm"]),
+            _sql_str(r["route_type"]), int(r["tier"]),
+            _sql_str(load_date), _sql_str(collected_at), _sql_str(dag_run_id),
+        )
+        for r in rows
+    )
+    return [
+        f"DELETE FROM {qualified_table} WHERE load_date = {_sql_str(load_date)}",
+        f"INSERT INTO {qualified_table} "
+        "(bus_route_id, bus_route_nm, route_type, tier, load_date, collected_at, dag_run_id)\n"
+        f"VALUES\n{values}",
+    ]
