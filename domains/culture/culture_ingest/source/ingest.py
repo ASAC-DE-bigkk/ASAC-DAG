@@ -543,7 +543,7 @@ def load_existing_detail_ids(
             f"select distinct json_extract_scalar(record_json, '$.{id_field}') "
             f"from {wh.qualified(dataset)}"
         )
-        return [row[0] for row in wh.execute(sql) if row and row[0]]
+        return [row[0] for row in wh.client.execute(sql) if row and row[0]]
     except Exception as exc:  # noqa: BLE001 -- 조회 실패가 야간 런을 죽이면 안 됨
         print(f"  [top-up] 기존 detail id 로드 실패(fail-open, top-up skip): "
               f"{redact(f'{type(exc).__name__}: {exc}')}")

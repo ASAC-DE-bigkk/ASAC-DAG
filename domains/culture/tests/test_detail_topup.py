@@ -117,10 +117,13 @@ from culture_ingest.source.ingest import load_existing_detail_ids
 
 
 class _FakeTrinoWarehouse:
+    """BronzeWarehouse 실인터페이스 미러 — execute 는 .client 에 있다(E2E 실측으로 확정)."""
+
     def __init__(self, rows=None, error: Exception | None = None):
         self._rows = rows or []
         self._error = error
         self.sql: str | None = None
+        self.client = self  # 실물처럼 .client.execute 경로 제공
 
     def qualified(self, dataset: str) -> str:
         return f"iceberg.culture.bronze_{dataset}"
