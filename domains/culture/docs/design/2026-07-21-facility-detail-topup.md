@@ -17,8 +17,11 @@
 - **접근 A**: fetch 단계 모드 분기 — `kopis_facility_detail`을 야간 플랜에 편입하되
   missing-only 모드로 신규 시설만 수집. 플랜 단계 안티조인(B, 어제 목록 기준이라
   하루 지연)과 적재 후 별도 태스크(C, 적재 2회 + asset 트리거 복잡)는 기각.
-- **기존 detail 보유 판별 소스 = bronze 안티조인**: fetch 시점에
-  `bronze_kopis_facility_detail`의 distinct ID를 pyiceberg(#203 경로)로 읽어 대조.
+- **기존 detail 보유 판별 소스 = bronze 안티조인**: `bronze_kopis_facility_detail`의
+  distinct ID를 **plan 태스크가 Trino(`BronzeWarehouse.execute`)로 로드**해 op_kwargs로
+  주입하고(기존 detail ID는 런 중 불변이라 plan 시점 조회로 충분 — baselines #147과
+  같은 자리·같은 fail-open), 차집합은 fetch의 missing 모드가 같은 런 착지 목록 기준으로
+  계산한다. fetch 경로에 warehouse 의존을 넣지 않는다(구현 중 정련 — 정확도 동일).
   run_report 상태 확장(이중화 위험)은 기각.
 - **gold not_null 3종은 error 유지**: top-up 후 잔여 실패(신규 시설 detail fetch
   실패·좌표 빈 값)는 희귀해지므로 알림이 "진짜 볼 일"이 된다. DBT 변경 없음 —
@@ -31,8 +34,9 @@ plan (facility_detail 포함, detail_mode=missing)
   → fetch kopis_facility (목록 착지)
   → fetch kopis_facility_detail (기존 정렬대로 마지막):
       1. 같은 런 착지 목록에서 ID 추출 — missing 모드에선 cap 없이 전체 목록
-         (현행은 max_detail로 먼저 잘라 목록 후미의 신규 시설을 놓칠 수 있음)
-      2. bronze 기존 detail ID 집합(pyiceberg) 대조 → 차집합 = 신규 시설만
+         (현행은 max_detail로 먼저 잘라 목록 후미의 신규 시설을 놓칠 수 있음).
+         목록 미착지면 API 재조회 폴백 없이 skip(주간 전수가 백스톱)
+      2. plan이 주입한 bronze 기존 detail ID 집합(Trino) 대조 → 차집합 = 신규 시설만
       3. 차집합 空 → API 호출 0으로 skipped 종료 / 있으면 그 건만 fetch
          (차집합에 max_detail cap 적용 — 안티조인 이후)
   → load_bronze (같은 런 ingest_ts, 멱등 append)
