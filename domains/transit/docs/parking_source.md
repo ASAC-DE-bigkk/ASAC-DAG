@@ -17,7 +17,7 @@
 
 ## 수집 스코프 & 호출 예산
 
-- `GetParkingInfo` **1콜/런**(전체 123개 반환). `*/20` → 72콜/일. `SEOUL_API_KEY_TRAN` 공유(지하철과 별도 DAG).
+- `GetParkingInfo` **1콜/런**(전체 반환). 현행 `*/5`(288콜/일, 원천 갱신 ~5분). `SEOUL_API_KEY_TRAN` 공유(지하철과 별도 DAG).
 - `source=seoul_parking`, dataset=`parking`, `PARKING_ROWS`(기본 1000) — N 충분히 크게.
 
 ---

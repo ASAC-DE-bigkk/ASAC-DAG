@@ -30,13 +30,18 @@
   코드·Iceberg 테이블·파서는 모두 유지된다.
 - **재개**: `SOURCES` 의 주석 해제 + PR (수집 스코프 계약 테스트 `test_collect_scope.py` 갱신 동반).
   ⚠️ **이력 공백 주의**: 실시간 데이터는 소급 수집이 불가능하다 → 제외 이후 재개 전까지의 `bus_arrival` 구간은 **영구 공백**으로 남는다.
-- **호출량(#369, 운영계정 전환 후)**: `BUS_ROUTES=ALL`(기본) → 노선 마스터 reference 의
-  서울 전 노선(~728) × 1콜/런. `*/20` 기준 ~5.2만 콜/일, `*/1` 전환 시 **~105만 콜/일** —
-  ⚠️ 운영계정 **승인 트래픽 수치 확인 전 `*/1` 금지**. 버스 키는 `SEOUL_API_KEY_TRAN` 와 별도 쿼터.
+- **호출량(티어링 #440·#449)**: `BUS_ROUTES=ALL`(기본) → 노선 마스터 reference 의 서울 전
+  노선 × 1콜/런. 운영계정 10,000콜/일 예산을 시간창으로 배분: tier1(간선·광역 ~165) 출퇴근
+  10분·그 외 시간당, tier2(그 외)는 09·19시 전 노선 스냅샷, 01~05시 제외 → **평일 9,211 /
+  주말 8,221 콜/일**. 창·간격 변경은 `test_bus_collect_window.py` 예산 테스트가 게이트.
+  버스 키는 `SEOUL_API_KEY_TRAN` 와 별도 쿼터(`PUBLIC_DATA_API_KEY`).
 - **노선 확보(#369)**: `transit_bus_route_master`(@weekly)가 노선목록 API(`getBusRouteList`,
   2026-07-15 실측 1,364노선)를 R2 raw 로 랜딩하고 `reference/transit/bus_routes/latest.json` 갱신.
   collector 는 여기서 로드 + `BUS_ROUTE_TYPES_EXCLUDE`(기본 7=인천, 8=경기) 필터.
   **부트스트랩**: ALL 모드 켜기 전 이 DAG 을 최초 1회 수동 트리거(없으면 collector 가 명확히 실패).
+- **노선 마스터 bronze(#471)**: 같은 DAG 이 reference 를 `bronze_bus_route_master`(bus_route_id·
+  route_type·**tier** + 계보)로도 적재한다. tier 는 수집 정책(`BUS_TIER1_TYPES`: 간선3·광역6=1)으로
+  계산해 넣고, ASAC-DBT `dim_transit_bus_route_tier` 가 관측 역산 대신 이 tier 를 직접 조인한다.
 - **병렬 수집(#369)**: 노선별 호출을 스레드풀(`BUS_COLLECT_WORKERS`, 기본 8)로 — 728노선 ≈ 15~25s/런.
   노선 단위 실패는 격리(10% 허용선 초과 시 런 실패). HttpCore 는 스레드 안전이 아니라 스레드-로컬 코어 사용.
 - **수집·적재 분리(#369)**: 이 DAG 은 R2 랜딩 + pending 마커까지만. Iceberg 적재는
