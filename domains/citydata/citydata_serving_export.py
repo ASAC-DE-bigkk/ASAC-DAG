@@ -1,6 +1,6 @@
 """Airflow DAG: citydata 골드 → Cloudflare D1 서빙 export (#445).
 
-D1+Workers 서빙(https://ask-seoul-citydata-api.ask-seoul.workers.dev, ASAC-DBT#255)의
+D1+Workers 서빙(https://ask-seoul-citydata-api.dy950328.workers.dev, ASAC-DBT#255)의
 데이터 갱신을 수동 스크립트(sample/serving/export_gold_to_d1.py)에서 DAG 로 승격한다.
 
 원칙 (specs/2026-07-17 §2·§4·§5):
@@ -42,8 +42,8 @@ _run_md_ok = record_run_metadata("citydata", "serving_export", status="success")
 _run_md_fail = record_run_metadata("citydata", "serving_export", status="failed")
 
 # 서빙 대상 계정/DB — dev(개인 계정). 팀 계정 이관 시 여기만 바꾼다. (id 는 비밀 아님)
-SERVING_ACCOUNT_ID = "14ccb01681dc60a37f0d3c5baaa58588"
-SERVING_D1_DATABASE_ID = "91ea7514-98bd-4c73-9ab9-cb3662ee8b11"
+SERVING_ACCOUNT_ID = "0d39ddce1c07c97df66843ede19f56c4"
+SERVING_D1_DATABASE_ID = "9db0e851-558e-489f-9e76-f131d25aa267"
 D1_API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{SERVING_ACCOUNT_ID}/d1/database/{SERVING_D1_DATABASE_ID}/query"
