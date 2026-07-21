@@ -61,16 +61,22 @@ FAST_TABLES = [
     "gold_citydata_ppltn_trend", "gold_citydata_ppltn_anomaly",
     "gold_citydata_ppltn_x_commerce_dong", "gold_citydata_charger_availability",
 ]
-DAILY_TABLES = [
-    "gold_citydata_ppltn_forecast", "gold_citydata_ppltn_daily", "gold_citydata_cmrcl_daily",
+# DAILY 계열 중 forecast 만 전량 교체(장소×주말×시간 패턴 — 누적 아님, 매번 재계산).
+# 나머지 일별 집계는 누적 이력이라 append (아래 APPEND_TABLES).
+DAILY_TABLES = ["gold_citydata_ppltn_forecast"]
+
+# 이력·누적형 — 전량 교체하면 매 export 전 기간 재기록 → 한도 초과. 최근 구간만 삭제→재삽입.
+# 시간축 타입으로 lookback 단위 자동 분기: timestamp=시간(늦은 5분 슬라이스), date=일(오늘 누적+어제 확정).
+HOURLY_APPEND_TABLES = ["gold_citydata_ppltn_hourly"]  # 매시 append(시간축)
+DAILY_APPEND_TABLES = [
+    "gold_citydata_ppltn_daily", "gold_citydata_cmrcl_daily",
     "gold_citydata_purchasing_power_daily", "gold_citydata_ppltn_x_culture_daily",
 ]
-# 이력·누적형 — 전량 교체하면 매 export 전 기간 재기록(1년 106만 행) → 한도 초과.
-# 매시 최근 N시간 time_bucket 만 삭제→재삽입(late-arrival 여유). 시간당 ~242행 쓰기.
-HOURLY_APPEND_TABLES = ["gold_citydata_ppltn_hourly"]
-HOURLY_APPEND_LOOKBACK_H = 2  # D1 에서 재적재할 최근 시간 수 (늦게 도착한 슬라이스 반영)
-DAILY_FULL_HOUR_KST = 8  # 이 시각(KST) run 은 DAILY 포함 전체 export
-EXPORT_TABLES = FAST_TABLES + DAILY_TABLES + HOURLY_APPEND_TABLES  # 카탈로그 정본 목록
+APPEND_TABLES = HOURLY_APPEND_TABLES + DAILY_APPEND_TABLES
+APPEND_LOOKBACK_H = 2  # timestamp 축: 재적재할 최근 시간 수
+APPEND_LOOKBACK_D = 2  # date 축: 재적재할 최근 일 수 (골드 자체도 '최근 2일 재집계' 규약)
+DAILY_FULL_HOUR_KST = 8  # 이 시각(KST) run 은 DAILY(forecast) 포함 전체 export
+EXPORT_TABLES = FAST_TABLES + DAILY_TABLES + APPEND_TABLES  # 카탈로그 정본 목록
 
 # ── 서빙 신뢰성 게이트 (#1 신선도 · #3 검증) ──────────────────────
 # 서울시 citydata API 는 실측 대비 ~30분 지연 발표(event_at vs collected_at, 실측 p50=31분).
@@ -137,24 +143,32 @@ def _load_serving_meta() -> dict[str, dict]:
     }
 
 
-def _export_append(name: str, rel: str, col_defs: list, cur, token: str) -> tuple[int, int]:
-    """이력·누적 테이블 append 적재. DROP 안 함 — 최근 LOOKBACK 시간만 삭제→재삽입(late-arrival
-    여유) + 그 이후 신규. D1 이 비었으면(최초) 전체 백필. 반환: (upsert 행수, D1 총 행수)."""
+def _export_append(name: str, rel: str, col_defs: list, time_axis: str, cur, token: str) -> tuple[int, int]:
+    """이력·누적 테이블 append 적재. DROP 안 함 — 최근 lookback 구간만 삭제→재삽입(late-arrival
+    여유) + 그 이후 신규. D1 이 비었으면(최초) 전체 백필. 반환: (upsert 행수, D1 총 행수).
+    시간축 타입으로 분기: date=일 단위(오늘 누적+어제 확정), timestamp=시간 단위(늦은 슬라이스)."""
     colnames = [c for c, _ in col_defs]
+    axis_type = dict(col_defs).get(time_axis, "")
+    is_date = axis_type.startswith("date")
     _d1(f'CREATE TABLE IF NOT EXISTS "{name}" ('
         + ", ".join(f'"{c}" {_sqlite_type(t)}' for c, t in col_defs) + ");", token)
 
-    info = _d1(f'SELECT count(*) c, max(time_bucket) m FROM "{name}";', token)
+    info = _d1(f'SELECT count(*) c, max("{time_axis}") m FROM "{name}";', token)
     d1_count = (info[0].get("c") if info else 0) or 0
     d1_max = info[0].get("m") if info else None
 
     where = ""
     cutoff = None
     if d1_count and d1_max:
-        cutoff = pendulum.parse(str(d1_max).replace(" ", "T")).subtract(
-            hours=HOURLY_APPEND_LOOKBACK_H).format("YYYY-MM-DD HH:00:00")
-        where = f" WHERE time_bucket >= timestamp '{cutoff}'"
-        _d1(f'DELETE FROM "{name}" WHERE time_bucket >= \'{cutoff}\';', token)
+        base = pendulum.parse(str(d1_max).replace(" ", "T"))
+        if is_date:
+            cutoff = base.subtract(days=APPEND_LOOKBACK_D).format("YYYY-MM-DD")
+            trino_lit = f"date '{cutoff}'"
+        else:
+            cutoff = base.subtract(hours=APPEND_LOOKBACK_H).format("YYYY-MM-DD HH:00:00")
+            trino_lit = f"timestamp '{cutoff}'"
+        where = f' WHERE "{time_axis}" >= {trino_lit}'
+        _d1(f'DELETE FROM "{name}" WHERE "{time_axis}" >= \'{cutoff}\';', token)
 
     cur.execute(f"SELECT * FROM {rel}{where}")
     rows = cur.fetchall()
@@ -182,11 +196,11 @@ def _export(**context) -> None:
     meta = _load_serving_meta()
     now = pendulum.now("UTC").isoformat()
 
-    # 이번 run 의 대상: 매시 FAST + HOURLY(append), DAILY_FULL_HOUR_KST(08시) run 은 전체.
-    # hourly 는 append 라 매시 돌아도 쓰기 부담 작음(최근 2시간만) → 항상 포함.
+    # 이번 run 의 대상: 매시 FAST + APPEND(hourly·일별), 08시 run 은 DAILY(forecast)까지 전체.
+    # APPEND 는 최근 구간만 재적재라 매시 돌아도 쓰기 부담 작음 → 항상 포함.
     end = context.get("data_interval_end") or pendulum.now("UTC")
     full = end.in_timezone(KST).hour == DAILY_FULL_HOUR_KST or context["params"].get("full")
-    tables = EXPORT_TABLES if full else (FAST_TABLES + HOURLY_APPEND_TABLES)
+    tables = EXPORT_TABLES if full else (FAST_TABLES + APPEND_TABLES)
     print(f"[serving export] mode={'full' if full else 'fast'} · {len(tables)} tables")
 
     kst_now = pendulum.now(KST).naive()  # event_at 은 KST 벽시계 naive 저장 → naive 로 비교
@@ -202,9 +216,9 @@ def _export(**context) -> None:
         time_axis = next((c for c, t in col_defs if t.startswith(("timestamp", "date"))), None)
         time_idx = colnames.index(time_axis) if time_axis else None
 
-        if name in HOURLY_APPEND_TABLES:
+        if name in APPEND_TABLES:
             # 이력·누적: 최근 구간만 upsert(전량 교체 금지 — 한도 초과). catalog row_count = D1 총.
-            _, cat_count = _export_append(name, rel, col_defs, cur, token)
+            _, cat_count = _export_append(name, rel, col_defs, time_axis, cur, token)
         else:
             cur.execute(f"SELECT * FROM {rel}")
             rows = cur.fetchall()
