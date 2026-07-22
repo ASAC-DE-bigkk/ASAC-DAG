@@ -65,9 +65,9 @@ cannot be marked publishable.
 Run from the ASAC-DAG repository root:
 
 ```bash
-python3 scripts/delivery_reliability_pilot.py evidence.json --format markdown
-python3 scripts/delivery_reliability_pilot.py evidence.json --format json
-python3 scripts/delivery_reliability_pilot.py evidence.json --format csv
+python3 domains/weather/weather_ingest/delivery_reliability_pilot.py evidence.json --format markdown
+python3 domains/weather/weather_ingest/delivery_reliability_pilot.py evidence.json --format json
+python3 domains/weather/weather_ingest/delivery_reliability_pilot.py evidence.json --format csv
 ```
 
 The command writes only to stdout. Redirecting output to a file is an explicit
