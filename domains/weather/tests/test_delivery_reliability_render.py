@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from common.delivery_reliability.render import (
+WEATHER_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(WEATHER_ROOT))
+
+from weather_ingest.delivery_reliability.render import (  # noqa: E402
     report_from_document,
     render_csv,
     render_json,
@@ -13,8 +16,8 @@ from common.delivery_reliability.render import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[2]
-CLI = ROOT / "scripts" / "delivery_reliability_pilot.py"
+ROOT = Path(__file__).resolve().parents[3]
+CLI = WEATHER_ROOT / "weather_ingest" / "delivery_reliability_pilot.py"
 
 
 def run_mapping(**overrides):

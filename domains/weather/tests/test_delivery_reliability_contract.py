@@ -1,8 +1,12 @@
 from datetime import datetime, timezone
+from pathlib import Path
+import sys
 
 import pytest
 
-from common.delivery_reliability.contract import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from weather_ingest.delivery_reliability.contract import (  # noqa: E402
     DeliveryEvidence,
     DeliveryState,
     ensure_unique_grain,

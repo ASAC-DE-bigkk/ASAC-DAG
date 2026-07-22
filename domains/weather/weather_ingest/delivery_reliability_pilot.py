@@ -9,11 +9,15 @@ import sys
 from pathlib import Path
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-if str(REPOSITORY_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPOSITORY_ROOT))
+DAGS_ROOT = Path(__file__).resolve().parents[3]
+for import_path in (
+    DAGS_ROOT,
+    DAGS_ROOT / "domains" / "weather",
+):
+    if str(import_path) not in sys.path:
+        sys.path.insert(0, str(import_path))
 
-from common.delivery_reliability.render import (  # noqa: E402
+from weather_ingest.delivery_reliability.render import (  # noqa: E402
     report_from_document,
     render_csv,
     render_json,

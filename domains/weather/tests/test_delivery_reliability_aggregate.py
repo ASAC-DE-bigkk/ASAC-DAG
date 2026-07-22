@@ -1,9 +1,13 @@
 from datetime import datetime, timezone
+from pathlib import Path
+import sys
 
 import pytest
 
-from common.delivery_reliability.aggregate import build_pilot_report
-from common.delivery_reliability.contract import DeliveryEvidence
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from weather_ingest.delivery_reliability.aggregate import build_pilot_report  # noqa: E402
+from weather_ingest.delivery_reliability.contract import DeliveryEvidence  # noqa: E402
 
 
 OBSERVED_AT = datetime(2026, 7, 19, 12, tzinfo=timezone.utc)
