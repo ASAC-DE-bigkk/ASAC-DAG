@@ -42,6 +42,16 @@ _CATALOG_AVAILABILITY_MARKERS = (
     "failed to list tables",
     "nohttpresponseexception",
 )
+# 공용 asac_axes seed(예: seoul_admin_dong_crosswalk)는 weather/traffic transform마다
+# 재시딩되는 계약 게이트다. weather와 traffic의 recurring transform이 서로 다른
+# 스케줄로 같은 공용 축을 동시에 재시딩/읽을 수 있어, 한쪽이 seed를 재적재하는 짧은
+# 창에 다른 쪽이 dim_admin_dong 같은 공용 view를 읽다 걸릴 수 있다(ASAC-DAG#480).
+# 재시딩 주기 자체는 seed drift 계약 검증이라 건드리지 않고, 이 특정 transient
+# 신호만 재시도 대상으로 인식한다.
+_SHARED_AXIS_REBUILD_RACE_MARKERS = (
+    "invalid_view",
+    "does not exist",
+)
 _UNSAFE_SEGMENT_CHARS = re.compile(r"[^A-Za-z0-9._=-]")
 
 
@@ -122,8 +132,13 @@ def classify_dbt_failure(
     has_catalog_availability_error = all(
         marker in detail for marker in _CATALOG_AVAILABILITY_MARKERS
     )
+    has_shared_axis_rebuild_race = all(
+        marker in detail for marker in _SHARED_AXIS_REBUILD_RACE_MARKERS
+    )
     if has_trino_or_adapter_error and (
-        has_infrastructure_error or has_catalog_availability_error
+        has_infrastructure_error
+        or has_catalog_availability_error
+        or has_shared_axis_rebuild_race
     ):
         return DbtFailure(
             classification="retryable-infrastructure-error",

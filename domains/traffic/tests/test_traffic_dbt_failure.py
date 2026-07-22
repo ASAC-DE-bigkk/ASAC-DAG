@@ -84,6 +84,41 @@ def test_does_not_retry_catalog_listing_error_without_transport_failure():
     assert failure.retryable is False
 
 
+def test_classifies_shared_axis_rebuild_race_as_retryable_infrastructure_failure():
+    failure = classify_dbt_failure(
+        returncode=1,
+        results=[],
+        artifact_path=None,
+        command_output=(
+            "Database Error in test "
+            "assert_gold_traffic_current_by_admin_dong_hourly_admin_join_reconciles\n"
+            "TrinoUserError(type=USER_ERROR, name=INVALID_VIEW, "
+            "message=\"line 27:10: Failed analyzing stored view "
+            "'iceberg_dev.common.dim_admin_dong': line 28:6: Table "
+            "'iceberg_dev.common.seoul_admin_dong_crosswalk' does not exist\", "
+            "query_id=20260722_045215_06725_32p5n)"
+        ),
+    )
+
+    assert failure.classification == "retryable-infrastructure-error"
+    assert failure.retryable is True
+
+
+def test_does_not_retry_invalid_view_error_without_missing_table_signature():
+    failure = classify_dbt_failure(
+        returncode=1,
+        results=[],
+        artifact_path=None,
+        command_output=(
+            "TrinoUserError(type=USER_ERROR, name=INVALID_VIEW, "
+            'message="view definition references a column that no longer exists")'
+        ),
+    )
+
+    assert failure.classification == "model-execution-failed"
+    assert failure.retryable is False
+
+
 def test_classifies_dbt_model_execution_error_as_non_retryable_failure():
     failure = classify_dbt_failure(
         returncode=1,
