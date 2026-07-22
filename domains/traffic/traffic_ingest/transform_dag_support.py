@@ -242,6 +242,7 @@ def require_publishable_incident_snapshot(
     run_id: str,
     *,
     mismatch_action: str,
+    snapshot_label: str = "Traffic Incident",
 ) -> str:
     """Distinguish an expected superseded run from manifest I/O failures."""
     if mismatch_action not in {"skip", "fail"}:
@@ -249,17 +250,17 @@ def require_publishable_incident_snapshot(
     try:
         verified = manifest.require_publishable(run_id)
     except RunNotPublishableError as exc:
-        message = f"Traffic Incident snapshot was superseded: {run_id}"
+        message = f"{snapshot_label} snapshot was superseded: {run_id}"
         if mismatch_action == "skip":
             raise AirflowSkipException(message) from exc
         raise AirflowFailException(message) from exc
     except Exception as exc:
         raise AirflowFailException(
-            f"Traffic Incident manifest verification failed: {run_id}"
+            f"{snapshot_label} manifest verification failed: {run_id}"
         ) from exc
     if str(verified) != run_id:
         raise AirflowFailException(
-            f"Traffic Incident manifest identity mismatch: {run_id}"
+            f"{snapshot_label} manifest identity mismatch: {run_id}"
         )
     return run_id
 
@@ -536,10 +537,14 @@ def resolve_traffic_flow_silver_snapshot_run(
             "Traffic Flow Silver requires a matching Incident parent"
         )
     flow_run_id = str(compatible_flow_events[-1]["flow_dag_run_id"])
-    _require_publishable(
+    # Bronze 미publish(빈 응답 실패 포함)는 이 DAG의 존재 이유(Flow Silver 생성)가
+    # 아직 준비되지 않았다는 정상 신호다 — skip(다음 5분 asset 트리거가 재수렴)으로
+    # 처리해 실패 아닌 것으로 남기고, manifest 조회 자체가 깨진 경우만 fail 로 알린다.
+    require_publishable_incident_snapshot(
         flow_manifest_factory(),
         flow_run_id,
-        domain="traffic flow",
+        mismatch_action="skip",
+        snapshot_label="Traffic Flow",
     )
     task_instance = context.get("ti") or context.get("task_instance")
     if task_instance is not None:

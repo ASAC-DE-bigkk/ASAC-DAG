@@ -8,7 +8,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from traffic_ingest.errors import TrafficBronzeConfigurationError, TrafficSourceBusinessError
+from traffic_ingest.errors import (
+    TrafficBronzeConfigurationError,
+    TrafficSourceBusinessError,
+    TrafficSourceEmptyResponseError,
+    TrafficSourceSchemaError,
+)
 from traffic_ingest.flow_info import (
     build_api_url,
     normalize_link_ids,
@@ -83,6 +88,16 @@ def test_info_200_is_a_valid_zero_row_response():
 def test_non_success_traffic_info_response_fails_loudly():
     with pytest.raises(TrafficSourceBusinessError, match="ERROR-310"):
         parse_traffic_info_response(_payload("ERROR-310"))
+
+
+def test_empty_traffic_info_response_is_a_known_transient_error():
+    with pytest.raises(TrafficSourceEmptyResponseError):
+        parse_traffic_info_response(b"")
+
+
+def test_non_empty_garbled_traffic_info_response_still_fails_loudly():
+    with pytest.raises(TrafficSourceSchemaError):
+        parse_traffic_info_response(b"not json and not xml")
 
 
 def test_link_ids_are_deduplicated_and_request_metadata_has_no_api_key():
