@@ -12,7 +12,7 @@ Issue: [#479](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/479)
 `weather_w2_canonical_transform`이 2026-07-17 이 패턴으로 배포된 뒤 unpause 단계가
 빠져 **5일간 DAG run이 0건**이었고, 그 DAG가 유일하게 만드는
 `gold_weather_forecast_by_admin_dong`도 같은 기간 정체됐다(자세한 경위는
-[LessonRun.md](../../../LessonRun.md) 2026-07-22 항목 참고). Airflow UI에서 pause
+[LessonRun.md](../../../../../LessonRun.md) 2026-07-22 항목 참고). Airflow UI에서 pause
 상태를 직접 보지 않는 한 증상이 겉으로 드러나지 않는다는 점이 발견을 늦췄다.
 
 ## 체크리스트
