@@ -5,6 +5,40 @@
 
 ---
 
+## 2026-07-23
+
+### 76. gold → 공용 D1 서빙 게시 개시 — Serving Contract v1 초안(#478) 준거
+
+request:
+- 골드가 R2(Iceberg)뿐 아니라 **D1 에도 적재**되어야 함. 단 **2만 행 초과 commerce 골드는 D1
+  게시 금지**이며 이는 **gold 레이어 실행 시** 반영(런타임 판정). 그 전에 gold 실행이 전체
+  재적재인지 부분 적재인지 먼저 확인할 것(전체 재적재면 사용 시 문제). D1 적재 규약은
+  ASAC-DAG#478 논의 의제를 바탕으로 적용. 공용 D1 합승 + 주기 이원화 선택(사용자 확정).
+
+response:
+- **재적재 방식 실측**: gold 22 중 19종 `materialized=table` **전량 재생성**, flow 3종
+  `incremental(append)` 부분 적재. 전량 재생성은 `on_table_exists` 기본 `rename` — rename 2회
+  사이 "테이블 없음" 창 존재. `replace` 전환을 검토했으나 **전 22모델 contract enforced 실측**
+  → #478 실측(enforced+replace=2커밋)상 0행 창이 생겨 더 나쁨 — **보류**(캐시에 0행 박제 방지).
+  D1 export 는 gold DAG 내 직렬이라 재빌드 창과 무관.
+- **계약 선언(dbt)**: `_commerce_gold__models.yml` 22모델에 `config.meta.serving`
+  (#478 수렴 필드 — enabled/product_id/contract_version/grain/primary_key/publication_mode/
+  zero_policy/partial_policy/refresh(cron)/product_question). 행수는 선언하지 않음(실측 합의).
+  >2만 행 5종(flow 3·churn_yearly·uptae_mix)은 `enabled: false` + `publication_mode: hold`.
+- **게시 구현(dags)**: `include/gold/serving_export.py` + `commerce_load_gold.export_serving_d1`
+  (dbt_gold 후 report 와 병렬). 매 실행 행수 실측 게이트(>20,000 스킵 — 성장 방어), 주기 판정
+  (refresh cron 요일 — 중형 6종 큰 표부터 월~토 분산, 일 최대 ≈91k 로 공용 한도 내), 첫 게시도
+  요일 준수(스파이크 방지), 8일 경과 자가치유. staging→단일요청 swap(무중단), D1 행수 검증,
+  `_catalog` upsert(citydata 동일 스키마)+자기 접두 등록 누락 자동검사(#477③),
+  `_publication_log`(publication_id·source_run_id·행수·bytes·status). zero/partial hold 는
+  §19.1 그룹 알림(warning), 등록 누락 error. §20 게이트 통과(assert_identifier·netio·redact·
+  register_secret) + 검증: DAG import OK · 컨테이너 스모크로 dong_summary 414행 실게시 →
+  공개 Worker `/data/gold_license_dong_summary`·`/catalog` 서빙 확인.
+- **운영 전제**: 컨테이너에 `CLOUDFLARE_API_TOKEN` env 필요(root .env 에 존재 — 재생성 시 주입.
+  3행의 빈 중복 선언은 제거 권장). 토큰이 스모크 중 예외 메시지로 1회 노출되어 **회전 권장**.
+
+---
+
 ## 2026-07-20
 
 ### 75. from-zero 재빌드 드릴 — bronze/silver/gold 결함 3건 수정 + 태스크 개명 (#458·#459·#460)

@@ -5,9 +5,11 @@ silver = 결측 처리·표준화·중복 제거·**테이블 단위 정리·JOI
 집계·지표·인사이트만**. 원형 파이프라인(entity·entity_history·detail)은 commerce_load_silver 에
 편승했고, 이 DAG 는 silver 원형을 입력으로 집계 테이블만 빌드·누적한다.
 
-  dbt_gold(Cosmos — gold_license_dong_summary run+test) ──> report_gold
+  dbt_gold(Cosmos — gold 22종 run+test) ──┬──> export_serving_d1 (공용 D1 선별 게시, #478 계약)
+                                          └──> report_gold
 
-- 집계 확장 시 models/gold/ 에 모델 추가 + GOLD_SELECT 에 등록(D1 export 후보는 PROJECT.md §4.3).
+- 집계 확장 시 models/gold/ 에 모델 추가 + GOLD_SELECT 에 등록 + yml 에 meta.serving 선언
+  (D1 게시 규약·주기·행수 상한은 PROJECT.md §4.3 + include/gold/serving_export.py).
 - 유지보수(silver 원형·detail + gold 집계 optimize/expire/orphan)는 silver DAG 의
   maintain_silver_gold_tables 가 담당(gold 전용 아님 — 대상은 silver+gold 혼합).
 """
@@ -111,6 +113,20 @@ def commerce_load_gold():
                    if dr and getattr(dr, "start_date", None) else None)
         return report.send_gold_report(elapsed_seconds=elapsed)
 
+    @task
+    def export_serving_d1(**ctx) -> dict:
+        """gold → 공용 D1 선별 게시(Serving Contract v1 초안 ASAC-DAG#478 준거).
+
+        yml meta.serving(enabled·주기)을 읽어 **매 실행 행수 실측**으로 게이트한다 —
+        20,000행 초과 게시 제외(사용자 지시), 0행/급감 hold(직전 스냅샷 유지),
+        staging→swap 게시, _catalog upsert + 등록 누락 검증(#477③), _publication_log 기록.
+        """
+        from gold import serving_export
+
+        dr = ctx.get("dag_run")
+        return serving_export.export_serving(
+            source_run_id=getattr(dr, "run_id", None) or "manual")
+
     dbt_gold = DbtTaskGroup(
         group_id="dbt_gold",
         project_config=_project_config,
@@ -120,7 +136,8 @@ def commerce_load_gold():
         operator_args={"install_deps": False},
     )
 
-    dbt_gold >> report_gold()
+    # export 와 리포트는 독립 — export 실패가 빌드 리포트를 막지 않는다(리포트는 all_done)
+    dbt_gold >> [export_serving_d1(), report_gold()]
 
 
 commerce_load_gold()

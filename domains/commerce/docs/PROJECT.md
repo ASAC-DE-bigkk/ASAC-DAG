@@ -152,10 +152,26 @@ Serve       API·화면 조회 최적화 최종 결과 = D1(SQLite) 선별 expor
 | `silver_license_entity_history` | dbt | 버전 이력 프로젝션(append, collected_at 증분) | ❌ (대용량 — Iceberg 전용) |
 | `meta_detail_catalog` | Python(Trino) | detail 스펙 정본(파생 과정 — 별도 meta_ 단위) | ❌ (내부 메타) |
 | `silver_<domain>_detail` ×N | Python(Trino) | **API 별 상이(비공통) 컬럼 평탄화** — 카탈로그 구동(원형=silver) | 대상별 선별 후보 |
-| `gold_license_dong_summary` | dbt | 행정동별 업소/영업/폐업 집계(소형) | ✅ 1순위 |
-| `gold_license_flow_daily/monthly/yearly` | dbt | 개업/폐업 흐름 × 업종 3단 × 지역 3축 — **완결 기간만+지연보정 창**(이미 적재된 기간 재적재 없음, 중복 불가) | ✅ 기간 키 증분 |
-| `gold_license_status_duration` | dbt | 상태 전이 지속기간 요약(업종·상태군·진행중) — 이력 기반 | ✅ (소형) |
-| `gold_env_facility_operation` | dbt | 가동 시간·일수 축(환경 2종 — **영업시간/요일 필드는 원천 부재** 실측) | 후보 |
+| `gold_license_dong_summary` 등 소형 11종(≤1천 행) | dbt | 행정동 집계·특화(LQ)·승계·품질 등 | ✅ **매일 게시** |
+| `gold_license_geo_grid` 등 중형 6종(1천~2만 행) | dbt | 격자·업력밴드·코호트·동×업종·계절성·수명 | ✅ **주 1회(월~토 요일 분산)** |
+| `gold_license_flow_daily/monthly/yearly` | dbt | 개업/폐업 흐름 × 업종 3단 × 지역 3축 — **완결 기간만+지연보정 창**(append 증분) | ❌ **행수 상한 초과**(2.8M/1.2M/415k > 2만) — Iceberg 전용 |
+| `gold_license_churn_yearly` · `gold_detail_uptae_mix` | dbt | 연별 교체율(55k) · 업태 구성(30k) | ❌ 행수 상한 초과 |
+
+**D1 게시 규약(2026-07-23, ASAC-DAG#478 Serving Contract v1 초안 준거)** — 구현:
+`commerce_load_gold.export_serving_d1` + `include/gold/serving_export.py`.
+
+- **선언**: dbt yml `config.meta.serving`(enabled·product_id·contract_version·grain·primary_key·
+  publication_mode·zero_policy·partial_policy·refresh·product_question — #478 수렴 필수 8+선택).
+  행수는 선언하지 않는다 — **export 가 매 실행 실측**(#478 합의).
+- **행수 상한(사용자 지시)**: 실측 `> 20,000행` 이면 게시 스킵(`skipped_row_cap`) — 고정 목록이
+  아니라 런타임 게이트라 표가 성장해 상한을 넘으면 자동 제외된다.
+- **쓰기 예산**: 공용 D1 무료 한도(계정당 100k행/일)는 **일 단위 경성** — citydata ~72k 와 합승이므로
+  중형 6종은 큰 표부터 월~토 요일 분산(일 최대 ≈ 91k). 첫 게시도 요일 규칙을 따른다(스파이크 방지).
+- **게시 = Publication 단위(#477 교훈)**: staging→swap(직전 스냅샷 무중단) → D1 행수 검증 →
+  `_catalog` upsert(citydata 와 동일 스키마) → `_publication_log`(publication_id·source_run_id·
+  실측 행수·bytes·serving_status) → 자기 접두(`gold_license_/gold_detail_/gold_env_`) 등록 누락 자동검사.
+- **게이트**: `zero_policy: hold`(0행 → 게시 스킵·직전 유지) · `partial_policy: hold`(직전 게시 대비
+  80% 미만 급감 → hold) — hold 는 §19.1 그룹 품질 알림(warning), 등록 누락은 error.
 
 - **서빙 단위 추출** = 코어(entity) ⋈ detail(자연키 조인) — D1 export 는 이 조합에서 대상별
   필터·컬럼 축소로 뽑는다(§4.2 원칙).
@@ -238,6 +254,12 @@ silver/gold 변환·DB 명세는 **dbt 번들**(별도 서브모듈 ASAC-DBT —
 
 ## 7. 변경 이력
 
+- 2026-07-23: **gold → 공용 D1 게시 개시(§4.3 게시 규약 신설)** — ASAC-DAG#478 Serving Contract
+  v1 초안 준거(yml `meta.serving` 선언 + export 실측). 행수 상한 20,000 초과 게시 금지(런타임
+  실측 게이트 — flow 3종·churn_yearly·uptae_mix 제외), 소형 11종 매일·중형 6종 요일 분산 주 1회
+  (공용 D1 일 쓰기 한도 합승), staging→swap + zero/partial hold + `_catalog`·`_publication_log`
+  Publication 단위(#477 교훈). gold 재적재 방식 실측 병기: table 19종 전량 재생성(rename,
+  전 모델 contract enforced → `replace` 는 0행 창이 생겨 보류) · flow 3종 append 증분. (#478)
 - 2026-07-14: **서빙 레이어 전면 개편(§4 신설)** — 서빙 DB Postgres 폐기, 대상 = **D1(SQLite)**.
   gold 는 bronze/silver 와 동일 **Iceberg 카탈로그**(dbt)로 재구축하고 **선별 소수 테이블만 D1 export**
   (예정). "DB 특성(용량 상한·단일 writer·시퀀스 없음·엣지 읽기 최적화)에 따라 gold·서빙 레이어를
