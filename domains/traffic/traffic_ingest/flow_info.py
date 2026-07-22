@@ -19,6 +19,7 @@ from traffic_ingest.common.runtime import (
 from traffic_ingest.errors import (
     TrafficBronzeConfigurationError,
     TrafficSourceBusinessError,
+    TrafficSourceEmptyResponseError,
     TrafficSourceSchemaError,
 )
 
@@ -187,6 +188,8 @@ def build_raw_object_key(
 def parse_traffic_info_response(raw_bytes: bytes) -> tuple[dict[str, Any], list[dict[str, str | None]]]:
     if raw_bytes.lstrip().startswith(b"<"):
         return _parse_traffic_info_xml(raw_bytes)
+    if not raw_bytes.strip():
+        raise TrafficSourceEmptyResponseError("TrafficInfo response body is empty")
     try:
         document = json.loads(raw_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

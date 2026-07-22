@@ -17,6 +17,10 @@ class TrafficSourceSchemaError(TrafficBronzeDeterministicError, RuntimeError):
     """TOPIS or landing metadata violated the expected schema."""
 
 
+class TrafficSourceEmptyResponseError(TrafficSourceSchemaError):
+    """TOPIS returned an empty response body — known-transient, no data lost."""
+
+
 class TrafficRawIntegrityError(TrafficBronzeDeterministicError, RuntimeError):
     """A raw object does not match the hash recorded at landing time."""
 
@@ -36,5 +40,6 @@ __all__ = [
     "TrafficInvalidWindowError",
     "TrafficRawIntegrityError",
     "TrafficSourceBusinessError",
+    "TrafficSourceEmptyResponseError",
     "TrafficSourceSchemaError",
 ]

@@ -171,6 +171,7 @@ def problem_failure_callback(domain: str, *, source_system: str | None = None,
                              sink: R2ErrorSink | None = None,
                              dbt_project_dir: str | None = None,
                              dbt_run_results_xcom_key: str | None = None,
+                             should_notify: Callable[[BaseException | None], bool] | None = None,
                              ) -> Callable[[dict[str, Any]], None]:
     """실패 콜백 팩토리.
 
@@ -178,6 +179,10 @@ def problem_failure_callback(domain: str, *, source_system: str | None = None,
     XCom으로 남긴 attempt-local ``run_results.json``만 읽어 실패 모델/테스트·사유를
     알림에 붙인다. XCom key를 생략한 기존 caller는 기존 ``target/run_results.json``
     best-effort 경로를 유지한다.
+
+    ``should_notify`` 를 주면 그 predicate가 ``context["exception"]`` 에 대해 False 를
+    돌려주는 실패에 한해 Discord 전송만 건너뛴다(R2 Problem 문서 기록은 그대로 유지 —
+    감시 가능성은 보존한다). 생략 시 기존 동작(항상 알림) 그대로.
     """
     error_sink = sink or R2ErrorSink()
 
@@ -194,6 +199,12 @@ def problem_failure_callback(domain: str, *, source_system: str | None = None,
         # Discord 에러 알림 (#161) — R2 기록과 독립. 어떤 실패도 밖으로 안 던진다.
         try:
             if problem is None or _notify_optout(domain):
+                return
+            if should_notify is not None and not should_notify(context.get("exception")):
+                LOGGER.info(
+                    "[discord] known-quiet 실패로 분류되어 알림 스킵 (dag_id=%s)",
+                    problem.dag_id,
+                )
                 return
             if not first_notice_for_run(problem.dag_id, problem.run_id):
                 LOGGER.info("[discord] 같은 run 의 실패 알림 이미 전송 — 스킵 (%s)",
