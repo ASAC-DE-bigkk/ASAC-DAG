@@ -433,6 +433,8 @@ with DAG(
     schedule=transform_schedule(),
     catchup=False,
     max_active_runs=1,
+    # 배포 직후 자동 실행을 막기 위한 의도적 안전장치 — 영구 pause가 아니다.
+    # 머지 후 반드시 수동 unpause 필요: docs/operations/new-asset-triggered-dag-rollout.md
     is_paused_upon_creation=True,
     default_args={"retries": 1, "retry_delay": DBT_RETRY_DELAY},
     params=DEFAULT_PARAMS,
