@@ -18,6 +18,12 @@ _TRANSIENT_MARKERS = (
     "connection reset",
     "connection aborted",
 )
+# 공용 asac_axes seed(예: seoul_admin_dong_crosswalk)는 weather/traffic transform마다
+# 재시딩되는 계약 게이트라, 두 도메인 DAG가 같은 Bronze 이벤트로 동시에 돌면 다른 쪽이
+# seed를 재적재하는 짧은 창에 이 쪽에서 dim_admin_dong 같은 공용 view를 읽다 걸릴 수
+# 있다(ASAC-DAG#480). 재시딩 주기 자체는 seed drift 계약 검증이라 건드리지 않고, 이
+# 특정 transient 신호만 재시도 대상으로 인식한다.
+_SHARED_AXIS_REBUILD_RACE_MARKERS = ("invalid_view", "does not exist")
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,13 @@ def classify_weather_dbt_failure(
     ):
         return WeatherDbtFailure(
             "retryable-infrastructure-error",
+            retryable=True,
+        )
+    if any(marker in detail for marker in _ADAPTER_MARKERS) and all(
+        marker in detail for marker in _SHARED_AXIS_REBUILD_RACE_MARKERS
+    ):
+        return WeatherDbtFailure(
+            "retryable-shared-axis-rebuild-race",
             retryable=True,
         )
     if missing_expected_artifacts:
