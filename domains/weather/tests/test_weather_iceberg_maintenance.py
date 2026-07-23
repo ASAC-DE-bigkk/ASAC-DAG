@@ -15,7 +15,9 @@ from common.runtime_guard import RuntimeTargetError  # noqa: E402
 from weather_ingest.iceberg_maintenance import (  # noqa: E402
     APPROVED_DEV_CATALOG,
     APPROVED_DEV_SCHEMA,
+    APPROVED_PROD_CATALOG,
     MaintenancePlanError,
+    _connect_trino,
     classify_action_exception,
     collect_maintenance_fingerprint,
     collect_maintenance_inventory,
@@ -42,6 +44,16 @@ def dev_env():
         "ASK_SEOUL_TARGET": "dev",
         "DBT_TARGET": "dev",
         "TRINO_DEV_ICEBERG_CATALOG": APPROVED_DEV_CATALOG,
+        "ASK_SEOUL_SCHEMA": APPROVED_DEV_SCHEMA,
+        "WEATHER_SCHEMA": "weather",
+    }
+
+
+def prod_env():
+    return {
+        "ASK_SEOUL_TARGET": "prod",
+        "DBT_TARGET": "prod",
+        "TRINO_ICEBERG_CATALOG": APPROVED_PROD_CATALOG,
         "ASK_SEOUL_SCHEMA": APPROVED_DEV_SCHEMA,
         "WEATHER_SCHEMA": "weather",
     }
@@ -210,7 +222,7 @@ def test_resolve_plan_requires_fixed_retention_and_schema():
 
     unsafe_env = dev_env()
     unsafe_env["ASK_SEOUL_SCHEMA"] = "ask_seoul"
-    with pytest.raises(MaintenancePlanError, match="approved dev schema"):
+    with pytest.raises(MaintenancePlanError, match="approved schema"):
         resolve_maintenance_plan(
             target="dev",
             retention="7d",
@@ -220,7 +232,7 @@ def test_resolve_plan_requires_fixed_retention_and_schema():
             env=unsafe_env,
         )
 
-    with pytest.raises(MaintenancePlanError, match="target must be exactly dev"):
+    with pytest.raises(MaintenancePlanError, match="target must be dev or prod"):
         resolve_maintenance_plan(
             target="DEV",
             retention="7d",
@@ -229,6 +241,58 @@ def test_resolve_plan_requires_fixed_retention_and_schema():
             dag_run_id="manual__target_case",
             env=dev_env(),
         )
+
+
+def test_resolve_plan_accepts_prod_target_with_prod_catalog():
+    plan = resolve_maintenance_plan(
+        target="prod",
+        retention="7d",
+        tables=(ALLOWED_TABLES[0],),
+        allowed_tables=ALLOWED_TABLES,
+        dag_run_id="manual__prod",
+        env=prod_env(),
+    )
+
+    assert plan.target == "prod"
+    assert plan.catalog == APPROVED_PROD_CATALOG
+    assert plan.schema == APPROVED_DEV_SCHEMA
+
+
+def test_resolve_plan_rejects_prod_target_with_dev_catalog(monkeypatch):
+    """Caught by the shared runtime_guard cross-check before this module's own
+    (redundant, defense-in-depth) catalog check ever runs."""
+
+    def fail_if_connected():
+        raise AssertionError("catalog mismatch must not connect")
+
+    monkeypatch.setattr(
+        "weather_ingest.iceberg_maintenance._connect_trino", fail_if_connected
+    )
+
+    bad_env = prod_env()
+    bad_env["TRINO_ICEBERG_CATALOG"] = APPROVED_DEV_CATALOG
+    with pytest.raises(RuntimeTargetError, match="catalog"):
+        resolve_maintenance_plan(
+            target="prod",
+            retention="7d",
+            tables=(ALLOWED_TABLES[0],),
+            allowed_tables=ALLOWED_TABLES,
+            dag_run_id="manual__prod_bad_catalog",
+            env=bad_env,
+        )
+
+
+def test_connect_trino_uses_requested_catalog(monkeypatch):
+    captured = {}
+
+    def fake_connect(**kwargs):
+        captured.update(kwargs)
+        return "connection"
+
+    monkeypatch.setattr("trino.dbapi.connect", fake_connect)
+
+    assert _connect_trino(catalog=APPROVED_PROD_CATALOG) == "connection"
+    assert captured["catalog"] == APPROVED_PROD_CATALOG
 
 
 def test_resolve_plan_keeps_weather_dbt_schema_independent_from_bronze_maintenance():
@@ -904,6 +968,8 @@ def test_run_action_fails_closed_when_optimize_non_main_ref_drifts():
         replace(sample_action_plan(), retention="1d"),
         replace(sample_action_plan(), retain_last=2),
         replace(sample_action_plan(), plan_hash="f" * 64),
+        replace(sample_action_plan(), catalog=APPROVED_PROD_CATALOG),
+        replace(sample_action_plan(), target="staging"),
     ],
 )
 def test_raw_forged_plan_is_rejected_before_action_or_inventory_cursor_use(forged):

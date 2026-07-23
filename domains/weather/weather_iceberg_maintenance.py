@@ -70,7 +70,7 @@ DEFAULT_PARAM_VALUES = {
     "tables": CANONICAL_TABLES,
 }
 DEFAULT_PARAMS = {
-    "target": Param("dev", enum=["dev"]),
+    "target": Param("dev", enum=["dev", "prod"]),
     "retention": Param("7d", enum=["7d"]),
     "tables": Param(
         list(CANONICAL_TABLES),

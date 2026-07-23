@@ -99,12 +99,25 @@ def test_split_dags_keep_dev_only_target(loader):
 def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
     module = loader()
     critical_task_ids = {"dbt_run_silver", "dbt_test_silver", "dbt_test_gold"}
+    local_workload_task_ids = {"dbt_deps", "dbt_deps_gold"}
+    # Pre-write checks read Trino but do not need to serialize behind the
+    # heavy pool with actual writes: keeping them off it shortens the window
+    # between pinning a snapshot and dbt_run_silver, so the pin is less
+    # likely to be superseded by a newer Bronze run under pool contention.
+    light_trino_task_ids = {
+        "dbt_source_freshness",
+        "dbt_test_traffic_incident_availability",
+        "dbt_test_traffic_bronze_source_contract",
+    }
 
     assert module.TRINO_HEAVY_POOL == "trino_traffic_heavy"
     for task_id, task in module.dbt_phase_tasks.items():
-        if task_id in {"dbt_deps", "dbt_deps_gold"}:
+        if task_id in local_workload_task_ids:
             assert "pool" not in task.kwargs
             assert task.kwargs["op_kwargs"]["threads"] is None
+        elif task_id in light_trino_task_ids:
+            assert "pool" not in task.kwargs
+            assert task.kwargs["op_kwargs"]["threads"] == 2
         else:
             assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
             assert task.kwargs["op_kwargs"]["threads"] == 2
