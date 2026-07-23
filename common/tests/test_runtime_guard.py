@@ -13,8 +13,18 @@ def test_accepts_dev_runtime_with_domain_schema_defaults():
     )
 
 
-def test_rejects_prod_target_even_when_catalog_is_dev():
-    with pytest.raises(RuntimeTargetError, match="target"):
+def test_accepts_prod_runtime_with_domain_schema_defaults():
+    validate_dev_runtime(
+        "weather",
+        {
+            "DBT_TARGET": "prod",
+            "TRINO_ICEBERG_CATALOG": "iceberg",
+        },
+    )
+
+
+def test_rejects_prod_target_when_catalog_is_dev():
+    with pytest.raises(RuntimeTargetError, match="catalog"):
         validate_dev_runtime(
             "weather",
             {
@@ -22,6 +32,28 @@ def test_rejects_prod_target_even_when_catalog_is_dev():
                 "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
             },
         )
+
+
+def test_rejects_unsupported_target_value():
+    with pytest.raises(RuntimeTargetError, match="target"):
+        validate_dev_runtime(
+            "weather",
+            {
+                "DBT_TARGET": "staging",
+                "TRINO_ICEBERG_CATALOG": "iceberg",
+            },
+        )
+
+
+def test_allows_reserved_schema_name_under_prod_target():
+    validate_dev_runtime(
+        "traffic",
+        {
+            "DBT_TARGET": "prod",
+            "TRINO_ICEBERG_CATALOG": "iceberg",
+            "ASK_SEOUL_SCHEMA": "ops_smoke",
+        },
+    )
 
 
 def test_rejects_requested_transform_target_mismatch():
