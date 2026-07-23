@@ -50,6 +50,8 @@ WEATHER_DBT_CONTRACT_VARS = {"weather_w2_canonical_revision_date": "2025-04-01"}
 WEATHER_DBT_RUN_RESULTS_XCOM_KEY = "weather_dbt_run_results_path"
 SNAPSHOT_TASK_ID = "resolve_weather_snapshot_run"
 WEATHER_SNAPSHOT_VAR = "weather_snapshot_dag_run_id"
+ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY = "admin_dong_crosswalk_pin_snapshot_id"
+ADMIN_DONG_CROSSWALK_PIN_VAR = "admin_dong_crosswalk_pin_snapshot_id"
 DBT_RETRY_DELAY = timedelta(minutes=2)
 DOMAIN = "weather"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
@@ -116,6 +118,40 @@ def _triggering_asset_events(*, context: dict, asset_uri: str):
     return matched
 
 
+class AdminDongCrosswalkSnapshotUnavailableError(RuntimeError):
+    """The shared admin_dong crosswalk Iceberg table has no usable snapshot to pin."""
+
+
+def resolve_admin_dong_crosswalk_snapshot_id() -> int:
+    """Pin the shared admin_dong crosswalk seed to one Iceberg snapshot (ASAC-DAG#480)."""
+    from weather_ingest.common.runtime import sql_identifier, trino_cursor
+
+    cursor, catalog, _ = trino_cursor()
+    schema = sql_identifier(os.environ.get("COMMON_SCHEMA", "common"))
+    table = sql_identifier("seoul_admin_dong_crosswalk")
+    cursor.execute(
+        "SELECT snapshot_id "
+        f'FROM {catalog}.{schema}."{table}$snapshots" '
+        "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    try:
+        raw_snapshot_id = row[0]
+    except (TypeError, IndexError) as exc:
+        raise AdminDongCrosswalkSnapshotUnavailableError(
+            "admin_dong crosswalk Iceberg snapshot is unavailable"
+        ) from exc
+    if (
+        isinstance(raw_snapshot_id, bool)
+        or not isinstance(raw_snapshot_id, int)
+        or raw_snapshot_id <= 0
+    ):
+        raise AdminDongCrosswalkSnapshotUnavailableError(
+            "admin_dong crosswalk Iceberg snapshot ID must be a positive integer"
+        )
+    return raw_snapshot_id
+
+
 def resolve_weather_snapshot_run(**context) -> str:
     """Pin and verify the exact publishable Weather Bronze snapshot."""
     events = _triggering_asset_events(
@@ -175,6 +211,16 @@ def resolve_weather_snapshot_run(**context) -> str:
     if str(verified_run_id) != run_id:
         raise AirflowFailException(
             f"weather Bronze manifest identity mismatch for snapshot: {run_id}"
+        )
+    ti = context.get("ti") or context.get("task_instance")
+    if ti is not None:
+        try:
+            crosswalk_snapshot_id = resolve_admin_dong_crosswalk_snapshot_id()
+        except AdminDongCrosswalkSnapshotUnavailableError as exc:
+            raise AirflowFailException(str(exc)) from exc
+        ti.xcom_push(
+            key=ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
+            value=crosswalk_snapshot_id,
         )
     return run_id
 
@@ -277,6 +323,14 @@ def run_dbt_phase(
     snapshot_run_id = (
         ti.xcom_pull(task_ids=snapshot_task_id) if snapshot_task_id else None
     )
+    crosswalk_pin_id = (
+        ti.xcom_pull(
+            task_ids=snapshot_task_id,
+            key=ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
+        )
+        if snapshot_task_id
+        else None
+    )
     run_results_path = None
     try:
         execution = weather_dbt.execute_dbt_phase(
@@ -295,6 +349,11 @@ def run_dbt_phase(
                         **(
                             {WEATHER_SNAPSHOT_VAR: snapshot_run_id}
                             if snapshot_task_id
+                            else {}
+                        ),
+                        **(
+                            {ADMIN_DONG_CROSSWALK_PIN_VAR: crosswalk_pin_id}
+                            if crosswalk_pin_id is not None
                             else {}
                         ),
                     },
