@@ -41,9 +41,11 @@ record_citydata_problem = problem_failure_callback(domain="citydata", source_sys
 _run_md_ok = record_run_metadata("citydata", "serving_export", status="success")
 _run_md_fail = record_run_metadata("citydata", "serving_export", status="failed")
 
-# 서빙 대상 계정/DB — dev(개인 계정). 팀 계정 이관 시 여기만 바꾼다. (id 는 비밀 아님)
-SERVING_ACCOUNT_ID = "0d39ddce1c07c97df66843ede19f56c4"
-SERVING_D1_DATABASE_ID = "9db0e851-558e-489f-9e76-f131d25aa267"
+# 서빙 대상 계정/DB — .env 로 주입(비밀 아닌 식별자, 환경 스왑 위해 env 화).
+# .env 의 CLOUDFLARE_ACCOUNT_ID 는 R2용이라 겹치지 않게 SERVING_ 접두 키를 쓴다.
+# (Worker 쪽은 wrangler.toml 이 리터럴로 가짐 — wrangler 는 .env 미참조.)
+SERVING_ACCOUNT_ID = os.environ.get("SERVING_CLOUDFLARE_ACCOUNT_ID", "")
+SERVING_D1_DATABASE_ID = os.environ.get("SERVING_D1_DATABASE_ID", "")
 D1_API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{SERVING_ACCOUNT_ID}/d1/database/{SERVING_D1_DATABASE_ID}/query"
@@ -191,6 +193,9 @@ def _export(**context) -> None:
     if not token:
         raise AirflowException(
             "CLOUDFLARE_API_TOKEN 미설정 — compose 의 airflow env 에 전달 필요 (D1 Edit 권한)")
+    if not SERVING_ACCOUNT_ID or not SERVING_D1_DATABASE_ID:
+        raise AirflowException(
+            "SERVING_CLOUDFLARE_ACCOUNT_ID / SERVING_D1_DATABASE_ID 미설정 — .env 에 추가 필요 (D1 서빙 대상)")
 
     settings = build_trino_settings(target=context["params"].get("target", "dev"))
     conn = connect(settings)
