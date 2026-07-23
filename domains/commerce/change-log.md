@@ -5,6 +5,44 @@
 
 ---
 
+## 2026-07-23
+
+### 76. gold→D1 서빙 export 분리 DAG(commerce_serving_export) + dbt serving_tier 계약 (#493 · ASAC-DBT#334)
+
+request:
+- dags 에서 SQLite(=D1) 적재를 **기존 gold 라인에서 분리**해 신규 DAG 로 올린다. 기존 gold 에서
+  **지정한 품목만** D1 에 갱신되도록 구성. 위 변경에 맞춰 dbt 계약도 함께 반영. 구현 깊이=**코어
+  서빙셋**(direct 15 + rollup 7 + d1_meta + 행수 게이트 + _catalog/R2 마커, dim·current-period 후속),
+  기동=**gold 완료 Asset 자동 트리거**(사용자 확정).
+
+response:
+- **분리 DAG `commerce_serving_export`**: gold 빌드 라인(`commerce_load_gold`)과 서빙 export 를
+  분리(spec §1.4 의 "gold DAG 내 편입" 대신). `commerce_load_gold` 에 `mark_gold_ready`
+  (outlet Asset `iceberg://commerce/gold`, 기본 all_success — **dbt_gold 성공 시에만** 발행) 추가 →
+  export DAG 는 `schedule=[Asset(...)]` 로 자동 기동(분리 유지 + 신선도). Asset 상수는 번들 자립
+  `include/gold/assets.py`(공유 `common.assets` 미변경).
+- **export 모듈 `include/gold/serving_export.py`**: 지정 품목(dbt `meta.serving.serving_tier ≠
+  iceberg_api`)을 공유 D1(`ask-seoul-dev-d1`, citydata·transit 와 동일 DB)에 **전량 교체 스냅샷**.
+  direct 15(SELECT * + 동적 DDL) + rollup 7(§1.3 GROUP BY 파생 — flow_m/y·churn 비율 재산출·
+  geo overview/detail·age_band·uptae share). commerce 소유 `d1_*` 만 DROP+CREATE, 공유
+  `_catalog`/`_request_log`/`d1_meta` 는 **upsert(DROP 금지 — transit 규약 승계)**. 스왑 전 **행수
+  밴드 게이트**(0행/2배 가드 — 밖이면 스킵 + `build_status='stale'` 직전 유지). R2 export 마커
+  `commerce_serve_state/_export_state.json`(재개·감사 정본, silver/bronze state 대칭). D1 HTTP API 는
+  `security.http_post`(timeout·TLS·예외 마스킹), 토큰 `CLOUDFLARE_API_TOKEN`(자동 마스킹), Trino 는
+  `bronze.warehouse`(번들 자립).
+- **dbt 계약(ASAC-DBT#334)**: `_commerce_gold__models.yml` 22모델 `meta.serving` 재정리 — 행수캡
+  `enabled` → `serving_tier`(d1_direct 15 / d1_rollup 6 / iceberg_api 1) + `d1_table` + rollup 축.
+  `gold_license_flow_daily`(원장 290만행)=iceberg_api(D1 금지, Trino 직조회). export `SERVING_SPEC`
+  (22 D1 테이블)과 1:1 대조.
+- **env**: `.env.commerce.example` 에 `CLOUDFLARE_API_TOKEN`·서빙 account/DB id·`COMMERCE_SERVE_STATE_LAYER` 추가.
+- **검증**: py_compile 4파일 OK · `python -m security` PASS(차단 0) · export 모듈 import·SERVING_SPEC 22
+  (중복 0)·롤업 SELECT 포맷 OK · dbt yml YAML 파싱 22모델(로컬 `dbt-trino` 어댑터 부재로 `dbt parse` 는
+  컨테이너/CI 이관). D1 실적재는 컨테이너(Trino·D1 토큰) 필요 — 배포 후 행수 밴드 실측 재보정.
+- 후속(별도 이슈): dim 4종 · current-period 2종(`agg_license_daily/monthly`) · 행수 밴드 실측 보정 ·
+  D1 스왑 원자성(`*_next` 스테이징).
+
+---
+
 ## 2026-07-20
 
 ### 75. from-zero 재빌드 드릴 — bronze/silver/gold 결함 3건 수정 + 태스크 개명 (#458·#459·#460)

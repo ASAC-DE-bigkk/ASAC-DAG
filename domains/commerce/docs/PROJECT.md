@@ -238,6 +238,11 @@ silver/gold 변환·DB 명세는 **dbt 번들**(별도 서브모듈 ASAC-DBT —
 
 ## 7. 변경 이력
 
+- 2026-07-23: **서빙 D1 export 구현 + 계약 tier 화**(#493 · ASAC-DBT#334) — §4 의 gold→D1 선별 export 를
+  gold **빌드 라인과 분리한 신규 DAG**(`commerce_serving_export`, gold 완료 Asset 트리거)로 구현(사용자
+  확정 — spec §1.4 의 gold DAG 내 편입 대신 분리). gold `meta.serving` 을 행수캡 `enabled` →
+  **`serving_tier`(d1_direct/d1_rollup/iceberg_api)** 로 재정리해 "지정 품목"을 정본화. 코어 서빙셋
+  (direct 15 + rollup 7); dim·current-period 는 후속.
 - 2026-07-14: **서빙 레이어 전면 개편(§4 신설)** — 서빙 DB Postgres 폐기, 대상 = **D1(SQLite)**.
   gold 는 bronze/silver 와 동일 **Iceberg 카탈로그**(dbt)로 재구축하고 **선별 소수 테이블만 D1 export**
   (예정). "DB 특성(용량 상한·단일 writer·시퀀스 없음·엣지 읽기 최적화)에 따라 gold·서빙 레이어를
