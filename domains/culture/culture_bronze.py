@@ -363,9 +363,13 @@ with DAG(
     )
 
     # 2) fetch_raw: plan 결과를 동적 매핑, 데이터셋마다 raw 박제까지만(재현 불가 경계).
+    #    동시성 상한 4 = #201 완화 ①. KOPIS 400 은 런 시작 burst(15개 동시 첫 요청)를
+    #    따라오므로(03:00 이동 후에도 재발 4회로 확정) 동시 요청을 15→4 로 줄인다.
+    #    직렬화 비용 실측 +30s 이내(합 550s ÷ 4 ≈ 138s vs 병렬 최장 111s), 신선도 30h 무영향.
     fetch_raw = PythonOperator.partial(
         task_id="fetch_raw",
         python_callable=_fetch_raw,
+        max_active_tis_per_dagrun=4,
         on_failure_callback=record_culture_problem,
     ).expand(op_kwargs=plan.output)
 
