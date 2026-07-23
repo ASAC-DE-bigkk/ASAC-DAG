@@ -26,6 +26,7 @@ class DbtPhaseSpec:
         dict[TrafficTestTier, str | None] | None
     ) = None
     citydata_snapshot_required: bool = False
+    admin_dong_crosswalk_pin_required: bool = False
     silver_fence_mode: Literal["write", "verify"] | None = None
 
 
