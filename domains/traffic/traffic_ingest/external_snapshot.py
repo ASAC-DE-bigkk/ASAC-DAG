@@ -36,3 +36,33 @@ def resolve_citydata_crowding_snapshot_id(
             "Citydata crowding Iceberg snapshot ID must be a positive integer"
         )
     return raw_snapshot_id
+
+
+def resolve_admin_dong_crosswalk_snapshot_id(
+    cursor_factory=trino_cursor,
+    env: Mapping[str, str] = os.environ,
+) -> int:
+    cursor, catalog, _ = cursor_factory()
+    schema = sql_identifier(env.get("COMMON_SCHEMA", "common"))
+    table = sql_identifier("seoul_admin_dong_crosswalk")
+    cursor.execute(
+        "SELECT snapshot_id "
+        f'FROM {catalog}.{schema}."{table}$snapshots" '
+        "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    try:
+        raw_snapshot_id = row[0]
+    except (TypeError, IndexError) as exc:
+        raise ExternalSnapshotUnavailableError(
+            "admin_dong crosswalk Iceberg snapshot is unavailable"
+        ) from exc
+    if (
+        isinstance(raw_snapshot_id, bool)
+        or not isinstance(raw_snapshot_id, int)
+        or raw_snapshot_id <= 0
+    ):
+        raise ExternalSnapshotUnavailableError(
+            "admin_dong crosswalk Iceberg snapshot ID must be a positive integer"
+        )
+    return raw_snapshot_id
