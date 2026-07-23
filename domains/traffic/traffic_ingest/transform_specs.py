@@ -144,6 +144,7 @@ GOLD_DBT_PHASE_SPECS = (
         silver_persisted=True,
         snapshot_required=True,
         citydata_snapshot_required=True,
+        admin_dong_crosswalk_pin_required=True,
         selector_when_flow_missing=(
             "ask_seoul_traffic_transform_gold_incident_models_without_commerce"
         ),
@@ -157,6 +158,7 @@ GOLD_DBT_PHASE_SPECS = (
         snapshot_required=True,
         pin_critical=True,
         citydata_snapshot_required=True,
+        admin_dong_crosswalk_pin_required=True,
         selector_by_test_tier={
             TrafficTestTier.GATE: (
                 "ask_seoul_traffic_transform_gold_gate_tests_without_commerce"

@@ -910,6 +910,9 @@ def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
 
     monkeypatch.setattr(module, "build_traffic_flow_manifest", lambda: FlowManifest())
     monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
+    )
     ti = types.SimpleNamespace(
         xcom_push=lambda *, key, value: pushed.update({key: value})
     )
@@ -926,6 +929,7 @@ def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
     assert flow_calls == ["flow-42"]
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] == "flow-42"
     assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
+    assert pushed[module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY] == 99
 
 
 def test_gold_stale_incompatible_flow_becomes_none(monkeypatch):
@@ -939,6 +943,9 @@ def test_gold_stale_incompatible_flow_becomes_none(monkeypatch):
         lambda: pytest.fail("incompatible Flow must not be read"),
     )
     monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
+    )
     ti = types.SimpleNamespace(
         xcom_push=lambda *, key, value: pushed.update({key: value})
     )
@@ -1279,6 +1286,10 @@ def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch)
                 module.SNAPSHOT_TASK_ID,
                 module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
             ): 8738321387624398062,
+            (
+                module.SNAPSHOT_TASK_ID,
+                module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
+            ): 8738321387624398063,
         }
         return values[(task_ids, key)]
 
@@ -1294,6 +1305,7 @@ def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch)
         snapshot_task_id=module.SNAPSHOT_TASK_ID,
         snapshot_required=True,
         citydata_snapshot_required=True,
+        admin_dong_crosswalk_pin_required=True,
         silver_persisted=True,
         ti=ti,
         run_id="asset_triggered__pinned",
@@ -1304,6 +1316,7 @@ def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch)
     assert json.loads(captured["variables"]) == {
         "traffic_snapshot_dag_run_id": "snapshot-a",
         "traffic_citydata_crowding_snapshot_id": 8738321387624398062,
+        "admin_dong_crosswalk_pin_snapshot_id": 8738321387624398063,
     }
 
 

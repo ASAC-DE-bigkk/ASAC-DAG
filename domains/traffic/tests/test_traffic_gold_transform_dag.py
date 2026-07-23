@@ -89,6 +89,9 @@ def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_br
         ).to_json()
     )
     monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
+    )
     pushed = {}
     ti = types.SimpleNamespace(
         xcom_push=lambda *, key, value: pushed.update({key: value})
@@ -102,6 +105,7 @@ def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_br
     assert incident == "incident-1"
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
     assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
+    assert pushed[module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY] == 99
 
 
 def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch):
@@ -122,6 +126,9 @@ def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch)
         {module.TRAFFIC_INCIDENT_SILVER_ASSET: UserList([event])}
     )
     monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
+    )
     pushed = {}
     ti = types.SimpleNamespace(
         xcom_push=lambda *, key, value: pushed.update({key: value})
@@ -136,6 +143,7 @@ def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch)
     )
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
     assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
+    assert pushed[module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY] == 99
     assert pushed[module.SILVER_OUTPUT_EVIDENCE_XCOM_KEY] == {
         "snapshot_id": 42,
         "compacted_files_fingerprint": "a" * 64,
