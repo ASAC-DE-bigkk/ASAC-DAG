@@ -61,9 +61,11 @@ FAST_TABLES = [
     "gold_citydata_ppltn_trend", "gold_citydata_ppltn_anomaly",
     "gold_citydata_ppltn_x_commerce_dong", "gold_citydata_charger_availability",
 ]
-# DAILY 계열 중 forecast 만 전량 교체(장소×주말×시간 패턴 — 누적 아님, 매번 재계산).
+# DAILY 계열 중 forecast·dow_hour 는 패턴(전량 교체 — 누적 아님, 매번 재계산).
+#   dow_hour = 장소×요일×시간 혼잡 롤업(~2만 행). "무슨 요일 몇 시 붐벼" = 실검 수요 최다축
+#   (QA eval 🟢 채택, base_n 동봉). forecast(주말/평일)의 요일 세분화판.
 # 나머지 일별 집계는 누적 이력이라 append (아래 APPEND_TABLES).
-DAILY_TABLES = ["gold_citydata_ppltn_forecast"]
+DAILY_TABLES = ["gold_citydata_ppltn_forecast", "gold_citydata_ppltn_dow_hour"]
 
 # 이력·누적형 — 전량 교체하면 매 export 전 기간 재기록 → 한도 초과. 최근 구간만 삭제→재삽입.
 # 시간축 타입으로 lookback 단위 자동 분기: timestamp=시간(늦은 5분 슬라이스), date=일(오늘 누적+어제 확정).
