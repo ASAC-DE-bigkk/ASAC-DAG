@@ -735,7 +735,7 @@ def build_dbt_phase_task(
         "weight_rule": "absolute",
         "on_failure_callback": failure_callback,
     }
-    if spec.workload is DbtWorkload.TRINO:
+    if spec.workload is DbtWorkload.TRINO and spec.heavy_pool:
         operator_kwargs["pool"] = TRINO_HEAVY_POOL
     return PythonOperator(**operator_kwargs)
 
