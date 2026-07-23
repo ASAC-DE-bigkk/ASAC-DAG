@@ -366,6 +366,99 @@ def test_citydata_snapshot_requirement_is_owned_by_gold_not_incident_pin(monkeyp
         )
 
 
+def test_admin_dong_crosswalk_pin_requirement_is_owned_by_gold_test_phase(monkeypatch):
+    runtime = _load_transform_runtime()
+    monkeypatch.setattr(
+        runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **_kwargs: _successful_runtime_execution(),
+    )
+
+    silver = runtime.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        snapshot_task_id="resolve_traffic_snapshot_run",
+        silver_persisted=False,
+        snapshot_required=True,
+        admin_dong_crosswalk_pin_required=False,
+        ti=_runtime_ti(),
+        run_id="manual__silver_without_admin_dong_pin",
+        params={"target": "dev"},
+    )
+    assert silver["status"] == "success"
+
+    def xcom_pull(*, task_ids, key=None):
+        if task_ids == "resolve_traffic_snapshot_run" and key is None:
+            return "incident-1"
+        return None
+
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=1,
+        dag_id="traffic_gold_transform",
+        xcom_pull=xcom_pull,
+        xcom_push=lambda **_kwargs: None,
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="admin_dong crosswalk pin"):
+        runtime.run_dbt_phase(
+            dbt_command="test",
+            selector="ask_seoul_traffic_transform_gold_full_tests",
+            snapshot_task_id="resolve_traffic_snapshot_run",
+            silver_persisted=True,
+            snapshot_required=True,
+            admin_dong_crosswalk_pin_required=True,
+            admin_dong_crosswalk_xcom_key="admin_dong_crosswalk_pin_snapshot_id",
+            ti=ti,
+            run_id="manual__gold_without_admin_dong_pin",
+            params={"target": "dev"},
+        )
+
+
+def test_admin_dong_crosswalk_pin_passes_through_to_dbt_variables(monkeypatch):
+    runtime = _load_transform_runtime()
+    captured = {}
+    monkeypatch.setattr(
+        runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **kwargs: captured.update(kwargs) or _successful_runtime_execution(),
+    )
+
+    def xcom_pull(*, task_ids, key=None):
+        assert task_ids == "resolve_traffic_snapshot_run"
+        if key is None:
+            return "incident-1"
+        if key == "admin_dong_crosswalk_pin_snapshot_id":
+            return 99
+        return None
+
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=1,
+        dag_id="traffic_gold_transform",
+        xcom_pull=xcom_pull,
+        xcom_push=lambda **_kwargs: None,
+    )
+
+    result = runtime.run_dbt_phase(
+        dbt_command="test",
+        selector="ask_seoul_traffic_transform_gold_full_tests",
+        snapshot_task_id="resolve_traffic_snapshot_run",
+        silver_persisted=True,
+        snapshot_required=True,
+        admin_dong_crosswalk_pin_required=True,
+        admin_dong_crosswalk_xcom_key="admin_dong_crosswalk_pin_snapshot_id",
+        ti=ti,
+        run_id="manual__gold_with_admin_dong_pin",
+        params={"target": "dev"},
+    )
+
+    assert result["status"] == "success"
+    assert (
+        json.loads(captured["variables"])["admin_dong_crosswalk_pin_snapshot_id"] == 99
+    )
+
+
 def test_no_silver_fence_mode_preserves_existing_dbt_success_contract(monkeypatch):
     runtime = _load_transform_runtime()
     monkeypatch.setattr(

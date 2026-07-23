@@ -61,6 +61,7 @@ def run_dbt_phase(
     fresh_parse: bool = False,
     snapshot_required: bool = False,
     citydata_snapshot_required: bool = False,
+    admin_dong_crosswalk_pin_required: bool = False,
     silver_fence_mode: str | None = None,
     threads: int | None = None,
     selector_by_test_tier=None,
@@ -70,6 +71,7 @@ def run_dbt_phase(
     dbt_project: str | None = None,
     flow_xcom_key: str = "traffic_flow_snapshot_dag_run_id",
     citydata_xcom_key: str = "traffic_citydata_crowding_snapshot_id",
+    admin_dong_crosswalk_xcom_key: str | None = None,
     load_results: Callable[[str], list[dict[str, object]]] = load_dbt_results,
     classify_failure: Callable[..., Any] = classify_dbt_failure,
     recovery_record_builder: Callable[..., dict[str, object]] = build_recovery_record,
@@ -134,12 +136,22 @@ def run_dbt_phase(
         effective_snapshot_run_id,
         flow_xcom_key,
         citydata_xcom_key,
+        admin_dong_crosswalk_xcom_key,
     )
     flow_snapshot_run_id = dbt_variables.get(flow_xcom_key)
     citydata_crowding_snapshot_id = dbt_variables.get(citydata_xcom_key)
     if citydata_snapshot_required and citydata_xcom_key not in dbt_variables:
         raise AirflowFailException(
             "traffic dbt phase requires Citydata crowding snapshot: "
+            f"{task_id or dbt_command}"
+        )
+    if (
+        admin_dong_crosswalk_pin_required
+        and admin_dong_crosswalk_xcom_key is not None
+        and admin_dong_crosswalk_xcom_key not in dbt_variables
+    ):
+        raise AirflowFailException(
+            "traffic dbt phase requires admin_dong crosswalk pin: "
             f"{task_id or dbt_command}"
         )
 
