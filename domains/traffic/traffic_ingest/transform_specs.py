@@ -19,6 +19,7 @@ class DbtPhaseSpec:
     snapshot_required: bool = False
     pin_critical: bool = False
     workload: DbtWorkload = DbtWorkload.TRINO
+    heavy_pool: bool = True
     threads: int | None = 2
     selector_by_test_tier: dict[TrafficTestTier, str | None] | None = None
     selector_when_flow_missing: str | None = None
@@ -43,16 +44,19 @@ SILVER_DBT_PHASE_SPECS = (
         "dbt_source_freshness",
         "source freshness",
         "ask_seoul_traffic_transform_source",
+        heavy_pool=False,
     ),
     DbtPhaseSpec(
         "dbt_test_traffic_incident_availability",
         "test",
         "ask_seoul_traffic_transform_availability",
+        heavy_pool=False,
     ),
     DbtPhaseSpec(
         "dbt_test_traffic_bronze_source_contract",
         "test",
         "traffic_transform_contract_gate",
+        heavy_pool=False,
     ),
     DbtPhaseSpec(
         "dbt_run_silver",

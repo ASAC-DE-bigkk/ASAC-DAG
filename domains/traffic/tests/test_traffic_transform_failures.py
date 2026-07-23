@@ -112,7 +112,13 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
             task = module.dag.task_dict[task_id]
             assert isinstance(task, FakePythonOperator)
             assert task.python_callable is module.run_dbt_phase
-            if task_id in {"dbt_deps", "dbt_deps_gold"}:
+            if task_id in {
+                "dbt_deps",
+                "dbt_deps_gold",
+                "dbt_source_freshness",
+                "dbt_test_traffic_incident_availability",
+                "dbt_test_traffic_bronze_source_contract",
+            }:
                 assert "pool" not in task.kwargs or task.kwargs["pool"] in (
                     None,
                     "default_pool",
