@@ -309,4 +309,4 @@ serving: { event_time: forecast_at, ... }   # freshness_slo_minutes 없음 → F
 
 - ASAC-DAG #478 (v1 최종 결정 · v1.1 보강 결정), #477 (`_catalog` 등록 누락 장애), #476 (진입점 통합), #505 (문서화+Publisher 통합 작업 이슈)
 - ASAC-DBT: Serving Contract Validator (Schema·CI Gate), `contracts/engine` 재사용
-- ASAC-DAG: `domains/common/serving/` 공통 D1 Publisher
+- ASAC-DAG: `common/serving/` 공통 D1 Publisher
