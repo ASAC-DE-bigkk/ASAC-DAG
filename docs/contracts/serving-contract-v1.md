@@ -1,6 +1,6 @@
 # 도메인 공통 Serving Contract v1
 
-> 정본. 이 문서는 ASAC-DAG #478 [최종 결정 코멘트](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/478#issuecomment-5056366122)를 규격으로 옮긴 것이다.
+> 정본. 이 문서는 ASAC-DAG #478 [v1 최종 결정](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/478#issuecomment-5056366122)과 [v1.1 운영 계약 보강 결정](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/478#issuecomment-5065980055)을 규격으로 옮긴 것이다.
 > ASAC-DBT의 machine-readable Schema·Validator와 ASAC-DAG 공통 D1 Publisher는 이 문서를 원천으로 구현한다.
 > 문서와 구현이 어긋나면 **이 문서가 우선**이며, 변경은 아래 [§8 버전 정책](#8-계약-버전-정책)을 따른다.
 
@@ -20,6 +20,7 @@
 | **Export DAG (공통 Publisher)** | 실측 · Publication Gate · D1 Write · `_catalog` Upsert · Smoke Test | 런타임 값 기록 |
 | **D1 `_catalog` / publication 테이블** | 현재 게시 상태 · Runtime Metadata | 게시된 실측값의 정본 |
 | **Gateway / Worker** | API Route · Filter · Limit · 인증 | dbt YAML이 소유하지 않음 (#476) |
+| **Watchdog (독립 감시자)** | 게시 후 지속 감시 — `published_at`·`freshness`를 계약과 대조 ([§7.4](#74-운영-감시-책임-operational-monitoring-v11)) | v1.1 신설 책임. 구현은 후속 이슈 |
 
 원칙: **정적 계약은 dbt YAML, 실측값은 런타임 기록, API 형태는 Worker 계약.** 셋을 한 곳에 섞지 않는다.
 
@@ -41,6 +42,8 @@
 | `zero_policy` | enum | `fail` \| `retain_last_good` \| `allow` \| `warn` | `retain_last_good` | [§5.1](#51-zero_policy) |
 | `publication_trigger` | object | `schedule_cron` 또는 `trigger_type: asset` | — | [§6](#6-publication_trigger) |
 
+> **조건부 필수 (v1.1)**: `event_time`을 선언한 제품은 `freshness_slo_minutes`도 필수다. 미선언 시 Validator FAIL. `event_time`이 없는 명부성 제품은 면제 — 신선도를 잴 시간축이 없는데 강제하면 죽은 메타데이터만 늘어난다(§3.3의 `estimated_*` 제외와 같은 철학). 모든 제품의 "게시 지연" 감시는 이미 필수인 `publication_trigger`가 담당한다.
+
 ### 3.2 선택 필드 — 없으면 폴백
 
 | 필드 | 타입 | 허용값 / 형식 | 폴백 | 설명 |
@@ -49,7 +52,7 @@
 | `event_time` | string | 모델의 실제 컬럼 | 없음(시간축 없음) | Worker `from`/`to` 필터축, freshness 기준 컬럼 |
 | `retention_or_horizon` | string | 자유 서술 (예: `최근 2일`, `+3일 예보`) | 무제한 | 보존·예보 범위 |
 | `partial_policy` | object | `min_publish_ratio`: 0~1 | 검사 안 함 | [§5.2](#52-partial_policy) |
-| `freshness_slo_minutes` | int | > 0 | 검사 안 함 | `event_time` 최신값 지연 임계 |
+| `freshness_slo_minutes` | int | > 0 | — | `event_time` 최신값 지연 임계. **v1.1: `event_time` 선언 제품은 조건부 필수** (§3.1 참조) |
 | `shape` | enum | `wide` \| `rollup` \| `event` | 없음 | 서빙 형태 분류 |
 | `reliability` | object | rollup 전용, [§5.3](#53-reliability-rollup-전용) | 없음 | 표본 신뢰도 정책 |
 
@@ -163,12 +166,28 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 
 성공·degraded·skip 각 경우에 [§3.4](#34-런타임-실측값--export가-기록-yaml-아님) 값을 `_catalog`/publication 테이블에 기록한다. `serving_status ∈ {published, degraded, skipped_retained, failed}`.
 
+### 7.4 운영 감시 책임 (Operational Monitoring, v1.1)
+
+게시가 끝난 뒤에도 계약은 지켜져야 한다. 선언(§3)과 기록(§7.3)만으로는 **지켜보는 주체**가 없다 — 특히 export DAG 안의 자기보고 경보는 DAG 자체가 죽으면 함께 침묵한다(#477과 같은 계열의 조용한 실패).
+
+- **export DAG 밖의 독립 관찰자(watchdog)** 가 다음 검사쌍 2개를 주기적으로 대조한다:
+  1. `_catalog.published_at` ↔ `publication_trigger` 주기(cron 간격 / `max_interval_minutes`) — **D1 미갱신·죽은 DAG** 탐지
+  2. `_catalog.freshness` ↔ `freshness_slo_minutes` — **제때 게시됐지만 낡은 데이터** 탐지
+- 위반 시 경보를 발생시킨다. (`serving_status` 소비자 노출 연계는 후속 검토)
+- 이 조항은 **책임과 검사 대상만** 규정한다. watchdog 구현(위치·소유·알림 경로)은 별도 후속 이슈.
+- 계약에 이미 있는 선언·기록만 읽으므로 이 조항으로 인한 추가 스키마 변경은 없다.
+
 ## 8. 계약 버전 정책
 
 - `contract_version`은 선택, 폴백 `v1`.
 - **하위 호환 변경**(선택 필드 추가, 허용값 추가)은 v1 유지.
 - **비호환 변경**(필수 필드 추가·삭제, 허용값 삭제, 의미 변경)은 `v2` 신설 + 이 문서 개정 + 마이그레이션 절차 명시.
 - Validator·Publisher는 알 수 없는 `contract_version`을 만나면 ERROR(exit 2)로 멈춘다.
+
+**개정 이력**
+
+- **v1.1** (2026-07-24, [보강 결정](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/478#issuecomment-5065980055)): `freshness_slo_minutes` 조건부 필수 승격(§3.1) + §7.4 운영 감시 책임 신설. 필수 규칙 변경이지만 **채택 전 amend**(당시 `meta.serving` 채택 도메인 0, 마이그레이션 비용 0)라 v2가 아닌 v1.1로 처리. Pilot 채택 이후부터는 본 §8을 엄격 적용한다.
+- **v1** (2026-07-23, [최종 결정](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/478#issuecomment-5056366122)): 최초 확정.
 
 ## 9. 마이그레이션 — 기존 메타 → `meta.serving.*`
 
@@ -209,6 +228,7 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
         publication_trigger:
           schedule_cron: "10 * * * *"
         event_time: forecast_at
+        freshness_slo_minutes: 90    # v1.1: event_time 선언 시 필수
         shape: wide
   columns:
     - name: product_row_id
@@ -280,10 +300,13 @@ serving: { estimated_rows: 5000, api_path: /data/x, ... }
 
 # ❌ publication_trigger 에 cron·asset 둘 다 또는 둘 다 없음
 serving: { publication_trigger: { schedule_cron: "* * * * *", trigger_type: asset } }
+
+# ❌ v1.1: event_time 을 선언했는데 freshness_slo_minutes 누락 (조건부 필수)
+serving: { event_time: forecast_at, ... }   # freshness_slo_minutes 없음 → FAIL
 ```
 
 ## 11. 관련
 
-- ASAC-DAG #478 (최종 결정), #477 (`_catalog` 등록 누락 장애), #476 (진입점 통합)
+- ASAC-DAG #478 (v1 최종 결정 · v1.1 보강 결정), #477 (`_catalog` 등록 누락 장애), #476 (진입점 통합), #505 (문서화+Publisher 통합 작업 이슈)
 - ASAC-DBT: Serving Contract Validator (Schema·CI Gate), `contracts/engine` 재사용
 - ASAC-DAG: `domains/common/serving/` 공통 D1 Publisher
