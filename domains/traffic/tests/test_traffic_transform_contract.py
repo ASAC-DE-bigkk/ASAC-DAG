@@ -9,6 +9,7 @@ from traffic_transform_test_support import (
     FakeAirflowSkipException,
     FakeDAG,
     FakeVariable,
+    load_flow_transform_module,
     load_gold_transform_module,
     load_transform_module,
     write_materialization_artifacts,
@@ -118,6 +119,77 @@ def test_latest_publishable_guard_fails_closed_on_invalid_identity(invalid_lates
         module.require_latest_publishable_incident_snapshot(
             _LatestPublishableManifest(invalid_latest),
             "incident-old",
+        )
+
+
+def _dag_support_module():
+    """Load transform_dag_support with airflow fakes installed (flow resolve path)."""
+    load_flow_transform_module()
+    from traffic_ingest import transform_dag_support
+
+    return transform_dag_support
+
+
+class _RaisingPublishableManifest:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def require_publishable(self, run_id):
+        raise self._exc
+
+
+class TrinoExternalError(Exception):
+    """Stands in for trino.exceptions.TrinoExternalError (name-matched classifier)."""
+
+
+@pytest.mark.parametrize(
+    "transient",
+    [
+        OSError("Trino unavailable"),
+        ConnectionError("connection reset by peer"),
+        TimeoutError("timed out"),
+        TrinoExternalError(
+            "TrinoExternalError(type=EXTERNAL, name=ICEBERG_CATALOG_ERROR, "
+            'message="Failed to load view \'bronze_collection_run_manifest\'")'
+        ),
+    ],
+)
+def test_publishable_guard_retries_on_transient_manifest_lookup_error(transient):
+    # The manifest lookup runs against the R2 Iceberg REST catalog, which
+    # intermittently drops the connection or returns ICEBERG_CATALOG_ERROR.
+    # These must stay retryable (propagated as-is) so the task's configured
+    # retry can recover, instead of being fail-closed with AirflowFailException.
+    module = _dag_support_module()
+
+    with pytest.raises(type(transient)) as raised:
+        module.require_publishable_incident_snapshot(
+            _RaisingPublishableManifest(transient),
+            "incident-1",
+            mismatch_action="skip",
+        )
+    assert raised.value is transient
+
+
+def test_publishable_guard_fails_closed_on_non_transient_manifest_error():
+    module = _dag_support_module()
+
+    with pytest.raises(FakeAirflowFailException, match="verification failed"):
+        module.require_publishable_incident_snapshot(
+            _RaisingPublishableManifest(ValueError("unexpected bug")),
+            "incident-1",
+            mismatch_action="skip",
+        )
+
+
+def test_publishable_guard_still_skips_superseded_snapshot():
+    module = _dag_support_module()
+    from traffic_ingest.run_manifest import RunNotPublishableError
+
+    with pytest.raises(FakeAirflowSkipException, match="superseded"):
+        module.require_publishable_incident_snapshot(
+            _RaisingPublishableManifest(RunNotPublishableError("gone")),
+            "incident-1",
+            mismatch_action="skip",
         )
 
 

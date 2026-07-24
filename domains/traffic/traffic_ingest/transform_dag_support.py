@@ -237,6 +237,37 @@ def require_current_silver_output_evidence(
     return current
 
 
+# Transient signals from the manifest lookup's Iceberg REST catalog (R2 Data
+# Catalog): intermittent ICEBERG_CATALOG_ERROR ("Failed to load/list view/table")
+# and connection drops. These are recoverable on the task's configured retry,
+# unlike a genuine RunNotPublishableError verdict or an identity mismatch. This
+# mirrors the Bronze fail_fast_traffic_bronze boundary, which treats connection/
+# Trino-availability errors as retryable and only fails closed on deterministic
+# verdicts.
+_RETRYABLE_MANIFEST_LOOKUP_MARKERS = (
+    "iceberg_catalog_error",
+    "failed to load view",
+    "failed to load table",
+    "failed to list views",
+    "failed to list tables",
+    "trinoexternalerror",
+    "trinoconnectionerror",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "timed out",
+    "nohttpresponseexception",
+)
+
+
+def _is_retryable_manifest_lookup_error(exc: BaseException) -> bool:
+    """Transient Trino/catalog/connection failures should retry, not fail closed."""
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _RETRYABLE_MANIFEST_LOOKUP_MARKERS)
+
+
 def require_publishable_incident_snapshot(
     manifest,
     run_id: str,
@@ -255,6 +286,10 @@ def require_publishable_incident_snapshot(
             raise AirflowSkipException(message) from exc
         raise AirflowFailException(message) from exc
     except Exception as exc:
+        # Let transient catalog/connection blips propagate as-is so Airflow's
+        # task retry can recover; fail closed only on unexpected errors.
+        if _is_retryable_manifest_lookup_error(exc):
+            raise
         raise AirflowFailException(
             f"{snapshot_label} manifest verification failed: {run_id}"
         ) from exc
