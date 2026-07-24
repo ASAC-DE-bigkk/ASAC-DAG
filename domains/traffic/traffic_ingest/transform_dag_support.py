@@ -559,9 +559,11 @@ def resolve_traffic_gold_snapshot_run(
     incident_manifest_factory: Callable[[], Any],
     flow_manifest_factory: Callable[[], Any],
     citydata_snapshot_resolver: Callable[[], int],
+    admin_dong_crosswalk_snapshot_resolver: Callable[[], int],
     current_silver_evidence_loader: Callable[[], SilverOutputEvidence],
     flow_xcom_key: str,
     citydata_xcom_key: str,
+    admin_dong_crosswalk_xcom_key: str,
     silver_evidence_xcom_key: str = SILVER_OUTPUT_EVIDENCE_XCOM_KEY,
 ) -> str:
     """Pin a Silver parent, optional compatible Flow, and Citydata scalar."""
@@ -622,10 +624,26 @@ def resolve_traffic_gold_snapshot_run(
         or citydata_snapshot_id <= 0
     ):
         raise AirflowFailException("Traffic Citydata snapshot is invalid")
+
+    try:
+        admin_dong_crosswalk_snapshot_id = admin_dong_crosswalk_snapshot_resolver()
+    except ExternalSnapshotUnavailableError as exc:
+        raise AirflowFailException(str(exc)) from exc
+    if (
+        not isinstance(admin_dong_crosswalk_snapshot_id, int)
+        or isinstance(admin_dong_crosswalk_snapshot_id, bool)
+        or admin_dong_crosswalk_snapshot_id <= 0
+    ):
+        raise AirflowFailException("Traffic admin_dong crosswalk snapshot is invalid")
+
     task_instance = context.get("ti") or context.get("task_instance")
     if task_instance is not None:
         task_instance.xcom_push(key=flow_xcom_key, value=flow_run_id)
         task_instance.xcom_push(key=citydata_xcom_key, value=citydata_snapshot_id)
+        task_instance.xcom_push(
+            key=admin_dong_crosswalk_xcom_key,
+            value=admin_dong_crosswalk_snapshot_id,
+        )
         task_instance.xcom_push(key=silver_evidence_xcom_key, value=evidence.as_dict())
     return incident_run_id
 
@@ -674,6 +692,7 @@ def dbt_snapshot_variables(
     incident_run_id: str,
     flow_xcom_key: str,
     citydata_crowding_snapshot_xcom_key: str,
+    admin_dong_crosswalk_xcom_key: str | None = None,
 ) -> dict[str, object]:
     variables: dict[str, object] = {"traffic_snapshot_dag_run_id": incident_run_id}
     try:
@@ -698,6 +717,16 @@ def dbt_snapshot_variables(
         and citydata_crowding_snapshot_id > 0
     ):
         variables[citydata_crowding_snapshot_xcom_key] = citydata_crowding_snapshot_id
+    if admin_dong_crosswalk_xcom_key is not None:
+        try:
+            crosswalk_pin_id = task_instance.xcom_pull(
+                task_ids=snapshot_task_id,
+                key=admin_dong_crosswalk_xcom_key,
+            )
+        except TypeError:
+            crosswalk_pin_id = None
+        if crosswalk_pin_id is not None:
+            variables[admin_dong_crosswalk_xcom_key] = crosswalk_pin_id
     return variables
 
 
@@ -721,6 +750,7 @@ def build_dbt_phase_task(
             "fresh_parse": spec.fresh_parse,
             "snapshot_required": spec.snapshot_required,
             "citydata_snapshot_required": spec.citydata_snapshot_required,
+            "admin_dong_crosswalk_pin_required": spec.admin_dong_crosswalk_pin_required,
             "silver_fence_mode": spec.silver_fence_mode,
             "threads": spec.threads,
             "selector_by_test_tier": spec.selector_by_test_tier,

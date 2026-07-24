@@ -40,7 +40,10 @@ from traffic_ingest.assets import (  # noqa: E402
     schedule_asset,
 )
 from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
-from traffic_ingest.external_snapshot import resolve_citydata_crowding_snapshot_id  # noqa: E402
+from traffic_ingest.external_snapshot import (  # noqa: E402
+    resolve_admin_dong_crosswalk_snapshot_id,
+    resolve_citydata_crowding_snapshot_id,
+)
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_ingest.transform_admission import TransformIdentity, TransformSuccessMarker  # noqa: E402, F401
@@ -83,6 +86,7 @@ DBT_PROJECT = traffic_dbt.dbt_project_dir()
 SNAPSHOT_TASK_ID = "resolve_traffic_gold_snapshot_run"
 FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
 CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY = "traffic_citydata_crowding_snapshot_id"
+ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY = "admin_dong_crosswalk_pin_snapshot_id"
 # Gold validation must win the next slot after its priority-1 build. Silver
 # writers remain priority 10, preserving their precedence before Gold starts.
 PIN_CRITICAL_PRIORITY = 20
@@ -98,9 +102,11 @@ def resolve_traffic_gold_snapshot_run(**context) -> str:
         incident_manifest_factory=build_traffic_manifest,
         flow_manifest_factory=build_traffic_flow_manifest,
         citydata_snapshot_resolver=resolve_citydata_crowding_snapshot_id,
+        admin_dong_crosswalk_snapshot_resolver=resolve_admin_dong_crosswalk_snapshot_id,
         current_silver_evidence_loader=current_silver_output_evidence,
         flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,
         citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
+        admin_dong_crosswalk_xcom_key=ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
     )
 
 
@@ -153,6 +159,7 @@ def run_dbt_phase(
     fresh_parse: bool = False,
     snapshot_required: bool = False,
     citydata_snapshot_required: bool = False,
+    admin_dong_crosswalk_pin_required: bool = False,
     threads: int | None = None,
     selector_by_test_tier=None,
     selector_when_flow_missing: str | None = None,
@@ -185,6 +192,7 @@ def run_dbt_phase(
         fresh_parse=fresh_parse,
         snapshot_required=snapshot_required,
         citydata_snapshot_required=citydata_snapshot_required,
+        admin_dong_crosswalk_pin_required=admin_dong_crosswalk_pin_required,
         threads=threads,
         selector_by_test_tier=selector_by_test_tier,
         selector_when_flow_missing=selector_when_flow_missing,
@@ -195,6 +203,7 @@ def run_dbt_phase(
         dbt_project=DBT_PROJECT,
         flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,
         citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
+        admin_dong_crosswalk_xcom_key=ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
         load_results=load_dbt_results,
         classify_failure=classify_dbt_failure,
         recovery_record_builder=build_recovery_record,

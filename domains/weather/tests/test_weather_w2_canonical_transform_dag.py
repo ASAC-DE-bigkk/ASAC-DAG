@@ -6,6 +6,7 @@ import pytest
 from weather_transform_test_support import (
     FakeAsset,
     FakePythonOperator,
+    FakeTaskInstance,
     load_transform_module,
 )
 from weather_transform_test_support import (
@@ -145,3 +146,71 @@ def test_canonical_w2_dag_rejects_missing_bronze_asset_event():
 
     with pytest.raises(module.AirflowFailException, match="at least one"):
         module.resolve_weather_snapshot_run(triggering_asset_events={})
+
+
+def _valid_bronze_event():
+    return types.SimpleNamespace(
+        extra={
+            "source_id": "kma_vilage_fcst",
+            "bronze_run_id": "weather-run-42",
+            "bronze_dag_run_id": "weather-run-42",
+            "event_at": "2026-07-17T09:00:00+09:00",
+            "load_date": "2026-07-17",
+            "row_count": 3,
+            "payload_hash": "b" * 64,
+            "is_publishable": True,
+        }
+    )
+
+
+def test_resolve_weather_snapshot_run_pins_admin_dong_crosswalk_snapshot(monkeypatch):
+    module = load_canonical_module()
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            return run_id
+
+    monkeypatch.setattr(module, "build_weather_manifest", lambda: Manifest())
+    monkeypatch.setattr(
+        module,
+        "resolve_admin_dong_crosswalk_snapshot_id",
+        lambda: 8738321387624398062,
+    )
+    ti = FakeTaskInstance(task_id=module.SNAPSHOT_TASK_ID)
+
+    run_id = module.resolve_weather_snapshot_run(
+        triggering_asset_events={module.WEATHER_BRONZE_ASSET: [_valid_bronze_event()]},
+        ti=ti,
+    )
+
+    assert run_id == "weather-run-42"
+    assert (
+        module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
+        8738321387624398062,
+    ) in ti.pushes
+
+
+def test_resolve_weather_snapshot_run_fails_closed_when_crosswalk_snapshot_unavailable(
+    monkeypatch,
+):
+    module = load_canonical_module()
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            return run_id
+
+    monkeypatch.setattr(module, "build_weather_manifest", lambda: Manifest())
+
+    def _raise():
+        raise module.AdminDongCrosswalkSnapshotUnavailableError(
+            "admin_dong crosswalk Iceberg snapshot is unavailable"
+        )
+
+    monkeypatch.setattr(module, "resolve_admin_dong_crosswalk_snapshot_id", _raise)
+    ti = FakeTaskInstance(task_id=module.SNAPSHOT_TASK_ID)
+
+    with pytest.raises(module.AirflowFailException, match="unavailable"):
+        module.resolve_weather_snapshot_run(
+            triggering_asset_events={module.WEATHER_BRONZE_ASSET: [_valid_bronze_event()]},
+            ti=ti,
+        )
