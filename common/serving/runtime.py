@@ -14,9 +14,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from domains.common.serving.d1_client import Column, HttpD1Client
-from domains.common.serving.contract import ServingContract
-from domains.common.serving.publisher import ReadPlan
+from common.serving.d1_client import Column, HttpD1Client
+from common.serving.contract import ServingContract
+from common.serving.publisher import ReadPlan
 
 APPEND_LOOKBACK_HOURS = 2
 APPEND_LOOKBACK_DAYS = 2

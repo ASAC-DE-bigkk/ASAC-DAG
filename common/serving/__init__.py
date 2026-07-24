@@ -11,9 +11,9 @@ Trino/Cloudflare/Airflow wiring.
 
 from __future__ import annotations
 
-from domains.common.serving.contract import ServingContract, load_contracts
-from domains.common.serving.gate import GateDecision, GateResult, apply_reliability, evaluate_gate
-from domains.common.serving.publisher import (
+from common.serving.contract import ServingContract, load_contracts
+from common.serving.gate import GateDecision, GateResult, apply_reliability, evaluate_gate
+from common.serving.publisher import (
     ProductRecord,
     PublicationError,
     PublicationReport,

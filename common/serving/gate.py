@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from domains.common.serving.contract import ServingContract
+from common.serving.contract import ServingContract
 
 
 class GateDecision(str, Enum):

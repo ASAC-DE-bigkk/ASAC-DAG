@@ -11,10 +11,10 @@ from typing import Any
 
 import pytest
 
-from domains.common.serving.contract import ServingContract, load_contracts
-from domains.common.serving.d1_client import Column
-from domains.common.serving.gate import STATUS_DEGRADED, STATUS_PUBLISHED, STATUS_SKIPPED
-from domains.common.serving.publisher import PublicationError, ReadPlan, publish
+from common.serving.contract import ServingContract, load_contracts
+from common.serving.d1_client import Column
+from common.serving.gate import STATUS_DEGRADED, STATUS_PUBLISHED, STATUS_SKIPPED
+from common.serving.publisher import PublicationError, ReadPlan, publish
 
 FIXTURES = Path(__file__).parent / "fixtures"
 COLUMNS: list[Column] = [("product_row_id", "varchar"), ("place_id", "varchar"), ("forecast_at", "timestamp")]

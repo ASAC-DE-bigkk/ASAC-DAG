@@ -1,4 +1,4 @@
-# 공통 D1 Publisher (`domains/common/serving`)
+# 공통 D1 Publisher (`common/serving`)
 
 Serving Contract v1(ASAC-DAG `docs/contracts/serving-contract-v1.md`, #478)의 **Publication을
 도메인 공통 모듈로 강제**한다. #477 장애(골드가 D1에 적재됐으나 `_catalog` 미등록으로 404,
@@ -42,7 +42,7 @@ Contract Load → Publication Gate → D1 Write → row-count Verify
 ## 도메인 DAG (얇음)
 
 ```python
-from domains.common.serving.dag_factory import build_serving_export_dag
+from common.serving.dag_factory import build_serving_export_dag
 
 dag = build_serving_export_dag(
     domain="weather",
@@ -60,5 +60,5 @@ dag = build_serving_export_dag(
 ## 테스트
 
 ```bash
-python -m pytest -q domains/common/serving/tests -p no:cacheprovider
+python -m pytest -q common/serving/tests -p no:cacheprovider
 ```

@@ -18,10 +18,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol, Sequence
 
-from domains.common.serving import gate as gatelib
-from domains.common.serving.contract import ServingContract
-from domains.common.serving.d1_client import Column, D1Client
-from domains.common.serving.gate import (
+from common.serving import gate as gatelib
+from common.serving.contract import ServingContract
+from common.serving.d1_client import Column, D1Client
+from common.serving.gate import (
     STATUS_DEGRADED,
     STATUS_FAILED,
     STATUS_PUBLISHED,

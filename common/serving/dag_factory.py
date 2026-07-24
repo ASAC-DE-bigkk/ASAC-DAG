@@ -4,7 +4,7 @@ A domain DAG declares only its ``domain`` and ``product_ids``; everything else â
 contract load, gate, D1 write, verify, ``_catalog`` upsert, smoke â€” is the common
 publisher. Example (domains/weather/weather_serving_export.py)::
 
-    from domains.common.serving.dag_factory import build_serving_export_dag
+    from common.serving.dag_factory import build_serving_export_dag
 
     dag = build_serving_export_dag(
         domain="weather",
@@ -47,9 +47,9 @@ def build_serving_export_dag(
     from airflow import DAG
     from airflow.providers.standard.operators.python import PythonOperator
 
-    from domains.common.serving.contract import load_contracts
-    from domains.common.serving.publisher import publish
-    from domains.common.serving.runtime import (
+    from common.serving.contract import load_contracts
+    from common.serving.publisher import publish
+    from common.serving.runtime import (
         build_d1_client_from_env,
         build_smoke_tester_from_env,
         build_trino_source_reader,
