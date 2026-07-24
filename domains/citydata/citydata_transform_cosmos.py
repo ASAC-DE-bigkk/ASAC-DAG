@@ -42,7 +42,7 @@ if _DAGS_ROOT not in sys.path:
 
 from common.assets import CITYDATA_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.ops.airflow import record_run_metadata  # noqa: E402
+from common.ops.run_sink import record_run  # noqa: E402
 
 KST_TZ = ZoneInfo("Asia/Seoul")
 
@@ -55,8 +55,8 @@ record_citydata_problem = problem_failure_callback(
 
 # run-metadata(ops.run_metadata) — 성공·실패 모두 1행 append(태스크 단위). 기존 problem
 # 콜백과 병행하며, best-effort(기록 실패는 태스크 판정 안 가림).
-_run_md_ok = record_run_metadata("citydata", "transform", status="success")
-_run_md_fail = record_run_metadata("citydata", "transform", status="failed")
+_run_ok = record_run("citydata", "transform", status="success")
+_run_fail = record_run("citydata", "transform", status="failed")
 
 # 티어는 dbt **태그**로 관리 — 모델명 하드코딩 리스트 대신. 각 모델의 tier 는 그 모델
 # schema.yml `config: tags: [fast|slow]` 에 있고(SQL=비즈니스로직 / yml=문서·메타 분리
@@ -69,6 +69,13 @@ _run_md_fail = record_run_metadata("citydata", "transform", status="failed")
 # 주의: 태그는 manifest 에 반영돼야 선택됨 → 모델/태그 변경 시 manifest 재생성 필요.
 FAST_SELECT = ["tag:fast"]
 SLOW_SELECT = ["tag:slow"]
+# daily(매일 자정): 패턴 골드(dow_hour·forecast·demographics) — 과거 누적 평균이라 한시간새
+# 안 바뀜, 하루 1회 재빌드면 충분. 무거운 by_time 전체 스캔을 하루 1회로 제한 → OOM 최소화.
+# grain 은 시간(0~23)이지만 '갱신주기'는 일. 서빙(8시 DAILY)보다 앞서 자정에 실행.
+DAILY_SELECT = ["tag:daily"]
+# hourly(매시 :05~:09): 시간 grain 골드(ppltn_hourly·x_weather·x_incident) — 시간 버킷이라
+# 매시 1회면 충분(현재-시각 실시간은 fast 스냅샷이 담당). fast(5분)에서 빼 OOM 완화.
+HOURLY_SELECT = ["tag:hourly"]
 
 # DBT_MANIFEST 로드 — 파싱 시점에 dbt 를 돌리지 않고 target/manifest.json 을 읽어 그래프를
 # 만든다. dbt 가 전용 venv 에만 있어(메인 env 에 dbt-trino 없음) DBT_LS(in-process ls)가
@@ -120,8 +127,8 @@ def _tier_group(group_id: str, select: list[str]) -> DbtTaskGroup:
         # retries=0 유지(위 주석의 중복 방지 근거). run-metadata 는 성공·실패 모두 기록.
         default_args={
             "retries": 0,
-            "on_success_callback": _run_md_ok,
-            "on_failure_callback": [record_citydata_problem, _run_md_fail],
+            "on_success_callback": _run_ok,
+            "on_failure_callback": [record_citydata_problem, _run_fail],
         },
     )
 
@@ -129,6 +136,17 @@ def _tier_group(group_id: str, select: list[str]) -> DbtTaskGroup:
 def _is_slow_window(**_) -> bool:
     """slow 티어(10분) 게이트 — 기존 citydata_transform 과 동일 벽시계 근사."""
     return datetime.now(KST_TZ).minute % 10 < 5
+
+
+def _is_daily_window(**_) -> bool:
+    """daily 티어 게이트 — 매일 0시 15~19분 KST 만(slow·hourly 창과 stagger). 패턴 골드."""
+    now = datetime.now(KST_TZ)
+    return now.hour == 0 and 15 <= now.minute < 20
+
+
+def _is_hourly_window(**_) -> bool:
+    """hourly 티어 게이트 — 매시 5~9분만(slow 의 :00~:04 와 stagger). 시간 grain 골드."""
+    return 5 <= datetime.now(KST_TZ).minute < 10
 
 
 with DAG(
@@ -154,5 +172,18 @@ with DAG(
         on_failure_callback=record_citydata_problem,
     )
     slow = _tier_group("slow", SLOW_SELECT)
+    gate_daily = ShortCircuitOperator(
+        task_id="gate_daily_midnight", python_callable=_is_daily_window,
+        on_failure_callback=record_citydata_problem,
+    )
+    daily = _tier_group("daily", DAILY_SELECT)
+    gate_hourly = ShortCircuitOperator(
+        task_id="gate_hourly", python_callable=_is_hourly_window,
+        on_failure_callback=record_citydata_problem,
+    )
+    hourly = _tier_group("hourly", HOURLY_SELECT)
 
+    # fast 완료 후 게이트 분기(독립·stagger 로 상호 비겹침) — slow(:00~04)·hourly(:05~09)·daily(0시:15~19).
     deps_seed >> fast >> gate_slow >> slow
+    fast >> gate_hourly >> hourly
+    fast >> gate_daily >> daily
