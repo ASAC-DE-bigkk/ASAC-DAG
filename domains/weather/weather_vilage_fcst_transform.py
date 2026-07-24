@@ -38,7 +38,7 @@ from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
-from weather_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL  # noqa: E402
+from weather_ingest.common.resources import DbtWorkload  # noqa: E402
 from weather_ingest.runtime import build_weather_manifest  # noqa: E402
 import weather_dbt_execution as weather_dbt  # noqa: E402
 from weather_dbt_failure import classify_weather_dbt_failure  # noqa: E402
@@ -53,6 +53,15 @@ WEATHER_DBT_CONTRACT_VARS = {"weather_w2_canonical_revision_date": "2025-04-01"}
 WEATHER_DBT_RUN_RESULTS_XCOM_KEY = "weather_dbt_run_results_path"
 SNAPSHOT_TASK_ID = "resolve_weather_snapshot_run"
 WEATHER_SNAPSHOT_VAR = "weather_snapshot_dag_run_id"
+# Dedicated lane (#512): this DAG's own 12-step chain used to share
+# trino_weather_heavy with weather_w2_canonical_transform and
+# weather_vilage_fcst_bronze, so a single run (observed ~50min) starved both
+# of the shared pool. #480's atomic swap + snapshot pin already makes the
+# shared admin_dong axis safe to read concurrently, so this DAG no longer
+# needs to serialize behind canonical/bronze — only against itself
+# (max_active_runs=1 plus this pool's own single slot keep its internal
+# step order intact, same as before).
+TRINO_WEATHER_LEGACY_HEAVY_POOL = "trino_weather_legacy_heavy"
 
 
 @dataclass(frozen=True)
@@ -430,7 +439,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
         "on_failure_callback": record_weather_problem,
     }
     if spec.workload is DbtWorkload.TRINO:
-        operator_kwargs["pool"] = TRINO_HEAVY_POOL
+        operator_kwargs["pool"] = TRINO_WEATHER_LEGACY_HEAVY_POOL
     return PythonOperator(**operator_kwargs)
 
 

@@ -55,7 +55,7 @@ def test_weather_dbt_factory_preserves_phase_contracts():
                 "default_pool",
             )
         else:
-            assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+            assert task.kwargs["pool"] == module.TRINO_WEATHER_LEGACY_HEAVY_POOL
         assert task.kwargs["retries"] == 1
         assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
         assert task.kwargs["on_failure_callback"] is module.record_weather_problem
@@ -71,7 +71,7 @@ def test_weather_transform_failure_callback_uses_current_attempt_artifact_xcom()
 def test_weather_transform_trino_tasks_do_not_inflate_pool_priority_from_chain():
     module = load_transform_module()
 
-    assert module.TRINO_HEAVY_POOL == "trino_weather_heavy"
+    assert module.TRINO_WEATHER_LEGACY_HEAVY_POOL == "trino_weather_legacy_heavy"
     for task_id in module.DBT_PHASE_TASK_IDS:
         task = module.dag.task_dict[task_id]
         if task_id == "dbt_deps":
@@ -80,7 +80,7 @@ def test_weather_transform_trino_tasks_do_not_inflate_pool_priority_from_chain()
                 "default_pool",
             )
         else:
-            assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+            assert task.kwargs["pool"] == module.TRINO_WEATHER_LEGACY_HEAVY_POOL
         assert task.kwargs["weight_rule"] == "absolute"
 
 
