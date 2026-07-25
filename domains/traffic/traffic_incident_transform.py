@@ -316,12 +316,32 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
+    # #510: run the Bronze source gates (deps/freshness/availability/contract)
+    # BEFORE pinning a snapshot, then resolve/admit/assert the latest publishable
+    # Bronze run immediately before dbt_run_silver. The gates are Bronze-source
+    # tests that do not depend on the pinned run (run_dbt_phase falls back to the
+    # preflight sentinel var when no snapshot is resolved yet), so moving them
+    # ahead of the pin keeps every contract gate intact while shrinking the
+    # pin->build window from ~10 min to seconds. That window used to exceed the
+    # ~5 min Bronze ingestion cadence, so the pin was always superseded before
+    # dbt_run_silver and the run self-skipped, starving Gold/Flow (livelock).
+    gate_tasks = [
+        dbt_phase_tasks[spec.task_id]
+        for spec in SILVER_DBT_PHASE_SPECS
+        if not spec.snapshot_required
+    ]
+    build_tasks = [
+        dbt_phase_tasks[spec.task_id]
+        for spec in SILVER_DBT_PHASE_SPECS
+        if spec.snapshot_required
+    ]
     chain = [
         validate_runtime,
+        *gate_tasks,
         resolve_snapshot,
         admit_snapshot,
         assert_not_superseded,
-        *dbt_phase_tasks.values(),
+        *build_tasks,
         publish_silver,
         mark_success,
         publish_metrics,

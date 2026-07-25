@@ -2235,12 +2235,28 @@ def test_contract_gates_are_the_only_path_into_persisted_silver():
     module = load_transform_module()
     dag = module.dag
 
+    # #510: the pin (resolve/admit/assert) now sits between the Bronze contract
+    # gate and dbt_run_silver so the pinned run is fresh at build time. The
+    # contract gate must still be an unbypassable ancestor of persisted Silver.
     assert dag.task_dict[
         "dbt_test_traffic_bronze_source_contract"
-    ].downstream_task_ids == {"dbt_run_silver"}
+    ].downstream_task_ids == {"resolve_traffic_snapshot_run"}
     assert dag.task_dict["dbt_run_silver"].upstream_task_ids == {
-        "dbt_test_traffic_bronze_source_contract",
+        "assert_traffic_silver_snapshot_not_superseded",
     }
+    silver_ancestors = {
+        task.task_id
+        for task in dag.task_dict["dbt_run_silver"].get_flat_relatives(upstream=True)
+    }
+    assert {
+        "dbt_deps",
+        "dbt_source_freshness",
+        "dbt_test_traffic_incident_availability",
+        "dbt_test_traffic_bronze_source_contract",
+        "resolve_traffic_snapshot_run",
+        "admit_traffic_silver_snapshot",
+        "assert_traffic_silver_snapshot_not_superseded",
+    } <= silver_ancestors
 
 
 def test_traffic_dag_contains_no_model_or_test_membership_literals():
