@@ -267,6 +267,58 @@ def _recovery_context():
     }
 
 
+def _pin_crosswalk_snapshot(module, monkeypatch):
+    monkeypatch.setattr(
+        module,
+        "resolve_admin_dong_crosswalk_snapshot_id",
+        lambda: 8738321387624398062,
+    )
+
+
+class SnapshotCursor:
+    def __init__(self, row):
+        self.row = row
+        self.sql = None
+
+    def execute(self, sql):
+        self.sql = sql
+
+    def fetchone(self):
+        return self.row
+
+
+def test_recovery_resolves_the_latest_crosswalk_snapshot(monkeypatch):
+    module = load_recovery_module()
+    cursor = SnapshotCursor((8738321387624398062,))
+    monkeypatch.setattr(
+        module,
+        "trino_cursor",
+        lambda: (cursor, "iceberg_dev", "weather"),
+    )
+    monkeypatch.setenv("COMMON_SCHEMA", "common")
+
+    snapshot_id = module.resolve_admin_dong_crosswalk_snapshot_id()
+
+    assert snapshot_id == 8738321387624398062
+    assert cursor.sql is not None
+    assert 'iceberg_dev.common."seoul_admin_dong_crosswalk$snapshots"' in cursor.sql
+    assert cursor.sql.rstrip().endswith("LIMIT 1")
+
+
+@pytest.mark.parametrize("row", [None, (None,), (0,), (-1,), (True,), ("invalid",)])
+def test_recovery_rejects_unusable_crosswalk_snapshot(monkeypatch, row):
+    module = load_recovery_module()
+    cursor = SnapshotCursor(row)
+    monkeypatch.setattr(
+        module,
+        "trino_cursor",
+        lambda: (cursor, "iceberg_dev", "weather"),
+    )
+
+    with pytest.raises(module.AdminDongCrosswalkSnapshotUnavailableError):
+        module.resolve_admin_dong_crosswalk_snapshot_id()
+
+
 def test_manual_recovery_dag_shape_is_serial_dev_only_and_domain_pooled():
     module = load_recovery_module()
     dag = module.dag
@@ -294,6 +346,7 @@ def test_recovery_executes_selector_phases_in_order_and_checkpoints_before_final
     module = load_recovery_module()
     events = []
     calls = []
+    _pin_crosswalk_snapshot(module, monkeypatch)
     monkeypatch.setattr(module, "publishable_window_indexes", lambda _windows: {0})
     monkeypatch.setattr(
         module.Variable,
@@ -359,6 +412,11 @@ def test_recovery_executes_selector_phases_in_order_and_checkpoints_before_final
     assert all(call["try_number"] == 2 for call in calls)
     assert all("runner" not in call for call in calls)
     assert all(isinstance(json.loads(call["variables"]), dict) for call in calls)
+    assert all(
+        json.loads(call["variables"])["admin_dong_crosswalk_pin_snapshot_id"]
+        == 8738321387624398062
+        for call in calls
+    )
     winner_calls = calls[7:15]
     assert [
         json.loads(call["variables"])["weather_w2_winner_bucket_index"]
@@ -385,6 +443,7 @@ def test_recovery_revalidates_unversioned_checkpoint_before_skip(monkeypatch):
     module = load_recovery_module()
     events = []
     saved_payloads = []
+    _pin_crosswalk_snapshot(module, monkeypatch)
     legacy_payload = {
         "range": {
             "start_at": "2026-07-02 00:00:00.000000",
@@ -426,6 +485,7 @@ def test_recovery_revalidates_unversioned_checkpoint_before_skip(monkeypatch):
 def test_recovery_failure_stops_later_buckets_checkpoint_and_final(monkeypatch):
     module = load_recovery_module()
     events = []
+    _pin_crosswalk_snapshot(module, monkeypatch)
     monkeypatch.setattr(module, "publishable_window_indexes", lambda _windows: {0})
     monkeypatch.setattr(
         module.Variable, "get", staticmethod(lambda *_args, **_kwargs: None)
@@ -467,6 +527,7 @@ def test_recovery_failure_stops_later_buckets_checkpoint_and_final(monkeypatch):
 def test_recovery_winner_failure_stops_later_validation_and_checkpoint(monkeypatch):
     module = load_recovery_module()
     events = []
+    _pin_crosswalk_snapshot(module, monkeypatch)
     monkeypatch.setattr(module, "publishable_window_indexes", lambda _windows: {0})
     monkeypatch.setattr(
         module.Variable, "get", staticmethod(lambda *_args, **_kwargs: None)
@@ -504,6 +565,36 @@ def test_recovery_winner_failure_stops_later_validation_and_checkpoint(monkeypat
     assert "window-0000-lineage-0" not in events
     assert "checkpoint" not in events
     assert "final-contract" not in events
+
+
+def test_recovery_fails_the_airflow_task_when_crosswalk_snapshot_is_unavailable(
+    monkeypatch,
+):
+    module = load_recovery_module()
+    calls = []
+    monkeypatch.setattr(module, "publishable_window_indexes", lambda _windows: {0})
+    monkeypatch.setattr(
+        module.Variable,
+        "get",
+        staticmethod(lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_admin_dong_crosswalk_snapshot_id",
+        lambda: (_ for _ in ()).throw(
+            module.AdminDongCrosswalkSnapshotUnavailableError("snapshot unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        module.weather_dbt,
+        "execute_dbt_phase",
+        lambda **kwargs: calls.append(kwargs) or _successful_execution(),
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="snapshot unavailable"):
+        module.recover_observation_windows(**_recovery_context())
+
+    assert calls == []
 
 
 def test_recovery_dag_contains_no_raw_dbt_or_node_selection_ownership():

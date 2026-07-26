@@ -87,6 +87,49 @@ DEFAULT_PARAMS = {
 }
 record_weather_problem = problem_failure_callback(domain="weather")
 
+# ASAC-DAG#480: the W2 serving model requires the shared admin_dong crosswalk
+# to be pinned to one Iceberg snapshot via this dbt var. Historical recovery
+# resolves and passes the same pin so selector-owned dbt phases can compile.
+ADMIN_DONG_CROSSWALK_PIN_VAR = "admin_dong_crosswalk_pin_snapshot_id"
+
+
+class AdminDongCrosswalkSnapshotUnavailableError(RuntimeError):
+    """The shared admin_dong crosswalk Iceberg table has no usable snapshot to pin."""
+
+
+def resolve_admin_dong_crosswalk_snapshot_id() -> int:
+    """Pin the shared admin_dong crosswalk seed to its latest Iceberg snapshot (#480).
+
+    The latest snapshot includes the most recent bridge membership (e.g. Yongsin-dong
+    added 2026-07-23), which is exactly what a historical backfill needs.
+    """
+    from weather_ingest.common.runtime import sql_identifier
+
+    cursor, catalog, _ = trino_cursor()
+    schema = sql_identifier(os.environ.get("COMMON_SCHEMA", "common"))
+    table = sql_identifier("seoul_admin_dong_crosswalk")
+    cursor.execute(
+        "SELECT snapshot_id "
+        f'FROM {catalog}.{schema}."{table}$snapshots" '
+        "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    try:
+        raw_snapshot_id = row[0]
+    except (TypeError, IndexError) as exc:
+        raise AdminDongCrosswalkSnapshotUnavailableError(
+            "admin_dong crosswalk Iceberg snapshot is unavailable"
+        ) from exc
+    if (
+        isinstance(raw_snapshot_id, bool)
+        or not isinstance(raw_snapshot_id, int)
+        or raw_snapshot_id <= 0
+    ):
+        raise AdminDongCrosswalkSnapshotUnavailableError(
+            "admin_dong crosswalk Iceberg snapshot ID must be a positive integer"
+        )
+    return raw_snapshot_id
+
 
 def checkpoint_variable_name(checkpoint_id: str) -> str:
     if not CHECKPOINT_ID_PATTERN.fullmatch(checkpoint_id):
@@ -235,6 +278,12 @@ def recover_observation_windows(**context) -> dict[str, object]:
     if target != "dev":
         raise ValueError("Weather W2 historical recovery is dev-only")
 
+    try:
+        crosswalk_pin_id = resolve_admin_dong_crosswalk_snapshot_id()
+    except AdminDongCrosswalkSnapshotUnavailableError as exc:
+        raise AirflowFailException(str(exc)) from exc
+    crosswalk_vars = {ADMIN_DONG_CROSSWALK_PIN_VAR: crosswalk_pin_id}
+
     windows = split_repair_windows(
         str(params["repair_start_at"]),
         str(params["repair_cutoff_at"]),
@@ -252,9 +301,10 @@ def recover_observation_windows(**context) -> dict[str, object]:
 
     variable_name = checkpoint_variable_name(str(params["checkpoint_id"]))
     completed = _checkpoint_for_windows(variable_name, windows)
-    preparation_variables = preparation_dbt_vars(
-        selected_windows[0], selected_windows[-1]
-    )
+    preparation_variables = {
+        **preparation_dbt_vars(selected_windows[0], selected_windows[-1]),
+        **crosswalk_vars,
+    }
     for phase in preparation_phase_plan():
         execute_recovery_phase(
             phase,
@@ -269,7 +319,7 @@ def recover_observation_windows(**context) -> dict[str, object]:
             LOGGER.info("[weather-w2-recovery] checkpoint skip window=%s", window.label)
             continue
         window_index = window_indexes[window.label]
-        variables = window_dbt_vars(window)
+        variables = {**window_dbt_vars(window), **crosswalk_vars}
         LOGGER.info("[weather-w2-recovery] recover window=%s", window.label)
         for phase in window_phase_plan(window_index):
             execute_recovery_phase(
