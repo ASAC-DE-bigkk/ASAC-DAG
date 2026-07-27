@@ -22,6 +22,26 @@ class RecordingCursor:
     def fetchone(self):
         return self.rows.pop(0)
 
+    def fetchall(self):
+        rows = self.rows
+        self.rows = []
+        return rows
+
+
+def _receipt_raw_result(*, raw_key: str, raw_hash: str, row_count: int) -> dict:
+    return {
+        "raw_objects": [
+            {
+                "raw_object_key": raw_key,
+                "raw_hash": raw_hash,
+                "row_count": row_count,
+            }
+        ],
+        "expected_rows": row_count,
+        "page_count": 1,
+        "is_publishable": True,
+    }
+
 
 def test_create_bronze_table_also_creates_request_audit_table():
     cursor = RecordingCursor()
@@ -172,3 +192,55 @@ def test_verify_multiple_raw_objects(monkeypatch):
 
     assert row_count == 3
     assert "raw_object_key IN" in cursor.statements[0]
+
+
+def test_find_verified_receipts_returns_only_exact_bronze_and_audit_evidence():
+    raw_key = "raw/traffic/accinfo/request-1.xml"
+    raw_hash = "a" * 64
+    cursor = RecordingCursor(
+        rows=[
+            ("bronze", "snapshot-1", raw_key, 4, 1, raw_hash, None, None),
+            ("audit", "snapshot-1", raw_key, 1, 1, raw_hash, 4, 1),
+        ]
+    )
+
+    verified = bronze.find_verified_seoul_traffic_bronze_receipts(
+        {
+            "snapshot-1": _receipt_raw_result(
+                raw_key=raw_key,
+                raw_hash=raw_hash,
+                row_count=4,
+            )
+        },
+        cursor_factory=lambda: (cursor, "iceberg_dev", "weather_traffic_bronze"),
+    )
+
+    assert verified == {"snapshot-1": 4}
+    assert "bronze_seoul_traffic_incident_request_audit" in cursor.statements[0]
+
+
+def test_find_verified_receipts_keeps_missing_or_mismatched_evidence_for_load():
+    raw_key = "raw/traffic/accinfo/request-1.xml"
+    cursor = RecordingCursor(
+        rows=[
+            ("bronze", "snapshot-1", raw_key, 4, 1, "b" * 64, None, None),
+        ]
+    )
+
+    verified = bronze.find_verified_seoul_traffic_bronze_receipts(
+        {
+            "snapshot-1": _receipt_raw_result(
+                raw_key=raw_key,
+                raw_hash="a" * 64,
+                row_count=4,
+            ),
+            "snapshot-2": _receipt_raw_result(
+                raw_key="raw/traffic/accinfo/request-2.xml",
+                raw_hash="c" * 64,
+                row_count=0,
+            ),
+        },
+        cursor_factory=lambda: (cursor, "iceberg_dev", "weather_traffic_bronze"),
+    )
+
+    assert verified == {}
