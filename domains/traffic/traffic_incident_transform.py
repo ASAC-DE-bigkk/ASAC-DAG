@@ -116,6 +116,26 @@ def admit_traffic_silver_snapshot(**context) -> dict[str, object]:
         raise
 
 
+def assert_traffic_silver_snapshot_not_superseded(**context) -> str:
+    """Re-check the pin before the expensive dbt phases, not just at dbt_run_silver.
+
+    dbt_deps/dbt_source_freshness/dbt_test_traffic_incident_availability/
+    dbt_test_traffic_bronze_source_contract take several minutes even off the
+    heavy pool. Bronze arrives roughly every 5 minutes, so a run that only
+    discovers it was superseded once it reaches dbt_run_silver has already
+    burned that whole window — and the next run repeats the same waste,
+    livelocking the pipeline (#510). Checking here, right after admission,
+    keeps a superseded run's pool/wall-clock cost to one cheap manifest
+    lookup instead. The pre_execution_guard inside dbt_run_silver/
+    dbt_test_silver stays as-is for defense in depth.
+    """
+    ti = context["ti"]
+    incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
+    return require_latest_publishable_incident_snapshot(
+        build_traffic_manifest(), incident_run_id
+    )
+
+
 def publish_traffic_incident_silver_asset(**context) -> dict[str, object]:
     ti = context["ti"]
     incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
@@ -259,6 +279,12 @@ with DAG(
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
     )
+    assert_not_superseded = PythonOperator(
+        task_id="assert_traffic_silver_snapshot_not_superseded",
+        python_callable=assert_traffic_silver_snapshot_not_superseded,
+        weight_rule="absolute",
+        on_failure_callback=record_traffic_problem,
+    )
     dbt_phase_tasks = {
         spec.task_id: build_dbt_phase_task(
             spec,
@@ -290,11 +316,32 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
+    # #510: run the Bronze source gates (deps/freshness/availability/contract)
+    # BEFORE pinning a snapshot, then resolve/admit/assert the latest publishable
+    # Bronze run immediately before dbt_run_silver. The gates are Bronze-source
+    # tests that do not depend on the pinned run (run_dbt_phase falls back to the
+    # preflight sentinel var when no snapshot is resolved yet), so moving them
+    # ahead of the pin keeps every contract gate intact while shrinking the
+    # pin->build window from ~10 min to seconds. That window used to exceed the
+    # ~5 min Bronze ingestion cadence, so the pin was always superseded before
+    # dbt_run_silver and the run self-skipped, starving Gold/Flow (livelock).
+    gate_tasks = [
+        dbt_phase_tasks[spec.task_id]
+        for spec in SILVER_DBT_PHASE_SPECS
+        if not spec.snapshot_required
+    ]
+    build_tasks = [
+        dbt_phase_tasks[spec.task_id]
+        for spec in SILVER_DBT_PHASE_SPECS
+        if spec.snapshot_required
+    ]
     chain = [
         validate_runtime,
+        *gate_tasks,
         resolve_snapshot,
         admit_snapshot,
-        *dbt_phase_tasks.values(),
+        assert_not_superseded,
+        *build_tasks,
         publish_silver,
         mark_success,
         publish_metrics,

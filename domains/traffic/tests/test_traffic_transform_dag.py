@@ -53,15 +53,33 @@ def test_silver_dag_schedule_and_guard_order():
 
     assert dag.kwargs["schedule"].uri == module.TRAFFIC_INCIDENT_BRONZE_ASSET
     assert dag.kwargs["max_active_runs"] == 1
+    # #510: Bronze source gates run first (no pin needed), then the snapshot is
+    # pinned immediately before dbt_run_silver so the pin cannot be superseded by
+    # a newer Bronze run during the multi-minute gate phase (livelock fix).
     assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
-        "resolve_traffic_snapshot_run"
+        "dbt_deps"
     }
+    assert dag.task_dict["dbt_deps"].downstream_task_ids == {
+        "dbt_source_freshness"
+    }
+    assert dag.task_dict["dbt_source_freshness"].downstream_task_ids == {
+        "dbt_test_traffic_incident_availability"
+    }
+    assert dag.task_dict[
+        "dbt_test_traffic_incident_availability"
+    ].downstream_task_ids == {"dbt_test_traffic_bronze_source_contract"}
+    assert dag.task_dict[
+        "dbt_test_traffic_bronze_source_contract"
+    ].downstream_task_ids == {"resolve_traffic_snapshot_run"}
     assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {
         "admit_traffic_silver_snapshot"
     }
     assert dag.task_dict["admit_traffic_silver_snapshot"].downstream_task_ids == {
-        "dbt_deps"
+        "assert_traffic_silver_snapshot_not_superseded"
     }
+    assert dag.task_dict[
+        "assert_traffic_silver_snapshot_not_superseded"
+    ].downstream_task_ids == {"dbt_run_silver"}
     assert "dbt_run_gold" not in dag.task_ids
     assert "select_traffic_test_tier" not in dag.task_ids
 
@@ -239,6 +257,37 @@ def test_silver_admission_coalesces_deferred_runs_when_exact_output_skips(monkey
         )
 
     assert calls == [(["incident-old"], "incident-1")]
+
+
+def test_assert_not_superseded_passes_when_pin_is_still_latest(monkeypatch):
+    module = load_transform_module()
+
+    class Manifest:
+        def latest_publishable_run_id(self):
+            return "incident-1"
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+
+    result = module.assert_traffic_silver_snapshot_not_superseded(
+        ti=_silver_ti(module, incident_run_id="incident-1")
+    )
+
+    assert result == "incident-1"
+
+
+def test_assert_not_superseded_skips_early_before_any_dbt_phase_runs(monkeypatch):
+    module = load_transform_module()
+
+    class Manifest:
+        def latest_publishable_run_id(self):
+            return "incident-2"
+
+    monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+
+    with pytest.raises(FakeAirflowSkipException):
+        module.assert_traffic_silver_snapshot_not_superseded(
+            ti=_silver_ti(module, incident_run_id="incident-1")
+        )
 
 
 def test_silver_publication_failure_cannot_write_marker(monkeypatch):

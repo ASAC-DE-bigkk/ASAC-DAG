@@ -157,17 +157,100 @@ def test_load_existing_detail_ids_fails_open():
     assert load_existing_detail_ids("dev", warehouse=wh) is None  # fail-open → top-up skip
 
 
-def test_missing_mode_ignores_non_flagged_detail(tmp_path):
-    # missing_only_nightly=False 인 다른 detail(공연 상세)은 missing 모드여도 현행 동작
-    landing = _landing(tmp_path)
+# ── #518 공연 상세 top-up ────────────────────────────────────────────────────
+
+from culture_ingest.source.ingest import load_known_detail_ids
+
+
+def _land_performance_list(landing: Landing, *ids: str) -> None:
+    rows = "".join(f"<db><mt20id>{i}</mt20id><prfnm>공연{i}</prfnm></db>" for i in ids)
+    body = f'<?xml version="1.0"?><dbs>{rows}</dbs>'.encode()
     prefix = landing.prefix_for("kopis", "kopis_performance")
-    body = ('<?xml version="1.0"?><dbs><db><mt20id>PF001</mt20id>'
-            "<prfnm>공연</prfnm></db></dbs>").encode()
     key = landing.write_page(prefix, "page-0001.xml", body, "xml")
-    landing.write_manifest(prefix, {"dataset": "kopis_performance", "rows": 1,
+    landing.write_manifest(prefix, {"dataset": "kopis_performance", "rows": len(ids),
                                     "object_keys": [key]})
+
+
+def test_performance_detail_is_flagged_for_nightly_topup():
+    # #518: 공연 상세도 야간엔 신규분만 — 한 공연의 mt10id 는 불변이라 재크롤 정보량 0
+    assert BY_NAME["kopis_performance_detail"].missing_only_nightly is True
+
+
+def test_performance_detail_antijoins_known_ids(tmp_path):
+    landing = _landing(tmp_path)
+    _land_performance_list(landing, "PF001", "PF002", "PF003")
     kopis = _DetailOnlyKopis()
     res = ingest_dataset(BY_NAME["kopis_performance_detail"], _Clients(kopis), landing,
-                         _opts(known_detail_ids=[]))
+                         _opts(known_detail_ids=["PF001", "PF002"]))
     assert not res.error
-    assert kopis.detail_ids == ["PF001"]
+    assert kopis.detail_ids == ["PF003"]  # 기존 2건은 재크롤하지 않는다
+
+
+def test_performance_detail_skips_when_nothing_new(tmp_path):
+    # 평상시(신규 공연 0건) — API 호출 0 이 이 이슈의 절감분
+    landing = _landing(tmp_path)
+    _land_performance_list(landing, "PF001", "PF002")
+    kopis = _DetailOnlyKopis()
+    res = ingest_dataset(BY_NAME["kopis_performance_detail"], _Clients(kopis), landing,
+                         _opts(known_detail_ids=["PF001", "PF002"]))
+    assert res.error == "skipped (detail top-up: no missing ids)"
+    assert kopis.detail_ids == []
+
+
+# ── plan-측 데이터셋별 known-id 로드 (#518) ──────────────────────────────────
+
+
+class _RecordingWarehouse:
+    """데이터셋별 SQL 을 기록 — 한 집합이 다른 데이터셋으로 새는지 잡는다."""
+
+    def __init__(self, rows_by_table: dict, errors: dict | None = None):
+        self._rows = rows_by_table
+        self._errors = errors or {}
+        self.sqls: list[str] = []
+        self.client = self
+
+    def qualified(self, dataset: str) -> str:
+        return f"iceberg.culture.bronze_{dataset}"
+
+    def execute(self, sql: str):
+        self.sqls.append(sql)
+        for table, exc in self._errors.items():
+            if table in sql:
+                raise exc
+        for table, rows in self._rows.items():
+            if table in sql:
+                return rows
+        return []
+
+
+def test_known_ids_loaded_per_dataset_with_own_id_field():
+    # 시설 집합(mt10id)이 공연(mt20id)으로 새면 안티조인이 전량 신규 판정 → 절감 0
+    wh = _RecordingWarehouse({
+        "bronze_kopis_facility_detail": [["FC001"]],
+        "bronze_kopis_performance_detail": [["PF001"], ["PF002"]],
+    })
+    known = load_known_detail_ids(
+        "dev", ["kopis_facility_detail", "kopis_performance_detail"], warehouse=wh)
+    assert known["kopis_facility_detail"] == ["FC001"]
+    assert known["kopis_performance_detail"] == ["PF001", "PF002"]
+    joined = " ".join(wh.sqls)
+    assert "'$.mt10id'" in joined and "'$.mt20id'" in joined  # 각자 자기 id_field
+
+
+def test_known_ids_omits_non_flagged_datasets():
+    wh = _RecordingWarehouse({})
+    known = load_known_detail_ids("dev", ["kopis_performance", "kopis_festival"], warehouse=wh)
+    assert known == {}          # 플래그 없는 데이터셋은 조회 자체를 안 한다
+    assert wh.sqls == []
+
+
+def test_known_ids_fail_open_is_per_dataset():
+    # 한쪽 조회 실패가 다른 데이터셋의 top-up 까지 끄면 안 된다(fail-open 은 개별)
+    wh = _RecordingWarehouse(
+        {"bronze_kopis_performance_detail": [["PF001"]]},
+        errors={"bronze_kopis_facility_detail": RuntimeError("trino down")},
+    )
+    known = load_known_detail_ids(
+        "dev", ["kopis_facility_detail", "kopis_performance_detail"], warehouse=wh)
+    assert known["kopis_facility_detail"] is None       # 이 데이터셋만 top-up skip
+    assert known["kopis_performance_detail"] == ["PF001"]

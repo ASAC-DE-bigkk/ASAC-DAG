@@ -145,8 +145,22 @@ def _is_daily_window(**_) -> bool:
 
 
 def _is_hourly_window(**_) -> bool:
-    """hourly 티어 게이트 — 매시 5~9분만(slow 의 :00~:04 와 stagger). 시간 grain 골드."""
-    return 5 <= datetime.now(KST_TZ).minute < 10
+    """hourly 티어 게이트 — 매시 '첫 실행 1회'(분 무관, slow 의 :00~:04 는 양보).
+    과거엔 '매시 5~9분' 5분 창이었으나, transform 이 asset 트리거라 불규칙한 분(예: :18·:37·:56)에
+    돌아 창을 자주 빗나가 hourly 티어가 몇 시간씩 안 도는 버그(2026-07-26). Variable 로 '이 시간에
+    이미 돌았나'를 보고 시간당 정확히 1회 통과 → 타이밍에 안 흔들린다. downstream 실패 시엔 다음
+    시간 run 이 self-heal(hourly 골드는 table+replace)."""
+    from airflow.models import Variable
+
+    now = datetime.now(KST_TZ)
+    if now.minute < 5:
+        return False  # :00~:04 는 slow 창 — stagger 양보
+    key = "citydata_transform_hourly_last_hour"
+    cur = now.strftime("%Y-%m-%dT%H")  # 시간 버킷
+    if Variable.get(key, default_var="") == cur:
+        return False  # 이 시간엔 이미 실행함
+    Variable.set(key, cur)
+    return True
 
 
 with DAG(

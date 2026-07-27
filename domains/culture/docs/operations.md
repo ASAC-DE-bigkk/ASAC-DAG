@@ -64,6 +64,21 @@ bronze Iceberg 적재는 파라미터가 아니라 **`load_bronze` 태스크가 
   방지). 전수 재크롤은 `culture_facility_refresh`(일 05:30 KST)가 `detail_mode="full"`
   + `max_detail=2000`으로 수행. 수동 전수 크롤:
   `airflow dags trigger culture_bronze --conf '{"datasets": ["kopis_facility", "kopis_facility_detail"], "max_detail": 2000, "detail_mode": "full"}'`
+- **공연 상세도 야간 top-up(#518)**: `kopis_performance_detail`도 `missing_only_nightly`.
+  상세에서 쓰는 값은 `mt10id`(공연↔공연장) 하나뿐이고 이는 공연 id 에 대해 불변이라
+  — 실측 608건 중 변경 0건 — 재크롤 정보량이 0 이었다(200콜/일의 약 92%가 전날 것
+  재수집). 시설과 달리 **주기가 아니라 대상을 줄인다**: 신규 공연이 매일 생기므로
+  야간 실행은 그대로 두고 안티조인으로 신규분만 긁는다. **전환 직후엔 200건씩 나간다** —
+  앞자르기가 한 번도 닿지 않은 목록 후미가 미크롤로 남아 있어서다(전환 시점 목록
+  1,260건 중 크롤 이력 608건 = 백로그 652건). cap 만큼 하루 200씩 배수해 3~4일이면
+  목록 전량, 그 뒤가 정상 상태(신규 ~15건/일)다. 부수 효과로 상세 커버리지가
+  29%→~100%로 올라 `facility_match` 가 이름 폴백에서 `detail_id` 로 옮겨간다. 전수 재크롤:
+  `airflow dags trigger culture_bronze --conf '{"datasets": ["kopis_performance", "kopis_performance_detail"], "max_detail": 3000, "detail_mode": "full"}'`
+- **top-up known-id 는 데이터셋별 조회(#518)**: plan 이 `load_known_detail_ids`로
+  `missing_only_nightly` 데이터셋마다 **자기 `id_field`**로 기존 id 를 읽는다. 한 집합을
+  공유하면 공연(`mt20id`)이 시설(`mt10id`) 집합과 안티조인돼 교집합 0 → 목록 앞 200건을
+  매일 재크롤하던 종전 동작이 유지된다(cap 이 차집합 뒤라 폭주는 없지만 **절감 0 인 채
+  로그만 top-up 처럼 보이는 조용한 no-op**). 조회 실패는 데이터셋 단위 fail-open.
 
 ```bash
 # 예: boxoffice만 특정 주간 재수집 (dev, 로컬 CLI)
