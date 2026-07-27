@@ -35,6 +35,10 @@ from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from weather_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL  # noqa: E402
 from weather_ingest.runtime import build_weather_manifest  # noqa: E402
+from weather_ingest.w2_canonical_runtime import (  # noqa: E402
+    AdminDongCrosswalkSnapshotUnavailableError,
+    resolve_admin_dong_crosswalk_snapshot_id,
+)
 import weather_dbt_execution as weather_dbt  # noqa: E402
 from weather_dbt_failure import classify_weather_dbt_failure  # noqa: E402
 from weather_lineage import enable_lineage_if_configured  # noqa: E402
@@ -116,40 +120,6 @@ def _triggering_asset_events(*, context: dict, asset_uri: str):
             "weather transform requires at least one triggering Bronze asset event"
         )
     return matched
-
-
-class AdminDongCrosswalkSnapshotUnavailableError(RuntimeError):
-    """The shared admin_dong crosswalk Iceberg table has no usable snapshot to pin."""
-
-
-def resolve_admin_dong_crosswalk_snapshot_id() -> int:
-    """Pin the shared admin_dong crosswalk seed to one Iceberg snapshot (ASAC-DAG#480)."""
-    from weather_ingest.common.runtime import sql_identifier, trino_cursor
-
-    cursor, catalog, _ = trino_cursor()
-    schema = sql_identifier(os.environ.get("COMMON_SCHEMA", "common"))
-    table = sql_identifier("seoul_admin_dong_crosswalk")
-    cursor.execute(
-        "SELECT snapshot_id "
-        f'FROM {catalog}.{schema}."{table}$snapshots" '
-        "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
-    )
-    row = cursor.fetchone()
-    try:
-        raw_snapshot_id = row[0]
-    except (TypeError, IndexError) as exc:
-        raise AdminDongCrosswalkSnapshotUnavailableError(
-            "admin_dong crosswalk Iceberg snapshot is unavailable"
-        ) from exc
-    if (
-        isinstance(raw_snapshot_id, bool)
-        or not isinstance(raw_snapshot_id, int)
-        or raw_snapshot_id <= 0
-    ):
-        raise AdminDongCrosswalkSnapshotUnavailableError(
-            "admin_dong crosswalk Iceberg snapshot ID must be a positive integer"
-        )
-    return raw_snapshot_id
 
 
 def resolve_weather_snapshot_run(**context) -> str:
