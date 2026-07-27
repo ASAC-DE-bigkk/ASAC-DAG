@@ -26,6 +26,7 @@ commerce 카테고리 문서 모음. 코드·설정·테스트·문서·규약(C
 - **[작업 러북] detail_health 레거시 제거(OPEN, 물리테이블 env별 체크)**: [cleanup-detail-health.md](cleanup-detail-health.md)
 - **[작업 가이드] silver/gold 구조 판정 + 리팩터 C1~C7·V1(OPEN)**: [silver-gold-refactor-guide.md](silver-gold-refactor-guide.md)
 - **보안 종합검증(단일 포인트)**: [security/security.md](security/security.md) · `python -m security`
+- **[추적] 공용 D1 Serving Contract(호스트 소유 크로스도메인 계약, commerce=소비자)**: [serving-contract-chain.md](serving-contract-chain.md)
 - **변경 이력(대단위 변경 기록)**: [../change-log.md](../change-log.md)
 
 ## 전체 문서 맵

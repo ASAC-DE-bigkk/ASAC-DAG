@@ -999,6 +999,23 @@ Current known rule:
   external alert. Watermark unknown → full-table fallback.
 
 
+## 19.2 External Serving Contract (공용 D1) — 추적만, commerce 는 소비자
+
+도메인 공통 **Serving Contract**(어떤 Gold를 어떤 기준으로 공용 Cloudflare **D1** 데이터 제품으로
+승격·게시·등록하는가)는 **호스트(ASAC-DAG) 소유의 크로스도메인 계약**이다(ASAC-DAG #478 확정,
+정본 `docs/contracts/serving-contract-v1.md` · 공통 Publisher `common/serving/` · ASAC-DBT
+Validator/CI Gate). **commerce gold 는 지금 이 계약 대상이 아니다** — commerce gold 는
+`commerce_load_gold`(카탈로그 구동 Python)로 **서빙 Postgres** 에 적재되고, #478 대상 도메인
+(citydata·transit·culture·weather·traffic)에 commerce 는 없다.
+
+- 지금은 **참조·추적용**이며, 이 계약을 이유로 commerce 코드를 바꾸지 않는다(Working Scope 유지).
+- commerce 가 **미래에 어떤 gold 를 공용 D1(외부 공개 API·`/catalog` 또는 내부 Agent용)에 올리게
+  될 때** 준수해야 하는 외부 계약이다. 그때는 자체 서빙 규약을 재발명하지 말고 공통 Publisher
+  factory 를 소비하고, 계약 문서·Publisher 를 고쳐야 하면 **결정 이슈(#478 계열)로 제안**한다.
+- **추적 문서(정본으로 가는 길): [docs/serving-contract-chain.md](docs/serving-contract-chain.md).**
+  필요할 때 이 한 문서에서 이슈·결정·정본·구현·롤아웃을 순서대로 따라간다.
+
+
 ## 20. Security Gate (recall · apply · check, ongoing)
 
 

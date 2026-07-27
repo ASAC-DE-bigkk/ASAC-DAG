@@ -32,6 +32,7 @@
 | [docs/pipeline/](docs/pipeline/README.md) | 레이어별 — [raw/](docs/pipeline/raw/README.md)(수집) · [bronze/](docs/pipeline/bronze/README.md)(Iceberg) · [silver/](docs/pipeline/silver/README.md)(dbt) · [gold/](docs/pipeline/gold/README.md)(미구현) |
 | [docs/README.md](docs/README.md) | 카테고리 코드 위치·문서 인덱스·빠른 실행 |
 | [config/dataset_registry.yaml](config/dataset_registry.yaml) | 수집 대상 단일 진실 공급원 |
+| [docs/serving-contract-chain.md](docs/serving-contract-chain.md) | **공용 D1 Serving Contract 추적**(호스트 소유 크로스도메인 계약, commerce 는 소비자) — 이슈·결정·정본·구현·롤아웃으로 가는 길. commerce gold 는 현재 서빙 Postgres 라 대상 아님(참조·추적용) |
 
 ## 4. 프로젝트 운영
 
