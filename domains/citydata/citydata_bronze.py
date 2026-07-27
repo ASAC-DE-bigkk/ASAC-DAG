@@ -42,7 +42,7 @@ if _DAGS_ROOT not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.assets import CITYDATA_BRONZE_ASSET  # noqa: E402
-from common.ops.airflow import record_run_metadata  # noqa: E402
+from common.ops.run_sink import record_run  # noqa: E402
 
 from citydata_ingest.common.config import RunContext  # noqa: E402
 from citydata_ingest.source.citydata import DEFAULT_BRONZE_BLOCKS  # noqa: E402
@@ -61,8 +61,8 @@ record_citydata_problem = problem_failure_callback(
 
 # run-metadata(ops.run_metadata) — 성공·실패 모두 1행 append(태스크 단위). 기존 problem
 # 콜백과 병행. bronze 완전성(expected/landed)은 load_bronze 가 XCom 으로 밀어 채운다.
-_run_md_ok = record_run_metadata("citydata", "bronze", status="success")
-_run_md_fail = record_run_metadata("citydata", "bronze", status="failed")
+_run_ok = record_run("citydata", "bronze", status="success")
+_run_fail = record_run("citydata", "bronze", status="failed")
 
 DEFAULT_PARAMS = {
     "target": "dev",
@@ -219,21 +219,21 @@ with DAG(
     dagrun_timeout=timedelta(minutes=15),
     default_args={"retries": 1, "retry_delay": timedelta(minutes=1),
                   "execution_timeout": timedelta(minutes=10),
-                  "on_success_callback": _run_md_ok},
+                  "on_success_callback": _run_ok},
     params=DEFAULT_PARAMS,
     tags=["ingest", "citydata", "population", "bronze", "r2", "iceberg"],
 ) as dag:
     fetch_raw = PythonOperator(
         task_id="fetch_raw", python_callable=_fetch_raw,
-        on_failure_callback=[record_citydata_problem, _run_md_fail])
+        on_failure_callback=[record_citydata_problem, _run_fail])
     # 적재 성공 시 Asset 발행 → citydata_transform_cosmos 자동 기동 (#274). 크론 오프셋 대신
     # bronze 완료 이벤트로 변환을 묶어 "덜 끝난 bronze 를 읽는" 경합을 제거한다.
     load_bronze = PythonOperator(
         task_id="load_bronze", python_callable=_load_bronze,
         outlets=[Asset(CITYDATA_BRONZE_ASSET)],
-        on_failure_callback=[record_citydata_problem, _run_md_fail])
+        on_failure_callback=[record_citydata_problem, _run_fail])
     report = PythonOperator(
         task_id="report", python_callable=_report, trigger_rule="all_done",
-        on_failure_callback=[record_citydata_problem, _run_md_fail])
+        on_failure_callback=[record_citydata_problem, _run_fail])
 
     fetch_raw >> load_bronze >> report
