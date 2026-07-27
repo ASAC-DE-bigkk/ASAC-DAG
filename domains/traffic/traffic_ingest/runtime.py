@@ -199,6 +199,7 @@ def build_incident_landing_lifecycle() -> IncidentLandingLifecycle:
 def build_incident_materializer() -> IncidentMaterializer:
     from traffic_ingest.bronze import (
         create_seoul_traffic_bronze_table,
+        find_verified_seoul_traffic_bronze_receipts,
         insert_seoul_traffic_bronze_rows,
         verify_seoul_traffic_bronze_runtime,
     )
@@ -223,10 +224,19 @@ def build_incident_materializer() -> IncidentMaterializer:
             expected_raw_objects=int(load_result.get("page_count") or 0),
         )
 
+    def verified_receipts(receipts) -> dict[str, int]:
+        return find_verified_seoul_traffic_bronze_receipts(
+            {
+                receipt.snapshot_run_id: receipt.raw_result
+                for receipt in receipts
+            }
+        )
+
     return IncidentMaterializer(
         receipts=build_traffic_snapshot_receipts(),
         manifest=build_traffic_manifest(),
         load=load,
         verify=verify,
+        verified_receipts=verified_receipts,
         clock=lambda: datetime.now(timezone.utc),
     )
