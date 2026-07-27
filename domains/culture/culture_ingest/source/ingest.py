@@ -550,9 +550,37 @@ def load_existing_detail_ids(
         )
         return [row[0] for row in wh.client.execute(sql) if row and row[0]]
     except Exception as exc:  # noqa: BLE001 -- 조회 실패가 야간 런을 죽이면 안 됨
-        print(f"  [top-up] 기존 detail id 로드 실패(fail-open, top-up skip): "
+        print(f"  [top-up] {dataset} 기존 detail id 로드 실패(fail-open, top-up skip): "
               f"{redact(f'{type(exc).__name__}: {exc}')}")
         return None
+
+
+def load_known_detail_ids(
+    target: str,
+    names: list[str],
+    *,
+    warehouse=None,
+) -> dict[str, list[str] | None]:
+    """top-up 대상 데이터셋마다 **자기 id_field 로** 기존 id 집합을 로드한다(#518).
+
+    데이터셋별로 나눠 조회하는 것이 핵심이다. 한 집합을 모든 detail 에 공유하면
+    공연(``mt20id``)이 시설(``mt10id``) 집합과 안티조인돼 교집합이 0 이 되고,
+    cap 이 차집합 뒤에 걸리는 탓에 **목록 앞 200건을 매일 재크롤하던 종전 동작이
+    그대로 유지된다** — 로그만 top-up 처럼 보이는 조용한 no-op.
+
+    웨어하우스는 한 번만 만들어 재사용하고, 실패는 데이터셋 단위 fail-open(None)
+    이다 — 한쪽 조회 실패가 다른 데이터셋의 top-up 까지 끄지 않게.
+    """
+    flagged = [n for n in names if BY_NAME[n].missing_only_nightly]
+    if not flagged:
+        return {}
+    wh = warehouse or BronzeWarehouse(build_warehouse_settings(target))
+    return {
+        n: load_existing_detail_ids(
+            target, dataset=n, id_field=BY_NAME[n].id_field, warehouse=wh
+        )
+        for n in flagged
+    }
 
 
 def build_clients(env_file: str | None = None) -> Clients:

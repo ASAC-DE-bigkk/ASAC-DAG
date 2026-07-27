@@ -63,7 +63,7 @@ from culture_ingest.common.config import (  # noqa: E402
     RunContext,
     normalize_target,
 )
-from culture_ingest.source.datasets import BY_NAME, plan_dataset_names  # noqa: E402
+from culture_ingest.source.datasets import plan_dataset_names  # noqa: E402
 from culture_ingest.source.ingest import (  # noqa: E402
     IngestOptions,
     annihilation_reason,
@@ -71,7 +71,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
     ingest_one,
     load_baselines_for_target,
     load_bronze,
-    load_existing_detail_ids,
+    load_known_detail_ids,
     normalize_mapped_results,
     write_run_report,
 )
@@ -155,12 +155,15 @@ def _plan(**context) -> list[dict]:
     # 볼륨 HWM(#147): 직전 run_report 의 데이터셋별 rows 를 기준선으로 로드(fail-open).
     baselines = load_baselines_for_target(target, before_ingest_ts=ingest_ts)
     # 야간 top-up(#466): missing 모드면 플래그 데이터셋의 기존 bronze id 를 로드(fail-open).
+    # 데이터셋별로 자기 id_field 로 나눠 조회한다(#518) — 한 집합을 공유하면 공연이
+    # 시설 id 집합과 안티조인돼 절감 0 인 채로 성공처럼 보인다.
     detail_mode = str(params.get("detail_mode", "missing"))
-    known_detail_ids = None
-    if detail_mode == "missing" and any(BY_NAME[n].missing_only_nightly for n in names):
-        known_detail_ids = load_existing_detail_ids(target)
-        print(f"plan: top-up known ids = "
-              f"{'로드 실패(fail-open)' if known_detail_ids is None else len(known_detail_ids)}")
+    known_by_dataset: dict[str, list[str] | None] = {}
+    if detail_mode == "missing":
+        known_by_dataset = load_known_detail_ids(target, names)
+        for ds_name, ids in known_by_dataset.items():
+            print(f"plan: top-up known ids[{ds_name}] = "
+                  f"{'로드 실패(fail-open)' if ids is None else len(ids)}")
     print(
         f"plan: {len(names)} datasets, window {date_from}~{date_to}, ingest_ts={ingest_ts}, "
         f"baselines={len(baselines)}개"
@@ -179,7 +182,7 @@ def _plan(**context) -> list[dict]:
             "kopis_rows": int(params["kopis_rows"]),
             "baseline_rows": baselines.get(name),
             "detail_mode": detail_mode,
-            "known_detail_ids": known_detail_ids if BY_NAME[name].missing_only_nightly else None,
+            "known_detail_ids": known_by_dataset.get(name),
         }
         for name in names
     ]
