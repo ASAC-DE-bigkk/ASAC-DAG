@@ -6,6 +6,9 @@
 
 - 스케줄 30 4 * * * (KST): culture_transform 완료(~03:22) 후 · culture_slo(05:01) 전.
   계약의 publication_trigger.schedule_cron 과 일치 의무(계약 §6).
+- Airflow import 는 factory 내부에만 있다(unit test 를 import-clean 하게 유지).
+  이 docstring 의 "Airflow" 표기는 DAG 파일 탐지 safe mode("dag"+"airflow" 문자열
+  동시 요구)의 스캔 조건이기도 하다 — 지우면 dag-processor 가 이 파일을 건너뛴다.
 - 7종 전량 스냅샷(A안) — 설계: docs/design/2026-07-27-culture-serving-export-d1.md
 """
 from common.serving.dag_factory import build_serving_export_dag
