@@ -163,6 +163,17 @@ def _is_hourly_window(**_) -> bool:
     return True
 
 
+def _not_maintenance(**_) -> bool:
+    """maintenance 진행 중이면(Variable citydata_maintenance_active=1) transform 전체 skip.
+
+    주간 유지보수(citydata_maintenance)가 optimize 로 데이터파일을 재작성하는 동안 transform 의
+    delete+insert 가 겹치면 Iceberg 커밋 충돌이 난다. 그 창에서만 transform 을 막는다 —
+    maintenance DAG 가 플래그를 set(pause)/clear(resume, trigger_rule=all_done 로 항상 clear)."""
+    from airflow.models import Variable
+
+    return Variable.get("citydata_maintenance_active", default_var="0") != "1"
+
+
 with DAG(
     dag_id="citydata_transform_cosmos",
     description="citydata transform via Cosmos — 모델별 태스크 + 모델별 테스트. 기존 통짜 DAG 대체(중복 재발 차단).",
@@ -197,7 +208,13 @@ with DAG(
     )
     hourly = _tier_group("hourly", HOURLY_SELECT)
 
+    # 최상위 게이트: 주간 maintenance 진행 중이면 transform 전체 skip(optimize↔delete+insert 충돌 방지).
+    gate_maint = ShortCircuitOperator(
+        task_id="gate_not_maintenance", python_callable=_not_maintenance,
+        on_failure_callback=record_citydata_problem,
+    )
+
     # fast 완료 후 게이트 분기(독립·stagger 로 상호 비겹침) — slow(:00~04)·hourly(:05~09)·daily(0시:15~19).
-    deps_seed >> fast >> gate_slow >> slow
+    gate_maint >> deps_seed >> fast >> gate_slow >> slow
     fast >> gate_hourly >> hourly
     fast >> gate_daily >> daily
