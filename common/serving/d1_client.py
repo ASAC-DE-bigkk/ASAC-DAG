@@ -48,18 +48,17 @@ class D1Client(Protocol):
 
 # ---- catalog schema (single source for both real client and Worker) -----------------
 
-CATALOG_COLUMNS = (
-    "name", "product_id", "external", "description", "product_question",
-    "tests", "time_axis", "columns", "row_count", "serving_status",
-    "publication_id", "source_run_id", "published_bytes", "freshness", "exported_at",
+CATALOG_COLUMN_TYPES = (
+    ("name", "TEXT PRIMARY KEY"), ("product_id", "TEXT"), ("external", "INTEGER"),
+    ("description", "TEXT"), ("product_question", "TEXT"), ("tests", "TEXT"),
+    ("time_axis", "TEXT"), ("columns", "TEXT"), ("row_count", "INTEGER"),
+    ("serving_status", "TEXT"), ("publication_id", "TEXT"), ("source_run_id", "TEXT"),
+    ("published_bytes", "INTEGER"), ("freshness", "TEXT"), ("exported_at", "TEXT"),
 )
-
-CATALOG_DDL = (
-    "CREATE TABLE IF NOT EXISTS _catalog (name TEXT PRIMARY KEY, product_id TEXT, "
-    "external INTEGER, description TEXT, product_question TEXT, tests TEXT, time_axis TEXT, "
-    "columns TEXT, row_count INTEGER, serving_status TEXT, publication_id TEXT, "
-    "source_run_id TEXT, published_bytes INTEGER, freshness TEXT, exported_at TEXT);"
-)
+CATALOG_COLUMNS = tuple(name for name, _ in CATALOG_COLUMN_TYPES)
+CATALOG_DDL = "CREATE TABLE IF NOT EXISTS _catalog (" + ", ".join(
+    f"{name} {column_type}" for name, column_type in CATALOG_COLUMN_TYPES
+) + ");"
 
 
 class HttpD1Client:
@@ -140,12 +139,38 @@ class HttpD1Client:
     def insert_rows(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], *, replace: bool) -> None:
         self._insert_batches(name, columns, rows, replace=replace)
 
+    def _catalog_column_names(self) -> set[str]:
+        return {str(row["name"]) for row in self._query("PRAGMA table_info(_catalog);")}
+
+    def _ensure_catalog_schema(self) -> None:
+        self._query(CATALOG_DDL)
+        existing = self._catalog_column_names()
+        for name, column_type in CATALOG_COLUMN_TYPES:
+            if name in existing:
+                continue
+            try:
+                self._query(f'ALTER TABLE _catalog ADD COLUMN "{name}" {column_type};')
+            except RuntimeError:
+                # Another publisher may have added the same column between PRAGMA and ALTER.
+                if name not in self._catalog_column_names():
+                    raise
+
     def upsert_catalog(self, catalog_rows: Sequence[dict[str, Any]]) -> None:
-        statements = [CATALOG_DDL]
+        self._ensure_catalog_schema()
+        column_names = '", "'.join(CATALOG_COLUMNS)
+        update_columns = ", ".join(
+            f'"{column}" = excluded."{column}"'
+            for column in CATALOG_COLUMNS
+            if column != "name"
+        )
         for row in catalog_rows:
             values = ", ".join(sql_literal(row.get(col)) for col in CATALOG_COLUMNS)
-            statements.append(f"INSERT OR REPLACE INTO _catalog VALUES ({values});")
-        self._query("\n".join(statements))
+            # Do not use INSERT OR REPLACE: on a legacy catalog that deletes the old
+            # row and turns the retained serving_tier field into NULL.
+            self._query(
+                f'INSERT INTO _catalog ("{column_names}") VALUES ({values}) '
+                f'ON CONFLICT("name") DO UPDATE SET {update_columns};'
+            )
 
     def catalog_domain_count(self, model_names: set[str]) -> int:
         if not model_names:
