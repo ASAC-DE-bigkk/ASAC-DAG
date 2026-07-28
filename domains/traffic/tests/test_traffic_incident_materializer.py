@@ -127,6 +127,9 @@ def test_materializer_skips_load_for_exact_preverified_receipt():
             assert limit == 24
             return [old, new]
 
+        def is_pending(self, snapshot_run_id):
+            return snapshot_run_id == "snapshot-1"
+
         def record_materialized(self, receipt):
             events.append(("materialized", receipt.snapshot_run_id, receipt.row_count))
 
@@ -178,6 +181,69 @@ def test_materializer_skips_load_for_exact_preverified_receipt():
     ]
 
 
+def test_materializer_coalesces_exact_preverified_receipt_acknowledged_after_batch_read():
+    """The fence catches a stale pending list, not a failed publish recovery."""
+
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    events = []
+    stale = _receipt("snapshot-1", "2026-07-16T00:00:00+00:00")
+    active = _receipt("snapshot-2", "2026-07-16T00:05:00+00:00")
+
+    class Receipts:
+        def pending(self, *, limit):
+            assert limit == 24
+            return [stale, active]
+
+        def is_pending(self, snapshot_run_id):
+            return snapshot_run_id == "snapshot-2"
+
+        def record_materialized(self, receipt):
+            events.append(("materialized", receipt.snapshot_run_id))
+
+    class Manifest:
+        def start(self, run, **_metrics):
+            events.append(("start", run.run_id))
+
+        def publish(self, run, **_metrics):
+            events.append(("publish", run.run_id))
+
+        def fail(self, *_args, **_kwargs):
+            pytest.fail("coalesced or successful receipt must not fail manifest")
+
+    result = IncidentMaterializer(
+        receipts=Receipts(),
+        manifest=Manifest(),
+        load=lambda *_args: pytest.fail("preverified receipts must not load"),
+        verify=lambda *_args: pytest.fail("preverified receipts must not verify"),
+        verified_receipts=lambda _receipts: {"snapshot-1": 4, "snapshot-2": 4},
+        clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
+    ).run(
+        materializer_dag_id="traffic_incident_bronze",
+        materializer_run_id="asset__materializer-1",
+        limit=24,
+    )
+
+    assert result.snapshot_run_ids == ("snapshot-2",)
+    assert result.latest_asset_metadata == {
+        "source_id": "seoul_traffic_incident",
+        "bronze_run_id": "snapshot-2",
+        "bronze_dag_run_id": "snapshot-2",
+        "event_at": "2026-07-16T00:05:00+00:00",
+        "load_date": "2026-07-16",
+        "row_count": 4,
+        "payload_hash": "b" * 64,
+        "is_publishable": True,
+    }
+    assert [event for event in events if event[0] in {"start", "publish"}] == [
+        ("start", "snapshot-2"),
+        ("publish", "snapshot-2"),
+    ]
+    assert [event for event in events if event[0] == "materialized"] == [
+        ("materialized", "snapshot-2")
+    ]
+
+
 def test_materializer_rejects_inconsistent_preverified_row_count():
     from traffic_ingest.incident_pipeline import IncidentMaterializer
 
@@ -187,6 +253,10 @@ def test_materializer_rejects_inconsistent_preverified_row_count():
     class Receipts:
         def pending(self, *, limit):
             return [receipt]
+
+        def is_pending(self, snapshot_run_id):
+            assert snapshot_run_id == "snapshot-1"
+            return True
 
         def record_materialized(self, _receipt):
             pytest.fail("invalid preflight must not materialize receipt")

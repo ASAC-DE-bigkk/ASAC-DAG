@@ -14,6 +14,7 @@ RECEIPT_VERSION = 1
 RECEIPT_PREFIX = "traffic-snapshot-receipts"
 INCIDENT_SOURCE_ID = "seoul_traffic_incident"
 KST = ZoneInfo("Asia/Seoul")
+_MISSING_OBJECT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 
 
 class SnapshotReceiptContractError(ValueError):
@@ -38,6 +39,12 @@ class JsonStorage(Protocol):
 
 def _safe_segment(value: object) -> str:
     return quote(str(value or "unknown"), safe="-._~")
+
+
+def _is_missing_object_error(error: Exception) -> bool:
+    response = getattr(error, "response", {}) or {}
+    details = response.get("Error", {}) if isinstance(response, Mapping) else {}
+    return str(details.get("Code", "")) in _MISSING_OBJECT_CODES
 
 
 def _timestamp(value: object, *, field: str) -> datetime:
@@ -342,6 +349,19 @@ class TrafficSnapshotReceipts:
                 f"materialized acknowledgement identity mismatch: {snapshot_run_id}"
             )
         self._storage.delete(pending_key)
+        return True
+
+    def is_pending(self, snapshot_run_id: str) -> bool:
+        """Return whether the snapshot still awaits acknowledgement, fail-closed."""
+
+        try:
+            self._storage.read_json(self.pending_key(snapshot_run_id))
+        except FileNotFoundError:
+            return False
+        except Exception as error:
+            if _is_missing_object_error(error):
+                return False
+            raise
         return True
 
     def pending(self, *, limit: int | None = None) -> list[LandedSnapshot]:

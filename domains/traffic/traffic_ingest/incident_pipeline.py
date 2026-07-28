@@ -37,6 +37,8 @@ class ReceiptWriter(Protocol):
 class ReceiptQueue(Protocol):
     def pending(self, *, limit: int) -> list[LandedSnapshot]: ...
 
+    def is_pending(self, snapshot_run_id: str) -> bool: ...
+
     def record_materialized(self, receipt: MaterializedSnapshot) -> str: ...
 
 
@@ -282,6 +284,11 @@ class IncidentMaterializer:
             materializer_dag_id=materializer_dag_id,
         )
         for receipt in pending_receipts:
+            if (
+                receipt.snapshot_run_id in verified_rows_by_snapshot
+                and not self._receipts.is_pending(receipt.snapshot_run_id)
+            ):
+                continue
             run = TrafficRun(materializer_dag_id, receipt.snapshot_run_id)
             raw_result = dict(receipt.raw_result)
             raw_object_count = len(_raw_objects(raw_result))
