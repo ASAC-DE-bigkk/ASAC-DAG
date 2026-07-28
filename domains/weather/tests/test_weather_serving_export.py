@@ -32,7 +32,7 @@ def test_weather_serving_export_is_a_thin_common_publisher_wrapper(monkeypatch):
     assert module.dag is sentinel_dag
     assert captured == {
         "domain": "weather",
-        "product_ids": ["weather_current_by_admin_dong"],
+        "product_ids": ["weather_place_current_outlook"],
         "schedule": None,
         "dag_id": "weather_serving_export",
         "target": "dev",
