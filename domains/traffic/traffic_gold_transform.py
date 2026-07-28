@@ -39,7 +39,7 @@ from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_INCIDENT_SILVER_ASSET,
     schedule_asset,
 )
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from traffic_ingest.common.resources import TRINO_TRANSFORM_POOL  # noqa: E402
 from traffic_ingest.external_snapshot import (  # noqa: E402
     resolve_admin_dong_crosswalk_snapshot_id,
     resolve_citydata_crowding_snapshot_id,
@@ -267,7 +267,7 @@ with DAG(
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
         python_callable=resolve_traffic_gold_snapshot_run,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
@@ -275,7 +275,7 @@ with DAG(
     admit_snapshot = PythonOperator(
         task_id="admit_traffic_gold_snapshot",
         python_callable=admit_traffic_gold_snapshot,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
@@ -294,7 +294,7 @@ with DAG(
     mark_success = PythonOperator(
         task_id="mark_traffic_gold_success",
         python_callable=mark_traffic_gold_success,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,

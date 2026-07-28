@@ -124,7 +124,7 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
                     "default_pool",
                 )
             else:
-                assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+                assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
             assert task.kwargs["retries"] == 1
             assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
             assert (

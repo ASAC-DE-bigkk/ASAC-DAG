@@ -473,6 +473,6 @@ def test_gold_success_marker_uses_fresh_evidence_and_heavy_pool(monkeypatch):
     )
     assert marker.output_snapshot_id == 43
     task = module.dag.task_dict["mark_traffic_gold_success"]
-    assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+    assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
     assert task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
     assert task.kwargs["weight_rule"] == "absolute"

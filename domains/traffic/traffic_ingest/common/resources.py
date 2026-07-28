@@ -7,6 +7,13 @@ class DbtWorkload(str, Enum):
 
 
 TRINO_HEAVY_POOL = "trino_traffic_heavy"
+TRINO_INGEST_POOL = "trino_traffic_ingest"
+TRINO_TRANSFORM_POOL = "trino_traffic_transform"
 
 
-__all__ = ["DbtWorkload", "TRINO_HEAVY_POOL"]
+__all__ = [
+    "DbtWorkload",
+    "TRINO_HEAVY_POOL",
+    "TRINO_INGEST_POOL",
+    "TRINO_TRANSFORM_POOL",
+]

@@ -42,7 +42,7 @@ from traffic_ingest.assets import (  # noqa: E402
     publish_through_alias,
     schedule_asset,
 )
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from traffic_ingest.common.resources import TRINO_TRANSFORM_POOL  # noqa: E402
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     TransformFailurePorts,
@@ -187,7 +187,7 @@ with DAG(
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
         python_callable=resolve_traffic_flow_silver_snapshot_run,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,

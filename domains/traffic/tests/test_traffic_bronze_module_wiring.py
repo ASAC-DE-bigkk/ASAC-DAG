@@ -287,7 +287,7 @@ def test_traffic_bronze_scheduled_dag_is_one_heavy_receipt_materializer():
         "materialize_pending_traffic_incident_snapshots"
     )
 
-    assert materialize.pool == scheduled_module.TRINO_HEAVY_POOL
+    assert materialize.pool == scheduled_module.TRINO_INGEST_POOL
     assert materialize.outlets == [
         scheduled_module.TRAFFIC_INCIDENT_MATERIALIZED_ALIAS
     ]

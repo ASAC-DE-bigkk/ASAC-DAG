@@ -29,7 +29,7 @@ from traffic_ingest.assets import (  # noqa: E402
     publish_through_alias,
 )
 from traffic_ingest.bronze_dag_support import DAG_ID, current_dag_id  # noqa: E402
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from traffic_ingest.common.resources import TRINO_INGEST_POOL  # noqa: E402
 from traffic_ingest.errors import TrafficBronzeConfigurationError  # noqa: E402
 from traffic_ingest.incident_pipeline import MATERIALIZER_TASK_ID  # noqa: E402
 from traffic_ingest.runtime import (  # noqa: E402
@@ -111,7 +111,7 @@ with DAG(
     materialize = PythonOperator(
         task_id=MATERIALIZER_TASK_ID,
         python_callable=materialize_pending_traffic_incident_snapshots,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_INGEST_POOL,
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
