@@ -78,12 +78,17 @@ def test_missing_mode_caps_after_diff(tmp_path):
 
 
 def test_missing_mode_skips_when_no_missing(tmp_path):
+    # "빠진 게 없어서 안 한 것"은 계획된 no-op = 성공(0행)이다(#562).
+    # error 로 기록하면 SLO(dataset_passed=checks.passed)가 조용한 밤마다 실패로 센다.
     landing = _landing(tmp_path)
     _land_facility_list(landing, "FC001", "FC002")
     kopis = _DetailOnlyKopis()
     res = ingest_dataset(DS, _Clients(kopis), landing,
                          _opts(known_detail_ids=["FC001", "FC002"]))
-    assert res.error == "skipped (detail top-up: no missing ids)"
+    assert res.ok and res.error == ""
+    assert res.checks["passed"] is True          # SLO 통과 근거
+    assert "no missing ids" in res.checks["skipped"]
+    assert res.rows == 0 and res.object_keys == []
     assert kopis.detail_ids == []  # API 호출 0
 
 
@@ -193,7 +198,7 @@ def test_performance_detail_skips_when_nothing_new(tmp_path):
     kopis = _DetailOnlyKopis()
     res = ingest_dataset(BY_NAME["kopis_performance_detail"], _Clients(kopis), landing,
                          _opts(known_detail_ids=["PF001", "PF002"]))
-    assert res.error == "skipped (detail top-up: no missing ids)"
+    assert res.ok and res.checks["passed"] is True  # 계획된 no-op = 성공(#562)
     assert kopis.detail_ids == []
 
 
