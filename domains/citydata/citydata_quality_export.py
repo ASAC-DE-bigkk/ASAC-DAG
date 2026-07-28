@@ -249,7 +249,9 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     is_paused_upon_creation=True,  # 검증 후 unpause
-    params={"target": "dev"},  # prod 트리거 시 ops/runs/ + seoul 버킷 (#556)
+    # 단일 env 노브(#556) — CITYDATA_TARGET=prod 로 컷오버, 미설정 시 dev(불변).
+    # per-run 오버라이드 유지: 트리거 시 target=prod conf 가 이 기본값보다 우선.
+    params={"target": os.environ.get("CITYDATA_TARGET", "dev")},  # prod: ops/runs/ + seoul 버킷
     tags=["quality", "citydata", "ops", "serving"],
     default_args={
         "retries": 1,

@@ -177,7 +177,9 @@ with DAG(
     schedule="7 8 * * *",   # 매일 08:07 KST — 전날 전체 집계
     catchup=False,
     max_active_runs=1,
-    params={"target": "dev", "target_date": None},
+    # 단일 env 노브(#556) — CITYDATA_TARGET=prod 로 컷오버, 미설정 시 dev(불변).
+    # per-run 오버라이드 유지: 트리거 시 target=prod conf 가 이 기본값보다 우선.
+    params={"target": os.environ.get("CITYDATA_TARGET", "dev"), "target_date": None},
     tags=["ops", "citydata", "digest", "slo"],
 ) as dag:
     digest = PythonOperator(
