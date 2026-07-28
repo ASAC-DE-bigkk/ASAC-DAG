@@ -390,7 +390,12 @@ class TrafficLanding:
             return 0
         return max(0, min(request.end_index, total_count) - request.start_index + 1)
 
-    def replay(self, raw_object_keys: list[str]) -> TrafficLandingBatch:
+    def replay(
+        self,
+        raw_object_keys: list[str],
+        *,
+        run: RunIdentity,
+    ) -> TrafficLandingBatch:
         raw_objects: list[TrafficRawObject] = []
         result_code = ""
         total_count = 0
@@ -449,6 +454,7 @@ class TrafficLanding:
                 f"total_count={total_count}, parsed_rows={parsed_rows}, "
                 f"covered_end_index={raw_objects[-1].end_index}"
             )
+        manifest_key = self._write_manifest(run, raw_objects)
         return TrafficLandingBatch(
             raw_objects=tuple(raw_objects),
             result_code=result_code,
@@ -457,4 +463,5 @@ class TrafficLanding:
             expected_rows=total_count,
             collection_mode=TrafficCollectionMode.BACKFILL,
             is_publishable=True,
+            manifest_key=manifest_key,
         )
