@@ -292,17 +292,22 @@ def land_master(
             f"빈 마스터 스냅샷 [{spec.dataset}] — 원천 이상 의심, 이전 스냅샷 유지됨 (rows=0)"
         )
 
+    # 완결 확인서(ASK-Seoul#60 약속③) — 전 페이지 업로드 후 마지막에 쓴다(R1).
+    # completed_at 은 업로드 완료 시각 — 함수 시작의 now(load_date/ingest_ts 기준)와 다르다.
     manifest = {
         "dataset": spec.dataset,
         "source_system": spec.source_system,
         "service": spec.service,
         "pages": len(object_keys),
         "rows": total_rows,
+        "expected_rows": spec.expected_rows,
         "bytes": total_bytes,
         "run_id": run_id,
         "load_date": load_date,
         "ingest_ts": ingest_ts,
         "object_keys": object_keys,
+        "status": "ok",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     manifest_key = f"{base}/_manifest.json"
     store.write_json(manifest_key, manifest)

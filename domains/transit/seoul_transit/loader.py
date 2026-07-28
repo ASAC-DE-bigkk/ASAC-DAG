@@ -1,7 +1,7 @@
 """bronze 적재 분리(#369) — pending 마커 기반 R2→Iceberg 적재. 순수 로직(테스트 대상).
 
 1분 수집을 버티기 위해 collector 와 적재를 분리한다:
-  collector(고빈도) : API → R2 랜딩 + pending 마커(state/transit/loader_pending/…)
+  collector(고빈도) : API → R2 랜딩 + pending 마커(ops/control/state/transit/loader_pending/…)
   loader(저빈도)    : 마커 나열 → manifest·페이지 재다운로드 → 파싱 → 청크 INSERT → 마커 삭제
 
 멱등성: 마커 단위로 `DELETE WHERE dag_run_id=<collector run>` 후 재적재 —

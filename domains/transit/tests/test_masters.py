@@ -37,6 +37,7 @@ _SPEC = MasterSpec(
     source_system="seoul_parking",
     table="bronze_unit_master",
     fields=("PKLT_CD", "PKLT_NM", "LAT", "LOT"),
+    expected_rows=3,  # 랜딩 테스트 3행과 일치 — manifest 전달 검증이 None==None 으로 무력화되지 않게
 )
 
 
@@ -257,6 +258,12 @@ def test_land_master_path_convention_and_manifest():
     assert manifest["rows"] == 3
     assert manifest["run_id"] == "run-xyz"
     assert manifest["object_keys"] == result["object_keys"]
+    # 완결 확인서 필드(ASK-Seoul#60 약속③, #547).
+    assert manifest["status"] == "ok"
+    assert manifest["completed_at"]  # ISO8601 존재만 — 시각 자체는 실행 시점 의존
+    assert manifest["expected_rows"] == 3  # _SPEC.expected_rows 실값 전달 확인
+    # R1 순서 — 확인서가 마지막 쓰기여야 한다(쓰다 만 랜딩에 확인서가 없도록).
+    assert list(store.objects)[-1] == result["manifest_key"]
 
 
 def test_land_master_empty_snapshot_raises():

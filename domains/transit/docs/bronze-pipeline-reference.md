@@ -20,7 +20,7 @@
 
 ## pending 마커 규약
 
-- 키: `state/transit/loader_pending/<dataset>/<ingest_ts>__<safe_run_id>.json`
+- 키: `ops/control/state/transit/loader_pending/<dataset>/<ingest_ts>__<safe_run_id>.json` (ASK-Seoul#60 존 규약 — #547 에서 `state/transit/…` 에서 이사)
   (사전순 나열 = 시간순 처리)
 - 본문: `{dataset, table, shape, source, manifest_key, run_id, ts_collected}`
 - collector 가 R2 랜딩 직후 등록, loader 가 적재 성공 시 삭제.

@@ -137,8 +137,17 @@ PARKING_ROWS = int(os.environ.get("PARKING_ROWS", "1000"))
 # collector 는 R2 랜딩 후 pending 마커만 남기고, transit_bronze_loader 가 소비한다.
 # env 는 TRANSIT_ 프리픽스 — "loader" 는 일반어라 타 도메인 복제 시 충돌 방지
 # (transit_transform 의 TRANSIT_TRANSFORM_SCHEDULE 관례와 정합).
+# ops/control/state = "지워지면 다음 실행이 오작동하는" 존(ASK-Seoul#60, #547) — R2 lifecycle
+# TTL 금지. 만료 정리는 소유 파이프라인(transit_maintenance stale 스윕, 알림 동반)만 수행.
 LOADER_PENDING_PREFIX = os.environ.get(
-    "TRANSIT_LOADER_PENDING_PREFIX", "state/transit/loader_pending/"
+    "TRANSIT_LOADER_PENDING_PREFIX", "ops/control/state/transit/loader_pending/"
+)
+# 구경로(#547 이전) 드레인용 — 배포 시점에 구경로에 남은 마커가 loader·maintenance 양쪽에서
+# 보이지 않게 되는 고립(적재 누락 + 무알림 소실)을 막는다. 구경로 소진 확인 후 빈 값으로 제거.
+LOADER_PENDING_LEGACY_PREFIXES = tuple(
+    p for p in os.environ.get(
+        "TRANSIT_LOADER_PENDING_LEGACY_PREFIXES", "state/transit/loader_pending/"
+    ).split(",") if p
 )
 # INSERT 문 최대 길이(문자) — Trino QUERY_TEXT_TOO_LARGE(100만자) 회피용 바이트 캡.
 LOADER_INSERT_MAX_CHARS = int(os.environ.get("TRANSIT_LOADER_INSERT_MAX_CHARS", "700000"))
