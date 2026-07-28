@@ -2,6 +2,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -10,6 +12,7 @@ from traffic_ingest.bronze import (  # noqa: E402
     insert_seoul_traffic_bronze_rows,
     replace_seoul_traffic_bronze_snapshots,
 )
+from traffic_ingest.errors import TrafficSourceSchemaError  # noqa: E402
 
 
 class RecordingCursor:
@@ -142,3 +145,36 @@ def test_set_based_replacement_uses_four_statements_for_multiple_receipts():
     assert "dag_run_id IN ('scheduled__first', 'scheduled__second')" in bronze_delete_sql
     assert bronze_insert_sql.count("scheduled__first") == 1
     assert bronze_insert_sql.count("scheduled__second") == 1
+
+
+def test_set_based_replacement_validates_all_pages_before_first_statement():
+    cursor = RecordingCursor()
+
+    with pytest.raises(TrafficSourceSchemaError, match="collected_at"):
+        replace_seoul_traffic_bronze_snapshots(
+            cursor=cursor,
+            qualified_table="iceberg_dev.ask_seoul.bronze_seoul_traffic_incident",
+            snapshots=[
+                {
+                    "dag_run_id": "scheduled__invalid",
+                    "pages": [
+                        {
+                            "rows": [],
+                            "metadata": {
+                                "result_code": "INFO-000",
+                                "list_total_count": 0,
+                            },
+                            "request_id": "request-invalid",
+                            "start_index": 1,
+                            "end_index": 1,
+                            "raw_object_key": "raw/invalid.xml",
+                            "raw_hash": "abc123",
+                            "http_status": 200,
+                            "collected_at": "not-a-datetime",
+                        }
+                    ],
+                }
+            ],
+        )
+
+    assert cursor.statements == []

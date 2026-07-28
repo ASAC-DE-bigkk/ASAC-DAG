@@ -354,16 +354,6 @@ def replace_seoul_traffic_bronze_snapshots(
             inserted_by_run[dag_run_id] += len(rows)
             pages.append((dag_run_id, page))
 
-    run_id_values = ", ".join(sql_string(run_id) for run_id in dag_run_ids)
-    qualified_audit_table = request_audit_table_for(qualified_table)
-    cursor.execute(
-        f"""
-        DELETE FROM {qualified_audit_table}
-        WHERE source_id = {sql_string(SOURCE_ID)}
-            AND dag_run_id IN ({run_id_values})
-        """
-    )
-
     audit_values: list[str] = []
     bronze_values: list[str] = []
     for dag_run_id, page in pages:
@@ -430,6 +420,15 @@ def replace_seoul_traffic_bronze_snapshots(
                 ")"
             )
 
+    run_id_values = ", ".join(sql_string(run_id) for run_id in dag_run_ids)
+    qualified_audit_table = request_audit_table_for(qualified_table)
+    cursor.execute(
+        f"""
+        DELETE FROM {qualified_audit_table}
+        WHERE source_id = {sql_string(SOURCE_ID)}
+            AND dag_run_id IN ({run_id_values})
+        """
+    )
     cursor.execute(
         f"""
         INSERT INTO {qualified_audit_table} (
