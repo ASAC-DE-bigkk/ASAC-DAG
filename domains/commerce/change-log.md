@@ -37,6 +37,16 @@ response:
 - 검증: #478 Validator 규칙 로컬 재현 → **22모델 0 findings**(serving-contract-gate 통과 형상) ·
   export import + 15컬럼 upsert SQL 렌더 검증 · `py_compile` OK · `python -m security` PASS(차단 0).
   D1 실적재 재검증(행수 밴드 재보정)은 배포 후 후속 그대로.
+- **구 적재 잔재 삭제(2026-07-28 실측·실행)**: 공유 D1 에 남아 있던 commerce 구 반복 잔재
+  `gold_license_dong_summary` 테이블 + `_catalog` 행 1개를 삭제(신규 규약은 `d1_dong_summary` 라
+  새 export 가 지우지 않는 고아). 삭제 후 검증 — commerce 잔재 0 · `_catalog` 타 도메인 23행
+  (transit 6·citydata 17) 무손실. `d1_meta`·`d1_*` 는 애초 미존재(PR 미배포).
+- **⚠ 배포 블로커(팀 이슈 필요)**: 실측 결과 공유 `_catalog` 는 아직 **구 8컬럼 스키마**
+  (`serving_tier` 포함)로 transit·citydata 가 서빙 중 — 15컬럼 정본(`CATALOG_DDL`)은
+  `IF NOT EXISTS` 라 기존 테이블을 못 바꾸므로, **8→15 마이그레이션(정본 컬럼 순서로 재생성) 전에는**
+  commerce 신규 export 의 `_catalog` upsert 도, 공통 Publisher 의 bare 15-value INSERT 도 실패한다.
+  마이그레이션은 타 도메인 행·Worker 소비(`serving_tier` 의존 가능)에 영향 → 도메인 공통 결정
+  (#478 계열 이슈)로 제안할 것. commerce 단독 수행 금지.
 
 ---
 
