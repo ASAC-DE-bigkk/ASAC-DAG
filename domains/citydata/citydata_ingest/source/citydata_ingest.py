@@ -247,3 +247,59 @@ def write_citydata_run_report(report: dict, *, target: str = "dev",
     body = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
     R2Sink(settings).put(key, body, "application/json")
     return key
+
+
+# ── 완결 확인서(manifest) — 팀 R2 표준 ────────────────────────────────────────
+# 이 run 의 raw 폴더가 "다 써졌음"을 증명하는 확인서. 계약:
+#   R1 순서 : 데이터를 전부 쓴 뒤 마지막에 기록 → 확인서 유무만으로 완결 여부 판정.
+#   R3 소비 : R2 raw 를 스캔하는 재처리 잡은 확인서 없는 폴더를 읽지 않는다(부분실패 데이터
+#             오취식 방지). 단 citydata 의 fused bronze 로더(같은 run 의 ok 결과만 적재)는
+#             이미 안전하므로, 이 확인서의 실익은 "미래 R2 재처리 + 팀 표준 일관성".
+#   R4 위치 : 데이터 폴더 안, ``_manifest/`` 접두 — 데이터 파일과 기계적으로 구분.
+def manifest_object_key(ctx: RunContext) -> str:
+    """확인서 키 — 데이터 폴더 안 ``_manifest/<ingest_ts>.json`` (run 당 1개)."""
+    return (
+        f"{source_config.LANDING_ROOT}/{CITYDATA_SOURCE_ID}"
+        f"/load_date={ctx.load_date}/_manifest/{ctx.ingest_ts}.json"
+    )
+
+
+def build_citydata_manifest(results: list[dict], ctx: RunContext, *,
+                            completed_at: str) -> dict:
+    """완결 확인서 dict — 필수 6필드 + 자명한 정적 2필드. 순수 함수(테스트 재사용).
+
+    object_keys 는 이 run 이 올린 **유효(ok) raw 파일 목록** — flat 레이아웃에서 이 목록이
+    run 경계 역할(재처리 잡은 이 키들만 읽으면 된다). 원천오류(source not ok) 파일은 물리적으로
+    폴더에 있어도 유효 데이터가 아니므로 제외하고 status/actual 로 부분성을 표기한다.
+    hash 는 bronze 로더가 실제 대조하는 코드가 없어 생략(스펙상 검증 로직 있는 도메인부터).
+    """
+    landed = [r for r in results if r.get("ok") and r.get("raw_object_key")]
+    object_keys = sorted(r["raw_object_key"] for r in landed)
+    expected = len(results)
+    actual = len(object_keys)
+    return {
+        "run_id": ctx.run_id,
+        "dataset": CITYDATA_SOURCE_ID,
+        "load_date": ctx.load_date,
+        "object_keys": object_keys,
+        "expected_count": expected,
+        "actual_count": actual,
+        "completed_at": completed_at,
+        "status": "complete" if actual == expected and actual > 0 else "partial",
+        # 권장(정적·자명): 이번 계약은 KST·v1 단일 → 기본값 명시.
+        "load_date_timezone": "Asia/Seoul",
+        "path_contract_version": "v1",
+    }
+
+
+def write_citydata_manifest(manifest: dict, ctx: RunContext, *, target: str = "dev",
+                            env_file: str | None = None) -> str:
+    """완결 확인서를 데이터 폴더에 기록(R1: raw 를 다 쓴 뒤 호출). 키 반환."""
+    settings = build_r2_settings(target, env_file)
+    missing = missing_r2(settings)
+    if missing:
+        raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
+    key = manifest_object_key(ctx)
+    body = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    R2Sink(settings).put(key, body, "application/json")
+    return key
