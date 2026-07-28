@@ -7,11 +7,13 @@
   (아직 켜지 않은 DAG 오탐 방지).
 - 전부 정상: '파이프라인 정상' 성공 알림을 **하루 1회만**(가드 마커). 문제: '미완료 경고'를 매 점검 재발송.
 
-전송은 공통 Discord(best-effort). 가드 마커는 bronze 밖(운영 상태 `state/commerce/watchdog/`).
+전송은 공통 Discord(best-effort). 가드 마커는 raw 밖 운영 상태 존 —
+COMMERCE_WATCHDOG_STATE_LAYER(기본 `state/commerce/watchdog`, prod 는 `ops/control/state/commerce/watchdog`).
 """
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +32,7 @@ install_security()
 import pendulum  # noqa: E402
 from airflow.decorators import dag, task  # noqa: E402
 
+from commerce_core import paths  # noqa: E402
 from commerce_core.settings import get_settings  # noqa: E402
 from commerce_core.storage import get_storage  # noqa: E402
 from common.discord import COLOR_FAIL, COLOR_OK, send_embed  # noqa: E402
@@ -38,18 +41,19 @@ log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 _DOMAIN = "commerce"
 _COLLECT_DAG = "commerce_collect_raw"
-_RAW_LAYER = "raw/commerce"
 # 후속 레이어 DAG(순서) — 라벨은 리포트용
 _LAYERS = [("commerce_load_silver", "silver 변환"), ("commerce_load_gold", "gold 적재")]
+# 가드 마커 레이어(#60 약속② — 가변 상태는 raw 밖 ops 존). 미설정 시 구 위치 폴백(하위호환).
+_WATCHDOG_STATE_LAYER = os.getenv("COMMERCE_WATCHDOG_STATE_LAYER", "state/commerce/watchdog")
 
 
 def _pfx(prefix: str, tail: str) -> str:
     return f"{prefix}/{tail}" if prefix else tail
 
 
-def _today_collect_ran(storage, prefix: str, y: str, m: str, d: str) -> bool:
-    """오늘 날짜 run 폴더에 `_RUN.completed|incomplete` 마커가 있으면 수집 실행됨."""
-    date_prefix = _pfx(prefix, f"{_RAW_LAYER}/{y}/{m}/{d}/")
+def _today_collect_ran(storage, prefix: str, today: str) -> bool:
+    """오늘 `load_date=<today>` 파티션에 `_RUN.completed|incomplete` 마커가 있으면 수집 실행됨."""
+    date_prefix = paths.raw_date_prefix(prefix=prefix, date=today)
     return any("/_markers/_RUN." in k for k in storage.list_keys(date_prefix))
 
 
@@ -84,9 +88,8 @@ def check_pipeline() -> dict:
     prefix = get_settings().storage_prefix
     now = datetime.now(KST)
     today = now.strftime("%Y-%m-%d")
-    y, m, d = now.strftime("%Y"), now.strftime("%m"), now.strftime("%d")
 
-    collected = _today_collect_ran(storage, prefix, y, m, d)
+    collected = _today_collect_ran(storage, prefix, today)
     layers = {dag_id: _layer_state(dag_id, today) for dag_id, _ in _LAYERS}
 
     problems = []
@@ -108,8 +111,8 @@ def check_pipeline() -> dict:
         log.warning("watchdog: %s 파이프라인 미완료 %s", today, problems)
         return {"date": today, "collected": collected, "layers": layers, "ok": False}
 
-    # 전부 정상 → 하루 1회만 성공 알림(중복 방지 가드)
-    guard = _pfx(prefix, f"state/commerce/watchdog/pipeline_{today}.ok")
+    # 전부 정상 → 하루 1회만 성공 알림(중복 방지 가드) — 위치는 env 레이어(#60 약속②)
+    guard = _pfx(prefix, f"{_WATCHDOG_STATE_LAYER}/pipeline_{today}.ok")
     if storage.exists(guard):
         log.info("watchdog: %s 파이프라인 정상 — 성공 알림 이미 전송(스킵)", today)
         return {"date": today, "collected": collected, "layers": layers, "ok": True, "notified": False}

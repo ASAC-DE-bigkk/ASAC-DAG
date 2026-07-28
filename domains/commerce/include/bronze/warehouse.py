@@ -54,7 +54,13 @@ PYICEBERG_CHUNK_ROWS = 50_000    # PyIceberg: Arrow 배치 크기(메모리 바�
 
 # ── Trino 연결/식별자 ────────────────────────────────────────────────────────
 def _is_dev() -> bool:
-    return os.getenv("DBT_TARGET", "dev").strip().lower() == "dev"
+    """commerce 타깃 판정 — COMMERCE_DBT_TARGET 이 DBT_TARGET(공유)보다 우선.
+
+    silver/gold DAG(cosmos target_name)와 동일 규약. 공유 DBT_TARGET 은 건드리지 않고
+    commerce 만 prod 카탈로그로 전환할 수 있게 한다(gold/serving 도 _qualified() 경유 전파).
+    """
+    target = os.getenv("COMMERCE_DBT_TARGET") or os.getenv("DBT_TARGET", "dev")
+    return target.strip().lower() == "dev"
 
 
 def _target_catalog() -> str:

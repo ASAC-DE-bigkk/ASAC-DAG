@@ -16,7 +16,7 @@ Airflow 카테고리 번들이다. **서빙 DB·외부 매니페스트 없이** 
 ## 데이터 흐름
 
 ```text
-raw     {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl   # API당 1파일(원본 row-NDJSON 증분)
+raw     {prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl   # API당 1파일(원본 row-NDJSON 증분)
 state   .../run_id=<...>/_markers/<short>.completed|.incomplete + _RUN.*                        # 수집 결과 마커(DB·매니페스트 대체)
 bronze  Iceberg <catalog>.commerce.bronze_localdata_license (+ collection_run_manifest)         # raw 증분의 append-only 변경로그 (commerce_load_bronze)
 silver  dbt/domains/commerce — silver_license_history · silver_license_current                  # 파싱·정제·암묵 버저닝 (commerce_load_silver)

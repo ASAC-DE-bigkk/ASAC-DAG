@@ -19,14 +19,21 @@ CLAUDE.md §2의 비협상 데이터 규칙을 구현. 동일한 `key`가 백엔
 
 ## 경로 규칙 (결정적)
 
-bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **연/월/일 디렉터리 아래**에 둔다
-(연/월/일은 run_id 날짜에서 파생). silver 는 **논리일** 파티션. `{prefix}`(=`COMMERCE_STORAGE_PREFIX`,
-비우면 없음)·bucket 접두는 스토리지 백엔드가 붙인다([paths.py](../../include/commerce_core/paths.py)):
+bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **`load_date=YYYY-MM-DD` 파티션 아래**에
+둔다(날짜는 run_id 에서 파생 — ASK-Seoul#60 약속① key=value 날짜 표기, 2026-07-28 전환). silver 는
+**논리일** 파티션. `{prefix}`(=`COMMERCE_STORAGE_PREFIX`, 비우면 없음)·bucket 접두는 스토리지
+백엔드가 붙인다([paths.py](../../include/commerce_core/paths.py)):
+
+> **가변 상태는 raw 밖**(#60 약속②): diff-target·적재 워터마크/영수증·watchdog 가드는
+> `ops/control/state/commerce/{diff_target,bronze,silver,serve,watchdog}` (루트 .env 의
+> `COMMERCE_*_LAYER` 값). raw 에는 불변 랜딩(run 폴더)만 남는다. 버킷은 **seoul(프로드)** —
+> 루트 `R2_BUCKET_NAME` 을 `.env.commerce` 가 `R2_BUCKET` 으로 매핑. 구(`YYYY/MM/DD`) 레이아웃
+> 이력은 seoul-dev 에 보존, seoul 에는 신 레이아웃으로 이관됨(scripts/migrate_raw_to_prod_bucket.py).
 
 ```text
-{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
-{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커(JSON, 리니지 포함)
-{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
+{prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
+{prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커(JSON, 리니지 포함)
+{prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
 {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet                       # [DEPRECATED] 구 R2 parquet silver(152종 공통=v1 공통 14 + v2 별칭 통합) — 현행 silver 는 dbt/Iceberg 테이블
 ```
 
@@ -37,9 +44,9 @@ bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **연/월/�
 예시(2026-06-30 14:30:25.123 KST 실행):
 
 ```text
-raw/commerce/2026/06/30/run_id=2026-06-30_143025_123/general_restaurant.jsonl
-raw/commerce/2026/06/30/run_id=2026-06-30_143025_123/_markers/general_restaurant.completed
-raw/commerce/2026/06/30/run_id=2026-06-30_143025_123/_markers/_RUN.completed
+raw/commerce/load_date=2026-06-30/run_id=2026-06-30_143025_123/general_restaurant.jsonl
+raw/commerce/load_date=2026-06-30/run_id=2026-06-30_143025_123/_markers/general_restaurant.completed
+raw/commerce/load_date=2026-06-30/run_id=2026-06-30_143025_123/_markers/_RUN.completed
 silver/commerce/general_restaurant/observed_date=2026-06-30/part-000.parquet
 ```
 
@@ -80,7 +87,7 @@ silver/commerce/general_restaurant/observed_date=2026-06-30/part-000.parquet
   "run_id": "<airflow_run_id>", "bronze_run_id": "2026-06-30_143025_123",
   "schema_version": "v1",
   "pages_written": 535, "rows_total": 534680, "list_total_count": 534680, "complete": true,
-  "bronze_key": "raw/commerce/2026/06/30/run_id=2026-06-30_143025_123/general_restaurant.jsonl",
+  "bronze_key": "raw/commerce/load_date=2026-06-30/run_id=2026-06-30_143025_123/general_restaurant.jsonl",
   "pages": [{"page": 1, "start": 1, "end": 1000, "rows": 1000, "content_hash": "9f2a...c4"}]
 }
 ```

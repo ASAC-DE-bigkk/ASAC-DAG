@@ -25,7 +25,7 @@ raw 의 NDJSON 증분을 **Iceberg 웨어하우스 원본층**으로 적재하�
   코디네이터 OOM 회피), **이후 증분 = Trino** INSERT. `load_unit` dispatch.
 - **최근 N일 창 증분**: `COMMERCE_LOAD_LOOKBACK_DAYS`(기본 3, 0=무제한)로 오늘−N 이후 미적재 완료 run 만
   적재(#223). 첫 적재는 워터마크 부재 → 전체(PyIceberg).
-- **워터마크**: `{prefix}/commerce_bronze_state/_watermark.json` = `{short: 마지막 적재 run_id}`.
+- **워터마크**: `{prefix}/ops/control/state/commerce/bronze/_watermark.json` = `{short: 마지막 적재 run_id}`.
   **적재 성공분까지만** 전진(실패 run 직전에서 멈춰 다음 실행이 재시도) — raw 와 격리, Iceberg+상태 삭제해도 재적재 가능.
 - **발행 게이트**: `rows_loaded` 검증 후 `is_publishable` 기록 → silver 자동 보호.
 - **Iceberg 유지보수(#226)**: DAG 말미 `iceberg_maintenance` task 가 `optimize / expire_snapshots /

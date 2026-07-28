@@ -14,7 +14,7 @@
 [수집원] 서울 열린데이터광장 OpenAPI (LOCALDATA 표준)   152종 = v1 139 + v2(환경) 13
    │  commerce_collect_raw(@daily) / commerce_recollect_raw(6h) / commerce_collect_watchdog
    ▼
-[raw]    R2 오브젝트(NDJSON) — {prefix}/raw/commerce/YYYY/MM/DD/run_id=.../<short>.jsonl + _markers
+[raw]    R2 오브젝트(NDJSON) — {prefix}/raw/commerce/load_date=YYYY-MM-DD/run_id=.../<short>.jsonl + _markers
    │       불변 원본 · 수집 상태 마커 · 롤링 diff 전체본(_diff_target). 테이블 아님(파일).
    │  commerce_load_bronze(04:00 KST) — 최근 N일 창 증분, 엔진 분기(first=PyIceberg / 이후=Trino)
    ▼
@@ -118,9 +118,9 @@ RDB/외부 매니페스트 없이 **R2 오브젝트 + 마커 파일**이 상태�
 [raw/README.md](raw/README.md) · [common_info.md](common_info.md). 코드: `include/commerce_core/paths.py`.
 
 ```text
-{prefix}/raw/commerce/YYYY/MM/DD/run_id=<...>/<short>.jsonl        # API당 1파일(NDJSON)
-{prefix}/raw/commerce/YYYY/MM/DD/run_id=<...>/_markers/<short>.completed|.incomplete
-{prefix}/raw/commerce/_diff_target/<short>.<YYYY-MM-DD>.jsonl      # run 무관 롤링 전체본(증분 기준)
+{prefix}/raw/commerce/load_date=YYYY-MM-DD/run_id=<...>/<short>.jsonl        # API당 1파일(NDJSON)
+{prefix}/raw/commerce/load_date=YYYY-MM-DD/run_id=<...>/_markers/<short>.completed|.incomplete
+{prefix}/ops/control/state/commerce/diff_target/<short>.<YYYY-MM-DD>.jsonl      # run 무관 롤링 전체본(증분 기준)
 ```
 
 ### 4.1 bronze — `bronze_localdata_license` (Iceberg)

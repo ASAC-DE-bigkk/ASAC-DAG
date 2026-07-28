@@ -37,7 +37,7 @@
 
 | 레이어 | 위치 | 역할 | 담당 |
 |---|---|---|---|
-| raw | R2 `{prefix}/raw/commerce/YYYY/MM/DD/run_id=.../`(내부에 `_markers/`) + 레이어 루트 `{prefix}/raw/commerce/_diff_target/`(run 무관 롤링 전체본) | 불변 원본·수집 상태·롤링 전체본. 재처리의 유일한 원천. **일절 변경 금지, Trino/dbt 직접 읽기 금지** | 기존 DAG (변경 없음) |
+| raw | R2 `{prefix}/raw/commerce/load_date=YYYY-MM-DD/run_id=.../`(내부에 `_markers/`) + 레이어 루트 `{prefix}/ops/control/state/commerce/diff_target/`(run 무관 롤링 전체본) | 불변 원본·수집 상태·롤링 전체본. 재처리의 유일한 원천. **일절 변경 금지, Trino/dbt 직접 읽기 금지** | 기존 DAG (변경 없음) |
 | bronze | Iceberg `<catalog>.commerce.bronze_localdata_license` | raw 증분의 append-only **변경로그**. `record_json` 통짜 보존(schema-on-read) + 계보 컬럼. 파싱·정제 금지 | **`commerce_load_bronze` DAG**(수집과 분리, PyIceberg/Trino) |
 | silver | dbt `silver_license_history` · `silver_license_current` · `silver_geocode_address` | 파싱(19컬럼+파생)·형변환·중복제거·**암묵 버저닝(정렬키 기반)**·**좌표 보정 병합** | dbt/domains/commerce |
 | gold | dbt `gold_commerce_license_status_current` | silver 만 참조하는 얇은 집계(자치구×업종×영업상태 현황) | dbt/domains/commerce |
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS <catalog>.commerce.bronze_localdata_license (
 #### 2.1.1 적재 상태(파일 기반, RDB 없음) — raw 와 격리
 
 수집 DAG 와 **분리**된 `commerce_load_bronze` DAG 가 적재 전담. 상태는 **RDB 없이 파일**로,
-raw 와 **완전히 격리된 공간**(`{prefix}/commerce_bronze_state/` — `raw/` 밖, `commerce_` prefix)에 둔다.
+raw 와 **완전히 격리된 공간**(`{prefix}/ops/control/state/commerce/bronze/` — `raw/` 밖, `commerce_` prefix)에 둔다.
 Iceberg 테이블 + 이 상태파일을 삭제해도 raw 는 불변이라 **전체 재적재가 항상 가능**하다.
 
 - **워터마크** `_watermark.json` = `{short: 마지막 적재 run_id}`. 없으면 처음부터 전체 재적재.
@@ -306,7 +306,7 @@ resolve_targets      : bronze_localdata_license 유니크 주소 전체 − 보�
                        일상/백필이 **같은 단일 안티조인**이라 누락일 자동 캐치업 —
                        별도 backfill 모드 불필요(params 는 상한값 조정만)
 geocode_batch        : netio.http_get(timeout, max_response_bytes) + rate-limit 준수(딜레이) 호출
-                       → raw/commerce/geocode/YYYY/MM/DD/run_id=<...>/geocode_<provider>.jsonl
+                       → raw/commerce/geocode/load_date=YYYY-MM-DD/run_id=<...>/geocode_<provider>.jsonl
                        + _markers (기존 경로·마커 규칙 동일 적용)
 load_geocode_bronze  : bronze_geocode_address 에 delete-then-insert (bronze_run_id 단위)
 finalize             : _RUN 마커 + metrics (성공/실패/not_found 카운트)
