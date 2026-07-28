@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 from common.serving.d1_client import CATALOG_COLUMNS, HttpD1Client
@@ -25,6 +26,20 @@ class LegacyCatalogClient(HttpD1Client):
         if sql.startswith("ALTER TABLE _catalog ADD COLUMN "):
             self.columns.append(sql.split('"')[1])
         return []
+
+
+class SqliteCatalogClient(HttpD1Client):
+    """Real SQLite seam for preserving fields outside the v1.1 catalog model."""
+
+    def __init__(self) -> None:
+        super().__init__(api_url="https://example.invalid", token="test-token")
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.row_factory = sqlite3.Row
+
+    def _query(self, sql: str) -> list[dict[str, Any]]:
+        cursor = self.connection.execute(sql)
+        self.connection.commit()
+        return [dict(row) for row in cursor.fetchall()] if cursor.description else []
 
 
 def _catalog_row() -> dict[str, Any]:
@@ -54,8 +69,10 @@ def test_catalog_upsert_migrates_legacy_catalog_and_names_v11_columns():
     d1.upsert_catalog([_catalog_row()])
 
     assert set(CATALOG_COLUMNS).issubset(d1.columns)
-    insert = next(query for query in d1.queries if query.startswith("INSERT OR REPLACE INTO _catalog"))
+    insert = next(query for query in d1.queries if query.startswith("INSERT INTO _catalog"))
     assert '("name", "product_id", "external", "description", "product_question"' in insert
+    assert 'ON CONFLICT("name") DO UPDATE SET' in insert
+    assert '"serving_tier"' not in insert
 
 
 def test_catalog_upsert_does_not_alter_an_already_migrated_schema():
@@ -68,3 +85,27 @@ def test_catalog_upsert_does_not_alter_an_already_migrated_schema():
     d1.upsert_catalog([_catalog_row()])
 
     assert sum(query.startswith("ALTER TABLE _catalog ADD COLUMN") for query in d1.queries) == alter_count
+
+
+def test_catalog_upsert_preserves_legacy_serving_tier_on_existing_row():
+    d1 = SqliteCatalogClient()
+    d1._query(
+        "CREATE TABLE _catalog (name TEXT PRIMARY KEY, description TEXT, serving_tier TEXT, "
+        "tests TEXT, time_axis TEXT, columns TEXT, row_count INTEGER, exported_at TEXT);"
+    )
+    d1._query(
+        "INSERT INTO _catalog (name, description, serving_tier) "
+        "VALUES ('gold_weather_place_current_outlook', 'legacy description', 'public');"
+    )
+
+    d1.upsert_catalog([_catalog_row()])
+
+    row = d1._query(
+        "SELECT product_id, description, serving_tier FROM _catalog "
+        "WHERE name = 'gold_weather_place_current_outlook';"
+    )[0]
+    assert row == {
+        "product_id": "weather_place_current_outlook",
+        "description": _catalog_row()["description"],
+        "serving_tier": "public",
+    }

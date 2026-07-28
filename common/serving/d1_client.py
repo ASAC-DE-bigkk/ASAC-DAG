@@ -158,9 +158,19 @@ class HttpD1Client:
     def upsert_catalog(self, catalog_rows: Sequence[dict[str, Any]]) -> None:
         self._ensure_catalog_schema()
         column_names = '", "'.join(CATALOG_COLUMNS)
+        update_columns = ", ".join(
+            f'"{column}" = excluded."{column}"'
+            for column in CATALOG_COLUMNS
+            if column != "name"
+        )
         for row in catalog_rows:
             values = ", ".join(sql_literal(row.get(col)) for col in CATALOG_COLUMNS)
-            self._query(f'INSERT OR REPLACE INTO _catalog ("{column_names}") VALUES ({values});')
+            # Do not use INSERT OR REPLACE: on a legacy catalog that deletes the old
+            # row and turns the retained serving_tier field into NULL.
+            self._query(
+                f'INSERT INTO _catalog ("{column_names}") VALUES ({values}) '
+                f'ON CONFLICT("name") DO UPDATE SET {update_columns};'
+            )
 
     def catalog_domain_count(self, model_names: set[str]) -> int:
         if not model_names:
