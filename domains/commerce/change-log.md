@@ -5,6 +5,41 @@
 
 ---
 
+## 2026-07-28
+
+### 77. D1 서빙을 도메인 공통 Serving Contract v1(#478) 규격에 정합 — `_catalog` 8→15컬럼 + dbt 확정 필드 (#493 보강 · ASAC-DBT#334 보강)
+
+request:
+- 현재 D1 적재가 ASAC-DAG **#478 확정 필드(`meta.serving.*`)** 와 **`_catalog` 공통 규약
+  (8→15컬럼)** 을 따르는지 확인하고, 다른 부분을 규격에 맞게 수정.
+
+response:
+- **`_catalog` 15컬럼 정합(export)**: 자체 8컬럼 스키마(`serving_tier` 포함, 정본에 없는 컬럼)를
+  버리고 **`common/serving/d1_client.py` 의 `CATALOG_COLUMNS`/`CATALOG_DDL`(15컬럼, #478 §3.4)** 를
+  lazy import 로 단일 소스 소비. 상호운용 버그 해소 — 정본 15컬럼 `_catalog` 가 이미 있으면 8-value
+  bare `INSERT` 는 즉시 실패하고, commerce 가 먼저 돌면 8컬럼 테이블을 만들어 타 도메인을 깨뜨렸음.
+  upsert 는 **명시 컬럼 리스트**로 전환(컬럼 순서 드리프트 안전). 신규 기록값: `product_id`
+  (`commerce_*` = d1\_\* 1:1 파생) · `external`(dbt 계약) · `product_question` · `serving_status=
+  'published'` · `publication_id`(uuid4) · `source_run_id`(export dag_run_id) · `published_bytes`
+  (json bytes, 정본 산식) · `freshness`/`time_axis`(v1 은 event_time 미선언 → NULL). 밴드 게이트
+  스킵분은 `_catalog` 무접촉(직전 published 행 = 서빙 중 스냅샷 서술 유지, 스킵 상태는
+  `d1_meta.build_status='stale'` 담당).
+- **dbt 계약 #478 확정 필드 정합(ASAC-DBT, 짝 커밋)**: 22 gold `meta.serving` 을 재작성 —
+  `enabled`/`external` 추가(flow_daily 는 둘 다 false — iceberg_api 직조회, D1 미게시),
+  `contract_version: v1`, `publication_mode: snapshot`(구 iceberg/rollup 은 enum 위반 — 실제 메커니즘이
+  전량 교체 스냅샷), `zero_policy: retain_last_good`(구 keep_prior 동의어), `partial_policy:
+  {min_publish_ratio: 0.5}`(행수 밴드 ±50% 하한의 계약 표현), `refresh` → `publication_trigger:
+  {trigger_type: asset, max_interval_minutes: 1560}`(gold Asset 트리거·26h stale 감시축),
+  `product_id` → `commerce_*` 도메인 접두(전역 유일), `shape` 추가. commerce 확장(`serving_tier`/
+  `d1_table`/`d1_rollup`)은 추가 필드로 유지(Validator 는 미지 필드 허용). **PK 근거** — 복합키 21종에
+  자체 매크로 `unique_combination_of_columns`(dbt_utils 무의존) 모델 테스트 + grain 축 `not_null`
+  보강(선언 PK 22종 전부 모델 SQL `GROUP BY` 실측과 일치 확인).
+- 검증: #478 Validator 규칙 로컬 재현 → **22모델 0 findings**(serving-contract-gate 통과 형상) ·
+  export import + 15컬럼 upsert SQL 렌더 검증 · `py_compile` OK · `python -m security` PASS(차단 0).
+  D1 실적재 재검증(행수 밴드 재보정)은 배포 후 후속 그대로.
+
+---
+
 ## 2026-07-23
 
 ### 76. gold→D1 서빙 export 분리 DAG(commerce_serving_export) + dbt serving_tier 계약 (#493 · ASAC-DBT#334)

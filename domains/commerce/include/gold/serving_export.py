@@ -12,6 +12,13 @@ PROJECT.md §4(서빙 = D1 선별 export) · docs/DB/gold/opus-serving-build-ins
 브랜치 통합). commerce 소유 테이블(`d1_*`)만 DROP+CREATE 로 교체하고, **공유
 `_catalog`/`_request_log`/`d1_meta` 는 upsert(DROP 금지)** — 타 도메인 행 보존(transit 규약 승계).
 
+`_catalog` 스키마 정본 = **`common/serving/d1_client.py` 의 `CATALOG_COLUMNS`/`CATALOG_DDL`
+(15컬럼, #478 Serving Contract v1 §3.4)** — 자체 축약 스키마(8컬럼) 금지. 정본과 다른 컬럼
+수로 bare `INSERT ... VALUES` 하면 공유 `_catalog` 에서 즉시 깨진다(타 도메인 상호운용).
+게시 성공분만 `serving_status='published'` 로 upsert 하고, 밴드 게이트 스킵분은 `_catalog` 를
+건드리지 않는다(직전 published 행이 서빙 중인 스냅샷을 정확히 서술) — 스킵 상태는
+`d1_meta.build_status='stale'` 가 담당.
+
 설계 원칙(PROJECT.md §4.2): 소형만 · 전량 교체(증분 upsert 아님) · 자연키 · 조회형 사전집계·
 평탄화 · 타입 정규화. 대형 `gold_license_flow_daily`(원장 290만행)는 iceberg_api = D1 금지.
 `flow_monthly/yearly`·`churn_yearly`·`geo_grid`·`stock_age_band`·`uptae_mix` 는 화면 축으로
@@ -27,6 +34,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import NamedTuple
@@ -190,10 +198,11 @@ def _insert_rows(d1_table: str, colnames: list[str], rows: list, token: str) -> 
 
 # ── dbt manifest 의 서빙 계약(선언·검증 소스) ────────────────────────────────
 def _load_serving_meta() -> dict[str, dict]:
-    """dbt manifest → {model: {description, serving_tier, tests}}. 부재 시 {}(경고).
+    """dbt manifest → {model: {description, serving(계약 전체), tests}}. 부재 시 {}(경고).
 
     지정 품목(무엇을 D1 로) 의 **정본은 SERVING_SPEC**(코드, 견고성)이고, dbt 계약
-    `meta.serving.serving_tier` 는 그 **선언·검증**이다. 여기서 읽어 _catalog 메타를 채우고
+    `meta.serving.*`(#478 확정 필드 + commerce 확장 serving_tier/d1_*) 는 그 **선언·검증**이다.
+    여기서 읽어 _catalog 15컬럼(product_id/external/product_question/event_time 등)을 채우고
     SERVING_SPEC 과의 드리프트를 경보한다(계약이 정본과 어긋나면 알린다)."""
     path = os.path.join(
         os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce"),
@@ -219,7 +228,7 @@ def _load_serving_meta() -> dict[str, dict]:
         serving = ((n.get("config", {}).get("meta") or {}).get("serving") or {})
         out[n["name"]] = {
             "description": n.get("description", ""),
-            "serving_tier": serving.get("serving_tier"),
+            "serving": serving,
             "tests": sorted(set(gates.get(uid, []))),
         }
     return out
@@ -229,7 +238,8 @@ def _check_contract_drift(meta: dict[str, dict]) -> None:
     """SERVING_SPEC(정본) ↔ dbt 계약 serving_tier 대조. 어긋나면 경보(파이프라인은 진행)."""
     if not meta:
         return
-    declared = {name: (m.get("serving_tier") or "") for name, m in meta.items()}
+    declared = {name: ((m.get("serving") or {}).get("serving_tier") or "")
+                for name, m in meta.items()}
     drift = []
     for s in SERVING_SPEC:
         want = s.tier
@@ -246,21 +256,30 @@ def _check_contract_drift(meta: dict[str, dict]) -> None:
 
 
 # ── 공유 메타/카탈로그 upsert (DROP 금지) ────────────────────────────────────
-def _ensure_shared_tables(token: str) -> None:
+def _catalog_schema() -> tuple[tuple[str, ...], str]:
+    """공유 `_catalog` 스키마 정본(#478 §3.4) — `common/serving/d1_client.py` 를 단일 소스로 소비.
+
+    (lazy import — DAG 부트스트랩이 dags 루트를 sys.path 에 올린 뒤 사용. 자체 스키마 복제 금지:
+    정본과 컬럼 수가 어긋나면 공유 `_catalog` 에서 타 도메인과 상호 파손된다.)"""
+    from common.serving.d1_client import CATALOG_COLUMNS, CATALOG_DDL
+    return CATALOG_COLUMNS, CATALOG_DDL
+
+
+def _ensure_shared_tables(token: str, catalog_ddl: str) -> None:
     _d1(  # security: allow-sql — 상수 DDL(공유 테이블, IF NOT EXISTS)
-        'CREATE TABLE IF NOT EXISTS _catalog (name TEXT PRIMARY KEY, description TEXT, '
-        'serving_tier TEXT, tests TEXT, time_axis TEXT, columns TEXT, '
-        'row_count INTEGER, exported_at TEXT); '
+        catalog_ddl + ' '
         'CREATE TABLE IF NOT EXISTS _request_log (ts TEXT, path TEXT, query TEXT); '
         'CREATE TABLE IF NOT EXISTS d1_meta (source_table TEXT PRIMARY KEY, snapshot_at TEXT, '
         'row_count INTEGER, build_status TEXT, source_max_event_date TEXT);', token)
 
 
-def _upsert_catalog(catalog_rows: list[tuple], token: str) -> None:
+def _upsert_catalog(catalog_rows: list[dict], token: str, columns: tuple[str, ...]) -> None:
+    """정본 컬럼 순서(CATALOG_COLUMNS)로 명시 컬럼 upsert — 컬럼 드리프트에 안전."""
     if not catalog_rows:
         return
+    head = 'INSERT OR REPLACE INTO _catalog ("' + '", "'.join(columns) + '") VALUES '
     sql = "\n".join(  # security: allow-sql — _catalog 공유(upsert), 값은 _lit 이스케이프
-        "INSERT OR REPLACE INTO _catalog VALUES (" + ", ".join(_lit(v) for v in r) + ");"
+        head + "(" + ", ".join(_lit(r.get(c)) for c in columns) + ");"
         for r in catalog_rows)
     _d1(sql, token)
 
@@ -338,14 +357,17 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     meta = _load_serving_meta()
     _check_contract_drift(meta)
     now = datetime.now(timezone.utc).isoformat()
+    # 게시 실행 식별(#478 §3.4 런타임 기록) — source_run_id 는 export DAG run(Asset 트리거 소비측).
+    source_run_id = os.environ.get("AIRFLOW_CTX_DAG_RUN_ID") or now
 
-    _ensure_shared_tables(token)
+    cat_columns, cat_ddl = _catalog_schema()   # 공유 _catalog 15컬럼 정본(common/serving)
+    _ensure_shared_tables(token, cat_ddl)
 
     conn = _connect(catalog, schema)
     exported: list[tuple[str, int]] = []
     skipped: list[str] = []
     issues: list[str] = []
-    catalog_rows: list[tuple] = []
+    catalog_rows: list[dict] = []
     meta_rows: list[tuple] = []
     marker: dict[str, dict] = {}
     try:
@@ -376,11 +398,28 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
             _insert_rows(spec.d1_table, colnames, rows, token)
 
             m = meta.get(spec.source, {})
-            catalog_rows.append((
-                spec.d1_table, m.get("description", ""), spec.tier,
-                json.dumps(m.get("tests", []), ensure_ascii=False), None,
-                json.dumps([{"name": c, "type": t} for c, t in col_defs], ensure_ascii=False),
-                n, now))
+            sv = m.get("serving") or {}   # dbt meta.serving(#478 확정 필드 + commerce 확장)
+            catalog_rows.append({
+                # 정본 15컬럼(CATALOG_COLUMNS 순서와 무관 — upsert 가 명시 컬럼으로 정렬).
+                "name": spec.d1_table,
+                # d1_* → commerce_*: dbt product_id 와 1:1 대응(geo_grid 파생 2종만 name suffix).
+                "product_id": "commerce_" + spec.d1_table[3:],
+                "external": 0 if sv.get("external") is False else 1,
+                "description": m.get("description", ""),
+                "product_question": sv.get("product_question"),
+                "tests": json.dumps(m.get("tests", []), ensure_ascii=False),
+                "time_axis": sv.get("event_time"),   # v1 미선언 → NULL(신선도 감시는 trigger 축)
+                "columns": json.dumps([{"name": c, "type": t} for c, t in col_defs],
+                                      ensure_ascii=False),
+                "row_count": n,
+                "serving_status": "published",
+                "publication_id": uuid.uuid4().hex,
+                "source_run_id": source_run_id,
+                "published_bytes": len(json.dumps(rows, ensure_ascii=False,
+                                                  default=str).encode("utf-8")),
+                "freshness": None,   # event_time 미선언(v1) — d1_meta.snapshot_at 이 게시 시각 담당
+                "exported_at": now,
+            })
             meta_rows.append((spec.d1_table, now, n, "ready", None))
             marker[spec.d1_table] = {
                 "snapshot_at": now, "source_table": spec.source, "tier": spec.tier,
@@ -388,7 +427,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
             exported.append((spec.d1_table, n))
             log.info("[serving export] %s ← %s: %d행(%s)", spec.d1_table, spec.source, n, spec.tier)
 
-        _upsert_catalog(catalog_rows, token)   # 공유 _catalog(포함분만 upsert — 미포함 행 보존)
+        _upsert_catalog(catalog_rows, token, cat_columns)   # 공유 _catalog(성공분만 upsert — 타 도메인·스킵분 행 보존)
         _upsert_meta(meta_rows, token)
     finally:
         conn.close()
