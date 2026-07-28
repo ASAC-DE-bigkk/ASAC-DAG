@@ -344,3 +344,105 @@ def test_materializer_empty_queue_is_success_without_asset_metadata():
     assert result.processed_count == 0
     assert result.snapshot_run_ids == ()
     assert result.latest_asset_metadata is None
+
+
+def test_materializer_recovers_legacy_receipt_manifest_before_bronze_load():
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    receipt = _receipt("legacy-snapshot", "2026-07-16T00:00:00+00:00")
+    events = []
+
+    class Receipts:
+        def pending(self, *, limit):
+            assert limit == 24
+            return [receipt]
+
+        def record_materialized(self, value):
+            events.append(("materialized", value.snapshot_run_id))
+
+    class Manifest:
+        def start(self, *_args, **_kwargs):
+            return None
+
+        def publish(self, *_args, **_kwargs):
+            return None
+
+        def fail(self, *_args, **_kwargs):
+            pytest.fail("recovered legacy receipt must not fail")
+
+    def recover(raw_result, snapshot_run_id):
+        events.append(("recover", snapshot_run_id))
+        return {
+            **raw_result,
+            "manifest_key": "raw/traffic_incident/legacy/_manifest.json",
+        }
+
+    def load(raw_result, snapshot_run_id):
+        events.append(("load", snapshot_run_id))
+        assert raw_result["manifest_key"].endswith("/_manifest.json")
+        return {
+            "raw_object_keys": raw_result["raw_object_keys"],
+            "inserted": 4,
+            "expected_rows": 4,
+            "page_count": 1,
+            "is_publishable": True,
+        }
+
+    result = IncidentMaterializer(
+        receipts=Receipts(),
+        manifest=Manifest(),
+        load=load,
+        verify=lambda result, _run_id: int(result["inserted"]),
+        recover_legacy_raw_result=recover,
+        clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
+    ).run(
+        materializer_dag_id="traffic_incident_bronze",
+        materializer_run_id="scheduled__materializer",
+        limit=24,
+    )
+
+    assert result.snapshot_run_ids == ("legacy-snapshot",)
+    assert events == [
+        ("recover", "legacy-snapshot"),
+        ("load", "legacy-snapshot"),
+        ("materialized", "legacy-snapshot"),
+    ]
+
+
+def test_materializer_keeps_legacy_receipt_pending_when_manifest_recovery_fails():
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    receipt = _receipt("legacy-snapshot", "2026-07-16T00:00:00+00:00")
+    events = []
+
+    class Receipts:
+        def pending(self, *, limit):
+            return [receipt]
+
+        def record_materialized(self, _value):
+            pytest.fail("unrecoverable receipt must remain pending")
+
+    class Manifest:
+        def start(self, run, **_kwargs):
+            events.append(("start", run.run_id))
+
+        def fail(self, run, **_kwargs):
+            events.append(("fail", run.run_id))
+
+    with pytest.raises(ValueError, match="legacy raw is incomplete"):
+        IncidentMaterializer(
+            receipts=Receipts(),
+            manifest=Manifest(),
+            load=lambda *_args: pytest.fail("must not load without manifest"),
+            verify=lambda *_args: pytest.fail("must not verify without manifest"),
+            recover_legacy_raw_result=lambda *_args: (
+                (_ for _ in ()).throw(ValueError("legacy raw is incomplete"))
+            ),
+            clock=lambda: datetime.now(timezone.utc),
+        ).run(
+            materializer_dag_id="traffic_incident_bronze",
+            materializer_run_id="scheduled__materializer",
+            limit=24,
+        )
+
+    assert events == [("start", "legacy-snapshot"), ("fail", "legacy-snapshot")]

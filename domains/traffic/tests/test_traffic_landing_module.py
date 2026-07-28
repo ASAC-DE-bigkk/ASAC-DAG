@@ -419,7 +419,10 @@ def test_replay_deduplicates_raw_keys_and_rebuilds_lineage_without_source_reques
         request_id=lambda: "must-not-be-used",
     )
 
-    batch = landing.replay([raw_key, raw_key])
+    batch = landing.replay(
+        [raw_key, raw_key],
+        run=RunIdentity("traffic_incident_backfill", "manual__deduplicated-replay"),
+    )
 
     assert source.requests == []
     assert len(batch.raw_objects) == 1
@@ -453,7 +456,10 @@ def test_replay_rejects_duplicate_page_ranges_that_mask_missing_rows():
     )
 
     with pytest.raises(TrafficLandingIncompleteError, match="duplicate page range"):
-        landing.replay([first_key, duplicate_key])
+        landing.replay(
+            [first_key, duplicate_key],
+            run=RunIdentity("traffic_incident_backfill", "manual__duplicate-replay"),
+        )
 
 
 def test_landing_batch_round_trips_through_airflow_xcom_mapping():

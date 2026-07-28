@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from traffic_ingest.landing import (  # noqa: E402
     TrafficLanding,
     TrafficLandingIncompleteError,
 )
+from traffic_ingest.landing_contracts import RunIdentity  # noqa: E402
 
 
 class ReplayOnlySource:
@@ -62,7 +64,10 @@ def test_land_seoul_traffic_raw_object_keys_rebuilds_loader_input():
         request_id=lambda: "unused",
     )
 
-    result = landing.replay([raw_key]).to_xcom()
+    result = landing.replay(
+        [raw_key],
+        run=RunIdentity("traffic_incident_backfill", "manual__replay"),
+    ).to_xcom()
 
     assert result["raw_object_keys"] == [raw_key]
     assert result["result_code"] == "INFO-000"
@@ -73,6 +78,32 @@ def test_land_seoul_traffic_raw_object_keys_rebuilds_loader_input():
     assert result["raw_objects"][0]["request_id"] == "request-1"
     assert result["raw_objects"][0]["start_index"] == 1
     assert result["raw_objects"][0]["end_index"] == 1000
+
+
+def test_replay_writes_a_manifest_for_the_original_snapshot_run():
+    raw_key = (
+        "raw/traffic_incident/seoul_traffic_incident/load_date=2026-07-05/"
+        "20260705T082000KST_AccInfo-1-1000_request-1.xml"
+    )
+    raw_store = MemoryRawObjectStore({raw_key: acc_info_payload()})
+    landing = TrafficLanding(
+        source=ReplayOnlySource(),
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 5, tzinfo=timezone.utc),
+        request_id=lambda: "unused",
+    )
+
+    result = landing.replay(
+        [raw_key],
+        run=RunIdentity("traffic_incident_landing", "legacy-snapshot"),
+    )
+
+    assert result.manifest_key == (
+        "raw/traffic_incident/seoul_traffic_incident/load_date=2026-07-05/"
+        "run_id=legacy-snapshot/_manifest.json"
+    )
+    assert json.loads(raw_store.read_bytes(result.manifest_key))["run_id"] == "legacy-snapshot"
 
 
 def test_backfill_rejects_a_raw_set_that_does_not_start_at_one():
@@ -89,4 +120,7 @@ def test_backfill_rejects_a_raw_set_that_does_not_start_at_one():
     )
 
     with pytest.raises(TrafficLandingIncompleteError, match="start_index=1"):
-        landing.replay([raw_key])
+        landing.replay(
+            [raw_key],
+            run=RunIdentity("traffic_incident_backfill", "manual__replay"),
+        )

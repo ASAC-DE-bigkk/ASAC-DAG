@@ -254,6 +254,9 @@ class IncidentMaterializer:
         verified_receipts: (
             Callable[[list[LandedSnapshot]], Mapping[str, int]] | None
         ) = None,
+        recover_legacy_raw_result: (
+            Callable[[dict[str, object], str], dict[str, object]] | None
+        ) = None,
         clock: Callable[[], datetime],
     ) -> None:
         self._receipts = receipts
@@ -261,6 +264,7 @@ class IncidentMaterializer:
         self._load = load
         self._verify = verify
         self._verified_receipts = verified_receipts
+        self._recover_legacy_raw_result = recover_legacy_raw_result
         self._clock = clock
 
     def run(
@@ -279,19 +283,28 @@ class IncidentMaterializer:
         )
         for receipt in pending_receipts:
             run = TrafficRun(materializer_dag_id, receipt.snapshot_run_id)
-            raw_object_count = len(_raw_objects(receipt.raw_result))
+            raw_result = dict(receipt.raw_result)
+            raw_object_count = len(_raw_objects(raw_result))
             try:
                 self._manifest.start(
                     run,
                     expected_raw_objects=raw_object_count,
                 )
+                if (
+                    not raw_result.get("manifest_key")
+                    and self._recover_legacy_raw_result is not None
+                ):
+                    raw_result = self._recover_legacy_raw_result(
+                        raw_result,
+                        receipt.snapshot_run_id,
+                    )
                 if receipt.snapshot_run_id in verified_rows_by_snapshot:
                     (
                         expected_rows,
                         page_count,
                         raw_object_keys,
                         is_publishable,
-                    ) = _receipt_materialization_contract(receipt.raw_result)
+                    ) = _receipt_materialization_contract(raw_result)
                     verified_rows = verified_rows_by_snapshot[receipt.snapshot_run_id]
                     if verified_rows != expected_rows:
                         raise ValueError(
@@ -301,7 +314,7 @@ class IncidentMaterializer:
                         )
                 else:
                     load_result = self._load(
-                        receipt.raw_result,
+                        raw_result,
                         receipt.snapshot_run_id,
                     )
                     verified_rows = self._verify(

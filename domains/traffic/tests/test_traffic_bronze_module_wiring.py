@@ -90,8 +90,9 @@ def test_replay_wrapper_delegates_raw_keys_to_domain_module(monkeypatch):
     captured: dict[str, object] = {}
 
     class Landing:
-        def replay(self, keys):
+        def replay(self, keys, *, run):
             captured["keys"] = keys
+            captured["run"] = run
             return Result({"raw_object_keys": keys})
 
     class BackfillDagRun:
@@ -106,6 +107,7 @@ def test_replay_wrapper_delegates_raw_keys_to_domain_module(monkeypatch):
     )
 
     assert captured["keys"] == raw_keys
+    assert captured["run"] == RunIdentity(Dag.dag_id, "manual__backfill")
     assert result == {"raw_object_keys": raw_keys}
 
 

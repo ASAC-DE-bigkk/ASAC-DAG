@@ -205,6 +205,7 @@ def build_incident_materializer() -> IncidentMaterializer:
     )
     from traffic_ingest.bronze_batch import load_traffic_bronze_batch
     from traffic_ingest.common.runtime import download_raw_object
+    from traffic_ingest.landing_contracts import RunIdentity
 
     def load(raw_result: dict[str, object], snapshot_run_id: str) -> dict[str, object]:
         return load_traffic_bronze_batch(
@@ -232,11 +233,53 @@ def build_incident_materializer() -> IncidentMaterializer:
             }
         )
 
+    def recover_legacy_raw_result(
+        raw_result: dict[str, object], snapshot_run_id: str
+    ) -> dict[str, object]:
+        raw_object_keys = [
+            str(value) for value in raw_result.get("raw_object_keys") or []
+        ]
+        if not raw_object_keys or len(set(raw_object_keys)) != len(raw_object_keys):
+            raise ValueError("legacy Traffic receipt raw_object_keys are invalid")
+        replayed = build_traffic_landing().replay(
+            raw_object_keys,
+            run=RunIdentity("traffic_incident_landing", snapshot_run_id),
+        ).to_xcom()
+        if replayed.get("raw_object_keys") != raw_object_keys:
+            raise ValueError("legacy Traffic replay raw_object_keys do not match receipt")
+        if int(replayed["expected_rows"]) != int(raw_result["expected_rows"]):
+            raise ValueError("legacy Traffic replay row count does not match receipt")
+        receipt_hashes = {
+            str(item.get("raw_object_key") or ""): str(
+                item.get("raw_hash") or item.get("payload_hash") or ""
+            )
+            for item in raw_result.get("raw_objects") or []
+            if isinstance(item, dict)
+        }
+        replayed_hashes = {
+            str(item.get("raw_object_key") or ""): str(
+                item.get("raw_hash") or item.get("payload_hash") or ""
+            )
+            for item in replayed.get("raw_objects") or []
+            if isinstance(item, dict)
+        }
+        if (
+            set(receipt_hashes) != set(raw_object_keys)
+            or receipt_hashes != replayed_hashes
+            or not all(receipt_hashes.values())
+        ):
+            raise ValueError("legacy Traffic replay payload hashes do not match receipt")
+        manifest_key = str(replayed.get("manifest_key") or "")
+        if not manifest_key:
+            raise ValueError("legacy Traffic replay did not produce a raw manifest")
+        return {**raw_result, "manifest_key": manifest_key}
+
     return IncidentMaterializer(
         receipts=build_traffic_snapshot_receipts(),
         manifest=build_traffic_manifest(),
         load=load,
         verify=verify,
         verified_receipts=verified_receipts,
+        recover_legacy_raw_result=recover_legacy_raw_result,
         clock=lambda: datetime.now(timezone.utc),
     )
