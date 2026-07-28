@@ -59,7 +59,7 @@ KST = "Asia/Seoul"
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata")
 
-# run-metadata(ops.run_metadata) — 성공·실패 모두 1행 append(태스크 단위). 기존 problem
+# run 기록 — 성공·실패 모두 R2 runs/ 에 파일 1개(태스크 단위, common.ops.run_sink). 기존 problem
 # 콜백과 병행. bronze 완전성(expected/landed)은 load_bronze 가 XCom 으로 밀어 채운다.
 _run_ok = record_run("citydata", "bronze", status="success")
 _run_fail = record_run("citydata", "bronze", status="failed")

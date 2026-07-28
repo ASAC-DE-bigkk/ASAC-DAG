@@ -53,7 +53,7 @@ DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata", dbt_project_dir=DBT_PROJECT)
 
-# run-metadata(ops.run_metadata) — 성공·실패 모두 1행 append(태스크 단위). 기존 problem
+# run 기록 — 성공·실패 모두 R2 runs/ 에 파일 1개(태스크 단위, common.ops.run_sink). 기존 problem
 # 콜백과 병행하며, best-effort(기록 실패는 태스크 판정 안 가림).
 _run_ok = record_run("citydata", "transform", status="success")
 _run_fail = record_run("citydata", "transform", status="failed")
