@@ -36,7 +36,8 @@ if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.ops.run_sink import record_run  # noqa: E402
+from common.ops.run_sink import record_run, runs_prefix  # noqa: E402
+from common.storage import r2_env_for  # noqa: E402  (target-aware R2 자격증명, #556)
 
 KST = pendulum.timezone("Asia/Seoul")
 record_citydata_problem = problem_failure_callback(domain="citydata", source_system="ops_quality")
@@ -130,15 +131,16 @@ def _export_quality(**context) -> None:
     from collections import defaultdict
     from concurrent.futures import ThreadPoolExecutor
 
-    from common.errors.sink import _r2_env
+    target = context["params"].get("target", "dev")
+    prefix = runs_prefix(target)
 
     r2 = boto3.client(
-        "s3", endpoint_url=_r2_env("R2_ENDPOINT"),
-        aws_access_key_id=_r2_env("R2_ACCESS_KEY_ID"),
-        aws_secret_access_key=_r2_env("R2_SECRET_ACCESS_KEY"),
+        "s3", endpoint_url=r2_env_for("R2_ENDPOINT", target),
+        aws_access_key_id=r2_env_for("R2_ACCESS_KEY_ID", target),
+        aws_secret_access_key=r2_env_for("R2_SECRET_ACCESS_KEY", target),
         region_name="auto",
     )
-    bucket = _r2_env("R2_BUCKET_NAME")
+    bucket = r2_env_for("R2_BUCKET_NAME", target)
     now_kst = pendulum.now(KST)
     today = now_kst.format("YYYY-MM-DD")
     cutoff = now_kst.subtract(days=GRID_DAYS).format("YYYY-MM-DD")
@@ -156,7 +158,7 @@ def _export_quality(**context) -> None:
     failed_keys: list[tuple] = []             # (key, date, domain, layer)
     today_keys: list[tuple] = []              # (key, (date,domain,layer))
     paginator = r2.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix="runs/"):
+    for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/"):
         for obj in page.get("Contents", []):
             parsed = _parse_run_key(obj["Key"])
             if not parsed:
@@ -247,6 +249,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     is_paused_upon_creation=True,  # 검증 후 unpause
+    params={"target": "dev"},  # prod 트리거 시 ops/runs/ + seoul 버킷 (#556)
     tags=["quality", "citydata", "ops", "serving"],
     default_args={
         "retries": 1,

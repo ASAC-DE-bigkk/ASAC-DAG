@@ -7,7 +7,8 @@
 - ``errors/`` (실패 상세·Discord 알림) 와 ``_reports`` (bronze 수집 감사) 는 **별개로 유지**.
 
 경로: ``runs/observed_date=YYYY-MM-DD(KST)/domain=<d>/dag_id=<dag>/<run>__<task>__try<N>.json``
-R2 자격증명·put 은 common.errors.sink 의 것을 재활용(같은 R2 버킷).
+(prod 컷오버(#556) 이후: prod 는 ``ops/runs/...`` + seoul 버킷 — ``runs_prefix``/``r2_env_for`` 참고)
+R2 자격증명·put 은 common.errors.sink 의 것을 재활용(같은 R2 버킷, dev 전용 — prod 는 r2_env_for 직접 사용).
 """
 
 from __future__ import annotations
@@ -18,8 +19,14 @@ from datetime import datetime, timedelta, timezone
 
 LOGGER = logging.getLogger(__name__)
 
-RUNS_PREFIX = "runs"
+RUNS_PREFIX = "runs"  # dev(불변) — prod 는 runs_prefix() 사용
 _KST = timezone(timedelta(hours=9))
+
+
+def runs_prefix(target: str) -> str:
+    """target-aware runs/ prefix. dev→'runs'(seoul-dev 중앙집중 유지, #230),
+    prod→'ops/runs'(ops 존 분리, #60 · prod 컷오버 #556)."""
+    return "ops/runs" if (target or "dev").lower() == "prod" else RUNS_PREFIX
 
 
 def _safe(value: object) -> str:
@@ -31,14 +38,36 @@ def _iso(value: object) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else None
 
 
-def _put_r2(object_key: str, payload: bytes) -> None:
-    # boto3 R2 put 재활용(errors sink 와 동일 자격증명/버킷) — 중복 구현 회피.
-    from common.errors.sink import R2ErrorSink
+def _put_r2(object_key: str, payload: bytes, *, target: str = "dev") -> None:
+    # dev: 기존 경로 그대로(errors sink 위임 — 바이트 단위 불변, #556 STOP-FIRST).
+    # prod: r2_env_for 로 target-aware R2 클라이언트를 직접 build(더 이상 dev 우선 R2ErrorSink
+    # 에 위임하지 않음 — 그러면 prod 관측도 seoul-dev 로 새 나간다).
+    if (target or "dev").lower() != "prod":
+        from common.errors.sink import R2ErrorSink
 
-    R2ErrorSink._put_r2_object(object_key, payload)
+        R2ErrorSink._put_r2_object(object_key, payload)
+        return
+
+    import boto3
+
+    from common.storage import r2_env_for
+
+    boto3.client(
+        "s3",
+        endpoint_url=r2_env_for("R2_ENDPOINT", target),
+        aws_access_key_id=r2_env_for("R2_ACCESS_KEY_ID", target),
+        aws_secret_access_key=r2_env_for("R2_SECRET_ACCESS_KEY", target),
+        region_name="auto",
+    ).put_object(
+        Bucket=r2_env_for("R2_BUCKET_NAME", target),
+        Key=object_key,
+        Body=payload,
+        ContentType="application/json; charset=utf-8",
+    )
 
 
-def build_run_record(context: dict, *, domain: str, layer: str, status: str) -> tuple[str, dict]:
+def build_run_record(context: dict, *, domain: str, layer: str, status: str,
+                     prefix: str = RUNS_PREFIX) -> tuple[str, dict]:
     """Airflow context → (R2 object key, run record dict). 테스트·백필에서 재사용 가능."""
     ti = context.get("task_instance") or context.get("ti")
     dag = context.get("dag")
@@ -76,7 +105,7 @@ def build_run_record(context: dict, *, domain: str, layer: str, status: str) -> 
         "error": (str(exc)[:500] if exc else None),  # 짧은 요약 — 전체 상세는 errors/
     }
     object_key = (
-        f"{RUNS_PREFIX}/observed_date={obs_date}"
+        f"{prefix}/observed_date={obs_date}"
         f"/domain={_safe(domain)}/dag_id={_safe(dag_id)}"
         f"/{_safe(run_id)}__{_safe(task_id)}__try{try_number}__{_safe(status)}.json"
     )
@@ -92,8 +121,12 @@ def record_run(domain: str, layer: str, *, status: str):
 
     def _callback(context) -> None:
         try:
-            object_key, record = build_run_record(context, domain=domain, layer=layer, status=status)
-            _put_r2(object_key, json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+            target = (context.get("params") or {}).get("target", "dev")
+            prefix = runs_prefix(target)
+            object_key, record = build_run_record(
+                context, domain=domain, layer=layer, status=status, prefix=prefix)
+            _put_r2(object_key, json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                    target=target)
             LOGGER.info("[ops.runs] %s", object_key)
         except Exception as exc:  # noqa: BLE001 — 관측 실패로 태스크 죽이지 않음
             LOGGER.warning("[ops.runs] 기록 실패(무시): %s", type(exc).__name__)
