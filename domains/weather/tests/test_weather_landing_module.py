@@ -82,6 +82,7 @@ class ScriptedKmaSource:
 class MemoryRawObjectStore:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, str]] = {}
+        self.write_order: list[str] = []
 
     def exists(self, key: str) -> bool:
         return key in self.objects
@@ -91,6 +92,7 @@ class MemoryRawObjectStore:
 
     def write_bytes(self, key: str, payload: bytes, content_type: str) -> None:
         self.objects[key] = (payload, content_type)
+        self.write_order.append(key)
 
 
 def test_collect_preserves_kma_raw_lineage_for_one_grid_page():
@@ -134,6 +136,18 @@ def test_collect_preserves_kma_raw_lineage_for_one_grid_page():
         == "application/json; charset=utf-8"
     )
     assert "KMA_SERVICE_KEY" not in raw_object.raw_object_key
+    assert batch.manifest_key is not None
+    assert raw_store.write_order[-1] == batch.manifest_key
+    assert json.loads(raw_store.read_bytes(batch.manifest_key)) == {
+        "run_id": "scheduled__weather",
+        "dataset": "kma_vilage_fcst",
+        "load_date": "2026-07-14",
+        "object_keys": [raw_object.raw_object_key],
+        "expected_count": 1,
+        "actual_count": 1,
+        "completed_at": "2026-07-14T09:20:00+09:00",
+        "status": "SUCCESS",
+    }
 
 
 def test_collect_fetches_all_pages_for_every_configured_grid():

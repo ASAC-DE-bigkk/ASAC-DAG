@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from common.raw_manifest import validate_raw_manifest
 from traffic_ingest.acc_info import (
     SOURCE_ID,
     metadata_total_count,
@@ -66,6 +68,37 @@ def _collection_mode(raw_result: Mapping[str, Any]) -> TrafficCollectionMode:
     except ValueError as exc:
         raise TrafficSourceSchemaError(
             f"Unsupported Traffic Bronze collection_mode: {value}"
+        ) from exc
+
+
+def validate_traffic_raw_manifest(
+    raw_result: Mapping[str, Any],
+    *,
+    dag_run_id: str,
+    dataset: str,
+    download_raw_object,
+) -> None:
+    manifest_key = str(raw_result.get("manifest_key") or "")
+    if not manifest_key:
+        raise TrafficCompletenessError(
+            "Traffic raw landing manifest is missing; cannot load Bronze rows."
+        )
+    try:
+        document = json.loads(
+            download_raw_object(manifest_key, "Traffic raw landing manifest")
+        )
+        validate_raw_manifest(
+            document,
+            run_id=dag_run_id,
+            dataset=dataset,
+            object_keys=[
+                str(item["raw_object_key"])
+                for item in raw_result.get("raw_objects") or []
+            ],
+        )
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrafficCompletenessError(
+            "Traffic raw landing manifest validation failed"
         ) from exc
 
 
@@ -307,6 +340,17 @@ def load_traffic_bronze_batch(
     download_raw_object,
     insert_rows,
 ) -> dict:
+    raw_objects = raw_result.get("raw_objects") or []
+    if not isinstance(raw_objects, list) or not raw_objects:
+        raise TrafficCompletenessError(
+            "Seoul traffic raw landing result is empty; cannot load bronze rows."
+        )
+    validate_traffic_raw_manifest(
+        raw_result,
+        dag_run_id=dag_run_id,
+        dataset=SOURCE_ID,
+        download_raw_object=download_raw_object,
+    )
     prepared = _prepare_batch(
         raw_result=raw_result,
         download_raw_object=download_raw_object,

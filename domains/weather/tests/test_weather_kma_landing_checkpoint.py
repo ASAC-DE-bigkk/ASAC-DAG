@@ -18,6 +18,22 @@ from weather_ingest.landing import (  # noqa: E402
     RunIdentity,
     RawObjectIntegrityError,
 )
+from common.raw_manifest import build_raw_manifest  # noqa: E402
+
+
+def manifest_bytes(raw_result: dict, run_id: str) -> bytes:
+    raw_objects = raw_result["raw_objects"]
+    return json.dumps(
+        build_raw_manifest(
+            run_id=run_id,
+            dataset="kma_vilage_fcst",
+            load_date="2026-07-05",
+            object_keys=[item["raw_object_key"] for item in raw_objects],
+            expected_count=len(raw_objects),
+            actual_count=len(raw_objects),
+            completed_at="2026-07-05T08:20:02+00:00",
+        )
+    ).encode()
 
 
 class MemoryRawObjectStore:
@@ -240,6 +256,7 @@ def test_load_kma_bronze_fails_before_insert_when_expected_page_is_missing(monke
     }
     raw_result = {
         "raw_objects": [raw_object],
+        "manifest_key": "raw/weather/kma/_manifest.json",
         "grid_count": 1,
         "api_call_count": 1,
         "base_date": "20260705",
@@ -256,7 +273,11 @@ def test_load_kma_bronze_fails_before_insert_when_expected_page_is_missing(monke
     monkeypatch.setattr(
         dag_module,
         "download_raw_object",
-        lambda _object_key, _log_label: payload,
+        lambda key, _log_label: (
+            manifest_bytes(raw_result, "manual__load:missing-page")
+            if key == raw_result["manifest_key"]
+            else payload
+        ),
     )
     monkeypatch.setattr(
         dag_module,
@@ -291,6 +312,7 @@ def test_load_kma_bronze_rejects_downloaded_payload_hash_mismatch(monkeypatch):
                 "num_of_rows": 1000,
             }
         ],
+        "manifest_key": "raw/weather/kma/_manifest.json",
         "grid_count": 1,
         "base_date": "20260705",
         "base_time": "1700",
@@ -301,7 +323,15 @@ def test_load_kma_bronze_rejects_downloaded_payload_hash_mismatch(monkeypatch):
     monkeypatch.setattr(
         dag_module, "create_kma_bronze_table", lambda *_args: "iceberg_dev.dev.bronze"
     )
-    monkeypatch.setattr(dag_module, "download_raw_object", lambda *_args: payload)
+    monkeypatch.setattr(
+        dag_module,
+        "download_raw_object",
+        lambda key, *_args: (
+            manifest_bytes(raw_result, "manual__hash-mismatch")
+            if key == raw_result["manifest_key"]
+            else payload
+        ),
+    )
     monkeypatch.setattr(
         dag_module,
         "append_kma_bronze_row_batches_pyiceberg",
@@ -337,6 +367,7 @@ def test_load_kma_bronze_allows_partial_pages_when_conf_flag_set(monkeypatch):
     }
     raw_result = {
         "raw_objects": [raw_object],
+        "manifest_key": "raw/weather/kma/_manifest.json",
         "grid_count": 1,
         "api_call_count": 1,
         "base_date": "20260705",
@@ -360,7 +391,11 @@ def test_load_kma_bronze_allows_partial_pages_when_conf_flag_set(monkeypatch):
     monkeypatch.setattr(
         dag_module,
         "download_raw_object",
-        lambda _object_key, _log_label: payload,
+        lambda key, _log_label: (
+            manifest_bytes(raw_result, "manual__load:partial-page")
+            if key == raw_result["manifest_key"]
+            else payload
+        ),
     )
     monkeypatch.setattr(
         dag_module,
@@ -425,6 +460,7 @@ def test_load_kma_bronze_inserts_pages_after_aggregate_count_matches(monkeypatch
     ]
     raw_result = {
         "raw_objects": raw_objects,
+        "manifest_key": "raw/weather/kma/_manifest.json",
         "grid_count": 1,
         "api_call_count": 2,
         "api_request_count": 2,
@@ -435,6 +471,8 @@ def test_load_kma_bronze_inserts_pages_after_aggregate_count_matches(monkeypatch
     insert_calls = []
 
     def fake_download_raw_object(object_key, _log_label):
+        if object_key == raw_result["manifest_key"]:
+            return manifest_bytes(raw_result, "manual__load:all-pages")
         return page_payloads[object_key]
 
     def fake_insert_kma_bronze_row_batches(**kwargs):

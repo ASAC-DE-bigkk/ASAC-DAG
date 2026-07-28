@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Callable, Protocol
 
+from common.raw_manifest import build_raw_manifest
 from weather_ingest.kma import KST, parse_kma_response
 from weather_ingest.errors import (
     WeatherCompletenessError,
@@ -93,6 +94,7 @@ class KmaLandingBatch:
     base_date: str
     base_time: str
     is_publishable: bool = True
+    manifest_key: str | None = None
 
     def to_xcom(self) -> dict:
         raw_objects = [
@@ -128,6 +130,7 @@ class KmaLandingBatch:
             "base_date": self.base_date,
             "base_time": self.base_time,
             "is_publishable": self.is_publishable,
+            "manifest_key": self.manifest_key,
         }
 
     @classmethod
@@ -160,6 +163,11 @@ class KmaLandingBatch:
             base_date=str(document.get("base_date") or ""),
             base_time=str(document.get("base_time") or ""),
             is_publishable=bool(document.get("is_publishable", True)),
+            manifest_key=(
+                str(document["manifest_key"])
+                if document.get("manifest_key")
+                else None
+            ),
         )
 
 
@@ -223,6 +231,38 @@ class KmaLanding:
             f"run_id={self._safe_key_segment(run.run_id)}/"
             f"base-{request.base_date}{request.base_time}.json"
         )
+
+    def _manifest_key(self, run: RunIdentity, raw_objects: list[KmaRawObject]) -> str:
+        load_date = datetime.fromisoformat(
+            raw_objects[0].collected_at.replace("Z", "+00:00")
+        ).astimezone(KST).date().isoformat()
+        return (
+            f"{self._raw_prefix}/weather_forecast/kma_vilage_fcst/"
+            f"load_date={load_date}/run_id={self._safe_key_segment(run.run_id)}"
+            "/_manifest.json"
+        )
+
+    def _write_manifest(
+        self, run: RunIdentity, raw_objects: list[KmaRawObject]
+    ) -> str:
+        key = self._manifest_key(run, raw_objects)
+        manifest = build_raw_manifest(
+            run_id=run.run_id,
+            dataset="kma_vilage_fcst",
+            load_date=datetime.fromisoformat(
+                raw_objects[0].collected_at.replace("Z", "+00:00")
+            ).astimezone(KST).date().isoformat(),
+            object_keys=[item.raw_object_key for item in raw_objects],
+            expected_count=len(raw_objects),
+            actual_count=len(raw_objects),
+            completed_at=self._clock().astimezone(KST).isoformat(),
+        )
+        self._raw_store.write_bytes(
+            key,
+            json.dumps(manifest, ensure_ascii=True, sort_keys=True).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+        return key
 
     def _load_checkpoint(
         self,
@@ -339,6 +379,7 @@ class KmaLanding:
                     f"nx={grid.nx}, ny={grid.ny}, "
                     f"total_count={total_count}, parsed_rows={parsed_rows}"
                 )
+        manifest_key = self._write_manifest(run, raw_objects)
         return KmaLandingBatch(
             raw_objects=tuple(raw_objects),
             grid_count=len(request.grids),
@@ -347,6 +388,7 @@ class KmaLanding:
             base_date=request.base_date,
             base_time=request.base_time,
             is_publishable=True,
+            manifest_key=manifest_key,
         )
 
     def _checkpoint_object_is_trustworthy(self, item: KmaRawObject) -> bool:
@@ -411,6 +453,7 @@ class KmaLanding:
         raw_object_keys: list[str],
         *,
         grids: tuple[KmaGrid, ...],
+        run: RunIdentity | None = None,
     ) -> KmaLandingBatch:
         grid_place_ids = {(grid.nx, grid.ny): grid.place_id for grid in grids}
         raw_objects: list[KmaRawObject] = []
@@ -487,6 +530,9 @@ class KmaLanding:
         base_date, base_time = next(iter(base_datetimes))
         actual_grid_keys = {(item.nx, item.ny) for item in raw_objects}
         configured_grid_keys = {(grid.nx, grid.ny) for grid in grids}
+        manifest_key = self._write_manifest(
+            run or RunIdentity("weather_vilage_fcst_bronze", "replay"), raw_objects
+        )
         return KmaLandingBatch(
             raw_objects=tuple(raw_objects),
             grid_count=len(actual_grid_keys),
@@ -495,4 +541,5 @@ class KmaLanding:
             base_date=base_date,
             base_time=base_time,
             is_publishable=actual_grid_keys == configured_grid_keys,
+            manifest_key=manifest_key,
         )

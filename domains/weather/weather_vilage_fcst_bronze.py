@@ -129,6 +129,7 @@ def land_kma_raw_object_keys(**context) -> dict:
         .replay(
             raw_object_keys_from_conf(context),
             grids=grids,
+            run=RunIdentity(current_dag_id(context), context["run_id"]),
         )
         .to_xcom()
     )

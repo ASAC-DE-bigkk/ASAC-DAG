@@ -100,8 +100,8 @@ def test_replay_wrapper_delegates_raw_keys_and_grid_identity(monkeypatch):
     captured: dict[str, object] = {}
 
     class Landing:
-        def replay(self, keys, *, grids):
-            captured.update(keys=keys, grids=grids)
+        def replay(self, keys, *, grids, run):
+            captured.update(keys=keys, grids=grids, run=run)
             return Result({"raw_object_keys": keys})
 
     class BackfillDagRun:
@@ -123,6 +123,7 @@ def test_replay_wrapper_delegates_raw_keys_and_grid_identity(monkeypatch):
     assert captured == {
         "keys": raw_keys,
         "grids": (KmaGrid("jongno", 60, 127),),
+        "run": RunIdentity(Dag.dag_id, "manual__backfill"),
     }
     assert result == {"raw_object_keys": raw_keys}
 
