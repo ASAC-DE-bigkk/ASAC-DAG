@@ -48,9 +48,11 @@ from citydata_ingest.common.config import RunContext  # noqa: E402
 from citydata_ingest.source.citydata import DEFAULT_BRONZE_BLOCKS  # noqa: E402
 from citydata_ingest.source.citydata_ingest import (  # noqa: E402
     CitydataIngestOptions,
+    build_citydata_manifest,
     build_citydata_run_report,
     fetch_and_land_citydata,
     load_citydata_bronze_from_raw,
+    write_citydata_manifest,
     write_citydata_run_report,
 )
 
@@ -154,6 +156,18 @@ def _fetch_raw(**context) -> dict:
 
     if not landed:
         raise AirflowException(f"citydata bronze: 전체 {len(results)}개 장소 수집 실패")
+
+    # R1: raw 를 전부 올린 뒤 **마지막에** 완결 확인서 기록 → 확인서 유무 = 완결 여부.
+    # best-effort — 확인서 실패가 fetch(수집) 판정을 가리지 않게(확인서 없는 폴더는 R3 로 스킵).
+    try:
+        manifest = build_citydata_manifest(
+            results, ctx, completed_at=pendulum.now(KST).isoformat())
+        mkey = write_citydata_manifest(manifest, ctx, target=params["target"])
+        print(f"[citydata bronze] manifest -> {mkey} "
+              f"({manifest['status']}, {manifest['actual_count']}/{manifest['expected_count']})")
+    except Exception as exc:  # noqa: BLE001 -- 확인서 실패가 run 판정을 가리지 않게
+        print(f"[citydata bronze] manifest 기록 실패(무시): {exc}")
+
     return {
         "ctx": {"load_date": ctx.load_date, "ingest_ts": ctx.ingest_ts, "run_id": ctx.run_id},
         "results": results,
