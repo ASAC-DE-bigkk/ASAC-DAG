@@ -7,6 +7,36 @@
 
 ## 2026-07-28
 
+### 78. commerce env 를 루트 `.env` `commerce 전용값` 블록 단일 소스로 이관 + `.env.commerce` 매핑 레이어화 (호스트 env 계약 변경)
+
+request:
+- 호스트 프로젝트 오너 지시: commerce 의 env 값 중 루트 `.env` 를 상속하지 않던 것을 모두 루트 `.env`
+  기준으로 상속하도록 바꾸고, commerce 에만 관리되던 값은 루트 `.env` 에 `commerce 전용값` 블록으로 묶어 추가.
+- generic 이름 네임스페이스 방식 Q&A → **`COMMERCE_` 접두(옵션 B)** 채택(타 도메인 공유 env 오염 방지).
+
+response:
+- **계약 반전**: 기존 규약("commerce 변수는 루트 `.env` 에 넣지 않고 `.env.commerce` 로 공급, 번들 자립")을
+  뒤집어 **루트 `.env` 의 `commerce 전용값` 블록**을 단일 소스로 삼는다. `dags/` 는 서브모듈, 루트
+  `.env`/`.env.example` 는 호스트 프로젝트 파일이라 변경이 두 리포로 나뉜다(호스트 인프라 파일
+  `docker-compose.yml`/`Dockerfile.airflow` 무접촉 규약은 유지, env 값만 예외).
+- **루트 `.env`/`.env.example`**: `commerce 전용값` 블록 신설. generic 이름(`SEOUL_PAGE_SIZE`·
+  `STORAGE_BACKEND`·`LOCAL_DATA_ROOT`·`SCHEMA_VERSION`·`R2_REGION`·`SEOUL_MAX_PAGES`·
+  `SEOUL_REQUEST_DELAY_SECONDS`)은 `COMMERCE_` 접두로 네임스페이스, 이미 안전한 `COMMERCE_*`/`JUSO_*` 는
+  동일 이름. `JUSO_CONFM_KEY` 시크릿도 루트로 이관(루트 `.env` 는 gitignore).
+- **`.env.commerce`(실파일)/`.env.commerce.example`**: 얇은 매핑 레이어로 재작성 — generic 이름은
+  `${COMMERCE_<KEY>:-기본}` 으로 코드 이름 복원, R2 는 기존대로 `${R2_DEV_*}` 매핑. `:-기본` 은 루트
+  `.env` 없이 단독 실행 시 settings.py 기본값과 동일(빈문자열 footgun 방지). `.env.commerce` 에서 시크릿 제거.
+- **코드 무변경**: settings.py 는 여전히 generic 이름을 읽고 `.env.commerce` 가 되돌리므로 include/ 코드
+  무변경. 충돌 실측 — 루트 승격 대상 generic 이름의 타 도메인 사용처는 상수/독스트링/동일 기본값
+  (`R2_REGION=auto`)뿐이라 무해.
+- **검증**: 실제 `commerce_core.env` 로더로 (1) compose 시나리오(루트 `.env` 주입) → `settings` 8/8 값
+  변경 전과 동일, (2) 단독 실행 시나리오 → generic 키가 코드 기본값으로 fallback(`SCHEMA_VERSION` 공백
+  footgun 없음) 확인.
+- **문서 정합**: CLAUDE.md(Working Scope·부트스트랩), configuration.md(§1 주입·§3 대응표),
+  environments.md, configuration/README.md, README.md, project_setting.md(포팅 체크리스트 포함)를 새 모델로 갱신.
+- **트레이드오프**: 번들 자립/이식성이 낮아짐 — 포팅 시 대상 호스트 `.env` 에 `commerce 전용값` 블록을
+  함께 옮겨야 한다(project_setting.md 이식성 체크리스트에 명시).
+
 ### 77. D1 서빙을 도메인 공통 Serving Contract v1(#478) 규격에 정합 — `_catalog` 8→15컬럼 + dbt 확정 필드 (#493 보강 · ASAC-DBT#334 보강)
 
 request:

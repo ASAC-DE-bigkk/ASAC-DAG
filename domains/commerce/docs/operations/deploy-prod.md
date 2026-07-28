@@ -1,7 +1,7 @@
 # Deploy — prod (스토리지 = Cloudflare R2 prod 버킷)
 
 prod 는 dev 와 **버킷·자격증명을 분리**한다(`seoul-prod`, 전용 토큰). 호스트 스택 자체는
-dev 와 동일한 단일 컴포즈이므로, 분리는 **`.env.commerce` 의 `R2_BUCKET`/`R2_*` 값**과
+dev 와 동일한 단일 컴포즈이므로, 분리는 **루트 `.env` 의 `R2_*`/`COMMERCE_*` 값**과
 운영 정책(시크릿 관리·백업)으로 보장한다.
 
 > 환경 축: [environments.md](../configuration/environments.md). R2 발급: [storage.md](../architecture/storage.md).
@@ -9,32 +9,32 @@ dev 와 동일한 단일 컴포즈이므로, 분리는 **`.env.commerce` 의 `R2
 
 ## 분리 원칙 요약
 
-- 스토리지: R2 **prod 버킷**(`STORAGE_BACKEND=r2`, `R2_BUCKET=seoul-prod`, dev `seoul-dev`와 분리)
+- 스토리지: R2 **prod 버킷**(루트 `COMMERCE_STORAGE_BACKEND=r2`, 버킷 `seoul-prod`, dev `seoul-dev`와 분리)
 - 자격증명: prod 전용 R2 토큰(권한 최소화), dev 와 분리
-- 시크릿: `.env.commerce` 는 `600` 권한·시크릿 매니저 주입 권장, 커밋 금지(gitignore)
+- 시크릿: **루트 `.env`**(commerce 값·`JUSO_CONFM_KEY` 이관처)는 `600` 권한·시크릿 매니저 주입 권장, 커밋 금지(gitignore)
 
-## 1. 환경파일
+## 1. 환경 설정
+
+번들 매핑 파일은 복사만(수정 불필요), 실값은 **루트 `.env`**(호스트)에서 관리한다:
 
 ```bash
 cd dags/domains/commerce
-cp .env.commerce.example .env.commerce
-chmod 600 .env.commerce
+cp .env.commerce.example .env.commerce      # 매핑만 담김
 ```
+
+prod 용으로 **루트 `.env` 의 `commerce 전용값` 블록**에서 설정:
 
 ```bash
-# 인증키는 호스트 루트 .env 에: SEOUL_API_KEY_COMM=<발급키> (#70 이관)
-STORAGE_BACKEND=r2
-
-# R2 블록: 루트 .env 의 prod 키를 참조(권장) — 템플릿의 ${R2_DEV_*} 를 prod 키로 바꾼다:
-R2_ENDPOINT=${R2_ENDPOINT}
-R2_BUCKET=${R2_BUCKET_NAME}                 # 루트 prod 버킷(예: seoul). prod 전용이면 명시값으로
-R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
-R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
-R2_REGION=auto
+# 루트 .env (호스트 — 600 권한 권장)
+SEOUL_API_KEY_COMM=<발급키>          # #70 이관, 필수
+COMMERCE_STORAGE_BACKEND=r2
+# JUSO_CONFM_KEY=<도로명주소 승인키>  # silver 지번 보강 쓰면
 ```
 
-> 루트 `.env` 의 prod 자격증명을 쓰지 않고 prod 전용 토큰/버킷을 분리하려면 위 참조 대신
-> 실제 값을 직접 적는다(`R2_BUCKET=seoul-prod` 등). 참조 규칙: [configuration.md](../configuration/configuration.md).
+prod 버킷/자격증명 분리는 **prod 대상 R2 값**으로 가른다. `.env.commerce` 는 dev 기준으로
+`R2_BUCKET=${R2_DEV_BUCKET_NAME}` 처럼 매핑돼 있으니, prod 는 (a) 루트 `R2_DEV_*` 를 prod 값
+(`seoul-prod`·prod 토큰)으로 채우거나, (b) 배포 환경이 `R2_BUCKET`/`R2_*` 를 프로세스 env 로 직접
+주입(setdefault 우선)한다. 매핑·우선순위 규칙: [configuration.md](../configuration/configuration.md).
 
 ## 2. 의존성
 
@@ -54,7 +54,7 @@ R2 적재 확인은 [deploy-dev.md](deploy-dev.md) §3 과 동일(버킷만 prod
 ## 4. 보안 체크리스트
 
 - [ ] `SEOUL_API_KEY_COMM`·`R2_*` 는 로그/경로/커밋에 노출 금지(CLAUDE.md §2.5)
-- [ ] `.env.commerce` 는 `600`, 가능하면 시크릿 매니저 주입
+- [ ] **루트 `.env`**(commerce 시크릿 이관처)는 `600`, 가능하면 시크릿 매니저 주입
 - [ ] R2 토큰은 prod 버킷 한정·최소 권한
 - [ ] webserver(UI) 직접 노출 금지 — 앞단 TLS 리버스 프록시(호스트 정책)
 
