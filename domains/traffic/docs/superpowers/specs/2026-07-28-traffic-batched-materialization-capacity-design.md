@@ -105,4 +105,3 @@ supersession fence를 통과한 작업만 허용한다. 로컬 Trino root resour
 5. Traffic 전체 test, compile, Airflow 3 import를 통과한다.
 6. 최신 dev 재배포 후 pending age, materializer duration, pool utilization, Trino memory,
    Incident→Flow→Silver→Gold 새 cycle을 확인한다.
-
