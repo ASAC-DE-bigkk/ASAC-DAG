@@ -86,14 +86,19 @@ def sql_timestamp(value: str) -> str:
 
 
 def build_raw_object_key() -> str:
+    """스모크 랜딩 키 — *_RAW_PREFIX env 는 존 루트만(raw / dev/<id>/raw), 도메인 이하는
+    코드가 조립한다(ASK-Seoul#60: raw 첫 세그먼트=도메인 계약. 스모크 도메인 = ops_smoke)."""
     now = datetime.now(timezone.utc)
     load_date = now.strftime("%Y-%m-%d")
     ts_nodash = now.strftime("%Y%m%dT%H%M%S%f")
     if is_dev_target():
-        raw_prefix = os.environ.get("R2_DEV_RAW_PREFIX", f"dev/{smoke_schema()}/raw/sample_events")
+        raw_root = os.environ.get("R2_DEV_RAW_PREFIX", f"dev/{smoke_schema()}/raw")
     else:
-        raw_prefix = os.environ.get("R2_RAW_PREFIX", "raw/sample_events")
-    return f"{raw_prefix.rstrip('/')}/load_date={load_date}/sample_events_{ts_nodash}.csv"
+        raw_root = os.environ.get("R2_RAW_PREFIX", "raw")
+    return (
+        f"{raw_root.rstrip('/')}/ops_smoke/sample_events"
+        f"/load_date={load_date}/sample_events_{ts_nodash}.csv"
+    )
 
 
 def current_dag_run_id() -> str:
