@@ -9,6 +9,7 @@ from traffic_transform_test_support import (
     FakeAirflowSkipException,
     FakeDAG,
     FakeVariable,
+    load_flow_transform_module,
     load_gold_transform_module,
     load_transform_module,
     write_materialization_artifacts,
@@ -118,6 +119,77 @@ def test_latest_publishable_guard_fails_closed_on_invalid_identity(invalid_lates
         module.require_latest_publishable_incident_snapshot(
             _LatestPublishableManifest(invalid_latest),
             "incident-old",
+        )
+
+
+def _dag_support_module():
+    """Load transform_dag_support with airflow fakes installed (flow resolve path)."""
+    load_flow_transform_module()
+    from traffic_ingest import transform_dag_support
+
+    return transform_dag_support
+
+
+class _RaisingPublishableManifest:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def require_publishable(self, run_id):
+        raise self._exc
+
+
+class TrinoExternalError(Exception):
+    """Stands in for trino.exceptions.TrinoExternalError (name-matched classifier)."""
+
+
+@pytest.mark.parametrize(
+    "transient",
+    [
+        OSError("Trino unavailable"),
+        ConnectionError("connection reset by peer"),
+        TimeoutError("timed out"),
+        TrinoExternalError(
+            "TrinoExternalError(type=EXTERNAL, name=ICEBERG_CATALOG_ERROR, "
+            'message="Failed to load view \'bronze_collection_run_manifest\'")'
+        ),
+    ],
+)
+def test_publishable_guard_retries_on_transient_manifest_lookup_error(transient):
+    # The manifest lookup runs against the R2 Iceberg REST catalog, which
+    # intermittently drops the connection or returns ICEBERG_CATALOG_ERROR.
+    # These must stay retryable (propagated as-is) so the task's configured
+    # retry can recover, instead of being fail-closed with AirflowFailException.
+    module = _dag_support_module()
+
+    with pytest.raises(type(transient)) as raised:
+        module.require_publishable_incident_snapshot(
+            _RaisingPublishableManifest(transient),
+            "incident-1",
+            mismatch_action="skip",
+        )
+    assert raised.value is transient
+
+
+def test_publishable_guard_fails_closed_on_non_transient_manifest_error():
+    module = _dag_support_module()
+
+    with pytest.raises(FakeAirflowFailException, match="verification failed"):
+        module.require_publishable_incident_snapshot(
+            _RaisingPublishableManifest(ValueError("unexpected bug")),
+            "incident-1",
+            mismatch_action="skip",
+        )
+
+
+def test_publishable_guard_still_skips_superseded_snapshot():
+    module = _dag_support_module()
+    from traffic_ingest.run_manifest import RunNotPublishableError
+
+    with pytest.raises(FakeAirflowSkipException, match="superseded"):
+        module.require_publishable_incident_snapshot(
+            _RaisingPublishableManifest(RunNotPublishableError("gone")),
+            "incident-1",
+            mismatch_action="skip",
         )
 
 
@@ -364,6 +436,99 @@ def test_citydata_snapshot_requirement_is_owned_by_gold_not_incident_pin(monkeyp
             run_id="manual__gold_without_citydata",
             params={"target": "dev"},
         )
+
+
+def test_admin_dong_crosswalk_pin_requirement_is_owned_by_gold_test_phase(monkeypatch):
+    runtime = _load_transform_runtime()
+    monkeypatch.setattr(
+        runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **_kwargs: _successful_runtime_execution(),
+    )
+
+    silver = runtime.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        snapshot_task_id="resolve_traffic_snapshot_run",
+        silver_persisted=False,
+        snapshot_required=True,
+        admin_dong_crosswalk_pin_required=False,
+        ti=_runtime_ti(),
+        run_id="manual__silver_without_admin_dong_pin",
+        params={"target": "dev"},
+    )
+    assert silver["status"] == "success"
+
+    def xcom_pull(*, task_ids, key=None):
+        if task_ids == "resolve_traffic_snapshot_run" and key is None:
+            return "incident-1"
+        return None
+
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=1,
+        dag_id="traffic_gold_transform",
+        xcom_pull=xcom_pull,
+        xcom_push=lambda **_kwargs: None,
+    )
+
+    with pytest.raises(FakeAirflowFailException, match="admin_dong crosswalk pin"):
+        runtime.run_dbt_phase(
+            dbt_command="test",
+            selector="ask_seoul_traffic_transform_gold_full_tests",
+            snapshot_task_id="resolve_traffic_snapshot_run",
+            silver_persisted=True,
+            snapshot_required=True,
+            admin_dong_crosswalk_pin_required=True,
+            admin_dong_crosswalk_xcom_key="admin_dong_crosswalk_pin_snapshot_id",
+            ti=ti,
+            run_id="manual__gold_without_admin_dong_pin",
+            params={"target": "dev"},
+        )
+
+
+def test_admin_dong_crosswalk_pin_passes_through_to_dbt_variables(monkeypatch):
+    runtime = _load_transform_runtime()
+    captured = {}
+    monkeypatch.setattr(
+        runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **kwargs: captured.update(kwargs) or _successful_runtime_execution(),
+    )
+
+    def xcom_pull(*, task_ids, key=None):
+        assert task_ids == "resolve_traffic_snapshot_run"
+        if key is None:
+            return "incident-1"
+        if key == "admin_dong_crosswalk_pin_snapshot_id":
+            return 99
+        return None
+
+    ti = types.SimpleNamespace(
+        task_id="dbt_test_gold",
+        try_number=1,
+        dag_id="traffic_gold_transform",
+        xcom_pull=xcom_pull,
+        xcom_push=lambda **_kwargs: None,
+    )
+
+    result = runtime.run_dbt_phase(
+        dbt_command="test",
+        selector="ask_seoul_traffic_transform_gold_full_tests",
+        snapshot_task_id="resolve_traffic_snapshot_run",
+        silver_persisted=True,
+        snapshot_required=True,
+        admin_dong_crosswalk_pin_required=True,
+        admin_dong_crosswalk_xcom_key="admin_dong_crosswalk_pin_snapshot_id",
+        ti=ti,
+        run_id="manual__gold_with_admin_dong_pin",
+        params={"target": "dev"},
+    )
+
+    assert result["status"] == "success"
+    assert (
+        json.loads(captured["variables"])["admin_dong_crosswalk_pin_snapshot_id"] == 99
+    )
 
 
 def test_no_silver_fence_mode_preserves_existing_dbt_success_contract(monkeypatch):
@@ -817,6 +982,9 @@ def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
 
     monkeypatch.setattr(module, "build_traffic_flow_manifest", lambda: FlowManifest())
     monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
+    )
     ti = types.SimpleNamespace(
         xcom_push=lambda *, key, value: pushed.update({key: value})
     )
@@ -833,6 +1001,7 @@ def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
     assert flow_calls == ["flow-42"]
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] == "flow-42"
     assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
+    assert pushed[module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY] == 99
 
 
 def test_gold_stale_incompatible_flow_becomes_none(monkeypatch):
@@ -846,6 +1015,9 @@ def test_gold_stale_incompatible_flow_becomes_none(monkeypatch):
         lambda: pytest.fail("incompatible Flow must not be read"),
     )
     monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
+    )
     ti = types.SimpleNamespace(
         xcom_push=lambda *, key, value: pushed.update({key: value})
     )
@@ -897,6 +1069,123 @@ def test_gold_resolver_propagates_citydata_query_errors_for_retry(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Trino connection reset"):
         module.resolve_traffic_gold_snapshot_run(triggering_asset_events={})
+
+
+def test_gold_low_level_resolver_pins_admin_dong_crosswalk_snapshot_and_pushes_xcom():
+    load_transform_module()
+    from traffic_ingest import transform_dag_support
+
+    _set_silver_marker(transform_dag_support)
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            return run_id
+
+    pushed = {}
+    ti = types.SimpleNamespace(
+        xcom_push=lambda *, key, value: pushed.update({key: value})
+    )
+
+    incident_run_id = transform_dag_support.resolve_traffic_gold_snapshot_run(
+        context={"ti": ti, "triggering_asset_events": {}},
+        variable=FakeVariable,
+        incident_manifest_factory=Manifest,
+        flow_manifest_factory=Manifest,
+        citydata_snapshot_resolver=lambda: 7,
+        admin_dong_crosswalk_snapshot_resolver=lambda: 99,
+        current_silver_evidence_loader=lambda: transform_dag_support.SilverOutputEvidence(
+            42, "a" * 64
+        ),
+        flow_xcom_key="traffic_flow_snapshot_dag_run_id",
+        citydata_xcom_key="traffic_citydata_crowding_snapshot_id",
+        admin_dong_crosswalk_xcom_key="admin_dong_crosswalk_pin_snapshot_id",
+    )
+
+    assert incident_run_id == "incident-42"
+    assert pushed["traffic_citydata_crowding_snapshot_id"] == 7
+    assert pushed["admin_dong_crosswalk_pin_snapshot_id"] == 99
+
+
+@pytest.mark.parametrize("invalid_snapshot_id", [0, -1, None, "not-an-int"])
+def test_gold_low_level_resolver_fails_closed_on_invalid_admin_dong_crosswalk_snapshot(
+    invalid_snapshot_id,
+):
+    load_transform_module()
+    from traffic_ingest import transform_dag_support
+
+    _set_silver_marker(transform_dag_support)
+
+    class Manifest:
+        def require_publishable(self, run_id):
+            return run_id
+
+    ti = types.SimpleNamespace(xcom_push=lambda *, key, value: None)
+
+    with pytest.raises(FakeAirflowFailException, match="admin_dong crosswalk"):
+        transform_dag_support.resolve_traffic_gold_snapshot_run(
+            context={"ti": ti, "triggering_asset_events": {}},
+            variable=FakeVariable,
+            incident_manifest_factory=Manifest,
+            flow_manifest_factory=Manifest,
+            citydata_snapshot_resolver=lambda: 7,
+            admin_dong_crosswalk_snapshot_resolver=lambda: invalid_snapshot_id,
+            current_silver_evidence_loader=lambda: transform_dag_support.SilverOutputEvidence(
+                42, "a" * 64
+            ),
+            flow_xcom_key="traffic_flow_snapshot_dag_run_id",
+            citydata_xcom_key="traffic_citydata_crowding_snapshot_id",
+            admin_dong_crosswalk_xcom_key="admin_dong_crosswalk_pin_snapshot_id",
+        )
+
+
+def test_dbt_snapshot_variables_includes_admin_dong_crosswalk_pin_when_present():
+    load_transform_module()
+    from traffic_ingest import transform_dag_support
+
+    def xcom_pull(*, task_ids, key=None):
+        assert task_ids == "resolve_traffic_gold_snapshot_run"
+        if key == "traffic_citydata_crowding_snapshot_id":
+            return 7
+        if key == "admin_dong_crosswalk_pin_snapshot_id":
+            return 99
+        if key is None:
+            return "incident-42"
+        return None
+
+    ti = types.SimpleNamespace(xcom_pull=xcom_pull)
+
+    variables = transform_dag_support.dbt_snapshot_variables(
+        ti,
+        "resolve_traffic_gold_snapshot_run",
+        "incident-42",
+        "traffic_flow_snapshot_dag_run_id",
+        "traffic_citydata_crowding_snapshot_id",
+        admin_dong_crosswalk_xcom_key="admin_dong_crosswalk_pin_snapshot_id",
+    )
+
+    assert variables["admin_dong_crosswalk_pin_snapshot_id"] == 99
+
+
+def test_dbt_snapshot_variables_omits_admin_dong_crosswalk_pin_when_key_not_passed():
+    load_transform_module()
+    from traffic_ingest import transform_dag_support
+
+    def xcom_pull(*, task_ids, key=None):
+        if key == "traffic_citydata_crowding_snapshot_id":
+            return 7
+        return None
+
+    ti = types.SimpleNamespace(xcom_pull=xcom_pull)
+
+    variables = transform_dag_support.dbt_snapshot_variables(
+        ti,
+        "resolve_traffic_gold_snapshot_run",
+        "incident-42",
+        "traffic_flow_snapshot_dag_run_id",
+        "traffic_citydata_crowding_snapshot_id",
+    )
+
+    assert "admin_dong_crosswalk_pin_snapshot_id" not in variables
 
 
 def test_traffic_contract_gates_delegate_membership_to_dbt_selectors():
@@ -1069,6 +1358,10 @@ def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch)
                 module.SNAPSHOT_TASK_ID,
                 module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
             ): 8738321387624398062,
+            (
+                module.SNAPSHOT_TASK_ID,
+                module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
+            ): 8738321387624398063,
         }
         return values[(task_ids, key)]
 
@@ -1084,6 +1377,7 @@ def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch)
         snapshot_task_id=module.SNAPSHOT_TASK_ID,
         snapshot_required=True,
         citydata_snapshot_required=True,
+        admin_dong_crosswalk_pin_required=True,
         silver_persisted=True,
         ti=ti,
         run_id="asset_triggered__pinned",
@@ -1094,6 +1388,7 @@ def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch)
     assert json.loads(captured["variables"]) == {
         "traffic_snapshot_dag_run_id": "snapshot-a",
         "traffic_citydata_crowding_snapshot_id": 8738321387624398062,
+        "admin_dong_crosswalk_pin_snapshot_id": 8738321387624398063,
     }
 
 
@@ -1872,6 +2167,30 @@ def test_dbt_phase_task_adapter_forwards_split_runtime_contract():
     }
 
 
+def test_dbt_phase_task_adapter_forwards_admin_dong_crosswalk_pin_required():
+    module = load_transform_module()
+    from traffic_ingest.transform_specs import DbtPhaseSpec
+
+    spec = DbtPhaseSpec(
+        "dbt_test_gold_admin_dong_pin_probe",
+        "test",
+        "ask_seoul_traffic_transform_gold_full_tests_without_commerce",
+        admin_dong_crosswalk_pin_required=True,
+    )
+
+    with FakeDAG("adapter_admin_dong_pin_contract"):
+        task = module.build_dbt_phase_task(
+            spec,
+            python_callable=object(),
+            snapshot_task_id=module.SNAPSHOT_TASK_ID,
+            retry_delay=object(),
+            pin_critical_priority=module.PIN_CRITICAL_PRIORITY,
+            failure_callback=object(),
+        )
+
+    assert task.kwargs["op_kwargs"]["admin_dong_crosswalk_pin_required"] is True
+
+
 def test_traffic_transform_uses_only_the_silver_phase_contract():
     module = load_transform_module()
     dag = module.dag
@@ -1916,12 +2235,28 @@ def test_contract_gates_are_the_only_path_into_persisted_silver():
     module = load_transform_module()
     dag = module.dag
 
+    # #510: the pin (resolve/admit/assert) now sits between the Bronze contract
+    # gate and dbt_run_silver so the pinned run is fresh at build time. The
+    # contract gate must still be an unbypassable ancestor of persisted Silver.
     assert dag.task_dict[
         "dbt_test_traffic_bronze_source_contract"
-    ].downstream_task_ids == {"dbt_run_silver"}
+    ].downstream_task_ids == {"resolve_traffic_snapshot_run"}
     assert dag.task_dict["dbt_run_silver"].upstream_task_ids == {
-        "dbt_test_traffic_bronze_source_contract",
+        "assert_traffic_silver_snapshot_not_superseded",
     }
+    silver_ancestors = {
+        task.task_id
+        for task in dag.task_dict["dbt_run_silver"].get_flat_relatives(upstream=True)
+    }
+    assert {
+        "dbt_deps",
+        "dbt_source_freshness",
+        "dbt_test_traffic_incident_availability",
+        "dbt_test_traffic_bronze_source_contract",
+        "resolve_traffic_snapshot_run",
+        "admit_traffic_silver_snapshot",
+        "assert_traffic_silver_snapshot_not_superseded",
+    } <= silver_ancestors
 
 
 def test_traffic_dag_contains_no_model_or_test_membership_literals():

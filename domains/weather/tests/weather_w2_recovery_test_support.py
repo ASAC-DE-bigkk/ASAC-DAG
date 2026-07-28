@@ -102,6 +102,7 @@ def install_airflow_fakes():
     resources.TRINO_HEAVY_POOL = "trino_weather_heavy"
     runtime = types.ModuleType("weather_ingest.common.runtime")
     runtime.trino_cursor = lambda: (None, "iceberg_dev", "weather")
+    runtime.sql_identifier = lambda value: str(value)
 
     sys.modules.update(
         {

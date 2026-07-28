@@ -23,7 +23,10 @@ from weather_ingest.trino_query_metrics import (
 
 
 APPROVED_DEV_CATALOG = "iceberg_dev"
+APPROVED_PROD_CATALOG = "iceberg"
 APPROVED_DEV_SCHEMA = "weather_traffic_bronze"
+_TARGET_CATALOGS = {"dev": APPROVED_DEV_CATALOG, "prod": APPROVED_PROD_CATALOG}
+_TARGET_CATALOG_ENVS = {"dev": "TRINO_DEV_ICEBERG_CATALOG", "prod": "TRINO_ICEBERG_CATALOG"}
 FIXED_RETENTION = "7d"
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 OPERATIONS = ("optimize", "expire_snapshots", "remove_orphan_files")
@@ -123,8 +126,8 @@ def _validate_maintenance_plan(
     if not isinstance(plan, MaintenancePlan):
         raise MaintenancePlanError("maintenance plan has an invalid type")
     if (
-        plan.target != "dev"
-        or plan.catalog != APPROVED_DEV_CATALOG
+        plan.target not in _TARGET_CATALOGS
+        or plan.catalog != _TARGET_CATALOGS[plan.target]
         or plan.schema != APPROVED_DEV_SCHEMA
         or plan.retention != FIXED_RETENTION
         or not isinstance(plan.retain_last, int)
@@ -169,13 +172,15 @@ def resolve_maintenance_plan(
 ) -> MaintenancePlan:
     values = env if env is not None else os.environ
     validate_dev_runtime("weather", env=values, requested_target=target)
-    if target != "dev":
-        raise MaintenancePlanError("maintenance target must be exactly dev")
-    if str(values.get("TRINO_DEV_ICEBERG_CATALOG", "")).strip() != APPROVED_DEV_CATALOG:
-        raise MaintenancePlanError("maintenance catalog must be the approved dev catalog")
+    if target not in _TARGET_CATALOGS:
+        raise MaintenancePlanError("maintenance target must be dev or prod")
+    expected_catalog = _TARGET_CATALOGS[target]
+    catalog_env = _TARGET_CATALOG_ENVS[target]
+    if str(values.get(catalog_env, "")).strip() != expected_catalog:
+        raise MaintenancePlanError(f"maintenance catalog must be the approved {target} catalog")
     if str(values.get("ASK_SEOUL_SCHEMA", "")).strip() != APPROVED_DEV_SCHEMA:
         raise MaintenancePlanError(
-            "maintenance source schema must use the approved dev schema"
+            "maintenance source schema must use the approved schema"
         )
     if retention != FIXED_RETENTION:
         raise MaintenancePlanError("maintenance retention must be 7d")
@@ -195,8 +200,8 @@ def resolve_maintenance_plan(
     ordered = tuple(table for table in canonical if table in set(requested))
     plan_hash = _plan_hash(
         plan_id=dag_run_id,
-        target="dev",
-        catalog=APPROVED_DEV_CATALOG,
+        target=target,
+        catalog=expected_catalog,
         schema=APPROVED_DEV_SCHEMA,
         retention=FIXED_RETENTION,
         retain_last=1,
@@ -205,8 +210,8 @@ def resolve_maintenance_plan(
     return MaintenancePlan(
         plan_id=dag_run_id,
         plan_hash=plan_hash,
-        target="dev",
-        catalog=APPROVED_DEV_CATALOG,
+        target=target,
+        catalog=expected_catalog,
         schema=APPROVED_DEV_SCHEMA,
         retention=FIXED_RETENTION,
         retain_last=1,
@@ -228,11 +233,11 @@ def exact_table_exists(
     table: str,
 ) -> bool:
     if (
-        catalog != APPROVED_DEV_CATALOG
+        catalog not in _TARGET_CATALOGS.values()
         or schema != APPROVED_DEV_SCHEMA
         or not _IDENTIFIER.fullmatch(table)
     ):
-        raise MaintenancePlanError("exact table probe is outside approved dev scope")
+        raise MaintenancePlanError("exact table probe is outside approved scope")
     cursor.execute(
         f"SELECT 1 FROM {catalog}.information_schema.tables "
         f"WHERE table_schema = {sql_string(schema)} "
@@ -686,7 +691,11 @@ def collect_maintenance_inventory(
     connection_factory=None,
 ) -> dict[str, dict[str, Any]]:
     _validate_maintenance_plan(plan, allowed_tables=allowed_tables)
-    factory = connection_factory if connection_factory is not None else _connect_trino
+    factory = (
+        connection_factory
+        if connection_factory is not None
+        else lambda: _connect_trino(catalog=plan.catalog)
+    )
     connection = None
     cursor = None
     try:
@@ -746,7 +755,11 @@ def execute_maintenance_action(
         env=env,
     )
     _validate_maintenance_plan(plan, allowed_tables=allowed_tables)
-    factory = connection_factory if connection_factory is not None else _connect_trino
+    factory = (
+        connection_factory
+        if connection_factory is not None
+        else lambda: _connect_trino(catalog=plan.catalog)
+    )
     connection = None
     cursors: list[Any] = []
     try:
@@ -788,14 +801,14 @@ def _close_all(resources: Sequence[Any]) -> bool:
     return failed
 
 
-def _connect_trino():
+def _connect_trino(catalog: str = APPROVED_DEV_CATALOG):
     import trino.dbapi
 
     return trino.dbapi.connect(
         host=os.environ.get("TRINO_HOST", "trino"),
         port=int(os.environ.get("TRINO_PORT", "8080")),
         user=os.environ.get("TRINO_USER", "airflow"),
-        catalog=APPROVED_DEV_CATALOG,
+        catalog=catalog,
         http_scheme=os.environ.get("TRINO_HTTP_SCHEME", "http"),
     )
 

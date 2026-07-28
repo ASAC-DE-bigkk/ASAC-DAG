@@ -19,6 +19,7 @@ class DbtPhaseSpec:
     snapshot_required: bool = False
     pin_critical: bool = False
     workload: DbtWorkload = DbtWorkload.TRINO
+    heavy_pool: bool = True
     threads: int | None = 2
     selector_by_test_tier: dict[TrafficTestTier, str | None] | None = None
     selector_when_flow_missing: str | None = None
@@ -26,6 +27,7 @@ class DbtPhaseSpec:
         dict[TrafficTestTier, str | None] | None
     ) = None
     citydata_snapshot_required: bool = False
+    admin_dong_crosswalk_pin_required: bool = False
     silver_fence_mode: Literal["write", "verify"] | None = None
 
 
@@ -43,16 +45,19 @@ SILVER_DBT_PHASE_SPECS = (
         "dbt_source_freshness",
         "source freshness",
         "ask_seoul_traffic_transform_source",
+        heavy_pool=False,
     ),
     DbtPhaseSpec(
         "dbt_test_traffic_incident_availability",
         "test",
         "ask_seoul_traffic_transform_availability",
+        heavy_pool=False,
     ),
     DbtPhaseSpec(
         "dbt_test_traffic_bronze_source_contract",
         "test",
         "traffic_transform_contract_gate",
+        heavy_pool=False,
     ),
     DbtPhaseSpec(
         "dbt_run_silver",
@@ -143,6 +148,7 @@ GOLD_DBT_PHASE_SPECS = (
         silver_persisted=True,
         snapshot_required=True,
         citydata_snapshot_required=True,
+        admin_dong_crosswalk_pin_required=True,
         selector_when_flow_missing=(
             "ask_seoul_traffic_transform_gold_incident_models_without_commerce"
         ),
@@ -156,6 +162,7 @@ GOLD_DBT_PHASE_SPECS = (
         snapshot_required=True,
         pin_critical=True,
         citydata_snapshot_required=True,
+        admin_dong_crosswalk_pin_required=True,
         selector_by_test_tier={
             TrafficTestTier.GATE: (
                 "ask_seoul_traffic_transform_gold_gate_tests_without_commerce"

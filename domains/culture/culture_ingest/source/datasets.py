@@ -76,6 +76,11 @@ KOPIS_DATASETS = [
         id_field="mt20id",
         base_params={"signgucode": "11"},  # 11 = 서울 (상세 크롤 범위를 서울로 한정)
         key_fields=("mt20id", "prfnm"),
+        # 야간은 신규 공연만 top-up(#518). 상세에서 쓰는 값은 mt10id(공연↔공연장)
+        # 하나뿐이고 이는 공연 id 에 대해 불변 — 실측 608건 중 변경 0건이라 재크롤
+        # 정보량이 0 이었다(200콜/일 중 약 92%가 전날 것 재수집). 전수 재크롤은
+        # detail_mode="full" 수동 트리거.
+        missing_only_nightly=True,
     ),
     Dataset(
         name="kopis_facility",
