@@ -51,8 +51,10 @@ from silver import silver_tasks        # include/silver
 ```
 
 - 패키지 간 참조도 top-level 로: `from commerce_core.settings import get_settings`.
-- 부트스트랩 직후 `load_commerce_env()` 로 번들 `.env.commerce` 를 적재한다 — 호스트 루트
-  `.env` 에 카테고리 변수를 넣지 않아도 `dags/` 와 함께 인자가 따라온다([configuration.md](../configuration/configuration.md)).
+- 부트스트랩 직후 `load_commerce_env()` 로 번들 `.env.commerce` 를 적재한다 — 이 파일은 루트 `.env`
+  의 `commerce 전용값` 블록을 코드 이름으로 **매핑(상속)** 한다(2026-07-28 개편). 실값은 루트 `.env`
+  가 단일 소스로 관리하고, 매핑 계약만 `dags/` 와 함께 따라온다([configuration.md](../configuration/configuration.md)).
+  → 포팅 시 대상 호스트 `.env` 에 `commerce 전용값` 블록을 함께 옮겨야 한다.
 - 테스트는 `tests/conftest.py` 가 동일하게 `include` 를 path 에 올린다.
 - 설정/env 파일 경로는 코드 위치 기준 상대(`Path(__file__).resolve().parents[N]/...`)로
   찾되, 환경변수로 override 가능하게 한다(`COMMERCE_REGISTRY_PATH`/`COMMERCE_ENV_FILE`).
@@ -93,7 +95,8 @@ from silver import silver_tasks        # include/silver
 ## 7. 이식성 체크리스트
 
 - [ ] DAG 가 `Path(__file__).parent/"include"` 를 sys.path 에 올리는가
-- [ ] DAG 가 `load_commerce_env()` 로 번들 `.env` 를 적재하는가(호스트 루트 `.env` 비의존)
+- [ ] DAG 가 `load_commerce_env()` 로 번들 `.env.commerce` 매핑을 적재하는가 (실값은 루트 `.env` 의
+      `commerce 전용값` 블록 — 포팅 시 이 블록도 대상 호스트 `.env` 로 함께 옮긴다)
 - [ ] 외부 절대경로/호스트 PYTHONPATH 에 의존하지 않는가
 - [ ] config/env 경로가 코드 기준 상대 + env override 인가
 - [ ] `.airflowignore` 로 include/config/tests/docs 가 제외되는가

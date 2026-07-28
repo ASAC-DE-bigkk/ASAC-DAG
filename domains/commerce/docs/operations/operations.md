@@ -42,7 +42,7 @@ docker compose exec airflow-scheduler \
 
 bronze 원본이 `run_id` 폴더에 보존돼 있으므로 옛 원본으로 silver 를 다시 만든다.
 
-1. (스키마 바뀌면) `.env.commerce` 의 `SCHEMA_VERSION` 을 올린다 — 새 bronze 마커 리니지에 반영.
+1. (스키마 바뀌면) 루트 `.env` 의 `COMMERCE_SCHEMA_VERSION` 을 올린다 — 새 bronze 마커 리니지에 반영.
 2. 대상 구간 backfill 재실행 → silver `observed_date` 파티션 재생성.
 3. bronze 는 절대 덮어쓰지/삭제하지 않는다 — silver 는 bronze NDJSON 으로부터 재생성 가능.
 
@@ -59,7 +59,7 @@ docker compose exec airflow-scheduler \
 ```
 
 - 태스크는 `retries=2`로 자동 재시도. Dynamic Task Mapping 으로 데이터셋 단위 실패 격리.
-- 인증키 오류(`SeoulAuthError`)는 `check_api_key` 게이트에서 전체 빠른 실패 → `.env.commerce`
+- 인증키 오류(`SeoulAuthError`)는 `check_api_key` 게이트에서 전체 빠른 실패 → 루트 `.env`
   의 `SEOUL_API_KEY_COMM` 확인([configuration.md](../configuration/configuration.md)).
 
 ## 모니터링
@@ -78,7 +78,7 @@ docker compose exec airflow-scheduler \
 
 ```bash
 docker compose exec airflow-scheduler python -m bronze.resolve verify
-# (.env.commerce 의 SEOUL_API_KEY_COMM 를 자동 적재 → 152종 실호출 점검)
+# (루트 .env 의 SEOUL_API_KEY_COMM 를 자동 적재 → 152종 실호출 점검)
 ```
 
 ## 새 데이터셋 추가
