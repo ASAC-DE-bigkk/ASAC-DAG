@@ -17,9 +17,14 @@ D1 쓰기 한도 관리를 위해 3 티어로 스케줄만 분리(현행 정책 
 
 from __future__ import annotations
 
+import os
+
 from common.serving.dag_factory import build_serving_export_dag
 
-_SCHEMA = "seoul_citydata"
+# 프로젝트 target 관례(ASK_SEOUL_TARGET/DBT_TARGET, 기본 prod) — 컷오버(#556). runmetrics._resolve_target 와 동일.
+_TARGET = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
+# 스키마: prod=citydata, dev=seoul_citydata (transform·dbt profiles 와 정렬).
+_SCHEMA = "citydata" if _TARGET == "prod" else "seoul_citydata"
 
 # 티어 = product_id 묶음. 각 골드의 publication_trigger.schedule_cron(계약)이 아래 스케줄과 정렬돼 있다.
 CRITICAL = [
@@ -48,12 +53,12 @@ DAILY = [
 
 citydata_serving_export_critical = build_serving_export_dag(
     domain="citydata", product_ids=CRITICAL, schedule="*/5 * * * *",
-    dag_id="citydata_serving_export_critical", schema=_SCHEMA)
+    dag_id="citydata_serving_export_critical", schema=_SCHEMA, target=_TARGET)
 
 citydata_serving_export_fast = build_serving_export_dag(
     domain="citydata", product_ids=FAST, schedule="15 * * * *",
-    dag_id="citydata_serving_export_fast", schema=_SCHEMA)
+    dag_id="citydata_serving_export_fast", schema=_SCHEMA, target=_TARGET)
 
 citydata_serving_export_daily = build_serving_export_dag(
     domain="citydata", product_ids=DAILY, schedule="30 0 * * *",
-    dag_id="citydata_serving_export_daily", schema=_SCHEMA)
+    dag_id="citydata_serving_export_daily", schema=_SCHEMA, target=_TARGET)
