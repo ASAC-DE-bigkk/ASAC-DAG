@@ -253,6 +253,20 @@ class IncidentMaterializer:
         manifest: Manifest,
         load: Callable[[dict[str, object], str], dict[str, object]],
         verify: Callable[[dict[str, object], str], int],
+        load_many: (
+            Callable[
+                [Mapping[str, dict[str, object]]],
+                Mapping[str, dict[str, object]],
+            ]
+            | None
+        ) = None,
+        verify_many: (
+            Callable[
+                [Mapping[str, dict[str, object]], list[LandedSnapshot]],
+                Mapping[str, int],
+            ]
+            | None
+        ) = None,
         verified_receipts: (
             Callable[[list[LandedSnapshot]], Mapping[str, int]] | None
         ) = None,
@@ -265,6 +279,8 @@ class IncidentMaterializer:
         self._manifest = manifest
         self._load = load
         self._verify = verify
+        self._load_many = load_many
+        self._verify_many = verify_many
         self._verified_receipts = verified_receipts
         self._recover_legacy_raw_result = recover_legacy_raw_result
         self._clock = clock
@@ -276,27 +292,43 @@ class IncidentMaterializer:
         materializer_run_id: str,
         limit: int,
     ) -> MaterializationBatch:
-        snapshot_run_ids: list[str] = []
-        asset_metadata: list[dict[str, object]] = []
         pending_receipts = self._receipts.pending(limit=limit)
         verified_rows_by_snapshot = self._preflight_verified_receipts(
             pending_receipts,
             materializer_dag_id=materializer_dag_id,
         )
-        for receipt in pending_receipts:
-            if (
+        active_receipts = [
+            receipt
+            for receipt in pending_receipts
+            if not (
                 receipt.snapshot_run_id in verified_rows_by_snapshot
                 and not self._receipts.is_pending(receipt.snapshot_run_id)
-            ):
-                continue
-            run = TrafficRun(materializer_dag_id, receipt.snapshot_run_id)
-            raw_result = dict(receipt.raw_result)
-            raw_object_count = len(_raw_objects(raw_result))
-            try:
-                self._manifest.start(
-                    run,
-                    expected_raw_objects=raw_object_count,
-                )
+            )
+        ]
+        if not active_receipts:
+            return MaterializationBatch(snapshot_run_ids=(), asset_metadata=())
+
+        runs = {
+            receipt.snapshot_run_id: TrafficRun(
+                materializer_dag_id,
+                receipt.snapshot_run_id,
+            )
+            for receipt in active_receipts
+        }
+        raw_object_counts = {
+            receipt.snapshot_run_id: len(_raw_objects(receipt.raw_result))
+            for receipt in active_receipts
+        }
+        try:
+            self._manifest_start_many(
+                [
+                    (runs[receipt.snapshot_run_id], raw_object_counts[receipt.snapshot_run_id])
+                    for receipt in active_receipts
+                ]
+            )
+            raw_results: dict[str, dict[str, object]] = {}
+            for receipt in active_receipts:
+                raw_result = dict(receipt.raw_result)
                 if (
                     not raw_result.get("manifest_key")
                     and self._recover_legacy_raw_result is not None
@@ -305,45 +337,96 @@ class IncidentMaterializer:
                         raw_result,
                         receipt.snapshot_run_id,
                     )
-                if receipt.snapshot_run_id in verified_rows_by_snapshot:
-                    (
-                        expected_rows,
-                        page_count,
-                        raw_object_keys,
-                        is_publishable,
-                    ) = _receipt_materialization_contract(raw_result)
-                    verified_rows = verified_rows_by_snapshot[receipt.snapshot_run_id]
-                    if verified_rows != expected_rows:
-                        raise ValueError(
-                            "Traffic materializer preflight row count does not "
-                            f"match receipt: expected={expected_rows}, "
-                            f"actual={verified_rows}"
-                        )
-                else:
-                    load_result = self._load(
-                        raw_result,
-                        receipt.snapshot_run_id,
+                raw_results[receipt.snapshot_run_id] = raw_result
+
+            publish_metrics: dict[str, dict[str, object]] = {}
+            receipts_to_load: list[LandedSnapshot] = []
+            for receipt in active_receipts:
+                snapshot_run_id = receipt.snapshot_run_id
+                raw_result = raw_results[snapshot_run_id]
+                if snapshot_run_id not in verified_rows_by_snapshot:
+                    receipts_to_load.append(receipt)
+                    continue
+                (
+                    expected_rows,
+                    page_count,
+                    raw_object_keys,
+                    is_publishable,
+                ) = _receipt_materialization_contract(raw_result)
+                verified_rows = verified_rows_by_snapshot[snapshot_run_id]
+                if verified_rows != expected_rows:
+                    raise ValueError(
+                        "Traffic materializer preflight row count does not "
+                        f"match receipt: expected={expected_rows}, "
+                        f"actual={verified_rows}"
                     )
-                    verified_rows = self._verify(
-                        load_result,
-                        receipt.snapshot_run_id,
-                    )
-                    expected_rows = int(
-                        load_result.get(
-                            "expected_rows", load_result.get("inserted", 0)
-                        )
-                    )
-                    page_count = int(load_result.get("page_count", raw_object_count))
-                    raw_object_keys = list(load_result.get("raw_object_keys") or [])
-                    is_publishable = bool(load_result.get("is_publishable", True))
-                self._manifest.publish(
-                    run,
-                    expected_rows=expected_rows,
-                    actual_rows=verified_rows,
-                    expected_raw_objects=page_count,
-                    actual_raw_objects=len(raw_object_keys),
-                    is_publishable=is_publishable,
+                publish_metrics[snapshot_run_id] = {
+                    "expected_rows": expected_rows,
+                    "actual_rows": verified_rows,
+                    "expected_raw_objects": page_count,
+                    "actual_raw_objects": len(raw_object_keys),
+                    "is_publishable": is_publishable,
+                }
+
+            if receipts_to_load:
+                load_results = self._load_receipts(
+                    {
+                        receipt.snapshot_run_id: raw_results[receipt.snapshot_run_id]
+                        for receipt in receipts_to_load
+                    }
                 )
+                verified_loaded = self._verify_loaded_receipts(
+                    load_results,
+                    receipts_to_load,
+                )
+                expected_snapshot_ids = {
+                    receipt.snapshot_run_id for receipt in receipts_to_load
+                }
+                if set(load_results) != expected_snapshot_ids:
+                    raise ValueError(
+                        "Traffic materializer batch load returned incomplete receipts"
+                    )
+                if set(verified_loaded) != expected_snapshot_ids:
+                    raise ValueError(
+                        "Traffic materializer batch verification returned incomplete receipts"
+                    )
+                for receipt in receipts_to_load:
+                    snapshot_run_id = receipt.snapshot_run_id
+                    load_result = load_results[snapshot_run_id]
+                    publish_metrics[snapshot_run_id] = {
+                        "expected_rows": int(
+                            load_result.get(
+                                "expected_rows",
+                                load_result.get("inserted", 0),
+                            )
+                        ),
+                        "actual_rows": int(verified_loaded[snapshot_run_id]),
+                        "expected_raw_objects": int(
+                            load_result.get(
+                                "page_count",
+                                raw_object_counts[snapshot_run_id],
+                            )
+                        ),
+                        "actual_raw_objects": len(
+                            list(load_result.get("raw_object_keys") or [])
+                        ),
+                        "is_publishable": bool(
+                            load_result.get("is_publishable", True)
+                        ),
+                    }
+
+            self._manifest_publish_many(
+                [
+                    (runs[receipt.snapshot_run_id], publish_metrics[receipt.snapshot_run_id])
+                    for receipt in active_receipts
+                ]
+            )
+            snapshot_run_ids: list[str] = []
+            asset_metadata: list[dict[str, object]] = []
+            for receipt in active_receipts:
+                metrics = publish_metrics[receipt.snapshot_run_id]
+                verified_rows = int(metrics["actual_rows"])
+                page_count = int(metrics["expected_raw_objects"])
                 self._receipts.record_materialized(
                     MaterializedSnapshot(
                         source_id=receipt.source_id,
@@ -357,28 +440,101 @@ class IncidentMaterializer:
                     )
                 )
                 snapshot_run_ids.append(receipt.snapshot_run_id)
-                if is_publishable:
+                if bool(metrics["is_publishable"]):
                     asset_metadata.append(
                         bronze_asset_metadata(receipt, row_count=verified_rows)
                     )
-            except Exception as error:
-                try:
-                    self._manifest.fail(
-                        run,
-                        task_id=MATERIALIZER_TASK_ID,
-                        error=error,
-                        expected_raw_objects=raw_object_count,
-                    )
-                except Exception as manifest_error:  # preserve materialization cause
-                    LOGGER.warning(
-                        "Traffic materialization FAILED manifest write failed: %s",
-                        type(manifest_error).__name__,
-                    )
-                raise
-        return MaterializationBatch(
-            snapshot_run_ids=tuple(snapshot_run_ids),
-            asset_metadata=tuple(asset_metadata),
-        )
+            return MaterializationBatch(
+                snapshot_run_ids=tuple(snapshot_run_ids),
+                asset_metadata=tuple(asset_metadata),
+            )
+        except Exception as error:
+            try:
+                self._manifest_fail_many(
+                    [
+                        (
+                            runs[receipt.snapshot_run_id],
+                            raw_object_counts[receipt.snapshot_run_id],
+                        )
+                        for receipt in active_receipts
+                    ],
+                    error=error,
+                )
+            except Exception as manifest_error:  # preserve materialization cause
+                LOGGER.warning(
+                    "Traffic materialization FAILED manifest write failed: %s",
+                    type(manifest_error).__name__,
+                )
+            raise
+
+    def _load_receipts(
+        self,
+        raw_results: Mapping[str, dict[str, object]],
+    ) -> dict[str, dict[str, object]]:
+        if self._load_many is not None:
+            return dict(self._load_many(raw_results))
+        return {
+            snapshot_run_id: self._load(raw_result, snapshot_run_id)
+            for snapshot_run_id, raw_result in raw_results.items()
+        }
+
+    def _verify_loaded_receipts(
+        self,
+        load_results: Mapping[str, dict[str, object]],
+        receipts: list[LandedSnapshot],
+    ) -> dict[str, int]:
+        if self._verify_many is not None:
+            return {
+                key: int(value)
+                for key, value in self._verify_many(load_results, receipts).items()
+            }
+        return {
+            snapshot_run_id: self._verify(load_result, snapshot_run_id)
+            for snapshot_run_id, load_result in load_results.items()
+        }
+
+    def _manifest_start_many(
+        self,
+        entries: list[tuple[TrafficRun, int]],
+    ) -> None:
+        method = getattr(self._manifest, "start_many", None)
+        if callable(method):
+            method(entries)
+            return
+        for run, expected_raw_objects in entries:
+            self._manifest.start(
+                run,
+                expected_raw_objects=expected_raw_objects,
+            )
+
+    def _manifest_publish_many(
+        self,
+        entries: list[tuple[TrafficRun, dict[str, object]]],
+    ) -> None:
+        method = getattr(self._manifest, "publish_many", None)
+        if callable(method):
+            method(entries)
+            return
+        for run, metrics in entries:
+            self._manifest.publish(run, **metrics)
+
+    def _manifest_fail_many(
+        self,
+        entries: list[tuple[TrafficRun, int]],
+        *,
+        error: BaseException,
+    ) -> None:
+        method = getattr(self._manifest, "fail_many", None)
+        if callable(method):
+            method(entries, task_id=MATERIALIZER_TASK_ID, error=error)
+            return
+        for run, expected_raw_objects in entries:
+            self._manifest.fail(
+                run,
+                task_id=MATERIALIZER_TASK_ID,
+                error=error,
+                expected_raw_objects=expected_raw_objects,
+            )
 
     def _preflight_verified_receipts(
         self,
