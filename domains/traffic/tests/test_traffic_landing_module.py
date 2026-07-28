@@ -57,6 +57,7 @@ class SequentialTopisSource:
 class MemoryRawObjectStore:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, str]] = {}
+        self.write_order: list[str] = []
 
     def exists(self, key: str) -> bool:
         return key in self.objects
@@ -66,6 +67,7 @@ class MemoryRawObjectStore:
 
     def write_bytes(self, key: str, payload: bytes, content_type: str) -> None:
         self.objects[key] = (payload, content_type)
+        self.write_order.append(key)
 
 
 def test_collect_preserves_raw_lineage_for_one_successful_page():
@@ -101,6 +103,18 @@ def test_collect_preserves_raw_lineage_for_one_successful_page():
         == "application/xml; charset=utf-8"
     )
     assert "SEOUL_API_KEY" not in raw_object.raw_object_key
+    assert batch.manifest_key is not None
+    assert raw_store.write_order[-1] == batch.manifest_key
+    assert json.loads(raw_store.read_bytes(batch.manifest_key)) == {
+        "run_id": "scheduled__2026-07-14T00:20:00Z",
+        "dataset": "seoul_traffic_incident",
+        "load_date": "2026-07-14",
+        "object_keys": [raw_object.raw_object_key],
+        "expected_count": 1,
+        "actual_count": 1,
+        "completed_at": "2026-07-14T09:20:00+09:00",
+        "status": "SUCCESS",
+    }
 
 
 def test_collect_fetches_every_page_required_by_topis_total_count():
@@ -213,7 +227,14 @@ def test_collect_reuses_same_run_checkpoint_without_duplicate_source_request():
     assert second == first
     assert source.requests == []
     assert (
-        len([key for key in raw_store.objects if not key.endswith("landing.json")]) == 1
+        len(
+            [
+                key
+                for key in raw_store.objects
+                if not key.endswith(("landing.json", "_manifest.json"))
+            ]
+        )
+        == 1
     )
     checkpoint_key = next(
         key for key in raw_store.objects if key.endswith("landing.json")

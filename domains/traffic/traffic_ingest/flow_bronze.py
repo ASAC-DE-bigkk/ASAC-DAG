@@ -15,6 +15,7 @@ from traffic_ingest.common.runtime import (
     trino_cursor,
 )
 from traffic_ingest.errors import TrafficCompletenessError, TrafficSourceSchemaError
+from traffic_ingest.bronze_batch import validate_traffic_raw_manifest
 from traffic_ingest.flow_info import (
     SOURCE_ID,
     parse_traffic_info_response,
@@ -178,6 +179,16 @@ def load_traffic_flow_batch(
     download_raw_object: Callable[[str, str], bytes],
 ) -> dict[str, Any]:
     raw_objects = raw_result.get("raw_objects") or []
+    if not isinstance(raw_objects, list) or not raw_objects:
+        raise TrafficCompletenessError(
+            "Traffic flow raw landing result is empty; cannot load Bronze rows."
+        )
+    validate_traffic_raw_manifest(
+        raw_result,
+        dag_run_id=dag_run_id,
+        dataset=SOURCE_ID,
+        download_raw_object=download_raw_object,
+    )
     cursor, catalog, schema = cursor_factory()
     qualified_table = create_table(cursor, catalog, schema)
     prepared: list[tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = []

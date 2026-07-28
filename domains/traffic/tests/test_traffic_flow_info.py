@@ -121,9 +121,11 @@ def test_flow_landing_preserves_raw_json_and_is_stable_for_same_run_link():
     class Store:
         def __init__(self):
             self.objects = {}
+            self.write_order = []
 
         def write_bytes(self, key, payload, content_type):
             self.objects[key] = (payload, content_type)
+            self.write_order.append(key)
 
     store = Store()
     landing = TrafficFlowLanding(
@@ -142,6 +144,17 @@ def test_flow_landing_preserves_raw_json_and_is_stable_for_same_run_link():
     )
     assert "manual__flow" in descriptor["raw_object_key"]
     assert descriptor["raw_object_key"].endswith(".xml")
+    assert result["manifest_key"] == store.write_order[-1]
+    assert json.loads(store.objects[result["manifest_key"]][0]) == {
+        "run_id": "manual__flow",
+        "dataset": "seoul_traffic_flow",
+        "load_date": "2026-07-15",
+        "object_keys": [descriptor["raw_object_key"]],
+        "expected_count": 1,
+        "actual_count": 1,
+        "completed_at": "2026-07-15T01:02:03+00:00",
+        "status": "SUCCESS",
+    }
 
 
 def test_flow_link_resolution_is_pinned_to_exact_incident_snapshot():

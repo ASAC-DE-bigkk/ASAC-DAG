@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import json
 from pathlib import Path
 import sys
 
@@ -11,6 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from traffic_ingest.bronze_batch import load_traffic_bronze_batch  # noqa: E402
+from common.raw_manifest import build_raw_manifest  # noqa: E402
 from traffic_ingest.errors import (  # noqa: E402
     TrafficCompletenessError,
     TrafficRawIntegrityError,
@@ -51,6 +53,7 @@ def _valid_batch() -> tuple[dict, dict[str, bytes]]:
         {
             "raw_objects": raw_objects,
             "raw_object_keys": list(payloads),
+            "manifest_key": "raw/traffic/_manifest.json",
             "result_code": "INFO-000",
             "list_total_count": 2,
             "parsed_rows": 2,
@@ -74,7 +77,21 @@ def _valid_batch() -> tuple[dict, dict[str, bytes]]:
     )
 
 
-def _ports(events: list[str], payloads: dict[str, bytes]) -> dict:
+def _manifest_bytes(raw_result: dict, dag_run_id: str) -> bytes:
+    return json.dumps(
+        build_raw_manifest(
+            run_id=dag_run_id,
+            dataset="seoul_traffic_incident",
+            load_date="2026-07-15",
+            object_keys=raw_result["raw_object_keys"],
+            expected_count=len(raw_result["raw_object_keys"]),
+            actual_count=len(raw_result["raw_object_keys"]),
+            completed_at="2026-07-15T00:30:00+00:00",
+        )
+    ).encode()
+
+
+def _ports(events: list[str], payloads: dict[str, bytes], raw_result: dict, dag_run_id: str) -> dict:
     def cursor_factory():
         events.append("cursor")
         return object(), "iceberg_dev", "ask_seoul"
@@ -85,6 +102,8 @@ def _ports(events: list[str], payloads: dict[str, bytes]) -> dict:
 
     def download_raw_object(key, _description):
         events.append(f"download:{key}")
+        if key == raw_result["manifest_key"]:
+            return _manifest_bytes(raw_result, dag_run_id)
         return payloads[key]
 
     def insert_rows(**kwargs):
@@ -106,11 +125,12 @@ def test_traffic_batch_prepares_every_raw_page_before_opening_trino():
     result = load_traffic_bronze_batch(
         raw_result=raw_result,
         dag_run_id="manual__atomic",
-        **_ports(events, payloads),
+        **_ports(events, payloads, raw_result, "manual__atomic"),
     )
 
     assert result["inserted"] == 2
     assert events == [
+        "download:raw/traffic/_manifest.json",
         "download:raw/traffic/page-1.xml",
         "download:raw/traffic/page-2.xml",
         "cursor",
@@ -160,10 +180,25 @@ def test_incomplete_traffic_batch_performs_zero_database_mutations(
         load_traffic_bronze_batch(
             raw_result=raw_result,
             dag_run_id="manual__invalid",
-            **_ports(events, payloads),
+            **_ports(events, payloads, raw_result, "manual__invalid"),
         )
 
     assert not any(
         event in {"cursor", "create-table"} or event.startswith("insert:")
         for event in events
     )
+
+
+def test_traffic_batch_missing_manifest_performs_zero_database_mutations():
+    raw_result, payloads = _valid_batch()
+    raw_result.pop("manifest_key")
+    events: list[str] = []
+
+    with pytest.raises(TrafficCompletenessError, match="manifest is missing"):
+        load_traffic_bronze_batch(
+            raw_result=raw_result,
+            dag_run_id="manual__missing-manifest",
+            **_ports(events, payloads, {"manifest_key": "unused"}, "manual__missing-manifest"),
+        )
+
+    assert events == []

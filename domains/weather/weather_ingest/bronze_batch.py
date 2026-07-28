@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,6 +14,7 @@ from weather_ingest.kma import (
     kma_page_numbers,
     parse_kma_response,
 )
+from common.raw_manifest import validate_raw_manifest
 from weather_ingest.landing import verify_raw_payload_hash
 from weather_ingest.errors import WeatherCompletenessError
 from weather_ingest.raw_contract import raw_object_page_no
@@ -41,6 +43,23 @@ def load_kma_bronze_batch(
         raise WeatherCompletenessError(
             "KMA raw landing result is empty; cannot load bronze rows."
         )
+    manifest_key = str(raw_result.get("manifest_key") or "")
+    if not manifest_key:
+        raise WeatherCompletenessError(
+            "KMA raw landing manifest is missing; cannot load bronze rows."
+        )
+    try:
+        manifest = json.loads(ports.download(manifest_key, "KMA raw landing manifest"))
+        validate_raw_manifest(
+            manifest,
+            run_id=dag_run_id,
+            dataset=SOURCE_ID,
+            object_keys=[str(item["raw_object_key"]) for item in raw_objects],
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise WeatherCompletenessError(
+            "KMA raw landing manifest validation failed"
+        ) from exc
     # The Airflow wrapper decides whether legacy partial pages are allowed.
     cursor, catalog, schema = ports.open_trino()
     qualified_table = ports.ensure_table(cursor, catalog, schema)

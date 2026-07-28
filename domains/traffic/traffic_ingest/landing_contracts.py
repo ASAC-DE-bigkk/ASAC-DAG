@@ -84,6 +84,7 @@ class TrafficLandingBatch:
     expected_rows: int | None = None
     collection_mode: TrafficCollectionMode = TrafficCollectionMode.FULL_SNAPSHOT
     is_publishable: bool = True
+    manifest_key: str | None = None
 
     def to_xcom(self) -> dict:
         raw_objects = [
@@ -124,6 +125,7 @@ class TrafficLandingBatch:
                 }
                 for item in self.raw_objects
             ],
+            "manifest_key": self.manifest_key,
         }
 
     @classmethod
@@ -162,4 +164,5 @@ class TrafficLandingBatch:
                 document.get("collection_mode") or TrafficCollectionMode.FULL_SNAPSHOT
             ),
             is_publishable=bool(document.get("is_publishable", True)),
+            manifest_key=(str(document["manifest_key"]) if document.get("manifest_key") else None),
         )
