@@ -30,10 +30,10 @@ if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.errors.sink import _r2_env  # noqa: E402  (R2 자격증명 재활용 — 같은 버킷)
+from common.ops.run_sink import runs_prefix  # noqa: E402  (target-aware runs/ prefix, #556)
+from common.storage import r2_env_for  # noqa: E402  (target-aware R2 자격증명, #556)
 
 KST = pendulum.timezone("Asia/Seoul")
-RUNS_PREFIX = "runs"
 # dag_id → 레이어 표기 (경로에서 도출). 미매핑은 dag_id 그대로.
 _LAYER = {
     "citydata_bronze": "bronze",
@@ -45,21 +45,21 @@ _LAYER = {
 record_citydata_problem = problem_failure_callback(domain="citydata", source_system="seoul_citydata")
 
 
-def _r2_client():
+def _r2_client(target: str = "dev"):
     import boto3
 
     return boto3.client(
         "s3",
-        endpoint_url=_r2_env("R2_ENDPOINT"),
-        aws_access_key_id=_r2_env("R2_ACCESS_KEY_ID"),
-        aws_secret_access_key=_r2_env("R2_SECRET_ACCESS_KEY"),
+        endpoint_url=r2_env_for("R2_ENDPOINT", target),
+        aws_access_key_id=r2_env_for("R2_ACCESS_KEY_ID", target),
+        aws_secret_access_key=r2_env_for("R2_SECRET_ACCESS_KEY", target),
         region_name="auto",
     )
 
 
-def _list_keys(cli, prefix: str) -> list[str]:
+def _list_keys(cli, prefix: str, target: str = "dev") -> list[str]:
     keys, token = [], None
-    bucket = _r2_env("R2_BUCKET_NAME")
+    bucket = r2_env_for("R2_BUCKET_NAME", target)
     while True:
         kw = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
         if token:
@@ -73,11 +73,11 @@ def _list_keys(cli, prefix: str) -> list[str]:
     return keys
 
 
-def summary_from_runs(domain: str, dt: str) -> dict:
+def summary_from_runs(domain: str, dt: str, target: str = "dev") -> dict:
     """R2 ``runs/`` 하루치 집계 — 성공률·레이어별·실패상위 (파일명/경로만 파싱)."""
-    cli = _r2_client()
-    prefix = f"{RUNS_PREFIX}/observed_date={dt}/domain={domain}/"
-    keys = _list_keys(cli, prefix)
+    cli = _r2_client(target)
+    prefix = f"{runs_prefix(target)}/observed_date={dt}/domain={domain}/"
+    keys = _list_keys(cli, prefix, target)
 
     total = failed = 0
     runs: set[str] = set()
@@ -152,10 +152,11 @@ def _format(s: dict) -> str:
 
 def _run_digest(**context) -> None:
     params = context["params"]
+    target = params.get("target", "dev")
     target_date = params.get("target_date")
     if not target_date:
         target_date = pendulum.now(KST).subtract(days=1).format("YYYY-MM-DD")
-    summary = summary_from_runs("citydata", target_date)
+    summary = summary_from_runs("citydata", target_date, target)
     msg = _format(summary)
     print(msg)
     try:
@@ -176,7 +177,9 @@ with DAG(
     schedule="7 8 * * *",   # 매일 08:07 KST — 전날 전체 집계
     catchup=False,
     max_active_runs=1,
-    params={"target": "dev", "target_date": None},
+    # 단일 env 노브(#556) — CITYDATA_TARGET=prod 로 컷오버, 미설정 시 dev(불변).
+    # per-run 오버라이드 유지: 트리거 시 target=prod conf 가 이 기본값보다 우선.
+    params={"target": os.environ.get("CITYDATA_TARGET", "dev"), "target_date": None},
     tags=["ops", "citydata", "digest", "slo"],
 ) as dag:
     digest = PythonOperator(

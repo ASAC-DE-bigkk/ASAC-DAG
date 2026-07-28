@@ -46,6 +46,12 @@ from common.ops.run_sink import record_run  # noqa: E402
 
 KST_TZ = ZoneInfo("Asia/Seoul")
 
+# 단일 env 노브 — prod 컷오버 = CITYDATA_TARGET=prod 한 줄, 롤백 = 제거(#556).
+# 미설정 시 기본 "dev"(불변). 파싱 시점에 읽는다 — Cosmos ProfileConfig/RenderConfig 는
+# DAG 파싱 시점에 고정되는 정적 설정이라, 태스크 실행 시점 params 로는 dbt --target 을
+# 바꿀 수 없다(Cosmos 가 렌더한 태스크 커맨드에 이미 박혀있음). 그래서 여기만 env 로 읽는다.
+_TARGET = os.environ.get("CITYDATA_TARGET", "dev")
+
 # 단독 citydata dbt 프로젝트 (모노 루트 아님).
 DBT_PROJECT = "/opt/airflow/dbt/domains/citydata"
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
@@ -86,7 +92,7 @@ project_config = ProjectConfig(
 )
 profile_config = ProfileConfig(
     profile_name="seoul_ppltn",
-    target_name="dev",  # 실험 단계 고정 — 본 전환 시 params 연동 검토
+    target_name=_TARGET,  # CITYDATA_TARGET env 노브 — 컷오버(#556). 기본 dev(불변).
     profiles_yml_filepath=f"{DBT_PROJECT}/profiles.yml",
 )
 # dbt 는 전용 venv 에 있어(메인 파이썬에 미설치) in-process 불가 → SUBPROCESS 로 venv 호출.
@@ -101,7 +107,7 @@ def _dbt(args: str) -> str:
         "set -euo pipefail\n"
         f"cd {DBT_PROJECT}\n"
         f"export DBT_PROFILES_DIR={DBT_PROJECT} DBT_PROJECT_DIR={DBT_PROJECT}\n"
-        f"{DBT_BIN} {args} --target dev --no-use-colors"
+        f"{DBT_BIN} {args} --target {_TARGET} --no-use-colors"
     )
 
 
@@ -182,6 +188,9 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     is_paused_upon_creation=True,  # 기존 DAG 와 동시 write 금지 — 검증 후 스왑
+    # record_run(runs/ 관측)이 이 target 을 읽어 runs 경로/버킷을 정함 — dbt --target 과
+    # 같은 CITYDATA_TARGET 노브를 따르게 해 관측과 실제 빌드 대상이 어긋나지 않게 한다.
+    params={"target": _TARGET},
     tags=["transform", "citydata", "cosmos", "dbt"],
 ) as dag:
     # deps/seed 는 Cosmos 가 다루지 않아 BashOperator 유지. 미사용 seoul_gu_boundary 제외(#267).

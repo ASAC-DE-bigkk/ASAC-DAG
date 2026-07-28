@@ -65,24 +65,28 @@ def _publish_delay_issues(cur, schema_prefix: str) -> list[str]:
     return out
 
 
-def _stall_issues() -> list[str]:
-    """(b) 정체 — R2 runs/ 의 bronze 마지막 성공 기록이 임계보다 오래됐으면 경보. fail-open."""
+def _stall_issues(target: str = "dev") -> list[str]:
+    """(b) 정체 — R2 runs/ 의 bronze 마지막 성공 기록이 임계보다 오래됐으면 경보. fail-open.
+
+    prod 컷오버(#556): target=prod → seoul 버킷 + ``ops/runs`` prefix, dev → 기존(seoul-dev/``runs``)."""
     try:
         import boto3
-        from common.errors.sink import _r2_env
+        from common.ops.run_sink import runs_prefix
+        from common.storage import r2_env_for
 
         cli = boto3.client(
             "s3",
-            endpoint_url=_r2_env("R2_ENDPOINT"),
-            aws_access_key_id=_r2_env("R2_ACCESS_KEY_ID"),
-            aws_secret_access_key=_r2_env("R2_SECRET_ACCESS_KEY"),
+            endpoint_url=r2_env_for("R2_ENDPOINT", target),
+            aws_access_key_id=r2_env_for("R2_ACCESS_KEY_ID", target),
+            aws_secret_access_key=r2_env_for("R2_SECRET_ACCESS_KEY", target),
             region_name="auto",
         )
-        bucket = _r2_env("R2_BUCKET_NAME")
+        bucket = r2_env_for("R2_BUCKET_NAME", target)
+        _prefix = runs_prefix(target)
         now_kst = pendulum.now(KST)
         latest = None
         for d in (now_kst.format("YYYY-MM-DD"), now_kst.subtract(days=1).format("YYYY-MM-DD")):
-            prefix = f"runs/observed_date={d}/domain=citydata/dag_id=citydata_bronze/"
+            prefix = f"{_prefix}/observed_date={d}/domain=citydata/dag_id=citydata_bronze/"
             token = None
             while True:
                 kw = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
@@ -134,7 +138,7 @@ def _monitor(**context) -> None:
     conn = connect(settings)
     cur = conn.cursor()
     issues = _publish_delay_issues(cur, f"{settings.catalog}.{CITYDATA_SCHEMA}")
-    issues += _stall_issues()
+    issues += _stall_issues(target=context["params"].get("target", "dev"))
     _report_serving_health(issues)
 
 
@@ -146,7 +150,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 0, "execution_timeout": timedelta(minutes=10)},
-    params={"target": "dev"},
+    params={"target": os.environ.get("CITYDATA_TARGET", "dev")},  # prod 컷오버 env 노브(#556). 기본 dev.
     tags=["serving", "citydata", "monitor", "freshness"],
 ) as dag:
     PythonOperator(

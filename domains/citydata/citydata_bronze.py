@@ -67,7 +67,9 @@ _run_ok = record_run("citydata", "bronze", status="success")
 _run_fail = record_run("citydata", "bronze", status="failed")
 
 DEFAULT_PARAMS = {
-    "target": "dev",
+    # 단일 env 노브(#556) — CITYDATA_TARGET=prod 로 컷오버, 미설정 시 dev(불변).
+    # per-run 오버라이드 유지: 트리거 시 target=prod 를 conf 로 넘기면 이 기본값보다 우선.
+    "target": os.environ.get("CITYDATA_TARGET", "dev"),
     "max_areas": None,
     "blocks": list(DEFAULT_BRONZE_BLOCKS),
     "write_report": True,
@@ -180,6 +182,7 @@ def _load_bronze(**context) -> int:
     ctx = RunContext(**fetched["ctx"])
     inserted = load_citydata_bronze_from_raw(
         ctx, results=fetched["results"], target=params["target"],
+        schema=("citydata" if params["target"] == "prod" else None),
         blocks=tuple(params.get("blocks") or DEFAULT_BRONZE_BLOCKS))
     print(f"[citydata bronze] bronze_rows_inserted={inserted}")
     # run-metadata 완전성: 시도 장소 대비 적재(landed) + bronze 행수 → 콜백이 이 XCom 을 읽어 채운다.
