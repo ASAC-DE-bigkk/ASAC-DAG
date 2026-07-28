@@ -67,9 +67,9 @@ _run_ok = record_run("citydata", "bronze", status="success")
 _run_fail = record_run("citydata", "bronze", status="failed")
 
 DEFAULT_PARAMS = {
-    # 단일 env 노브(#556) — CITYDATA_TARGET=prod 로 컷오버, 미설정 시 dev(불변).
+    # 단일 env 노브(#556) — ASK_SEOUL_TARGET/DBT_TARGET=prod 로 컷오버, 미설정 시 dev(불변).
     # per-run 오버라이드 유지: 트리거 시 target=prod 를 conf 로 넘기면 이 기본값보다 우선.
-    "target": os.environ.get("CITYDATA_TARGET", "dev"),
+    "target": os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod")),
     "max_areas": None,
     "blocks": list(DEFAULT_BRONZE_BLOCKS),
     "write_report": True,
