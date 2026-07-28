@@ -11,7 +11,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from traffic_ingest.bronze_batch import load_traffic_bronze_batch  # noqa: E402
+from traffic_ingest.bronze_batch import (  # noqa: E402
+    load_traffic_bronze_batch,
+    load_traffic_bronze_batches,
+)
 from common.raw_manifest import build_raw_manifest  # noqa: E402
 from traffic_ingest.errors import (  # noqa: E402
     TrafficCompletenessError,
@@ -199,6 +202,111 @@ def test_traffic_batch_missing_manifest_performs_zero_database_mutations():
             raw_result=raw_result,
             dag_run_id="manual__missing-manifest",
             **_ports(events, payloads, {"manifest_key": "unused"}, "manual__missing-manifest"),
+        )
+
+    assert events == []
+
+
+def test_multiple_receipts_are_prepared_before_one_set_based_database_mutation():
+    first_result, first_payloads = _valid_batch()
+    second_result, second_payloads = _valid_batch()
+    second_result = deepcopy(second_result)
+    second_result["manifest_key"] = "raw/traffic/second/_manifest.json"
+    for raw_object in second_result["raw_objects"]:
+        original_key = raw_object["raw_object_key"]
+        raw_object["raw_object_key"] = original_key.replace(
+            "raw/traffic/", "raw/traffic/second/"
+        )
+    second_result["raw_object_keys"] = [
+        raw_object["raw_object_key"] for raw_object in second_result["raw_objects"]
+    ]
+    for page, raw_object in zip(second_result["pages"], second_result["raw_objects"]):
+        page["raw_object_key"] = raw_object["raw_object_key"]
+    second_payloads = {
+        key.replace("raw/traffic/", "raw/traffic/second/"): payload
+        for key, payload in second_payloads.items()
+    }
+    payloads = {**first_payloads, **second_payloads}
+    raw_results = {
+        "scheduled__first": first_result,
+        "scheduled__second": second_result,
+    }
+    events: list[str] = []
+    replaced: list[list[dict]] = []
+
+    def cursor_factory():
+        events.append("cursor")
+        return object(), "iceberg_dev", "ask_seoul"
+
+    def create_table(_cursor, _catalog, _schema):
+        events.append("create-table")
+        return "iceberg_dev.ask_seoul.bronze_seoul_traffic_incident"
+
+    def download_raw_object(key, _description):
+        events.append(f"download:{key}")
+        if key == first_result["manifest_key"]:
+            return _manifest_bytes(first_result, "scheduled__first")
+        if key == second_result["manifest_key"]:
+            return _manifest_bytes(second_result, "scheduled__second")
+        return payloads[key]
+
+    def replace_snapshots(**kwargs):
+        events.append("replace")
+        replaced.append(kwargs["snapshots"])
+        return {
+            snapshot["dag_run_id"]: sum(
+                len(page["rows"]) for page in snapshot["pages"]
+            )
+            for snapshot in kwargs["snapshots"]
+        }
+
+    result = load_traffic_bronze_batches(
+        raw_results=raw_results,
+        cursor_factory=cursor_factory,
+        create_table=create_table,
+        download_raw_object=download_raw_object,
+        replace_snapshots=replace_snapshots,
+    )
+
+    assert result["scheduled__first"]["inserted"] == 2
+    assert result["scheduled__second"]["inserted"] == 2
+    assert events[-3:] == ["cursor", "create-table", "replace"]
+    assert events.index("cursor") > max(
+        index
+        for index, event in enumerate(events)
+        if event.startswith("download:")
+    )
+    assert len(replaced) == 1
+    assert [snapshot["dag_run_id"] for snapshot in replaced[0]] == [
+        "scheduled__first",
+        "scheduled__second",
+    ]
+
+
+def test_invalid_receipt_prevents_all_set_based_database_mutations():
+    first_result, first_payloads = _valid_batch()
+    second_result, second_payloads = _valid_batch()
+    second_result = deepcopy(second_result)
+    second_result["expected_rows"] = 3
+    events: list[str] = []
+
+    def download_raw_object(key, _description):
+        if key == first_result["manifest_key"]:
+            return _manifest_bytes(first_result, "scheduled__first")
+        if key == second_result["manifest_key"]:
+            return _manifest_bytes(second_result, "scheduled__second")
+        return {**first_payloads, **second_payloads}[key]
+
+    with pytest.raises(TrafficCompletenessError):
+        load_traffic_bronze_batches(
+            raw_results={
+                "scheduled__first": first_result,
+                "scheduled__second": second_result,
+            },
+            cursor_factory=lambda: events.append("cursor"),
+            create_table=lambda *_args: events.append("create-table"),
+            download_raw_object=download_raw_object,
+            replace_snapshots=lambda **_kwargs: events.append("replace"),
         )
 
     assert events == []

@@ -128,7 +128,7 @@ def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
         "dbt_test_traffic_bronze_source_contract",
     }
 
-    assert module.TRINO_HEAVY_POOL == "trino_traffic_heavy"
+    assert module.TRINO_TRANSFORM_POOL == "trino_traffic_transform"
     for task_id, task in module.dbt_phase_tasks.items():
         if task_id in local_workload_task_ids:
             assert "pool" not in task.kwargs
@@ -137,7 +137,7 @@ def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
             assert "pool" not in task.kwargs
             assert task.kwargs["op_kwargs"]["threads"] == 2
         else:
-            assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+            assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
             assert task.kwargs["op_kwargs"]["threads"] == 2
         assert task.kwargs["weight_rule"] == "absolute"
         assert task.kwargs["priority_weight"] == (
@@ -151,7 +151,7 @@ def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
         else "admit_traffic_gold_snapshot",
     ):
         task = module.dag.task_dict[task_id]
-        assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+        assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
         assert task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
         assert task.kwargs["weight_rule"] == "absolute"
 
@@ -170,7 +170,7 @@ def test_silver_marker_is_a_separate_task_after_asset_publication():
         "publish_dbt_run_metrics"
     }
     publish_task = dag.task_dict["publish_traffic_incident_silver_asset"]
-    assert publish_task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+    assert publish_task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
     assert publish_task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
     assert publish_task.kwargs["weight_rule"] == "absolute"
 

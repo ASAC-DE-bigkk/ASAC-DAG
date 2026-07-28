@@ -115,6 +115,74 @@ def test_materializer_preserves_landing_run_ids_and_publishes_latest_batch_event
     ]
 
 
+def test_materializer_uses_batch_manifest_load_and_verification_ports_once():
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    events = []
+    old = _receipt("snapshot-1", "2026-07-16T00:00:00+00:00")
+    new = _receipt("snapshot-2", "2026-07-16T00:05:00+00:00")
+
+    class Receipts:
+        def pending(self, *, limit):
+            return [old, new]
+
+        def record_materialized(self, receipt):
+            events.append(("materialized", receipt.snapshot_run_id))
+
+    class Manifest:
+        def start_many(self, entries):
+            events.append(("start_many", [run.run_id for run, _count in entries]))
+
+        def publish_many(self, entries):
+            events.append(
+                ("publish_many", [run.run_id for run, _metrics in entries])
+            )
+
+        def fail_many(self, *_args, **_kwargs):
+            pytest.fail("successful batch must not fail")
+
+    def load_many(raw_results):
+        events.append(("load_many", list(raw_results)))
+        return {
+            run_id: {
+                "raw_object_keys": raw_result["raw_object_keys"],
+                "inserted": 4,
+                "expected_rows": 4,
+                "page_count": 1,
+                "is_publishable": True,
+            }
+            for run_id, raw_result in raw_results.items()
+        }
+
+    def verify_many(load_results, receipts):
+        events.append(("verify_many", list(load_results)))
+        assert [receipt.snapshot_run_id for receipt in receipts] == [
+            "snapshot-1",
+            "snapshot-2",
+        ]
+        return {run_id: 4 for run_id in load_results}
+
+    result = IncidentMaterializer(
+        receipts=Receipts(),
+        manifest=Manifest(),
+        load=lambda *_args: pytest.fail("batch load port must be used"),
+        verify=lambda *_args: pytest.fail("batch verify port must be used"),
+        load_many=load_many,
+        verify_many=verify_many,
+        clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
+    ).run(
+        materializer_dag_id="traffic_incident_bronze",
+        materializer_run_id="scheduled__materializer",
+        limit=24,
+    )
+
+    assert result.snapshot_run_ids == ("snapshot-1", "snapshot-2")
+    assert [event[0] for event in events].count("start_many") == 1
+    assert [event[0] for event in events].count("load_many") == 1
+    assert [event[0] for event in events].count("verify_many") == 1
+    assert [event[0] for event in events].count("publish_many") == 1
+
+
 def test_materializer_skips_load_for_exact_preverified_receipt():
     from traffic_ingest.incident_pipeline import IncidentMaterializer
 
@@ -336,7 +404,7 @@ def test_materializer_records_first_receipt_failure_when_preflight_errors():
     assert events[1][3] is failure
 
 
-def test_materializer_stops_at_first_failure_and_records_snapshot_manifest_failure():
+def test_materializer_fails_all_started_receipts_when_batch_load_fails():
     from traffic_ingest.incident_pipeline import IncidentMaterializer
 
     events = []
@@ -382,10 +450,19 @@ def test_materializer_stops_at_first_failure_and_records_snapshot_manifest_failu
         )
 
     assert raised.value is failure
-    assert events[0:2] == [("start", "snapshot-1"), ("load", "snapshot-1")]
-    assert events[2][0:3] == (
+    assert events[0:3] == [
+        ("start", "snapshot-1"),
+        ("start", "snapshot-2"),
+        ("load", "snapshot-1"),
+    ]
+    assert events[3][0:3] == (
         "fail",
         "snapshot-1",
+        "materialize_pending_traffic_incident_snapshots",
+    )
+    assert events[4][0:3] == (
+        "fail",
+        "snapshot-2",
         "materialize_pending_traffic_incident_snapshots",
     )
     assert not any(event == ("load", "snapshot-2") for event in events)

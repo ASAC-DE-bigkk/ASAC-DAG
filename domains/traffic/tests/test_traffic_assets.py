@@ -309,48 +309,32 @@ def test_latest_incident_event_rejects_malformed_latest_event():
         )
 
 
-def test_airflow_three_materializer_schedule_combines_raw_asset_and_time_fallback():
+def test_materializer_schedule_is_cron_only_in_dev():
     from traffic_ingest import assets
-
-    captured = {}
-
-    def schedule_factory(*, cron, asset, timezone):
-        captured.update(cron=cron, asset=asset, timezone=timezone)
-        return "asset-or-time"
 
     schedule = assets.materializer_schedule(
         env={"ASK_SEOUL_TARGET": "dev"},
         airflow_version="3.2.2",
-        schedule_factory=schedule_factory,
     )
 
-    assert schedule == "asset-or-time"
-    assert captured == {
-        "cron": "*/15 * * * *",
-        "asset": assets.TRAFFIC_INCIDENT_RAW_ASSET_REF,
-        "timezone": assets.KST,
-    }
+    assert schedule == "*/15 * * * *"
 
 
-def test_airflow_three_materializer_schedule_is_serializable():
-    import airflow
-
-    if int(airflow.__version__.split(".", 1)[0]) < 3:
-        pytest.skip("AssetOrTimeSchedule is available in the deployed Airflow 3 runtime")
-
+def test_materializer_schedule_override_remains_cron_only():
     from traffic_ingest import assets
 
     schedule = assets.materializer_schedule(
-        env={"ASK_SEOUL_TARGET": "dev"},
-        airflow_version=airflow.__version__,
+        env={
+            "ASK_SEOUL_TARGET": "dev",
+            "ASK_SEOUL_TRAFFIC_MATERIALIZER_FALLBACK_SCHEDULE": "3,18,33,48 * * * *",
+        },
+        airflow_version="3.2.2",
     )
 
-    serialized = schedule.serialize()
-
-    assert serialized["timetable"]["__var"]["timezone"] == "Asia/Seoul"
+    assert schedule == "3,18,33,48 * * * *"
 
 
-def test_materializer_schedule_can_be_disabled_and_has_local_airflow_fallback():
+def test_materializer_schedule_can_be_disabled_without_asset_fallback():
     from traffic_ingest import assets
 
     assert (
@@ -361,14 +345,12 @@ def test_materializer_schedule_can_be_disabled_and_has_local_airflow_fallback():
             },
             airflow_version="3.2.2",
         )
-        == [assets.TRAFFIC_INCIDENT_RAW_ASSET_REF]
+        is None
     )
     local_schedule = assets.materializer_schedule(
         env={"ASK_SEOUL_TARGET": "dev"}, airflow_version="2.11.2"
     )
-    assert [asset.uri for asset in local_schedule] == [
-        assets.TRAFFIC_INCIDENT_RAW_ASSET
-    ]
+    assert local_schedule == "*/15 * * * *"
 
 
 def test_conditional_alias_publish_adds_fixed_asset_only_when_called():

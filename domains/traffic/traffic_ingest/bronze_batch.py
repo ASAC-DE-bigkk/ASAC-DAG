@@ -392,3 +392,91 @@ def load_traffic_bronze_batch(
         "requested_end_index": raw_result.get("requested_end_index"),
         "pages": raw_result.get("pages") or [],
     }
+
+
+def load_traffic_bronze_batches(
+    *,
+    raw_results: Mapping[str, dict],
+    cursor_factory,
+    create_table,
+    download_raw_object,
+    replace_snapshots,
+) -> dict[str, dict]:
+    """Validate all receipts first, then publish them in one Trino mutation batch."""
+    if not raw_results:
+        return {}
+
+    prepared_by_run: dict[str, _PreparedTrafficBatch] = {}
+    for dag_run_id, raw_result in raw_results.items():
+        if not dag_run_id:
+            raise TrafficSourceSchemaError(
+                "Traffic Bronze batch requires a non-empty dag_run_id"
+            )
+        raw_objects = raw_result.get("raw_objects") or []
+        if not isinstance(raw_objects, list) or not raw_objects:
+            raise TrafficCompletenessError(
+                "Seoul traffic raw landing result is empty; cannot load bronze rows."
+            )
+        validate_traffic_raw_manifest(
+            raw_result,
+            dag_run_id=dag_run_id,
+            dataset=SOURCE_ID,
+            download_raw_object=download_raw_object,
+        )
+        prepared_by_run[dag_run_id] = _prepare_batch(
+            raw_result=raw_result,
+            download_raw_object=download_raw_object,
+        )
+
+    cursor, catalog, schema = cursor_factory()
+    qualified_table = create_table(cursor, catalog, schema)
+    snapshots = [
+        {
+            "dag_run_id": dag_run_id,
+            "pages": [
+                {
+                    "rows": page.rows,
+                    "metadata": page.metadata,
+                    "request_id": page.request_id,
+                    "start_index": page.start_index,
+                    "end_index": page.end_index,
+                    "raw_object_key": page.raw_object_key,
+                    "raw_hash": page.raw_hash,
+                    "http_status": page.http_status,
+                    "collected_at": page.collected_at,
+                }
+                for page in prepared.pages
+            ],
+        }
+        for dag_run_id, prepared in prepared_by_run.items()
+    ]
+    inserted_by_run = replace_snapshots(
+        cursor=cursor,
+        qualified_table=qualified_table,
+        snapshots=snapshots,
+    )
+
+    results: dict[str, dict] = {}
+    for dag_run_id, prepared in prepared_by_run.items():
+        raw_result = raw_results[dag_run_id]
+        inserted = int(inserted_by_run.get(dag_run_id, 0))
+        results[dag_run_id] = {
+            "source_id": SOURCE_ID,
+            "raw_object_keys": [
+                page.raw_object_key for page in prepared.pages
+            ],
+            "inserted": inserted,
+            "result_code": prepared.result_code,
+            "list_total_count": prepared.list_total_count,
+            "expected_rows": prepared.expected_rows,
+            "collection_mode": prepared.collection_mode.value,
+            "is_publishable": prepared.is_publishable,
+            "page_count": len(prepared.pages),
+            "requested_end_index": raw_result.get("requested_end_index"),
+            "pages": raw_result.get("pages") or [],
+        }
+    print(
+        f"Inserted {sum(result['inserted'] for result in results.values())} "
+        f"Seoul traffic rows from {len(results)} receipts into {qualified_table}"
+    )
+    return results

@@ -201,9 +201,13 @@ def build_incident_materializer() -> IncidentMaterializer:
         create_seoul_traffic_bronze_table,
         find_verified_seoul_traffic_bronze_receipts,
         insert_seoul_traffic_bronze_rows,
+        replace_seoul_traffic_bronze_snapshots,
         verify_seoul_traffic_bronze_runtime,
     )
-    from traffic_ingest.bronze_batch import load_traffic_bronze_batch
+    from traffic_ingest.bronze_batch import (
+        load_traffic_bronze_batch,
+        load_traffic_bronze_batches,
+    )
     from traffic_ingest.common.runtime import download_raw_object
     from traffic_ingest.landing_contracts import RunIdentity
 
@@ -223,6 +227,26 @@ def build_incident_materializer() -> IncidentMaterializer:
             dag_run_id=snapshot_run_id,
             expected_rows=int(load_result.get("inserted") or 0),
             expected_raw_objects=int(load_result.get("page_count") or 0),
+        )
+
+    def load_many(
+        raw_results: dict[str, dict[str, object]],
+    ) -> dict[str, dict[str, object]]:
+        return load_traffic_bronze_batches(
+            raw_results=raw_results,
+            cursor_factory=trino_cursor,
+            create_table=create_seoul_traffic_bronze_table,
+            download_raw_object=download_raw_object,
+            replace_snapshots=replace_seoul_traffic_bronze_snapshots,
+        )
+
+    def verify_many(load_results, receipts) -> dict[str, int]:
+        del load_results
+        return find_verified_seoul_traffic_bronze_receipts(
+            {
+                receipt.snapshot_run_id: receipt.raw_result
+                for receipt in receipts
+            }
         )
 
     def verified_receipts(receipts) -> dict[str, int]:
@@ -279,6 +303,8 @@ def build_incident_materializer() -> IncidentMaterializer:
         manifest=build_traffic_manifest(),
         load=load,
         verify=verify,
+        load_many=load_many,
+        verify_many=verify_many,
         verified_receipts=verified_receipts,
         recover_legacy_raw_result=recover_legacy_raw_result,
         clock=lambda: datetime.now(timezone.utc),

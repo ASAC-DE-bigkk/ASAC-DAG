@@ -23,7 +23,7 @@ from traffic_ingest.assets import (
     incident_bronze_events,
     schedule_asset,
 )
-from traffic_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL
+from traffic_ingest.common.resources import DbtWorkload, TRINO_TRANSFORM_POOL
 from traffic_ingest.external_snapshot import ExternalSnapshotUnavailableError
 from traffic_ingest.run_manifest import RunNotPublishableError
 from traffic_ingest.silver_snapshot_fence import (
@@ -813,7 +813,7 @@ def build_dbt_phase_task(
         "on_failure_callback": failure_callback,
     }
     if spec.workload is DbtWorkload.TRINO and spec.heavy_pool:
-        operator_kwargs["pool"] = TRINO_HEAVY_POOL
+        operator_kwargs["pool"] = TRINO_TRANSFORM_POOL
     return PythonOperator(**operator_kwargs)
 
 

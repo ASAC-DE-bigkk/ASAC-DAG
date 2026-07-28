@@ -42,7 +42,7 @@ from traffic_ingest.assets import (  # noqa: E402
     publish_through_alias,
     schedule_asset,
 )
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from traffic_ingest.common.resources import TRINO_TRANSFORM_POOL  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     SILVER_ASSET_CONTRACT,
@@ -266,7 +266,7 @@ with DAG(
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
         python_callable=resolve_traffic_snapshot_run,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
@@ -274,7 +274,7 @@ with DAG(
     admit_snapshot = PythonOperator(
         task_id="admit_traffic_silver_snapshot",
         python_callable=admit_traffic_silver_snapshot,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
@@ -300,7 +300,7 @@ with DAG(
         task_id="publish_traffic_incident_silver_asset",
         python_callable=publish_traffic_incident_silver_asset,
         outlets=[TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS],
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
