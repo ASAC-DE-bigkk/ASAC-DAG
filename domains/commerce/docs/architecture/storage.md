@@ -32,8 +32,8 @@ bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **`load_date
 
 ```text
 {prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
-{prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커(JSON, 리니지 포함)
-{prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
+{prefix}/ops/control/state/commerce/markers/load_date=<YYYY-MM-DD>/run_id=<...>/<short>.completed | .incomplete  # API별 수집 결과 마커(JSON, 리니지 포함)
+{prefix}/ops/control/state/commerce/markers/load_date=<YYYY-MM-DD>/run_id=<...>/_RUN.completed | .incomplete      # 실행 전체 마커
 {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet                       # [DEPRECATED] 구 R2 parquet silver(152종 공통=v1 공통 14 + v2 별칭 통합) — 현행 silver 는 dbt/Iceberg 테이블
 ```
 
@@ -45,28 +45,32 @@ bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **`load_date
 
 ```text
 raw/commerce/load_date=2026-06-30/run_id=2026-06-30_143025_123/general_restaurant.jsonl
-raw/commerce/load_date=2026-06-30/run_id=2026-06-30_143025_123/_markers/general_restaurant.completed
-raw/commerce/load_date=2026-06-30/run_id=2026-06-30_143025_123/_markers/_RUN.completed
+ops/control/state/commerce/markers/load_date=2026-06-30/run_id=2026-06-30_143025_123/general_restaurant.completed
+ops/control/state/commerce/markers/load_date=2026-06-30/run_id=2026-06-30_143025_123/_RUN.completed
 silver/commerce/general_restaurant/observed_date=2026-06-30/part-000.parquet
 ```
 
 ### bronze: API당 1파일(NDJSON) + 마커
 
 - `<short>.jsonl` = 그 API 의 **모든 페이지를 줄단위 NDJSON**(줄 1개 = 원본 응답 1페이지, 가공 없음).
-- **bronze 는 이 `run_id` 폴더 안에서만** 파일을 만든다 — 외부 경로(예전 `commerce/_manifest/`)에
-  상태 파일을 두지 않는다.
+- **데이터는 이 `run_id` 폴더 안에서만** 만든다. 마커(지시 파일)는 #60 오너 해석에 따라
+  마커 존(`COMMERCE_MARKERS_LAYER`, run 폴더와 `load_date=/run_id=` 1:1 미러)에 둔다.
 - 중복 제어: bronze 는 매 실행 전체 수집(스킵 없음), **중복 제거는 silver 가 `MGTNO` 로**.
 
 ### 마커 (수집 상태 = 외부 매니페스트 대체)
 
-상태/이력은 `run_id` 폴더의 마커가 전부(DB·외부 매니페스트 없음). **API당 마커 1개**(상호배타):
+상태/이력은 마커 존(run 미러)의 마커가 전부(DB·외부 매니페스트 없음). **API당 마커 1개**(상호배타):
 
 | 마커 | 의미 | 다음 실행 |
 |---|---|---|
-| `_markers/<short>.completed` | cap 없이 끝까지 + 건수 일치(status=ok) | — |
-| `_markers/<short>.incomplete` | 건수 불일치/부분(cap)/오류(status=partial\|failed) | 재수집 |
+| `<short>.completed` | cap 없이 끝까지 + 건수 일치(status=ok) | — |
+| `<short>.incomplete` | 건수 불일치/부분(cap)/오류(status=partial\|failed) | 재수집 |
 | (마커 없음) | 이번 실행 미시도 | — |
-| `_markers/_RUN.completed\|.incomplete` | 실행 전체 요약(metrics) | — |
+| `_RUN.completed\|.incomplete` | 실행 전체 요약(metrics) | — |
+
+> 위치: `{COMMERCE_MARKERS_LAYER}/load_date=<d>/run_id=<rid>/` (prod `ops/control/state/commerce/markers`).
+> 재시도로 completed·incomplete 가 공존하면 **completed 가 우선**하며, completed 기록 시 같은 run 의
+> 잔존 incomplete 를 정리한다(#60 감사 F7).
 
 > '완료'와 '미완료'를 **동시에** 두면 중복·불일치 위험이라, API당 1개만 둔다(타입이 곧 상태).
 
@@ -107,20 +111,20 @@ R2 는 S3 호환 — **boto3** S3 클라이언트에 커스텀 엔드포인트(p
 ```bash
 # 루트 .env — 스토리지 백엔드는 commerce 전용값 블록(COMMERCE_ 네임스페이스)
 COMMERCE_STORAGE_BACKEND=r2
-# R2 자격증명/엔드포인트/버킷은 루트의 R2_DEV_* 세트(dev). prod 는 값을 prod 로 교체:
-R2_DEV_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-R2_DEV_BUCKET_NAME=seoul-dev          # prod 는 seoul-prod
-R2_DEV_ACCESS_KEY_ID=<R2 API 토큰 Access Key ID>
-R2_DEV_SECRET_ACCESS_KEY=<R2 API 토큰 Secret>
+# 오브젝트 버킷 = seoul(프로드, 2026-07-28 전환). 자격증명/엔드포인트는 루트 동일 이름 직접 상속:
+R2_BUCKET_NAME=seoul
+R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+R2_ACCESS_KEY_ID=<R2 API 토큰 Access Key ID>
+R2_SECRET_ACCESS_KEY=<R2 API 토큰 Secret>
 
 # .env.commerce 매핑(수정 불필요) — 코드가 읽는 이름으로 되돌림
 #   STORAGE_BACKEND=${COMMERCE_STORAGE_BACKEND:-local}
-#   R2_BUCKET=${R2_DEV_BUCKET_NAME:-seoul-dev}   # 루트 R2_DEV_BUCKET_NAME → commerce R2_BUCKET
+#   R2_BUCKET=${R2_BUCKET_NAME:-seoul}           # dev 복귀 시 ${R2_DEV_BUCKET_NAME:-seoul-dev}
 #   R2_REGION=${COMMERCE_R2_REGION:-auto}
 ```
 
 - R2 대시보드 → **R2 → Manage R2 API Tokens**에서 Access Key/Secret 발급, 버킷 최소 권한.
-- 버킷은 dev/prod 분리(`seoul-dev`/`seoul-prod`), 토큰도 환경별 분리.
+- 버킷은 dev/prod 분리(`seoul-dev`/`seoul`) — dev 복귀는 R2_BUCKET 매핑 한 줄.
 - 자격증명은 bronze 페이로드/로그/경로/커밋에 **절대 저장 금지**(CLAUDE.md §2.5).
 - R2 백엔드는 `boto3` 만 필요하며 호스트 이미지에 **이미 포함**(추가 설치 불필요) — [requirements.txt](../../requirements.txt).
 

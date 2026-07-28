@@ -4,12 +4,15 @@
 run_id 의 날짜(`YYYY-MM-DD`)를 `load_date=YYYY-MM-DD` 파티션으로 펼쳐 run_id 폴더 위에 둔다
 (ASK-Seoul#60 약속① — key=value 날짜 표기, 도구가 파티션을 기계적으로 인식).
     {prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl    # API당 1파일(원본 페이지 NDJSON)
-    {prefix}/raw/commerce/load_date=<...>/run_id=<...>/_markers/<short>.completed|.incomplete    # API별 수집 결과 마커(JSON, 리니지 포함)
-    {prefix}/raw/commerce/load_date=<...>/run_id=<...>/_markers/_RUN.completed|.incomplete       # 실행 전체 마커
+    {prefix}/<MARKERS_LAYER>/load_date=<...>/run_id=<...>/<short>.completed|.incomplete          # API별 수집 결과 마커(JSON, 리니지 포함)
+    {prefix}/<MARKERS_LAYER>/load_date=<...>/run_id=<...>/_RUN.completed|.incomplete             # 실행 전체 마커
     {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet                   # 공통 19컬럼 정규화
 
 - **레이어 접두는 .env 로 관리**: COMMERCE_RAW_LAYER(기본 `raw/commerce`) · COMMERCE_SILVER_LAYER
   (기본 `silver/commerce`). bronze→raw 리네임으로 데이터가 raw/commerce 로 이관됨(코드도 정합).
+- **마커는 control 존**(#60 오너 해석: 수집·재수집·적재가 읽는 지시 파일): COMMERCE_MARKERS_LAYER
+  로 지정(prod `ops/control/state/commerce/markers`). 미설정 시 구 위치(run 폴더 안 `_markers/`)
+  폴백. run 폴더와 `load_date=/run_id=` 구조 1:1 미러라 run↔마커 대응이 경로만으로 성립.
 - **diff-target(가변 상태)은 raw 밖**: COMMERCE_DIFF_TARGET_LAYER 로 지정(#60 약속② — raw 는
   불변 박제만). 미설정 시 구 위치 `{RAW_LAYER}/_diff_target` 폴백(하위호환).
 - {prefix} = COMMERCE_STORAGE_PREFIX(비우면 없음). bucket 접두는 스토리지 백엔드가 붙인다.
@@ -26,6 +29,9 @@ RAW_LAYER = os.getenv("COMMERCE_RAW_LAYER", "raw/commerce")
 SILVER_LAYER = os.getenv("COMMERCE_SILVER_LAYER", "silver/commerce")
 # diff-target 레이어(#60 약속② — 가변 상태는 raw 밖 ops 존). 비우면 구 위치 폴백(하위호환).
 DIFF_TARGET_LAYER = os.getenv("COMMERCE_DIFF_TARGET_LAYER", "")
+# 마커 레이어(#60 오너 해석: 마커=수집·재수집·적재가 읽는 **지시 파일** → control 존).
+# 비우면 구 위치(run 폴더 안 _markers/) 폴백(하위호환). prod: ops/control/state/commerce/markers.
+MARKERS_LAYER = os.getenv("COMMERCE_MARKERS_LAYER", "")
 MARKERS_DIR = "_markers"
 DIFF_TARGET_DIR = "_diff_target"   # (구 위치 폴백용) raw 루트 아래 디렉터리명
 FULL_LANDING_DIR = "_full"         # 오늘 수집 full 의 임시 랜딩(run 폴더 안) — diff 완료 후 diff 로 이동
@@ -81,14 +87,44 @@ def bronze_object_key(*, prefix: str = "", run_id: str, short: str, ext: str = "
     return f"{bronze_run_dir(prefix=prefix, run_id=run_id)}/{short}.{ext}"
 
 
+def markers_run_dir(*, prefix: str = "", run_id: str) -> str:
+    """이 run 의 마커 폴더(#60 오너 해석 — 마커는 지시 파일이라 control 존).
+
+    MARKERS_LAYER 설정 시 `{layer}/load_date=<d>/run_id=<rid>`(run 폴더와 1:1 미러),
+    미설정 시 구 위치(run 폴더 안 `_markers/`) 폴백(하위호환).
+    """
+    if MARKERS_LAYER:
+        root = _root(prefix, MARKERS_LAYER)
+        date_dir = _run_date_dir(run_id)
+        base = f"{root}/{date_dir}" if date_dir else root
+        return f"{base}/run_id={run_id}"
+    return f"{bronze_run_dir(prefix=prefix, run_id=run_id)}/{MARKERS_DIR}"
+
+
+def run_index_root(*, prefix: str = "") -> str:
+    """run 발견(list_run_ids) 스캔 루트 — 마커 존(설정 시) 또는 raw 루트.
+
+    identical run(전 API 무변경 → 데이터 파일 0개)은 마커만 남기므로, 마커가 control 존으로
+    간 뒤에는 run 목록의 단일 소스가 마커 존이 된다.
+    """
+    return _root(prefix, MARKERS_LAYER) if MARKERS_LAYER else _root(prefix, RAW_LAYER)
+
+
+def markers_date_prefix(*, prefix: str = "", date: str) -> str:
+    """해당 수집일 마커 파티션 접두(`load_date=<date>/`) — 일자 스캔용(watchdog 등)."""
+    if MARKERS_LAYER:
+        return f"{_root(prefix, MARKERS_LAYER)}/load_date={date}/"
+    return raw_date_prefix(prefix=prefix, date=date)
+
+
 def bronze_marker_key(*, prefix: str = "", run_id: str, short: str, status: str) -> str:
     """API별 마커. status = 'completed' | 'incomplete'."""
-    return f"{bronze_run_dir(prefix=prefix, run_id=run_id)}/{MARKERS_DIR}/{short}.{status}"
+    return f"{markers_run_dir(prefix=prefix, run_id=run_id)}/{short}.{status}"
 
 
 def bronze_run_marker_key(*, prefix: str = "", run_id: str, status: str) -> str:
     """실행 전체 마커(_RUN.completed | _RUN.incomplete)."""
-    return f"{bronze_run_dir(prefix=prefix, run_id=run_id)}/{MARKERS_DIR}/_RUN.{status}"
+    return f"{markers_run_dir(prefix=prefix, run_id=run_id)}/_RUN.{status}"
 
 
 def silver_key(*, prefix: str = "", short: str, observed_date: str,

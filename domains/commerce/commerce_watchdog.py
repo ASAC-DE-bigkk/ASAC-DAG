@@ -52,9 +52,12 @@ def _pfx(prefix: str, tail: str) -> str:
 
 
 def _today_collect_ran(storage, prefix: str, today: str) -> bool:
-    """오늘 `load_date=<today>` 파티션에 `_RUN.completed|incomplete` 마커가 있으면 수집 실행됨."""
-    date_prefix = paths.raw_date_prefix(prefix=prefix, date=today)
-    return any("/_markers/_RUN." in k for k in storage.list_keys(date_prefix))
+    """오늘 `load_date=<today>` 마커 파티션에 `_RUN.completed|incomplete` 가 있으면 수집 실행됨.
+
+    마커 존(COMMERCE_MARKERS_LAYER) 기준 — 파일명 판정이라 구(run 폴더 `_markers/`)·신 위치 모두 동작.
+    """
+    date_prefix = paths.markers_date_prefix(prefix=prefix, date=today)
+    return any(k.rsplit("/", 1)[-1].startswith("_RUN.") for k in storage.list_keys(date_prefix))
 
 
 def _layer_state(dag_id: str, today: str) -> str:

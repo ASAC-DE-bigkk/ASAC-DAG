@@ -6,7 +6,7 @@
 
 동작: `--from-run <run_id>` 폴더의 API별 원본 파일을 읽어(구 page-NDJSON = 페이지 응답이
 줄 단위, 신 row-NDJSON = 레코드가 줄 단위 — 둘 다 지원) row 를 복원하고,
-`incremental.seed_diff_target` 로 `{bronze/commerce}/_diff_target/<short>.jsonl(+.key)` 를 만든다.
+`incremental.seed_diff_target` 로 diff-target 레이어(COMMERCE_DIFF_TARGET_LAYER, prod=ops 존)에 `<short>.<수집일>.jsonl(+.key)` 를 만든다.
 
 안전장치: 기본 **dry-run**(복원 row 수만 출력). 실제 기록은 `--apply`.
 

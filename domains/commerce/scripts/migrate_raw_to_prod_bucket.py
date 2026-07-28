@@ -4,8 +4,9 @@ ASK-Seoul#60 존 정리 + prod 전환(2026-07-28, change-log #79)의 1회성 이
 소스 버킷은 절대 삭제/이동하지 않는다(#60 "raw 이동 = 리플레이 파괴" — 복사만).
 
 변환 규칙(소스 키 → 목적지 키):
-  raw/commerce/YYYY/MM/DD/run_id=…/…   → {COMMERCE_RAW_LAYER}/load_date=YYYY-MM-DD/run_id=…/…  (약속①)
-  raw/commerce/_diff_target/<file>     → {COMMERCE_DIFF_TARGET_LAYER}/<file>                    (약속②)
+  raw/commerce/YYYY/MM/DD/run_id=…/<data>          → {COMMERCE_RAW_LAYER}/load_date=YYYY-MM-DD/run_id=…/<data>   (약속①)
+  raw/commerce/YYYY/MM/DD/run_id=…/_markers/<name> → {COMMERCE_MARKERS_LAYER}/load_date=YYYY-MM-DD/run_id=…/<name> (오너 해석 — 마커=지시 파일→control)
+  raw/commerce/_diff_target/<file>                 → {COMMERCE_DIFF_TARGET_LAYER}/<file>                          (약속②)
 복사 제외(사유별 카운트 리포트):
   _backup/            — 코드 미사용 수동 아카이브(소스 보존)
   run_id=envcheck*    — 테스트 잔재
@@ -38,8 +39,13 @@ log = logging.getLogger(__name__)
 _DATE_DIR_RE = re.compile(r"^(\d{4})/(\d{2})/(\d{2})/(run_id=.+)$")
 
 
-def map_source_key(key: str, *, src_raw: str, dst_raw: str, dst_diff: str):
-    """소스 키 → (목적지 키 | None, 분류). None = 복사 제외."""
+def map_source_key(key: str, *, src_raw: str, dst_raw: str, dst_diff: str,
+                   dst_markers: str = ""):
+    """소스 키 → (목적지 키 | None, 분류). None = 복사 제외.
+
+    dst_markers 지정 시 run 폴더 안 `_markers/<name>` 은 마커 존
+    `{dst_markers}/load_date=…/run_id=…/<name>` 으로 매핑(#60 오너 해석), 미지정 시 run 폴더 동반.
+    """
     if not key.startswith(src_raw + "/"):
         return None, "outside"
     rest = key[len(src_raw) + 1:]
@@ -52,6 +58,9 @@ def map_source_key(key: str, *, src_raw: str, dst_raw: str, dst_diff: str):
     m = _DATE_DIR_RE.match(rest)
     if m:
         y, mo, d, tail = m.groups()
+        if dst_markers and "/_markers/" in tail:
+            rid_part, name = tail.split("/_markers/", 1)      # rid_part = "run_id=<rid>"
+            return f"{dst_markers}/load_date={y}-{mo}-{d}/{rid_part}/{name}", "run_marker"
         return f"{dst_raw}/load_date={y}-{mo}-{d}/{tail}", "dated_run"
     return None, "skip_unknown"
 
@@ -96,23 +105,26 @@ def main() -> int:
     s = get_settings()
     dst_bucket = s.r2_bucket
     dst_raw = paths.bronze_root(prefix=s.storage_prefix)
-    if not paths.DIFF_TARGET_LAYER:
-        log.error("COMMERCE_DIFF_TARGET_LAYER 미설정 — #60 존 정리 값이 env 에 필요")
+    if not paths.DIFF_TARGET_LAYER or not paths.MARKERS_LAYER:
+        log.error("COMMERCE_DIFF_TARGET_LAYER/COMMERCE_MARKERS_LAYER 미설정 — #60 존 정리 값이 env 에 필요")
         return 2
     dst_diff = paths._diff_target_root(s.storage_prefix)
+    dst_markers = paths.run_index_root(prefix=s.storage_prefix)
     if not dst_bucket or dst_bucket == args.source_bucket:
         log.error("목적지 버킷(%s)이 비었거나 소스와 동일 — env(R2_BUCKET) 확인", dst_bucket)
         return 2
 
     s3 = _client()
-    log.info("source=s3://%s/%s/  →  dest=s3://%s/{%s, %s}  (apply=%s)",
-             args.source_bucket, args.source_raw_prefix, dst_bucket, dst_raw, dst_diff, args.apply)
+    log.info("source=s3://%s/%s/  →  dest=s3://%s/{%s, %s, %s}  (apply=%s)",
+             args.source_bucket, args.source_raw_prefix, dst_bucket,
+             dst_raw, dst_markers, dst_diff, args.apply)
 
     plan: list[tuple[str, str, int]] = []          # (src_key, dst_key, size)
     stats: dict[str, list[int]] = {}               # 분류 → [count, bytes]
     for obj in _list_all(s3, args.source_bucket, args.source_raw_prefix + "/"):
         dst, kind = map_source_key(obj["Key"], src_raw=args.source_raw_prefix,
-                                   dst_raw=dst_raw, dst_diff=dst_diff)
+                                   dst_raw=dst_raw, dst_diff=dst_diff,
+                                   dst_markers=dst_markers)
         st = stats.setdefault(kind, [0, 0])
         st[0] += 1
         st[1] += obj["Size"]
@@ -134,6 +146,7 @@ def main() -> int:
     # 멱등 skip: 목적지에 같은 크기 존재 시 제외
     existing = {o["Key"]: o["Size"] for o in _list_all(s3, dst_bucket, dst_raw + "/")}
     existing.update({o["Key"]: o["Size"] for o in _list_all(s3, dst_bucket, dst_diff + "/")})
+    existing.update({o["Key"]: o["Size"] for o in _list_all(s3, dst_bucket, dst_markers + "/")})
     todo = [(a, b, sz) for a, b, sz in plan if existing.get(b) != sz]
     print(f"\n복사 실행: {len(todo)}/{len(plan)} (이미 존재 skip={len(plan) - len(todo)})")
 
@@ -158,6 +171,7 @@ def main() -> int:
     # 검증: 목적지 수/바이트 == 계획 수/바이트
     dest_now = {o["Key"]: o["Size"] for o in _list_all(s3, dst_bucket, dst_raw + "/")}
     dest_now.update({o["Key"]: o["Size"] for o in _list_all(s3, dst_bucket, dst_diff + "/")})
+    dest_now.update({o["Key"]: o["Size"] for o in _list_all(s3, dst_bucket, dst_markers + "/")})
     missing = [(a, b) for a, b, sz in plan if dest_now.get(b) != sz]
     print(f"\n== 검증 == 복사완료={done} 실패={fail} | 계획 {len(plan)}개 중 목적지 불일치 {len(missing)}개")
     if missing[:3]:

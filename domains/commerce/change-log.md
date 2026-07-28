@@ -7,6 +7,39 @@
 
 ## 2026-07-28
 
+### 80. run 마커를 control 존으로 재배치(#60 오너 해석) + 재감사 확정 갭 5건 수리
+
+request:
+- 사용자 재검토 지시: `raw/…/run_id=…/_markers/` 도 control 레이어로 옮겨야 할 것으로 보임 — 파일
+  이동 누락과 로직 누락을 재검토 후 작업. **오너 해석 확정**: #60 약속③은 마커의 '내용' 규약일 뿐,
+  요지는 "수집 등 중간 과정이 읽는 **지시 파일**은 control 하위로 모은다" → run 마커도 이동 대상.
+- 부가 명시: 행정동 코드 원천은 `raw/common` 유지(#60 부록의 reference/ 이사 초안 미적용) —
+  commerce 는 이미 `raw/common/admin_dong/…` 를 읽으므로(enrich_tasks) 코드 무변경.
+
+response:
+- **마커 존 신설**: `COMMERCE_MARKERS_LAYER`(prod `ops/control/state/commerce/markers`, 미설정 시
+  구 위치 폴백). 경로는 run 폴더와 `load_date=/run_id=` 1:1 미러. paths(markers_run_dir/
+  run_index_root/markers_date_prefix) · markers(list_run_ids 가 마커 존 스캔 — identical run 은
+  마커만 남기므로 단일 소스) · watchdog(_RUN 탐지 파일명 기준) 정합. 기존 마커 3,667개를
+  `scripts/relocate_run_markers.py`(dry-run/--apply, 복사→크기검증→원본삭제)로 seoul 내 재배치.
+- **멀티에이전트 재감사(14 에이전트, 적대 검증)**: 파일 이동 누락 **0건** 재확인(5,075개 키·바이트
+  집합차 대조 — 초과 1건은 스모크 마커, receipts/silver state/_backup/watchdog 구 마커 skip 은
+  전부 정당 판정). 로직 갭 5건 확정·수리:
+  - **F5**: `_full/` 고아 랜딩(랜딩~diff 사이 중단 시 영구 잔존) — cleanup_incomplete 가 동일자
+    성공 시 랜딩까지 정리 + 마커 없는 중단 run 을 raw 일자 파티션에서도 발견(_same_day_run_ids).
+  - **F7**: 같은 run 재시도로 completed·incomplete 공존 가능 — completed 기록 **후** 잔존
+    incomplete 삭제(상호배타 계약 유지, 역방향 금지).
+  - **B2**: purge_v2 의 purge_raw 가 ops 존 diff_target/마커를 못 찾음 — 존 스캔 추가
+    (classify_zone_keys, stem 정확 일치).
+  - **B3**: purge_v2 purge_gold 가 폐사한 `gold.pg` import 로 런북 전체 크래시 — fail-soft skip
+    (gold=Iceberg, silver purge 후 다음 gold run 반영)으로 교체.
+  - **B9**: cleanup_orphan_warehouse_dirs 가 무조건 dev 카탈로그를 감사 — COMMERCE_DBT_TARGET
+    우선 해석으로 정합(프로드 감사 시 orphan 오분류 방지).
+  - (B7) 구 위치를 서술하던 독스트링(seed_diff_target/incremental/resort/load_plan) 정정.
+- migrate 스크립트 매핑에 run_marker 분기 추가(재실행 시에도 마커는 존으로). 테스트 381→
+  스위트 전체 통과(신 존 왕복·고아 GC·배타·매핑 케이스 추가), security PASS.
+- 문서: storage.md(마커 존 절·prod R2 블록)·common_info·data-model·README·configuration.md 정합.
+
 ### 79. R2 저장 위치 개편 — #60 규약(load_date= 파티션·ops 존) + seoul(프로드) 버킷·iceberg 카탈로그 전환 + 이력 이관 (ASK-Seoul#60)
 
 request:

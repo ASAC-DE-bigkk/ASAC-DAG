@@ -66,3 +66,27 @@ def test_v2_detail_objects_from_catalog():
         ("commerce_mixed_detail", "pharmacy air_pollution_facility"),   # 혼재 클러스터도 대상
     ]
     assert pv.v2_detail_objects(rows, V2) == ["commerce_env_facility_detail", "commerce_mixed_detail"]
+
+
+def test_classify_zone_keys_new_layout():
+    """#60 재배치 후 마커/diff-target 존 키 분류 — stem 정확 일치, _RUN/유사이름 배제."""
+    marker_zone = [
+        "ops/control/state/commerce/markers/load_date=2026-07-24/run_id=r1/water_pollution_facility.completed",
+        "ops/control/state/commerce/markers/load_date=2026-07-24/run_id=r1/general_restaurant.completed",
+        "ops/control/state/commerce/markers/load_date=2026-07-24/run_id=r1/_RUN.completed",
+    ]
+    diff_zone = [
+        "ops/control/state/commerce/diff_target/air_pollution_facility.2026-07-24.jsonl",
+        "ops/control/state/commerce/diff_target/air_pollution_facility.2026-07-24.key",
+        "ops/control/state/commerce/diff_target/general_restaurant.2026-07-24.jsonl",
+        "ops/control/state/commerce/diff_target/water_pollution_facility_v2.2026-07-24.jsonl",
+    ]
+    assert pv.classify_zone_keys(marker_zone, V2) == [marker_zone[0]]
+    hit = pv.classify_zone_keys(diff_zone, V2)
+    assert hit == diff_zone[:2]                       # v1/_v2 유사이름 배제
+
+
+def test_purge_gold_is_failsoft_skip():
+    """#60 감사 B3: 구 gold.pg 임포트로 죽지 않고 명시적 skip 을 반환한다."""
+    out = pv.purge_gold(["water_pollution_facility"], apply=False)
+    assert "skipped" in out and "Iceberg" in out["skipped"]

@@ -3,7 +3,7 @@
     python -m bronze.resort [--dry-run]
     (PYTHONPATH=dags/domains/commerce/include, .env.commerce 자동 적재)
 
-각 데이터셋의 최신 diff-target(`_diff_target/<short>.<date>.jsonl`)을 **현재 sort_key**
+각 데이터셋의 최신 diff-target(diff-target 레이어의 `<short>.<date>.jsonl`)을 **현재 sort_key**
 (UPDATEDT→LASTMODTS desc)로 재정렬하고 검증키(.key)를 갱신한다. 내용(row 집합)은 보존하고
 순서/검증키만 바꾼다. **멱등** — 이미 새 규칙으로 정렬돼 있으면 no-op(changed=False).
 
