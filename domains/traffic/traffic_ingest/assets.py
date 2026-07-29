@@ -275,25 +275,19 @@ def materializer_schedule(
     airflow_version: str | None = None,
     schedule_factory: Callable[..., object] | None = None,
 ):
-    """Build Asset+time recovery scheduling on Airflow 3.
+    """Return one cron-only drain schedule in dev.
 
-    The repository's Windows unit-test environment still carries Airflow 2.11,
-    while the deployed image is pinned to 3.2.2. Airflow 2 therefore receives
-    the Asset-only equivalent; container import tests cover the production path.
+    Raw Asset events are deliberately not a second scheduling path: the 5-minute
+    landing cadence is drained in bounded groups by this 15-minute materializer.
     """
 
     if env.get("ASK_SEOUL_TARGET", env.get("DBT_TARGET", "prod")) != "dev":
         return None
-    cron = env.get(
+    del airflow_version, schedule_factory
+    return env.get(
         "ASK_SEOUL_TRAFFIC_MATERIALIZER_FALLBACK_SCHEDULE",
         "*/15 * * * *",
-    )
-    version = airflow_version or airflow.__version__
-    major = _major_version(version)
-    if not cron or major < 3:
-        return [schedule_asset(TRAFFIC_INCIDENT_RAW_ASSET, airflow_version=version)]
-    factory = schedule_factory or _airflow_three_schedule
-    return factory(cron=cron, asset=TRAFFIC_INCIDENT_RAW_ASSET_REF, timezone=KST)
+    ) or None
 
 
 def publish_through_alias(

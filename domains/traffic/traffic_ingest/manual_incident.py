@@ -81,7 +81,10 @@ def land_seoul_traffic_raw(**context) -> dict:
 @fail_fast_traffic_bronze
 def land_seoul_traffic_raw_object_keys(**context) -> dict:
     raw_object_keys = raw_object_keys_from_conf(context)
-    return build_traffic_landing().replay(raw_object_keys).to_xcom()
+    return build_traffic_landing().replay(
+        raw_object_keys,
+        run=RunIdentity(current_dag_id(context), context["run_id"]),
+    ).to_xcom()
 
 
 @fail_fast_traffic_bronze

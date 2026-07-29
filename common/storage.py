@@ -37,6 +37,23 @@ def r2_env(name: str) -> str:
     return value
 
 
+def r2_env_for(name: str, target: str) -> str:
+    """target-aware R2 env — prod 컷오버(#556)로 관측(runs/)을 target 별 버킷으로 명시 분기.
+
+    ``r2_env``(#230, 항상 dev 우선)와 달리 여기선 target 이 곧 분기 기준이다:
+    target=="prod" → ``R2_*`` 만(R2_DEV_* 미참조), 그 외(dev) → ``R2_DEV_*`` 있으면 우선,
+    없으면 ``R2_*`` 로 폴백(``r2_env`` 와 동일한 dev 동작 — 바이트 단위로 유지).
+    """
+    base = name.removeprefix("R2_")
+    if (target or "dev").lower() == "prod":
+        value = os.environ.get("R2_" + base)
+    else:
+        value = os.environ.get("R2_DEV_" + base) or os.environ.get("R2_" + base)
+    if not value:
+        raise RuntimeError(f"R2 자격증명 누락 — target={target}, {base}")
+    return value
+
+
 class Storage(ABC):
     @abstractmethod
     def write_bytes(self, key: str, data: bytes) -> None: ...

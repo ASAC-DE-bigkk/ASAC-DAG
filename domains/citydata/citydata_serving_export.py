@@ -1,321 +1,64 @@
-"""Airflow DAG: citydata 골드 → Cloudflare D1 서빙 export (#445).
+"""Airflow DAGs: citydata 골드 → Cloudflare D1 서빙 (공통 Serving Contract v1 Publisher, #478).
 
-D1+Workers 서빙(https://ask-seoul-citydata-api.dy950328.workers.dev, ASAC-DBT#255)의
-데이터 갱신을 수동 스크립트(sample/serving/export_gold_to_d1.py)에서 DAG 로 승격한다.
+기존 손수 export(_export)를 공통 ``build_serving_export_dag`` 로 대체한다. 발행 규칙의 정본은
+dbt yml 의 ``meta.serving`` 계약 — 0행 보호(zero_policy=retain_last_good)·볼륨 절단(partial_policy)·
+append 윈도우(누적 이력)·행수 검증·``_catalog`` 등록·API smoke 를 공통 Publisher 가 처리한다.
+과거 여기 있던 손 관리 리스트(FAST/CRITICAL/APPEND)·PK·append 로직은 전부 계약으로 흡수됐다.
 
-원칙 (specs/2026-07-17 §2·§4·§5):
-  - **전량 교체 스냅샷** — 테이블마다 DROP+CREATE+INSERT (증분 upsert 금지, 멱등)
-  - ``_catalog`` 는 dbt manifest(description·meta.serving_tier·테스트 게이트)에서 재생성
-    — 서빙 목록의 정본은 yml 하나, 여기선 손 관리 없음
-  - wrangler 불필요 — Cloudflare **D1 HTTP API** 를 requests 로 직접 호출
+신선도/정체 경보(발표지연·정체 두 지표)는 발행과 책임 분리 — ``citydata_serving_monitor`` DAG 로 이관.
 
-전제: 컨테이너 env 에 ``CLOUDFLARE_API_TOKEN`` (D1 Edit 권한, compose 로 전달).
-계정/DB id 는 시크릿이 아니라 상수로 둔다 — 팀 계정 이관 시 여기만 교체.
+D1 쓰기 한도 관리를 위해 3 티어로 스케줄만 분리(현행 정책 유지):
+  critical(*/5)  : "지금 어때" 핵심 실시간 스냅샷 4종 (골드가 5분마다 재빌드 → D1 도 5분 동기)
+  fast(:15 매시) : 시간단위면 충분한 실시간/시간 골드 7종 (hourly transform 직후)
+  daily(00:30)   : 일 집계·패턴 6종 (대부분 append — 최근 구간만 재적재)
+
+계약 로드는 manifest(meta.serving) 기반 — 모델/계약 변경 시 manifest 재생성 필요.
 """
 
 from __future__ import annotations
 
-import json
 import os
-import sys
-from datetime import timedelta
 
-import pendulum
+from common.serving.dag_factory import build_serving_export_dag
 
-from airflow import DAG
-from airflow.exceptions import AirflowException
-from airflow.providers.standard.operators.python import PythonOperator
+# 프로젝트 target 관례(ASK_SEOUL_TARGET/DBT_TARGET, 기본 prod) — 컷오버(#556). runmetrics._resolve_target 와 동일.
+_TARGET = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
+# 스키마: prod=citydata, dev=seoul_citydata (transform·dbt profiles 와 정렬).
+_SCHEMA = "citydata" if _TARGET == "prod" else "seoul_citydata"
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-_DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if _DAGS_ROOT not in sys.path:
-    sys.path.insert(0, _DAGS_ROOT)
-
-from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.ops.airflow import record_run_metadata  # noqa: E402
-
-from citydata_ingest.common.trino import build_trino_settings, connect  # noqa: E402
-
-KST = pendulum.timezone("Asia/Seoul")
-record_citydata_problem = problem_failure_callback(domain="citydata", source_system="seoul_citydata")
-_run_md_ok = record_run_metadata("citydata", "serving_export", status="success")
-_run_md_fail = record_run_metadata("citydata", "serving_export", status="failed")
-
-# 서빙 대상 계정/DB — .env 로 주입(비밀 아닌 식별자, 환경 스왑 위해 env 화).
-# .env 의 CLOUDFLARE_ACCOUNT_ID 는 R2용이라 겹치지 않게 SERVING_ 접두 키를 쓴다.
-# (Worker 쪽은 wrangler.toml 이 리터럴로 가짐 — wrangler 는 .env 미참조.)
-SERVING_ACCOUNT_ID = os.environ.get("SERVING_CLOUDFLARE_ACCOUNT_ID", "")
-SERVING_D1_DATABASE_ID = os.environ.get("SERVING_D1_DATABASE_ID", "")
-D1_API = (
-    "https://api.cloudflare.com/client/v4/accounts/"
-    f"{SERVING_ACCOUNT_ID}/d1/database/{SERVING_D1_DATABASE_ID}/query"
-)
-
-CITYDATA_SCHEMA = os.environ.get("CITYDATA_SCHEMA", "seoul_citydata")
-MANIFEST_PATH = "/opt/airflow/dbt/domains/citydata/target/manifest.json"
-
-# 주기 이원화 — D1 무료 한도(일 10만 행 쓰기) 안에서 신선도 극대화:
-#   FAST  (매시): 실시간 스냅샷 소형 7종 (~2.5천 행/run × 24 ≈ 6만 행/일)
-#   DAILY (08시 run 에서만 추가): 일별 집계·forecast (~1.2만 행/일)
-# hourly 크로스 3종·demographics(20만 행)는 분할 적재 붙일 때 확장.
-FAST_TABLES = [
-    "gold_citydata_place_latest", "gold_citydata_place_scorecard", "gold_citydata_hot_commerce",
-    "gold_citydata_ppltn_trend", "gold_citydata_ppltn_anomaly",
-    "gold_citydata_ppltn_x_commerce_dong", "gold_citydata_charger_availability",
+# 티어 = product_id 묶음. 각 골드의 publication_trigger.schedule_cron(계약)이 아래 스케줄과 정렬돼 있다.
+CRITICAL = [
+    "citydata_place_latest",
+    "citydata_place_scorecard",
+    "citydata_ppltn_trend",
+    "citydata_ppltn_anomaly",
 ]
-# DAILY 계열 중 forecast·dow_hour 는 패턴(전량 교체 — 누적 아님, 매번 재계산).
-#   dow_hour = 장소×요일×시간 혼잡 롤업(~2만 행). "무슨 요일 몇 시 붐벼" = 실검 수요 최다축
-#   (QA eval 🟢 채택, base_n 동봉). forecast(주말/평일)의 요일 세분화판.
-# 나머지 일별 집계는 누적 이력이라 append (아래 APPEND_TABLES).
-DAILY_TABLES = ["gold_citydata_ppltn_forecast", "gold_citydata_ppltn_dow_hour"]
-
-# 이력·누적형 — 전량 교체하면 매 export 전 기간 재기록 → 한도 초과. 최근 구간만 삭제→재삽입.
-# 시간축 타입으로 lookback 단위 자동 분기: timestamp=시간(늦은 5분 슬라이스), date=일(오늘 누적+어제 확정).
-HOURLY_APPEND_TABLES = ["gold_citydata_ppltn_hourly"]  # 매시 append(시간축)
-DAILY_APPEND_TABLES = [
-    "gold_citydata_ppltn_daily", "gold_citydata_cmrcl_daily",
-    "gold_citydata_purchasing_power_daily", "gold_citydata_ppltn_x_culture_daily",
+FAST = [
+    "citydata_hot_commerce",
+    "citydata_ppltn_x_commerce_dong",
+    "citydata_charger_availability",
+    "citydata_air_trend",
+    "citydata_air_anomaly",
+    "citydata_sbike_availability",
+    "citydata_ppltn_hourly",          # append(시간축)
 ]
-APPEND_TABLES = HOURLY_APPEND_TABLES + DAILY_APPEND_TABLES
-APPEND_LOOKBACK_H = 2  # timestamp 축: 재적재할 최근 시간 수
-APPEND_LOOKBACK_D = 2  # date 축: 재적재할 최근 일 수 (골드 자체도 '최근 2일 재집계' 규약)
-DAILY_FULL_HOUR_KST = 8  # 이 시각(KST) run 은 DAILY(forecast) 포함 전체 export
-EXPORT_TABLES = FAST_TABLES + DAILY_TABLES + APPEND_TABLES  # 카탈로그 정본 목록
+DAILY = [
+    "citydata_ppltn_forecast",
+    "citydata_ppltn_dow_hour",
+    "citydata_ppltn_daily",           # append(일축)
+    "citydata_cmrcl_daily",           # append
+    "citydata_purchasing_power_daily",  # append
+    "citydata_ppltn_x_culture_daily",   # append
+]
 
-# ── 서빙 신뢰성 게이트 (#1 신선도 · #3 검증) ──────────────────────
-# 서울시 citydata API 는 실측 대비 ~30분 지연 발표(event_at vs collected_at, 실측 p50=31분).
-# 따라서 '지금'과 비교하면 항상 지연으로 보인다 — 내재 지연 + 파이프라인 여유를 더한 임계.
-# 이 임계를 넘으면 '수집·변환이 실제로 멈춘 것'(7/18 좀비 사고 = 2일 지연) → 경보.
-STALE_THRESHOLD_MIN = 90  # event_at 이 KST-now 보다 이만큼 뒤처지면 stale
-# 실시간 스냅샷만 신선도 검사(그 time_axis 가 '최신 측정'을 뜻함). 일별/예보/명부성은 제외.
-FRESHNESS_CHECK = {
-    "gold_citydata_place_latest", "gold_citydata_place_scorecard",
-    "gold_citydata_ppltn_trend", "gold_citydata_ppltn_anomaly",
-}
+citydata_serving_export_critical = build_serving_export_dag(
+    domain="citydata", product_ids=CRITICAL, schedule="*/5 * * * *",
+    dag_id="citydata_serving_export_critical", schema=_SCHEMA, target=_TARGET)
 
-_SQLITE_TYPE = {"integer": "INTEGER", "bigint": "INTEGER", "smallint": "INTEGER",
-                "tinyint": "INTEGER", "boolean": "INTEGER", "double": "REAL", "real": "REAL"}
-_INSERT_BATCH = 100  # D1 HTTP API 요청당 INSERT 행수 (요청 크기 제한 여유)
+citydata_serving_export_fast = build_serving_export_dag(
+    domain="citydata", product_ids=FAST, schedule="15 * * * *",
+    dag_id="citydata_serving_export_fast", schema=_SCHEMA, target=_TARGET)
 
-
-def _sqlite_type(trino_type: str) -> str:
-    base = trino_type.split("(")[0]
-    return "REAL" if base == "decimal" else _SQLITE_TYPE.get(base, "TEXT")
-
-
-def _lit(v) -> str:
-    if v is None:
-        return "NULL"
-    if isinstance(v, bool):
-        return "1" if v else "0"
-    if isinstance(v, (int, float)):
-        return str(v)
-    return "'" + str(v).replace("'", "''") + "'"
-
-
-def _d1(sql: str, token: str) -> list[dict]:
-    import requests
-
-    resp = requests.post(D1_API, json={"sql": sql},
-                         headers={"Authorization": f"Bearer {token}"}, timeout=120)
-    body = resp.json()
-    if not body.get("success"):
-        raise AirflowException(f"D1 API 실패: {json.dumps(body.get('errors'))[:300]}")
-    # 마지막 statement 의 결과 행 (SELECT 시). 없으면 빈 리스트.
-    result = body.get("result") or []
-    return (result[-1].get("results") or []) if result else []
-
-
-def _load_serving_meta() -> dict[str, dict]:
-    """manifest → 모델명: {description, serving_tier, tests}. (extract.py 와 동일 파생)"""
-    manifest = json.loads(open(MANIFEST_PATH, encoding="utf-8").read())
-    gates: dict[str, list[str]] = {}
-    for node in manifest["nodes"].values():
-        if node.get("resource_type") != "test" or not node.get("attached_node"):
-            continue
-        tm = node.get("test_metadata") or {}
-        label = tm.get("name") or node.get("name", "test")
-        col = (tm.get("kwargs") or {}).get("column_name")
-        gates.setdefault(node["attached_node"], []).append(f"{label}({col})" if col else label)
-    return {
-        n["name"]: {
-            "description": n.get("description", ""),
-            "serving_tier": (n.get("config", {}).get("meta") or {}).get("serving_tier"),
-            "tests": sorted(set(gates.get(uid, []))),
-        }
-        for uid, n in manifest["nodes"].items() if n.get("resource_type") == "model"
-    }
-
-
-def _export_append(name: str, rel: str, col_defs: list, time_axis: str, cur, token: str) -> tuple[int, int]:
-    """이력·누적 테이블 append 적재. DROP 안 함 — 최근 lookback 구간만 삭제→재삽입(late-arrival
-    여유) + 그 이후 신규. D1 이 비었으면(최초) 전체 백필. 반환: (upsert 행수, D1 총 행수).
-    시간축 타입으로 분기: date=일 단위(오늘 누적+어제 확정), timestamp=시간 단위(늦은 슬라이스)."""
-    colnames = [c for c, _ in col_defs]
-    axis_type = dict(col_defs).get(time_axis, "")
-    is_date = axis_type.startswith("date")
-    _d1(f'CREATE TABLE IF NOT EXISTS "{name}" ('
-        + ", ".join(f'"{c}" {_sqlite_type(t)}' for c, t in col_defs) + ");", token)
-
-    info = _d1(f'SELECT count(*) c, max("{time_axis}") m FROM "{name}";', token)
-    d1_count = (info[0].get("c") if info else 0) or 0
-    d1_max = info[0].get("m") if info else None
-
-    where = ""
-    cutoff = None
-    if d1_count and d1_max:
-        base = pendulum.parse(str(d1_max).replace(" ", "T"))
-        if is_date:
-            cutoff = base.subtract(days=APPEND_LOOKBACK_D).format("YYYY-MM-DD")
-            trino_lit = f"date '{cutoff}'"
-        else:
-            cutoff = base.subtract(hours=APPEND_LOOKBACK_H).format("YYYY-MM-DD HH:00:00")
-            trino_lit = f"timestamp '{cutoff}'"
-        where = f' WHERE "{time_axis}" >= {trino_lit}'
-        _d1(f'DELETE FROM "{name}" WHERE "{time_axis}" >= \'{cutoff}\';', token)
-
-    cur.execute(f"SELECT * FROM {rel}{where}")
-    rows = cur.fetchall()
-    head = f'INSERT INTO "{name}" ("' + '", "'.join(colnames) + '") VALUES\n'
-    for i in range(0, len(rows), _INSERT_BATCH):
-        values = ",\n".join("(" + ", ".join(_lit(v) for v in r) + ")"
-                            for r in rows[i:i + _INSERT_BATCH])
-        _d1(head + values + ";", token)
-
-    total = (_d1(f'SELECT count(*) c FROM "{name}";', token)[0].get("c")) or 0
-    print(f"[serving export] {name}: append({'백필' if cutoff is None else 'from '+cutoff}) "
-          f"· {len(rows)}행 upsert · D1 총 {total}")
-    return len(rows), total
-
-
-def _export(**context) -> None:
-    token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
-    if not token:
-        raise AirflowException(
-            "CLOUDFLARE_API_TOKEN 미설정 — compose 의 airflow env 에 전달 필요 (D1 Edit 권한)")
-    if not SERVING_ACCOUNT_ID or not SERVING_D1_DATABASE_ID:
-        raise AirflowException(
-            "SERVING_CLOUDFLARE_ACCOUNT_ID / SERVING_D1_DATABASE_ID 미설정 — .env 에 추가 필요 (D1 서빙 대상)")
-
-    settings = build_trino_settings(target=context["params"].get("target", "dev"))
-    conn = connect(settings)
-    cur = conn.cursor()
-    meta = _load_serving_meta()
-    now = pendulum.now("UTC").isoformat()
-
-    # 이번 run 의 대상: 매시 FAST + APPEND(hourly·일별), 08시 run 은 DAILY(forecast)까지 전체.
-    # APPEND 는 최근 구간만 재적재라 매시 돌아도 쓰기 부담 작음 → 항상 포함.
-    end = context.get("data_interval_end") or pendulum.now("UTC")
-    full = end.in_timezone(KST).hour == DAILY_FULL_HOUR_KST or context["params"].get("full")
-    tables = EXPORT_TABLES if full else (FAST_TABLES + APPEND_TABLES)
-    print(f"[serving export] mode={'full' if full else 'fast'} · {len(tables)} tables")
-
-    kst_now = pendulum.now(KST).naive()  # event_at 은 KST 벽시계 naive 저장 → naive 로 비교
-    issues = []  # 서빙 신뢰성 문제 (신선도·빈 테이블·컬럼 계약)
-
-    catalog_rows = []
-    total_rows = 0
-    for name in tables:
-        rel = f"{settings.catalog}.{CITYDATA_SCHEMA}.{name}"
-        cur.execute(f"SHOW COLUMNS FROM {rel}")
-        col_defs = [(r[0], r[1]) for r in cur.fetchall()]
-        colnames = [c for c, _ in col_defs]
-        time_axis = next((c for c, t in col_defs if t.startswith(("timestamp", "date"))), None)
-        time_idx = colnames.index(time_axis) if time_axis else None
-
-        if name in APPEND_TABLES:
-            # 이력·누적: 최근 구간만 upsert(전량 교체 금지 — 한도 초과). catalog row_count = D1 총.
-            _, cat_count = _export_append(name, rel, col_defs, time_axis, cur, token)
-        else:
-            cur.execute(f"SELECT * FROM {rel}")
-            rows = cur.fetchall()
-            print(f"[serving export] {name}: {len(rows)} rows")
-
-            # #3 검증 + 빈-데이터 보호: 스냅샷 테이블이 비면(place_latest 는 121곳) 상류 이상.
-            # 이때 D1 을 덮어쓰지 않고 **직전 정상 스냅샷을 유지**한다 — R2 502 등 일시 실패로
-            # 골드가 잠깐 비어도 공개 API 가 빈 응답을 서빙하지 않게(2026-07-21 사건 대응).
-            if not rows and name in FRESHNESS_CHECK:
-                issues.append(f"{name}: 0행 (상류 골드 비어있음) — D1 미갱신, 직전 스냅샷 유지")
-                continue
-
-            # #1 신선도: 실시간 스냅샷의 최신 측정 시각이 임계 이상 뒤처지면 stale.
-            if name in FRESHNESS_CHECK and time_idx is not None and rows:
-                latest = max((r[time_idx] for r in rows if r[time_idx] is not None), default=None)
-                if latest is not None:
-                    latest_naive = latest.replace(tzinfo=None) if getattr(latest, "tzinfo", None) else latest
-                    lag = (kst_now - pendulum.instance(pendulum.parse(str(latest_naive))).naive()).in_minutes()
-                    if lag > STALE_THRESHOLD_MIN:
-                        issues.append(f"{name}: 최신 {latest_naive} = {lag}분 지연 (임계 {STALE_THRESHOLD_MIN})")
-
-            _d1(f'DROP TABLE IF EXISTS "{name}"; CREATE TABLE "{name}" ('
-                + ", ".join(f'"{c}" {_sqlite_type(t)}' for c, t in col_defs) + ");", token)
-            head = f'INSERT INTO "{name}" ("' + '", "'.join(colnames) + '") VALUES\n'
-            for i in range(0, len(rows), _INSERT_BATCH):
-                values = ",\n".join("(" + ", ".join(_lit(v) for v in r) + ")"
-                                    for r in rows[i:i + _INSERT_BATCH])
-                _d1(head + values + ";", token)
-            cat_count = len(rows)
-            total_rows += len(rows)
-
-        m = meta.get(name, {})
-        catalog_rows.append((name, m.get("description", ""), m.get("serving_tier"),
-                             json.dumps(m.get("tests", []), ensure_ascii=False), time_axis,
-                             json.dumps([{"name": c, "type": t} for c, t in col_defs],
-                                        ensure_ascii=False), cat_count, now))
-
-    # fast run 은 미포함 테이블(DAILY)의 카탈로그 행을 보존해야 하므로 upsert (DROP 금지).
-    cat_sql = ("CREATE TABLE IF NOT EXISTS _catalog (name TEXT PRIMARY KEY, description TEXT, "
-               "serving_tier TEXT, tests TEXT, time_axis TEXT, columns TEXT, "
-               "row_count INTEGER, exported_at TEXT); "
-               "CREATE TABLE IF NOT EXISTS _request_log (ts TEXT, path TEXT, query TEXT);\n")
-    cat_sql += "\n".join("INSERT OR REPLACE INTO _catalog VALUES ("
-                         + ", ".join(_lit(v) for v in r) + ");" for r in catalog_rows)
-    _d1(cat_sql, token)
-
-    context["ti"].xcom_push(key="ops_run_completeness", value={
-        "expected_raw_objects": len(tables),
-        "actual_raw_objects": len(catalog_rows),
-        "actual_rows": total_rows,
-    })
-    print(f"[serving export] ✓ {len(catalog_rows)} tables, {total_rows} rows → D1")
-
-    # 서빙 신뢰성 게이트: export 는 성공했으나 '낡거나 빈' 데이터가 나갔으면 경보(#1·#3).
-    # export 실패와 별개 — '성공한 stale 서빙'(7/18 좀비류 사각지대)의 서빙 버전.
-    _report_serving_health(issues)
-
-
-def _report_serving_health(issues: list[str]) -> None:
-    if not issues:
-        print("[serving export] 신뢰성 게이트 통과 — 신선·비어있지 않음")
-        return
-    msg = "⚠️ citydata 서빙 신선도/검증 경보\n" + "\n".join(f" • {i}" for i in issues)
-    msg += "\n(export 자체는 성공 — 상류 골드 갱신 정체 또는 빈 데이터 의심)"
-    print(msg)
-    try:
-        from common.discord import resolve_webhook, send_text
-        if not resolve_webhook("citydata"):
-            print("[serving export] webhook 미설정 — 로그만")
-            return
-        if send_text(msg, domain="citydata"):
-            print("[serving export] 신뢰성 경보 전송 완료")
-    except Exception as exc:  # noqa: BLE001 -- 알림 실패가 export 판정을 가리지 않게
-        print(f"[serving export] 신뢰성 경보 전송 실패(무시): {exc}")
-
-
-with DAG(
-    dag_id="citydata_serving_export",
-    description="citydata 골드 → Cloudflare D1 전량 교체 스냅샷. 매시 FAST 7종 · 08시 run 전체 12종.",
-    start_date=pendulum.datetime(2026, 1, 1, tz=KST),
-    schedule="40 * * * *",  # 매시 40분 (08:40 run 은 DAILY 포함 전체) — D1 무료 쓰기 한도 내
-    catchup=False,
-    max_active_runs=1,
-    default_args={"retries": 1, "retry_delay": timedelta(minutes=5),
-                  # 전량 교체 스냅샷이라 재시도 안전(멱등). hang 방지 상한 30분.
-                  "execution_timeout": timedelta(minutes=30),
-                  "on_success_callback": _run_md_ok},
-    params={"target": "dev", "full": False},  # full=True 수동 트리거 시 전체 export
-    tags=["serving", "citydata", "d1", "gold"],
-) as dag:
-    PythonOperator(
-        task_id="export_to_d1", python_callable=_export,
-        on_failure_callback=[record_citydata_problem, _run_md_fail])
+citydata_serving_export_daily = build_serving_export_dag(
+    domain="citydata", product_ids=DAILY, schedule="30 0 * * *",
+    dag_id="citydata_serving_export_daily", schema=_SCHEMA, target=_TARGET)

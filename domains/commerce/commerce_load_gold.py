@@ -32,6 +32,7 @@ import os  # noqa: E402
 
 import pendulum  # noqa: E402
 from airflow.decorators import dag, task  # noqa: E402
+from airflow.sdk import Asset  # noqa: E402
 from cosmos import (  # noqa: E402
     DbtTaskGroup,
     ExecutionConfig,
@@ -40,6 +41,8 @@ from cosmos import (  # noqa: E402
     RenderConfig,
 )
 from cosmos.constants import ExecutionMode, InvocationMode, LoadMode, TestBehavior  # noqa: E402
+
+from gold.assets import GOLD_READY_ASSET  # noqa: E402  (분리 DAG commerce_serving_export 트리거)
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +114,15 @@ def commerce_load_gold():
                    if dr and getattr(dr, "start_date", None) else None)
         return report.send_gold_report(elapsed_seconds=elapsed)
 
+    @task(outlets=[Asset(GOLD_READY_ASSET)])
+    def mark_gold_ready() -> None:
+        """gold(집계) 빌드 성공 → Asset 발행 → 분리 DAG commerce_serving_export 자동 기동.
+
+        기본 트리거(all_success)라 **dbt_gold 성공 시에만** 발행된다 — 일부 gold 실패 시
+        Asset 미발행 → D1 export 미기동(직전 스냅샷 유지). 서빙 export 는 gold **빌드 라인**과
+        분리하되(사용자 확정) 완료 이벤트로 묶어 신선도를 유지한다."""
+        return
+
     dbt_gold = DbtTaskGroup(
         group_id="dbt_gold",
         project_config=_project_config,
@@ -121,6 +133,7 @@ def commerce_load_gold():
     )
 
     dbt_gold >> report_gold()
+    dbt_gold >> mark_gold_ready()
 
 
 commerce_load_gold()

@@ -34,7 +34,7 @@ from traffic_ingest.bronze_dag_support import (  # noqa: E402
     dag_run_conf,
     fail_fast_traffic_bronze,
 )
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from traffic_ingest.common.resources import TRINO_INGEST_POOL  # noqa: E402
 from traffic_ingest.errors import TrafficSourceEmptyResponseError  # noqa: E402
 from traffic_ingest.flow_info import KST  # noqa: E402
 from traffic_ingest.flow_ingest import build_traffic_flow_pipeline  # noqa: E402
@@ -127,7 +127,7 @@ with DAG(
     materialize_flow = PythonOperator(
         task_id=FLOW_MATERIALIZE_TASK_ID,
         python_callable=materialize_verify_publish_traffic_flow,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_INGEST_POOL,
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,

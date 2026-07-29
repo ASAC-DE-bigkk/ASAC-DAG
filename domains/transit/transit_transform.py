@@ -15,8 +15,16 @@ dbt 실행 방식은 타 도메인 transform DAG(weather/traffic)의 관례를 �
 
 빌드 후 ``run_results.json`` 을 파싱해 모델 단위 실행 메트릭(layer=silver, #188)을
 R2 에 적재한다(``dump_dbt_run_results``). 실패한 빌드에서도 모델/테스트 결과를
-남길 수 있게 메트릭 적재 태스크는 ``all_done`` 으로 돈다 — 빌드 태스크 자체의 실패가
-DAG 런 실패(계약 게이트)를 그대로 보존하므로 게이트는 훼손되지 않는다.
+남길 수 있게 메트릭 적재 태스크는 ``all_done`` 으로 돈다.
+
+⚠ 리프 마스킹(#526): Airflow 는 DagRun 상태를 **리프 태스크**로 판정하므로, all_done
+메트릭 태스크가 유일한 리프면 dbt_build 실패가 run success 로 가려진다(7/21~ 실측
+143연속 "성공한 좀비"). weather/traffic transform 6개가 쓰는 관례를 그대로 따라
+메트릭 태스크를 ``as_teardown(on_failure_fail_dagrun=False)`` 로 선언한다 —
+teardown 은 DagRun 판정에서 제외되어 dbt_build 가 실질 리프가 되고(build 실패 =
+run 실패 복원), build 실패에서도 메트릭은 계속 적재된다(#188 의도 보존).
+설계 배경: domains/weather/docs/superpowers/specs/2026-07-14-weather-transform-
+teardown-provenance-design.md
 """
 
 from __future__ import annotations
@@ -31,7 +39,6 @@ from airflow import DAG
 from airflow.models.param import Param
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.utils.trigger_rule import TriggerRule
 
 # 동봉 패키지(seoul_transit)는 이 DAG 파일과 같은 폴더(dags/domains/transit/)에 있다.
 # Airflow 3.x 는 dags 하위 디렉터리를 sys.path 에 자동 추가하지 않으므로 직접 올린다.
@@ -179,12 +186,12 @@ with DAG(
         on_failure_callback=record_transit_problem,
     )
 
-    # 모델 단위 실행 메트릭(#188). build 실패에서도 모델/테스트 결과를 남기도록 all_done.
+    # 모델 단위 실행 메트릭(#188) — build 실패에서도 적재. teardown 선언(#526)으로
+    # DagRun 판정에서 제외해 dbt_build 를 실질 리프로 만든다(weather/traffic 관례).
     publish_metrics = PythonOperator(
         task_id="publish_silver_metrics",
         python_callable=publish_silver_metrics,
-        trigger_rule=TriggerRule.ALL_DONE,
         on_failure_callback=record_transit_problem,
-    )
+    ).as_teardown(on_failure_fail_dagrun=False)
 
     gate >> dbt_deps >> dbt_build >> publish_metrics

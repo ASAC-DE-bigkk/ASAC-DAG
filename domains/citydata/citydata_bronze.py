@@ -42,15 +42,17 @@ if _DAGS_ROOT not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.assets import CITYDATA_BRONZE_ASSET  # noqa: E402
-from common.ops.airflow import record_run_metadata  # noqa: E402
+from common.ops.run_sink import record_run  # noqa: E402
 
 from citydata_ingest.common.config import RunContext  # noqa: E402
 from citydata_ingest.source.citydata import DEFAULT_BRONZE_BLOCKS  # noqa: E402
 from citydata_ingest.source.citydata_ingest import (  # noqa: E402
     CitydataIngestOptions,
+    build_citydata_manifest,
     build_citydata_run_report,
     fetch_and_land_citydata,
     load_citydata_bronze_from_raw,
+    write_citydata_manifest,
     write_citydata_run_report,
 )
 
@@ -59,13 +61,15 @@ KST = "Asia/Seoul"
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata")
 
-# run-metadata(ops.run_metadata) — 성공·실패 모두 1행 append(태스크 단위). 기존 problem
+# run 기록 — 성공·실패 모두 R2 runs/ 에 파일 1개(태스크 단위, common.ops.run_sink). 기존 problem
 # 콜백과 병행. bronze 완전성(expected/landed)은 load_bronze 가 XCom 으로 밀어 채운다.
-_run_md_ok = record_run_metadata("citydata", "bronze", status="success")
-_run_md_fail = record_run_metadata("citydata", "bronze", status="failed")
+_run_ok = record_run("citydata", "bronze", status="success")
+_run_fail = record_run("citydata", "bronze", status="failed")
 
 DEFAULT_PARAMS = {
-    "target": "dev",
+    # 단일 env 노브(#556) — ASK_SEOUL_TARGET/DBT_TARGET=prod 로 컷오버, 미설정 시 dev(불변).
+    # per-run 오버라이드 유지: 트리거 시 target=prod 를 conf 로 넘기면 이 기본값보다 우선.
+    "target": os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod")),
     "max_areas": None,
     "blocks": list(DEFAULT_BRONZE_BLOCKS),
     "write_report": True,
@@ -154,6 +158,18 @@ def _fetch_raw(**context) -> dict:
 
     if not landed:
         raise AirflowException(f"citydata bronze: 전체 {len(results)}개 장소 수집 실패")
+
+    # R1: raw 를 전부 올린 뒤 **마지막에** 완결 확인서 기록 → 확인서 유무 = 완결 여부.
+    # best-effort — 확인서 실패가 fetch(수집) 판정을 가리지 않게(확인서 없는 폴더는 R3 로 스킵).
+    try:
+        manifest = build_citydata_manifest(
+            results, ctx, completed_at=pendulum.now(KST).isoformat())
+        mkey = write_citydata_manifest(manifest, ctx, target=params["target"])
+        print(f"[citydata bronze] manifest -> {mkey} "
+              f"({manifest['status']}, {manifest['actual_count']}/{manifest['expected_count']})")
+    except Exception as exc:  # noqa: BLE001 -- 확인서 실패가 run 판정을 가리지 않게
+        print(f"[citydata bronze] manifest 기록 실패(무시): {exc}")
+
     return {
         "ctx": {"load_date": ctx.load_date, "ingest_ts": ctx.ingest_ts, "run_id": ctx.run_id},
         "results": results,
@@ -166,6 +182,7 @@ def _load_bronze(**context) -> int:
     ctx = RunContext(**fetched["ctx"])
     inserted = load_citydata_bronze_from_raw(
         ctx, results=fetched["results"], target=params["target"],
+        schema=("citydata" if params["target"] == "prod" else None),
         blocks=tuple(params.get("blocks") or DEFAULT_BRONZE_BLOCKS))
     print(f"[citydata bronze] bronze_rows_inserted={inserted}")
     # run-metadata 완전성: 시도 장소 대비 적재(landed) + bronze 행수 → 콜백이 이 XCom 을 읽어 채운다.
@@ -219,21 +236,21 @@ with DAG(
     dagrun_timeout=timedelta(minutes=15),
     default_args={"retries": 1, "retry_delay": timedelta(minutes=1),
                   "execution_timeout": timedelta(minutes=10),
-                  "on_success_callback": _run_md_ok},
+                  "on_success_callback": _run_ok},
     params=DEFAULT_PARAMS,
     tags=["ingest", "citydata", "population", "bronze", "r2", "iceberg"],
 ) as dag:
     fetch_raw = PythonOperator(
         task_id="fetch_raw", python_callable=_fetch_raw,
-        on_failure_callback=[record_citydata_problem, _run_md_fail])
+        on_failure_callback=[record_citydata_problem, _run_fail])
     # 적재 성공 시 Asset 발행 → citydata_transform_cosmos 자동 기동 (#274). 크론 오프셋 대신
     # bronze 완료 이벤트로 변환을 묶어 "덜 끝난 bronze 를 읽는" 경합을 제거한다.
     load_bronze = PythonOperator(
         task_id="load_bronze", python_callable=_load_bronze,
         outlets=[Asset(CITYDATA_BRONZE_ASSET)],
-        on_failure_callback=[record_citydata_problem, _run_md_fail])
+        on_failure_callback=[record_citydata_problem, _run_fail])
     report = PythonOperator(
         task_id="report", python_callable=_report, trigger_rule="all_done",
-        on_failure_callback=[record_citydata_problem, _run_md_fail])
+        on_failure_callback=[record_citydata_problem, _run_fail])
 
     fetch_raw >> load_bronze >> report

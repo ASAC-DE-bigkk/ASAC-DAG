@@ -82,12 +82,31 @@ class FakePythonOperator:
         self.kwargs = kwargs
         self.downstream_task_ids = set()
         self.upstream_task_ids = set()
-        FakeDAG._stack[-1].add_task(self)
+        self.dag = FakeDAG._stack[-1]
+        self.dag.add_task(self)
 
     def __rshift__(self, other):
         self.downstream_task_ids.add(other.task_id)
         other.upstream_task_ids.add(self.task_id)
         return other
+
+    def get_flat_relatives(self, upstream=False):
+        pending_task_ids = set(
+            self.upstream_task_ids if upstream else self.downstream_task_ids
+        )
+        relatives = []
+        seen_task_ids = set()
+        while pending_task_ids:
+            task_id = pending_task_ids.pop()
+            if task_id in seen_task_ids:
+                continue
+            seen_task_ids.add(task_id)
+            task = self.dag.task_dict[task_id]
+            relatives.append(task)
+            pending_task_ids.update(
+                task.upstream_task_ids if upstream else task.downstream_task_ids
+            )
+        return relatives
 
     def as_teardown(self, setups=None, on_failure_fail_dagrun=False):
         self.is_teardown = True

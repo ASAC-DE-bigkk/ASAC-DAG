@@ -8,7 +8,7 @@ DAG [`culture_bronze`](../culture_bronze.py) (스케줄 `0 3 * * *` = 03:00 KST 
 KOPIS 간헐 400 창(#201)을 피해 새벽으로 이동, freshness 무영향). 태스크 흐름:
 
 ```text
-plan ──▶ fetch_raw (12개 동적 매핑 · 병렬) ──▶ load_bronze ──▶ report (all_done)
+plan ──▶ fetch_raw (15개 동적 매핑 · 동시 4) ──▶ load_bronze ──▶ report (all_done)
 ```
 
 - **plan** — 적재할 데이터셋 목록과 공유 `ingest_ts`를 계산. 여기서 `target`을 검증(fail-fast).
@@ -21,20 +21,22 @@ plan ──▶ fetch_raw (12개 동적 매핑 · 병렬) ──▶ load_bronze �
 
 ### 설계 결정 (왜)
 
-- **데이터셋당 매핑 태스크 1개 (동적 매핑)** — `plan`이 낸 목록을 `.expand()`로 펼쳐 12개
+- **데이터셋당 매핑 태스크 1개 (동적 매핑)** — `plan`이 낸 목록을 `.expand()`로 펼쳐 15개
   태스크를 병렬 실행. 한 데이터셋의 API 오류가 **run 전체를 실패시키지 않고**(격리), 그 태스크만
   독립 재시도(`retries=2`)되며, Airflow 그리드에서 어느 데이터셋이 깨졌는지 바로 보인다.
   단일 루프 태스크였다면 all-or-nothing이라 부분 실패·개별 재시도·가시성을 모두 잃는다.
+  동시 실행은 `max_active_tis_per_dagrun=4`로 상한 — 런 시작 순간 15개가 한꺼번에 붙어
+  생기던 burst를 완화한다(#201 후보 ①, KOPIS 간헐 400의 호출 표면 축소).
 - **fetch/load 분리 (재현 불가/가능 경계)** — 실시간 API 응답은 지나가면 재현 불가라 **raw
   박제까지가 fetch_raw**의 몫. bronze Iceberg는 raw에서 언제든 재생 가능하므로 **load_bronze**가
   raw만 다시 읽어 적재한다(API 재호출 없음) → bronze만 깨진 run은 load_bronze **단독
   재시도/backfill**로 복구(population #94와 동일 패턴). load_bronze 성공 시 Asset outlet으로
   culture_transform(후속 #103)을 기동. → [operations.md](operations.md)
-- **멱등성 (`ingest_ts` 파티션)** — `ingest_ts`는 `plan`에서 **한 번** 계산해 12개 태스크가
+- **멱등성 (`ingest_ts` 파티션)** — `ingest_ts`는 `plan`에서 **한 번** 계산해 15개 태스크가
   공유한다. 한 run의 모든 적재가 같은 파티션에 떨어지고, 재시도/부분 재실행이 같은 파티션을
   덮어쓰므로(Iceberg는 delete-then-insert) 중복·오염이 없다. → [storage.md](storage.md)
 - **target fail-closed** — 수동 트리거의 `target`은 자유 입력이라 오타(`prd`)가 prod로 샐 수
-  있다. `_plan`이 `normalize_target`으로 `{dev,prod}` 외 값을 **즉시 실패**시켜, 12개 태스크가
+  있다. `_plan`이 `normalize_target`으로 `{dev,prod}` 외 값을 **즉시 실패**시켜, 15개 태스크가
   뜨기 전에 run을 멈춘다. → [change-log #41](../change-log.md)
 - **coverage 분모 = plan** — 실패한 매핑 태스크는 예외를 던져 XCom에 결과를 안 남긴다. 성공
   summary만 세면 실패가 분모에서도 사라져 coverage가 늘 ~100%로 보인다. `report`는 `plan`
@@ -52,8 +54,15 @@ plan ──▶ fetch_raw (12개 동적 매핑 · 병렬) ──▶ load_bronze �
 DAG [`culture_transform`](../culture_transform.py) — bronze → silver/gold dbt 변환. 태스크 흐름:
 
 ```text
-dbt_source_freshness ──▶ dbt_seed ──▶ dbt_run ──▶ dbt_test
+dbt_deps ──▶ dbt_source_freshness ──▶ dbt_seed ──▶ dbt_run ──▶ dbt_test
 ```
+
+- **deps가 맨 앞인 이유** — `packages.yml` 선언 수와 `dbt_packages/` 설치 수가 어긋나면 dbt는
+  **파스 단계**에서 죽어(`dbt found N package(s) specified ... but only M installed`) 뒤의 네
+  태스크가 시작조차 못 한다. 어긋나는 경로가 둘이다: ① `packages.yml`에 패키지를 추가하는 PR
+  ② `dbt_packages/` 유실(gitignore 대상 — `git clean`·컨테이너 재생성). 매 런 `dbt deps`를
+  돌리면 둘 다 자동 복구된다(#564, citydata·traffic 선례). 로컬 패키지만 있을 땐 심볼릭 링크
+  재생성이라 비용이 사실상 없다.
 
 - **왜 Asset 트리거인가** — cron이 아니라 `culture_bronze`의 **load_bronze outlet**
   (`Asset("iceberg://culture/bronze")`, #102)을 **구독**해 기동한다(`schedule=[Asset(...)]`).
@@ -64,10 +73,19 @@ dbt_source_freshness ──▶ dbt_seed ──▶ dbt_run ──▶ dbt_test
 - **freshness 게이트를 맨 앞에** — `dbt source freshness`가 `sources.yml` 계약(경고 30h/에러 48h)을
   실측한다. **error만 실패**시켜, bronze가 48h 넘게 낡았으면 seed/run/test로 나아가지 않고 **여기서
   멈춘다** → 낡은 입력으로 silver/gold를 오염시키는 대신 **수집부터 고치게** 신호를 준다.
-- **seed → run → test** — seed(`sema_branch_gu`, 시립미술관 분관→자치구 매핑)는 작아서 매 run 멱등
-  갱신. run이 silver 9종 + gold 3종을 dbt `ref()` 순서로 빌드하고, test가 계약을 검증한다.
+- **seed → run → test** — seed 5종(시립미술관 분관·세종 좌표·KBO 일정·경기장 좌표·QA 질문)은
+  작아서 매 run 멱등 갱신. run이 silver 15종 + gold 14종을 dbt `ref()` 순서로 빌드하고, test가 계약을 검증한다.
 - **target 파라미터** — 트리거 시 덮어쓸 수 있고 기본 dev. dbt target이 카탈로그(iceberg_dev/iceberg)를
   가른다. → [change-log #103](../change-log.md)
+
+### 그 외 DAG 3종 (요약 — 상세는 각 설계 문서)
+
+- [`culture_slo`](../culture_slo.py) (매일 05:00) — run_report·dag_run을 bronze로 편입 후 SLO
+  마트 갱신. → [design/2026-07-16-culture-slo-mart-plan.md](design/2026-07-16-culture-slo-mart-plan.md) · v2 [#411](design/2026-07-17-slo-dag-run-enrichment-v2.md)
+- [`culture_facility_refresh`](../culture_facility_refresh.py) (일요일 05:30) — 시설 상세 전수
+  리프레시(`detail_mode=full`·`max_detail=2000`). 평일 신규분 top-up과 이원화(#206·#466).
+- [`culture_maintenance`](../culture_maintenance.py) (일요일 04:30) — Iceberg optimize +
+  expire_snapshots(7d) + 고아 파일·옛 metadata 정리(#157). raw·`_reports`는 의도적 비대상.
 
 ### 데이터 흐름 (오케스트레이션 관점)
 
@@ -104,7 +122,7 @@ raw와 bronze Iceberg를 둘 다 남기는 이유: raw는 재처리용 **원본 
 | [`culture_ingest/common/warehouse.py`](../culture_ingest/common/warehouse.py) | bronze Iceberg 적재 — 쓰기는 pyiceberg `delete+append`(커밋 1회, `PyicebergBronzeWarehouse`, #203), DDL·count 는 Trino HTTP(`BronzeWarehouse`, 롤백 레버 겸용). → [storage.md](storage.md) |
 | [`culture_ingest/source/config.py`](../culture_ingest/source/config.py) | 적재 루트 `raw/culture`, 소스 API 키 로딩. |
 | [`culture_ingest/source/clients.py`](../culture_ingest/source/clients.py) | KOPIS(XML)·서울(JSON) 클라이언트 — `common.http` 합성(#152), 원본 bytes만 받음. 페이징·probe(#147)·400 판정(#146)은 여기(도메인 소관). |
-| [`culture_ingest/source/datasets.py`](../culture_ingest/source/datasets.py) | 12데이터셋 레지스트리(단일 진실 원천 — 데이터셋 추가 = 여기 한 줄). → [sources.md](sources.md) |
+| [`culture_ingest/source/datasets.py`](../culture_ingest/source/datasets.py) | 15데이터셋 레지스트리(단일 진실 원천 — 데이터셋 추가 = 여기 한 줄). → [sources.md](sources.md) |
 | [`culture_ingest/source/ingest.py`](../culture_ingest/source/ingest.py) | 적재 오케스트레이션 — fetch 계열(`run_batch`/`ingest_one`)·load 계열(`load_bronze`), run 리포트 빌드. |
 | [`scripts/run_culture_ingest.py`](../scripts/run_culture_ingest.py) | Airflow 없이 로컬 실행 CLI. → [operations.md](operations.md) |
 
@@ -113,7 +131,7 @@ raw와 bronze Iceberg를 둘 다 남기는 이유: raw는 재처리용 **원본 
 fetch(원본 박제)와 load(bronze 적재) 두 계열. fetch는 진입점 둘이 같은 코어로 수렴한다:
 
 ```text
-[DAG]  _plan ─▶ (12×) _fetch_raw ─▶ ingest_one(name, ctx=공유, opts, target)
+[DAG]  _plan ─▶ (15×) _fetch_raw ─▶ ingest_one(name, ctx=공유, opts, target)
                                         │
 [CLI]  run_batch(names, opts, target) ─ for ds in select(names) ─┐
                                         │                          │
@@ -129,7 +147,7 @@ fetch(원본 박제)와 load(bronze 적재) 두 계열. fetch는 진입점 둘�
 [DAG]  _report ─▶ build_run_report(summaries) ─▶ write_run_report() ─▶ R2 _reports/…/run_report.json
 ```
 
-- **`ingest_one`** (DAG) — 데이터셋 1개. `ctx`(=`ingest_ts`)를 **상류 `plan`에서 받아** 12개
+- **`ingest_one`** (DAG) — 데이터셋 1개. `ctx`(=`ingest_ts`)를 **상류 `plan`에서 받아** 15개
   태스크가 같은 파티션을 공유.
 - **`run_batch`** (CLI) — 여러 데이터셋을 **자체 생성한 `ctx` 하나**로 한 프로세스에서 순차 적재.
 - 둘 다 같은 fetch 코어로 수렴 → DAG/CLI 동작 일치. fetch는 **raw 박제까지만** 한다.

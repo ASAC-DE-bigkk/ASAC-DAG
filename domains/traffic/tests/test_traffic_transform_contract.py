@@ -847,14 +847,19 @@ def _set_silver_marker(module, incident_run_id="incident-42"):
     )
 
 
-def _flow_event(*, flow_run_id="flow-42", parent_incident_run_id="incident-42"):
+def _flow_event(
+    *,
+    flow_run_id="flow-42",
+    parent_incident_run_id="incident-42",
+    event_at="2026-07-16T00:06:00+00:00",
+):
     return types.SimpleNamespace(
         extra={
             "source_id": "seoul_traffic_flow",
             "flow_run_id": flow_run_id,
             "flow_dag_run_id": flow_run_id,
             "parent_incident_run_id": parent_incident_run_id,
-            "event_at": "2026-07-16T00:06:00+00:00",
+            "event_at": event_at,
             "load_date": "2026-07-16",
             "row_count": 1,
             "payload_hash": "b" * 64,
@@ -863,14 +868,18 @@ def _flow_event(*, flow_run_id="flow-42", parent_incident_run_id="incident-42"):
     )
 
 
-def _incident_silver_event(*, incident_run_id="incident-42"):
+def _incident_silver_event(
+    *,
+    incident_run_id="incident-42",
+    event_at="2026-07-16T00:05:00+00:00",
+):
     return types.SimpleNamespace(
         extra={
             "source_id": "seoul_traffic_incident",
             "incident_run_id": incident_run_id,
             "silver_snapshot_id": 42,
             "compacted_files_fingerprint": "a" * 64,
-            "event_at": "2026-07-16T00:05:00+00:00",
+            "event_at": event_at,
             "is_publishable": True,
             "contract": "traffic_incident_silver.v1",
         }
@@ -963,6 +972,39 @@ def test_flow_silver_resolver_fails_closed_for_mismatched_parent():
             },
             flow_manifest_factory=lambda: pytest.fail(
                 "mismatched Flow must not read the manifest"
+            ),
+            flow_xcom_key="traffic_flow_snapshot_dag_run_id",
+        )
+
+
+def test_flow_silver_resolver_skips_stale_flow_event_for_newer_incident_parent():
+    load_transform_module()
+    from traffic_ingest import transform_dag_support
+    from traffic_ingest.assets import (
+        TRAFFIC_FLOW_BRONZE_ASSET,
+        TRAFFIC_INCIDENT_SILVER_ASSET,
+    )
+
+    with pytest.raises(FakeAirflowSkipException, match="awaiting Flow Bronze"):
+        transform_dag_support.resolve_traffic_flow_silver_snapshot_run(
+            context={
+                "triggering_asset_events": {
+                    TRAFFIC_INCIDENT_SILVER_ASSET: [
+                        _incident_silver_event(
+                            incident_run_id="incident-new",
+                            event_at="2026-07-16T00:05:00+00:00",
+                        )
+                    ],
+                    TRAFFIC_FLOW_BRONZE_ASSET: [
+                        _flow_event(
+                            parent_incident_run_id="incident-old",
+                            event_at="2026-07-16T00:04:00+00:00",
+                        )
+                    ],
+                }
+            },
+            flow_manifest_factory=lambda: pytest.fail(
+                "stale Flow must not read the manifest"
             ),
             flow_xcom_key="traffic_flow_snapshot_dag_run_id",
         )

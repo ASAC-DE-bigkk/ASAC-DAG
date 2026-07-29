@@ -94,15 +94,22 @@ silver/commerce/general_restaurant/observed_date=2026-06-30/part-000.parquet
 R2 는 S3 호환 — **boto3** S3 클라이언트에 커스텀 엔드포인트(path-style·SigV4·region `auto`)를 준다
 ([storage.py](../../include/commerce_core/storage.py)의 `R2Storage`). s3fs 가 아니라 boto3 를 쓰는 이유는
 호스트 이미지에 boto3 만 있고 s3fs 는 없기 때문(번들 안에서 자립 해결).
-값은 `.env.commerce` 로 공급([configuration.md](../configuration/configuration.md) §2.3):
+값은 **루트 `.env`** 에서 관리하고, `.env.commerce` 가 코드 이름으로 매핑한다
+([configuration.md](../configuration/configuration.md) §1·§3):
 
 ```bash
-STORAGE_BACKEND=r2
-R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-R2_BUCKET=seoul-dev          # prod 는 seoul-prod  (※ 루트 .env 의 R2_BUCKET_NAME 과 다른 키)
-R2_ACCESS_KEY_ID=<R2 API 토큰 Access Key ID>
-R2_SECRET_ACCESS_KEY=<R2 API 토큰 Secret>
-R2_REGION=auto
+# 루트 .env — 스토리지 백엔드는 commerce 전용값 블록(COMMERCE_ 네임스페이스)
+COMMERCE_STORAGE_BACKEND=r2
+# R2 자격증명/엔드포인트/버킷은 루트의 R2_DEV_* 세트(dev). prod 는 값을 prod 로 교체:
+R2_DEV_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+R2_DEV_BUCKET_NAME=seoul-dev          # prod 는 seoul-prod
+R2_DEV_ACCESS_KEY_ID=<R2 API 토큰 Access Key ID>
+R2_DEV_SECRET_ACCESS_KEY=<R2 API 토큰 Secret>
+
+# .env.commerce 매핑(수정 불필요) — 코드가 읽는 이름으로 되돌림
+#   STORAGE_BACKEND=${COMMERCE_STORAGE_BACKEND:-local}
+#   R2_BUCKET=${R2_DEV_BUCKET_NAME:-seoul-dev}   # 루트 R2_DEV_BUCKET_NAME → commerce R2_BUCKET
+#   R2_REGION=${COMMERCE_R2_REGION:-auto}
 ```
 
 - R2 대시보드 → **R2 → Manage R2 API Tokens**에서 Access Key/Secret 발급, 버킷 최소 권한.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from traffic_ingest.landing import (  # noqa: E402
     TrafficLandingRequest,
 )
 from traffic_ingest.run_manifest import TrafficRun  # noqa: E402
+from common.raw_manifest import build_raw_manifest  # noqa: E402
 
 
 class Dag:
@@ -88,8 +90,9 @@ def test_replay_wrapper_delegates_raw_keys_to_domain_module(monkeypatch):
     captured: dict[str, object] = {}
 
     class Landing:
-        def replay(self, keys):
+        def replay(self, keys, *, run):
             captured["keys"] = keys
+            captured["run"] = run
             return Result({"raw_object_keys": keys})
 
     class BackfillDagRun:
@@ -104,6 +107,7 @@ def test_replay_wrapper_delegates_raw_keys_to_domain_module(monkeypatch):
     )
 
     assert captured["keys"] == raw_keys
+    assert captured["run"] == RunIdentity(Dag.dag_id, "manual__backfill")
     assert result == {"raw_object_keys": raw_keys}
 
 
@@ -283,7 +287,7 @@ def test_traffic_bronze_scheduled_dag_is_one_heavy_receipt_materializer():
         "materialize_pending_traffic_incident_snapshots"
     )
 
-    assert materialize.pool == scheduled_module.TRINO_HEAVY_POOL
+    assert materialize.pool == scheduled_module.TRINO_INGEST_POOL
     assert materialize.outlets == [
         scheduled_module.TRAFFIC_INCIDENT_MATERIALIZED_ALIAS
     ]
@@ -406,6 +410,7 @@ def test_bronze_loader_rejects_downloaded_payload_that_does_not_match_landing_ha
         ],
         "list_total_count": 0,
         "page_count": 1,
+        "manifest_key": "raw/traffic/_manifest.json",
     }
     ti = type("TI", (), {"xcom_pull": lambda _self, **_kwargs: raw_result})()
     monkeypatch.setattr(dag_module, "trino_cursor", lambda: (object(), "cat", "schema"))
@@ -414,7 +419,22 @@ def test_bronze_loader_rejects_downloaded_payload_that_does_not_match_landing_ha
         "create_seoul_traffic_bronze_table",
         lambda *_args: "cat.schema.table",
     )
-    monkeypatch.setattr(dag_module, "download_raw_object", lambda *_args: payload)
+    manifest = json.dumps(
+        build_raw_manifest(
+            run_id="manual__hash-mismatch",
+            dataset="seoul_traffic_incident",
+            load_date="2026-07-14",
+            object_keys=["raw/traffic/page.xml"],
+            expected_count=1,
+            actual_count=1,
+            completed_at="2026-07-14T00:20:00+00:00",
+        )
+    ).encode()
+    monkeypatch.setattr(
+        dag_module,
+        "download_raw_object",
+        lambda key, *_args: manifest if key == raw_result["manifest_key"] else payload,
+    )
     monkeypatch.setattr(
         dag_module,
         "insert_seoul_traffic_bronze_rows",

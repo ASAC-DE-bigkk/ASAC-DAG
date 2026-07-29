@@ -8,10 +8,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Callable, Protocol
 
+from common.raw_manifest import build_raw_manifest
 from traffic_ingest.acc_info import (
     KST,
     metadata_total_count,
@@ -105,6 +106,39 @@ class TrafficLanding:
             f"dag_id={self._safe_key_segment(run.dag_id)}/"
             f"run_id={self._safe_key_segment(run.run_id)}/landing.json"
         )
+
+    def _manifest_key(self, run: RunIdentity, raw_objects: list[TrafficRawObject]) -> str:
+        load_date = datetime.fromisoformat(
+            raw_objects[0].collected_at.replace("Z", "+00:00")
+        ).astimezone(KST).date().isoformat()
+        return (
+            f"{self._raw_prefix}/traffic_incident/seoul_traffic_incident/"
+            f"load_date={load_date}/run_id={self._safe_key_segment(run.run_id)}"
+            "/_manifest.json"
+        )
+
+    def _write_manifest(
+        self, run: RunIdentity, raw_objects: list[TrafficRawObject]
+    ) -> str:
+        load_date = datetime.fromisoformat(
+            raw_objects[0].collected_at.replace("Z", "+00:00")
+        ).astimezone(KST).date().isoformat()
+        key = self._manifest_key(run, raw_objects)
+        document = build_raw_manifest(
+            run_id=run.run_id,
+            dataset="seoul_traffic_incident",
+            load_date=load_date,
+            object_keys=[item.raw_object_key for item in raw_objects],
+            expected_count=len(raw_objects),
+            actual_count=len(raw_objects),
+            completed_at=self._clock().astimezone(KST).isoformat(),
+        )
+        self._raw_store.write_bytes(
+            key,
+            json.dumps(document, ensure_ascii=True, sort_keys=True).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+        return key
 
     def _load_checkpoint(
         self,
@@ -238,7 +272,12 @@ class TrafficLanding:
             and checkpoint.complete
             and len(trustworthy_objects) == len(checkpoint_objects)
         ):
-            return checkpoint.batch
+            manifest_key = self._manifest_key(run, list(checkpoint.batch.raw_objects))
+            if not self._raw_store.exists(manifest_key):
+                manifest_key = self._write_manifest(
+                    run, list(checkpoint.batch.raw_objects)
+                )
+            return replace(checkpoint.batch, manifest_key=manifest_key)
         checkpoint_pages = {
             (item.start_index, item.end_index): item for item in trustworthy_objects
         }
@@ -337,7 +376,7 @@ class TrafficLanding:
             is_publishable=mode is TrafficCollectionMode.FULL_SNAPSHOT,
         )
         self._save_checkpoint(run, request, batch, complete=True)
-        return batch
+        return replace(batch, manifest_key=self._write_manifest(run, raw_objects))
 
     def _checkpoint_object_is_trustworthy(self, item: TrafficRawObject) -> bool:
         if not self._raw_store.exists(item.raw_object_key):
@@ -351,7 +390,12 @@ class TrafficLanding:
             return 0
         return max(0, min(request.end_index, total_count) - request.start_index + 1)
 
-    def replay(self, raw_object_keys: list[str]) -> TrafficLandingBatch:
+    def replay(
+        self,
+        raw_object_keys: list[str],
+        *,
+        run: RunIdentity,
+    ) -> TrafficLandingBatch:
         raw_objects: list[TrafficRawObject] = []
         result_code = ""
         total_count = 0
@@ -410,6 +454,7 @@ class TrafficLanding:
                 f"total_count={total_count}, parsed_rows={parsed_rows}, "
                 f"covered_end_index={raw_objects[-1].end_index}"
             )
+        manifest_key = self._write_manifest(run, raw_objects)
         return TrafficLandingBatch(
             raw_objects=tuple(raw_objects),
             result_code=result_code,
@@ -418,4 +463,5 @@ class TrafficLanding:
             expected_rows=total_count,
             collection_mode=TrafficCollectionMode.BACKFILL,
             is_publishable=True,
+            manifest_key=manifest_key,
         )

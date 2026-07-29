@@ -37,7 +37,7 @@ def test_flow_dag_has_two_meaningful_tasks_and_no_independent_cron():
     materialize = dag_module.dag.get_task("materialize_verify_publish_traffic_flow")
 
     assert land.downstream_task_ids == {materialize.task_id}
-    assert materialize.pool == dag_module.TRINO_HEAVY_POOL
+    assert materialize.pool == dag_module.TRINO_INGEST_POOL
     assert materialize.outlets == [dag_module.TRAFFIC_FLOW_MATERIALIZED_ALIAS]
     assert dag_module.dag.max_active_runs == 1
     assert type(dag_module.dag.timetable).__name__ in {

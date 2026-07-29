@@ -1,9 +1,18 @@
 import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.raw_manifest import build_raw_manifest
 
 from traffic_ingest.flow_bronze import (
     load_traffic_flow_batch,
     verify_seoul_traffic_flow_bronze_runtime,
 )
+from traffic_ingest.errors import TrafficCompletenessError
 
 
 class Cursor:
@@ -32,6 +41,29 @@ def _payload():
     ).encode("utf-8")
 
 
+def _raw_result(*descriptors):
+    manifest_key = "raw/traffic_flow/_manifest.json"
+    return {
+        "raw_objects": list(descriptors),
+        "expected_rows": sum(int(item["row_count"]) for item in descriptors),
+        "manifest_key": manifest_key,
+    }, manifest_key
+
+
+def _manifest_bytes(manifest_key, descriptors):
+    return json.dumps(
+        build_raw_manifest(
+            run_id="manual__flow",
+            dataset="seoul_traffic_flow",
+            load_date="2026-07-15",
+            object_keys=[item["raw_object_key"] for item in descriptors],
+            expected_count=len(descriptors),
+            actual_count=len(descriptors),
+            completed_at="2026-07-15T01:02:04+00:00",
+        )
+    ).encode("utf-8")
+
+
 def test_flow_bronze_load_deletes_same_run_link_before_insert():
     cursor = Cursor()
     payload = _payload()
@@ -47,14 +79,19 @@ def test_flow_bronze_load_deletes_same_run_link_before_insert():
         "row_count": 1,
     }
 
+    raw_result, manifest_key = _raw_result(descriptor)
     result = load_traffic_flow_batch(
-        raw_result={"raw_objects": [descriptor], "expected_rows": 1},
+        raw_result=raw_result,
         dag_run_id="manual__flow",
         cursor_factory=lambda: (cursor, "iceberg_dev", "ask_seoul"),
         create_table=lambda _cursor, catalog, schema: (
             f"{catalog}.{schema}.bronze_seoul_traffic_flow"
         ),
-        download_raw_object=lambda _key, _label: payload,
+        download_raw_object=lambda key, _label: (
+            _manifest_bytes(manifest_key, [descriptor])
+            if key == manifest_key
+            else payload
+        ),
     )
 
     assert result["inserted"] == 1
@@ -95,15 +132,18 @@ def test_flow_bronze_load_batches_dml_for_multiple_links_and_zero_rows():
         "row_count": 0,
     }
 
+    raw_result, manifest_key = _raw_result(first, second)
     load_traffic_flow_batch(
-        raw_result={"raw_objects": [first, second], "expected_rows": 1},
+        raw_result=raw_result,
         dag_run_id="manual__flow",
         cursor_factory=lambda: (cursor, "iceberg_dev", "ask_seoul"),
         create_table=lambda _cursor, catalog, schema: (
             f"{catalog}.{schema}.bronze_seoul_traffic_flow"
         ),
         download_raw_object=lambda key, _label: (
-            payload if key == first["raw_object_key"] else zero_payload
+            _manifest_bytes(manifest_key, [first, second])
+            if key == manifest_key
+            else (payload if key == first["raw_object_key"] else zero_payload)
         ),
     )
 
@@ -116,6 +156,23 @@ def test_flow_bronze_load_batches_dml_for_multiple_links_and_zero_rows():
     assert "request-2" in cursor.statements[2]
     assert "request-1" in cursor.statements[3]
     assert "request-2" not in cursor.statements[3]
+
+
+def test_flow_bronze_missing_manifest_blocks_database_mutation():
+    cursor = Cursor()
+
+    with pytest.raises(TrafficCompletenessError, match="manifest is missing"):
+        load_traffic_flow_batch(
+            raw_result={
+                "raw_objects": [{"raw_object_key": "raw/traffic_flow/one.json"}]
+            },
+            dag_run_id="manual__missing-manifest",
+            cursor_factory=lambda: pytest.fail("must fail before Trino"),
+            create_table=lambda *_args: pytest.fail("must fail before table DDL"),
+            download_raw_object=lambda *_args: pytest.fail("must fail before R2"),
+        )
+
+    assert cursor.statements == []
 
 
 class VerifyCursor:
