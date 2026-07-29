@@ -27,7 +27,7 @@ from typing import Any, Callable
 
 from common.discord import COLOR_FAIL, first_notice_for_run, send_embed
 from common.errors.problem import Problem
-from common.errors.sink import R2ErrorSink, errors_prefix
+from common.errors.sink import R2ErrorSink
 
 LOGGER = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ def problem_failure_callback(domain: str, *, source_system: str | None = None,
     돌려주는 실패에 한해 Discord 전송만 건너뛴다(R2 Problem 문서 기록은 그대로 유지 —
     감시 가능성은 보존한다). 생략 시 기존 동작(항상 알림) 그대로.
     """
-    error_sink = sink or R2ErrorSink(prefix=errors_prefix(domain))
+    error_sink = sink or R2ErrorSink()
 
     def record_problem(context: dict[str, Any]) -> None:
         problem: Problem | None = None
