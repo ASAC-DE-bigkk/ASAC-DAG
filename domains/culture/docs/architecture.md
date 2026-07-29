@@ -54,8 +54,15 @@ plan ──▶ fetch_raw (15개 동적 매핑 · 동시 4) ──▶ load_bronze
 DAG [`culture_transform`](../culture_transform.py) — bronze → silver/gold dbt 변환. 태스크 흐름:
 
 ```text
-dbt_source_freshness ──▶ dbt_seed ──▶ dbt_run ──▶ dbt_test
+dbt_deps ──▶ dbt_source_freshness ──▶ dbt_seed ──▶ dbt_run ──▶ dbt_test
 ```
+
+- **deps가 맨 앞인 이유** — `packages.yml` 선언 수와 `dbt_packages/` 설치 수가 어긋나면 dbt는
+  **파스 단계**에서 죽어(`dbt found N package(s) specified ... but only M installed`) 뒤의 네
+  태스크가 시작조차 못 한다. 어긋나는 경로가 둘이다: ① `packages.yml`에 패키지를 추가하는 PR
+  ② `dbt_packages/` 유실(gitignore 대상 — `git clean`·컨테이너 재생성). 매 런 `dbt deps`를
+  돌리면 둘 다 자동 복구된다(#564, citydata·traffic 선례). 로컬 패키지만 있을 땐 심볼릭 링크
+  재생성이라 비용이 사실상 없다.
 
 - **왜 Asset 트리거인가** — cron이 아니라 `culture_bronze`의 **load_bronze outlet**
   (`Asset("iceberg://culture/bronze")`, #102)을 **구독**해 기동한다(`schedule=[Asset(...)]`).

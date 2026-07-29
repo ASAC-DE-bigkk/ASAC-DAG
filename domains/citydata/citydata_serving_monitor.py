@@ -150,7 +150,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 0, "execution_timeout": timedelta(minutes=10)},
-    params={"target": os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))},  # prod 컷오버 env 노브(#556). 기본 dev.
+    params={"target": os.environ.get("DBT_TARGET", "prod")},  # prod 컷오버 env 노브(#556). 기본 dev.
     tags=["serving", "citydata", "monitor", "freshness"],
 ) as dag:
     PythonOperator(

@@ -162,6 +162,20 @@ class _FetchAbort(Exception):
         self.error = error
 
 
+class _FetchSkip(Exception):
+    """계획된 no-op — 할 일이 없어서 안 한 것(예: top-up 대상 0건, #562).
+
+    _FetchAbort(실패)와 다르다: SLO 의 dataset_passed 는 checks.passed 를 보므로,
+    이걸 error 로 기록하면 신규 시설이 없는 **평상시 밤마다** 커버리지가 깎인다.
+    ingest_dataset 이 잡아 성공(0행) + checks.passed=true 로 기록한다. 랜딩이 없으니
+    매니페스트는 계속 쓰지 않는다(#60 R1 — 데이터 없는 폴더에 완결 신호를 남기지 않는다).
+    """
+
+    def __init__(self, note: str):
+        super().__init__(note)
+        self.note = note
+
+
 def _fetch_kopis_list(ds, clients, landing, opts, prefix, append) -> dict:
     """KOPIS 목록: 페이지를 끝까지 돌며 각 페이지를 page-NNNN.xml로 적재."""
     params = _with_date_window(ds.endpoint, ds.base_params, opts)
@@ -235,7 +249,8 @@ def _fetch_kopis_detail(ds, clients, landing, opts, prefix, append) -> dict:
         known = set(opts.known_detail_ids)
         ids = [i for i in all_ids if i not in known][:opts.max_detail]
         if not ids:
-            raise _FetchAbort("skipped (detail top-up: no missing ids)")
+            # 실패가 아니라 no-op — bronze id 검증까지 마치고 "빠진 게 없다"를 확인한 경로.
+            raise _FetchSkip("detail top-up: no missing ids")
         print(f"  [detail] {ds.name}: top-up {len(ids)}/{listed} id (기존 {len(known)}건 제외)")
     else:
         # 목록 재조회 제거(#146): 같은 run 에 랜딩된 목록 raw 에서 id 재사용.
@@ -326,8 +341,14 @@ def ingest_dataset(
             return result
         try:
             params = fetch(ds, clients, landing, opts, prefix, _append_page)
+        except _FetchSkip as skip:
+            # 계획된 no-op(#562) — 성공(0행). checks.passed 만 통과로 남겨 SLO 가
+            # 실패로 세지 않게 하고, 사유는 skipped 로 리포트에 드러낸다.
+            result.checks = {"passed": True, "violations": [], "skipped": skip.note}
+            print(f"  [skip] {ds.name}: {skip.note}")
+            return result
         except _FetchAbort as abort:
-            result.error = abort.error  # skip·과반실패 — 매니페스트/checks 미작성(기존 조기 return 동일)
+            result.error = abort.error  # 과반실패 등 — 매니페스트/checks 미작성(기존 조기 return 동일)
             return result
 
         # 수집 검증 (계약 v0): 완전성·드리프트·freshness·볼륨HWM 점검 후 매니페스트에 동봉.
