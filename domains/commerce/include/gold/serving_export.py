@@ -243,8 +243,68 @@ def _load_serving_meta() -> dict[str, dict]:
             "description": n.get("description", ""),
             "serving": serving,
             "tests": sorted(set(gates.get(uid, []))),
+            # 컬럼별 설명(계보 정본 = dbt yml, 22 gold 전 컬럼 100% 보유 실측) —
+            # MCP/API 개발 핸드오프용 d1_catalog_columns 게시 소스.
+            "columns": {c: (v.get("description") or "").strip()
+                        for c, v in (n.get("columns") or {}).items()},
         }
     return out
+
+
+# ── MCP/API 개발 핸드오프 보조 테이블(commerce 소유 d1_*) — 계보: dbt yml→manifest→여기→D1 ──
+def _handoff_rows(spec, m: dict, col_defs: list) -> tuple[list, list, list]:
+    """(columns_rows, ext_row, pattern_rows) — d1_catalog_{columns,ext}/d1_usage_patterns 용.
+
+    공유 `_catalog` 의 columns JSON 은 전 도메인이 name/type 관행이라 건드리지 않고(동형 유지),
+    컬럼 역할·그레인/PK 계보·검증 질의 패턴은 commerce 소유 보조 테이블로 게시한다 —
+    MCP/API 담당자가 저장소 접근 없이 D1 만으로 description·key 역할을 처리할 수 있게(오너 지시).
+    """
+    pid = "commerce_" + spec.d1_table[3:]
+    sv = m.get("serving") or {}
+    descs = m.get("columns") or {}
+    col_rows = [(pid, spec.d1_table, i, c, _sqlite_type(t), descs.get(c) or None)
+                for i, (c, t) in enumerate(col_defs)]
+    ext_row = (pid, spec.d1_table, spec.source, spec.tier,
+               sv.get("grain"), json.dumps(sv.get("primary_key") or [], ensure_ascii=False),
+               sv.get("d1_rollup"), sv.get("event_time"))
+    pat_rows = [(pid, p.get("pattern_id"), p.get("question_ko"), p.get("sql"),
+                 p.get("axes"), p.get("verified_rows"), p.get("insight_sample_ko"))
+                for p in (sv.get("usage_patterns") or [])
+                # 한 모델→다제품(geo_grid overview/detail)용: d1_table 명시 시 해당 제품만.
+                if p.get("sql") and p.get("d1_table", spec.d1_table) == spec.d1_table]
+    return col_rows, ext_row, pat_rows
+
+
+_HANDOFF_DDL = {
+    "d1_catalog_columns": ('"product_id" TEXT, "table_name" TEXT, "ordinal" INTEGER, '
+                           '"column_name" TEXT, "type" TEXT, "description_ko" TEXT'),
+    "d1_catalog_ext": ('"product_id" TEXT, "table_name" TEXT, "source_model" TEXT, '
+                       '"tier" TEXT, "grain" TEXT, "primary_key" TEXT, '
+                       '"rollup_rule" TEXT, "time_axis" TEXT'),
+    "d1_usage_patterns": ('"product_id" TEXT, "pattern_id" TEXT, "question_ko" TEXT, '
+                          '"sql" TEXT, "axes" TEXT, "verified_rows" INTEGER, '
+                          '"insight_sample_ko" TEXT'),
+}
+_HANDOFF_COLS = {
+    "d1_catalog_columns": ["product_id", "table_name", "ordinal", "column_name", "type", "description_ko"],
+    "d1_catalog_ext": ["product_id", "table_name", "source_model", "tier", "grain",
+                       "primary_key", "rollup_rule", "time_axis"],
+    "d1_usage_patterns": ["product_id", "pattern_id", "question_ko", "sql", "axes",
+                          "verified_rows", "insight_sample_ko"],
+}
+
+
+def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_rows: list) -> None:
+    """보조 테이블 3종 전량 교체 게시(commerce 소유 — 공유 메타 무접촉, 멱등)."""
+    for table, rows in (("d1_catalog_columns", columns_rows),
+                        ("d1_catalog_ext", ext_rows),
+                        ("d1_usage_patterns", pattern_rows)):
+        _d1(f'DROP TABLE IF EXISTS "{table}"; '            # security: allow-sql — 상수 DDL
+            f'CREATE TABLE "{table}" ({_HANDOFF_DDL[table]});', token)
+        if rows:
+            _insert_rows(table, _HANDOFF_COLS[table], rows, token)
+    log.info("[serving export] 핸드오프 메타 게시: columns=%d ext=%d patterns=%d",
+             len(columns_rows), len(ext_rows), len(pattern_rows))
 
 
 def _check_contract_drift(meta: dict[str, dict]) -> None:
@@ -383,6 +443,9 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     catalog_rows: list[dict] = []
     meta_rows: list[tuple] = []
     marker: dict[str, dict] = {}
+    handoff_cols: list = []          # MCP/API 핸드오프 보조 테이블 행(성공 스왑분만)
+    handoff_ext: list = []
+    handoff_pats: list = []
     try:
         cur = conn.cursor()
         for spec in SERVING_SPEC:
@@ -441,10 +504,13 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                 "snapshot_at": now, "source_table": spec.source, "tier": spec.tier,
                 "d1_row_count": n}
             exported.append((spec.d1_table, n))
+            cr, er, pr = _handoff_rows(spec, m, col_defs)   # MCP/API 핸드오프 계보(성공 스왑분만)
+            handoff_cols.extend(cr); handoff_ext.append(er); handoff_pats.extend(pr)
             log.info("[serving export] %s ← %s: %d행(%s)", spec.d1_table, spec.source, n, spec.tier)
 
         _upsert_catalog(catalog_rows, token, cat_columns)   # 공유 _catalog(성공분만 upsert — 타 도메인·스킵분 행 보존)
         _upsert_meta(meta_rows, token)
+        _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats)
     finally:
         conn.close()
 
