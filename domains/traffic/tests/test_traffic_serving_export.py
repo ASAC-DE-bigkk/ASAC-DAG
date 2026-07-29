@@ -62,6 +62,17 @@ def test_traffic_export_is_visible_to_airflow_safe_mode():
     assert "dag" in source
 
 
+def test_traffic_export_bootstraps_domain_imports_for_airflow_dag_loader():
+    """Airflow imports this file without the Traffic domain on ``sys.path``."""
+    source = DAG_PATH.read_text(encoding="utf-8")
+
+    assert "import os" in source
+    assert "import sys" in source
+    assert "DIR = os.path.dirname(os.path.abspath(__file__))" in source
+    assert "for path in (DIR, os.path.dirname(DIR), os.path.dirname(os.path.dirname(DIR))):" in source
+    assert "sys.path.insert(0, path)" in source
+
+
 def test_traffic_export_is_the_only_traffic_serving_dag():
     assert not (DAG_PATH.parent / "traffic_insight_serving_export.py").exists()
 
