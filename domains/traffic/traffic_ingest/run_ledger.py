@@ -57,7 +57,8 @@ def _safe_segment(value: object) -> str:
 
 
 def _build_r2_storage() -> JsonStorage:
-    from common.storage import build_storage, r2_env
+    from common.storage import build_storage
+    from traffic_ingest.common.runtime import r2_env
 
     return build_storage(
         "r2",

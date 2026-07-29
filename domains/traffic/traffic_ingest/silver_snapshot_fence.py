@@ -4,14 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from traffic_ingest.common.runtime import trino_catalog
 
-TRAFFIC_SILVER_RELATION = "iceberg_dev.traffic.silver_seoul_traffic_incident"
-_RELATION_CATALOG, _RELATION_SCHEMA, _RELATION_NAME = TRAFFIC_SILVER_RELATION.split(
-    ".", 2
-)
-_RELATION_NAMESPACE = f"{_RELATION_CATALOG}.{_RELATION_SCHEMA}"
-_SNAPSHOTS_RELATION = f'{_RELATION_NAMESPACE}."{_RELATION_NAME}$snapshots"'
-_FILES_RELATION = f'{_RELATION_NAMESPACE}."{_RELATION_NAME}$files"'
+_RELATION_SCHEMA = "traffic"
+_RELATION_NAME = "silver_seoul_traffic_incident"
 _ALLOWED_OPERATIONS = frozenset({"append", "overwrite", "replace", "delete"})
 
 
@@ -94,7 +90,7 @@ def _trino_connection() -> Any:
         host=os.environ.get("TRINO_HOST", "trino"),
         port=int(os.environ.get("TRINO_PORT", "8080")),
         user=os.environ.get("TRINO_USER", "airflow"),
-        catalog=_RELATION_CATALOG,
+        catalog=trino_catalog(),
         schema=_RELATION_SCHEMA,
         http_scheme=os.environ.get("TRINO_HTTP_SCHEME", "http"),
     )
@@ -118,14 +114,17 @@ def _file_path(row: object) -> str:
 def collect_silver_snapshot_evidence(
     connection_factory: Callable[[], Any] = _trino_connection,
 ) -> SilverSnapshotEvidence:
-    """Read the fixed dev Traffic Silver metadata relations and close DB resources."""
+    """Read target-selected Traffic Silver metadata and close DB resources."""
+    relation_namespace = f"{trino_catalog()}.{_RELATION_SCHEMA}"
+    snapshots_relation = f'{relation_namespace}."{_RELATION_NAME}$snapshots"'
+    files_relation = f'{relation_namespace}."{_RELATION_NAME}$files"'
     connection = connection_factory()
     cursor = None
     try:
         cursor = connection.cursor()
         cursor.execute(
             "SELECT snapshot_id, committed_at, operation "
-            f"FROM {_SNAPSHOTS_RELATION} "
+            f"FROM {snapshots_relation} "
             "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
         )
         snapshot_id, committed_at, operation = _snapshot_fields(cursor.fetchone())
@@ -134,7 +133,7 @@ def collect_silver_snapshot_evidence(
 
         cursor.execute(
             "SELECT file_path "
-            f"FROM {_FILES_RELATION} "
+            f"FROM {files_relation} "
             "WHERE content = 0 "
             "AND regexp_like(file_path, '(^|/)compacted-[^/]*$') "
             "ORDER BY file_path"

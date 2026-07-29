@@ -230,6 +230,54 @@ def test_incident_materializer_runtime_replays_legacy_raw_before_loading(monkeyp
     assert replayed_run.run_id == "legacy-snapshot"
 
 
+def test_incident_materializer_preflight_initializes_fresh_bronze_tables(monkeypatch):
+    import traffic_ingest.bronze as bronze
+
+    events: list[tuple[object, ...]] = []
+    cursor = object()
+    monkeypatch.setattr(
+        runtime,
+        "trino_cursor",
+        lambda: (cursor, "iceberg", "weather_traffic_bronze"),
+    )
+    monkeypatch.setattr(
+        bronze,
+        "create_seoul_traffic_bronze_table",
+        lambda actual_cursor, catalog, schema: events.append(
+            ("create", actual_cursor, catalog, schema)
+        ),
+    )
+
+    def find_verified(receipts, *, cursor_factory):
+        events.append(("find", receipts, cursor_factory()))
+        return {}
+
+    monkeypatch.setattr(
+        bronze,
+        "find_verified_seoul_traffic_bronze_receipts",
+        find_verified,
+    )
+    monkeypatch.setattr(runtime, "build_traffic_snapshot_receipts", lambda: object())
+    monkeypatch.setattr(runtime, "build_traffic_manifest", lambda: object())
+    monkeypatch.setattr(runtime, "IncidentMaterializer", lambda **kwargs: kwargs)
+
+    materializer = runtime.build_incident_materializer()
+    receipt = SimpleNamespace(
+        snapshot_run_id="snapshot-1",
+        raw_result={"raw_objects": []},
+    )
+
+    assert materializer["verified_receipts"]([receipt]) == {}
+    assert events == [
+        ("create", cursor, "iceberg", "weather_traffic_bronze"),
+        (
+            "find",
+            {"snapshot-1": {"raw_objects": []}},
+            (cursor, "iceberg", "weather_traffic_bronze"),
+        ),
+    ]
+
+
 def test_incident_materializer_runtime_rejects_legacy_raw_hash_mismatch(monkeypatch):
     class Landing:
         def replay(self, raw_object_keys, *, run):

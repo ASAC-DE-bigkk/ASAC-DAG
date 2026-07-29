@@ -269,7 +269,7 @@ class R2RecoveryRecordSink:
     def _put_r2_object(object_key: str, payload: bytes) -> None:
         import boto3
 
-        from common.storage import r2_env
+        from traffic_ingest.common.runtime import r2_env
 
         boto3.client(
             "s3",

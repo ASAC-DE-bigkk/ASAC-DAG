@@ -14,6 +14,10 @@ def test_accepts_dev_runtime_with_domain_schema_defaults():
         {
             "DBT_TARGET": "dev",
             "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
+            "R2_DEV_BUCKET_NAME": "seoul-dev",
+            "R2_DEV_ENDPOINT": "https://dev.invalid",
+            "R2_DEV_ACCESS_KEY_ID": "dev-access",
+            "R2_DEV_SECRET_ACCESS_KEY": "dev-secret",
         },
     )
 
@@ -24,8 +28,57 @@ def test_accepts_prod_runtime_with_domain_schema_defaults():
         {
             "DBT_TARGET": "prod",
             "TRINO_ICEBERG_CATALOG": "iceberg",
+            "R2_BUCKET_NAME": "seoul",
+            "R2_ENDPOINT": "https://prod.invalid",
+            "R2_ACCESS_KEY_ID": "prod-access",
+            "R2_SECRET_ACCESS_KEY": "prod-secret",
         },
     )
+
+
+def test_accepts_prod_runtime_with_dev_r2_keys_when_prod_tuple_is_valid():
+    validate_dev_runtime(
+        "weather",
+        {
+            "DBT_TARGET": "prod",
+            "TRINO_ICEBERG_CATALOG": "iceberg",
+            "R2_BUCKET_NAME": "seoul",
+            "R2_ENDPOINT": "https://prod.invalid",
+            "R2_ACCESS_KEY_ID": "prod-access",
+            "R2_SECRET_ACCESS_KEY": "prod-secret",
+            "R2_DEV_BUCKET_NAME": "seoul-dev",
+        },
+    )
+
+
+def test_rejects_dev_runtime_when_dev_r2_tuple_is_incomplete():
+    with pytest.raises(RuntimeTargetError, match="R2_DEV_ACCESS_KEY_ID"):
+        validate_dev_runtime(
+            "traffic",
+            {
+                "DBT_TARGET": "dev",
+                "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
+                "R2_DEV_BUCKET_NAME": "seoul-dev",
+                "R2_DEV_ENDPOINT": "https://dev.invalid",
+                "R2_ACCESS_KEY_ID": "prod-access",
+                "R2_DEV_SECRET_ACCESS_KEY": "dev-secret",
+            },
+        )
+
+
+def test_rejects_target_bucket_mismatch():
+    with pytest.raises(RuntimeTargetError, match="bucket"):
+        validate_dev_runtime(
+            "traffic",
+            {
+                "DBT_TARGET": "prod",
+                "TRINO_ICEBERG_CATALOG": "iceberg",
+                "R2_BUCKET_NAME": "seoul-dev",
+                "R2_ENDPOINT": "https://prod.invalid",
+                "R2_ACCESS_KEY_ID": "prod-access",
+                "R2_SECRET_ACCESS_KEY": "prod-secret",
+            },
+        )
 
 
 def test_rejects_prod_target_when_catalog_is_dev():
@@ -57,6 +110,10 @@ def test_allows_reserved_schema_name_under_prod_target():
             "DBT_TARGET": "prod",
             "TRINO_ICEBERG_CATALOG": "iceberg",
             "ASK_SEOUL_SCHEMA": "ops_smoke",
+            "R2_BUCKET_NAME": "seoul",
+            "R2_ENDPOINT": "https://prod.invalid",
+            "R2_ACCESS_KEY_ID": "prod-access",
+            "R2_SECRET_ACCESS_KEY": "prod-secret",
         },
     )
 
