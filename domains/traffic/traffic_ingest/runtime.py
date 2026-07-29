@@ -177,14 +177,14 @@ def build_traffic_manifest() -> TrafficRunManifest:
 
 
 def build_traffic_snapshot_receipts() -> TrafficSnapshotReceipts:
-    from common.storage import build_storage, r2_env as storage_r2_env
+    from common.storage import build_storage
 
     storage = build_storage(
         "r2",
-        bucket=storage_r2_env("R2_BUCKET_NAME"),
-        endpoint=storage_r2_env("R2_ENDPOINT"),
-        key=storage_r2_env("R2_ACCESS_KEY_ID"),
-        secret=storage_r2_env("R2_SECRET_ACCESS_KEY"),
+        bucket=r2_env("R2_BUCKET_NAME"),
+        endpoint=r2_env("R2_ENDPOINT"),
+        key=r2_env("R2_ACCESS_KEY_ID"),
+        secret=r2_env("R2_SECRET_ACCESS_KEY"),
         region="auto",
     )
     return TrafficSnapshotReceipts(storage)
@@ -256,11 +256,14 @@ def build_incident_materializer() -> IncidentMaterializer:
         )
 
     def verified_receipts(receipts) -> dict[str, int]:
+        cursor, catalog, schema = trino_cursor()
+        create_seoul_traffic_bronze_table(cursor, catalog, schema)
         return find_verified_seoul_traffic_bronze_receipts(
             {
                 receipt.snapshot_run_id: receipt.raw_result
                 for receipt in receipts
-            }
+            },
+            cursor_factory=lambda: (cursor, catalog, schema),
         )
 
     def recover_legacy_raw_result(

@@ -20,6 +20,26 @@ _TARGET_CATALOGS = {
 }
 TARGET_CHOICES = ("dev", "prod")
 _TARGET_ALIASES = ("ASK_SEOUL_TARGET", "DBT_TARGET")
+_R2_TARGETS = {
+    "dev": (
+        "seoul-dev",
+        (
+            "R2_DEV_BUCKET_NAME",
+            "R2_DEV_ENDPOINT",
+            "R2_DEV_ACCESS_KEY_ID",
+            "R2_DEV_SECRET_ACCESS_KEY",
+        ),
+    ),
+    "prod": (
+        "seoul",
+        (
+            "R2_BUCKET_NAME",
+            "R2_ENDPOINT",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY",
+        ),
+    ),
+}
 
 
 def default_target(env: Mapping[str, str] | None = None) -> str:
@@ -93,4 +113,18 @@ def validate_dev_runtime(
         if not _IDENTIFIER.fullmatch(schema):
             raise RuntimeTargetError(f"schema identifier is invalid: {env_name}")
         if target == "dev" and schema.lower() in _RESERVED_PROD_SCHEMAS:
-            raise RuntimeTargetError(f"schema is reserved for another environment: {env_name}")
+            raise RuntimeTargetError(
+                f"schema is reserved for another environment: {env_name}"
+            )
+
+    expected_bucket, required_r2_keys = _R2_TARGETS[target]
+    for env_name in required_r2_keys:
+        if not str(values.get(env_name, "")).strip():
+            raise RuntimeTargetError(
+                f"{target} R2 credential is missing: {env_name}"
+            )
+    bucket_name = str(values[required_r2_keys[0]]).strip()
+    if bucket_name != expected_bucket:
+        raise RuntimeTargetError(
+            f"{target} R2 bucket must be {expected_bucket}"
+        )

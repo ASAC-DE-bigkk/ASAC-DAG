@@ -113,9 +113,10 @@ def compact_history_snapshot(report: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _build_history_storage() -> HistoryStorage:
-    from common.storage import build_storage, r2_env
+    from common.storage import build_storage
+    from weather_ingest.common.runtime import r2_env, r2_env_name
 
-    region = os.environ.get("R2_DEV_REGION") or os.environ.get("R2_REGION", "auto")
+    region = os.environ.get(r2_env_name("R2_REGION"), "auto")
     return build_storage(
         "r2",
         bucket=r2_env("R2_BUCKET_NAME"),

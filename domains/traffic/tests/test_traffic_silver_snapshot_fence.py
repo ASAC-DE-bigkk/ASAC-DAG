@@ -195,7 +195,11 @@ def test_evidence_parser_rejects_whitespace_and_unknown_operations(operation):
         SilverSnapshotEvidence.from_dict(evidence_dict(operation=operation))
 
 
-def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources():
+def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources(
+    monkeypatch,
+):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
     cursor = FakeCursor(
         snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
         file_rows=[
@@ -240,6 +244,8 @@ def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources()
 def test_trino_connection_uses_the_exact_silver_relation_namespace(monkeypatch):
     captured = {}
     connection = object()
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
 
     monkeypatch.setattr(
         "trino.dbapi.connect",
@@ -248,6 +254,38 @@ def test_trino_connection_uses_the_exact_silver_relation_namespace(monkeypatch):
 
     assert snapshot_fence._trino_connection() is connection
     assert captured["catalog"] == "iceberg_dev"
+    assert captured["schema"] == "traffic"
+
+
+def test_prod_snapshot_fence_uses_only_the_prod_catalog(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg")
+    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    cursor = FakeCursor(
+        snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
+        file_rows=[],
+    )
+    connection = FakeConnection(cursor)
+
+    collect_silver_snapshot_evidence(connection_factory=lambda: connection)
+
+    assert all("iceberg.traffic." in statement for statement in cursor.statements)
+    assert all("iceberg_dev" not in statement for statement in cursor.statements)
+
+
+def test_prod_trino_connection_uses_the_prod_catalog(monkeypatch):
+    captured = {}
+    connection = object()
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg")
+    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    monkeypatch.setattr(
+        "trino.dbapi.connect",
+        lambda **kwargs: captured.update(kwargs) or connection,
+    )
+
+    assert snapshot_fence._trino_connection() is connection
+    assert captured["catalog"] == "iceberg"
     assert captured["schema"] == "traffic"
 
 

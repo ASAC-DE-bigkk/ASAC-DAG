@@ -35,9 +35,7 @@ def required_env(name: str) -> str:
 
 def r2_env_name(name: str) -> str:
     if is_dev_target():
-        dev_name = "R2_DEV_" + name.removeprefix("R2_")
-        if os.environ.get(dev_name):
-            return dev_name
+        return "R2_DEV_" + name.removeprefix("R2_")
     return name
 
 
