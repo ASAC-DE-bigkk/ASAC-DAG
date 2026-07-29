@@ -90,8 +90,6 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
     classified_task_ids = {
         silver: [
             "dbt_deps",
-            "dbt_source_freshness",
-            "dbt_test_traffic_bronze_source_contract",
             "dbt_run_silver",
         ],
         gold: [
@@ -113,8 +111,6 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
             if task_id in {
                 "dbt_deps",
                 "dbt_deps_gold",
-                "dbt_source_freshness",
-                "dbt_test_traffic_bronze_source_contract",
             }:
                 assert "pool" not in task.kwargs or task.kwargs["pool"] in (
                     None,

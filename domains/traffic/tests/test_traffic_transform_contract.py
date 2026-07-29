@@ -1230,12 +1230,12 @@ def test_dbt_snapshot_variables_omits_admin_dong_crosswalk_pin_when_key_not_pass
     assert "admin_dong_crosswalk_pin_snapshot_id" not in variables
 
 
-def test_traffic_contract_gates_delegate_membership_to_dbt_selectors():
+def test_traffic_hot_build_delegates_membership_to_one_dbt_selector():
     module = load_transform_module()
-    source_task = module.dag.task_dict["dbt_test_traffic_bronze_source_contract"]
-    assert source_task.kwargs["op_kwargs"]["dbt_command"] == "test"
-    assert source_task.kwargs["op_kwargs"]["selector"] == (
-        "ask_seoul_traffic_transform_incident_preflight_contracts"
+    build_task = module.dag.task_dict["dbt_run_silver"]
+    assert build_task.kwargs["op_kwargs"]["dbt_command"] == "build"
+    assert build_task.kwargs["op_kwargs"]["selector"] == (
+        "ask_seoul_traffic_transform_incident_hot_build"
     )
     assert not hasattr(module, "TRAFFIC_BRONZE_SOURCE_CONTRACT_TESTS")
     assert not hasattr(module, "normalize_dbt_test_tuples")
@@ -2037,8 +2037,6 @@ def test_transform_phase_specs_have_single_pipeline_owner():
 
     assert silver_ids == (
         "dbt_deps",
-        "dbt_source_freshness",
-        "dbt_test_traffic_bronze_source_contract",
         "dbt_run_silver",
     )
     assert gold_ids == (
@@ -2054,8 +2052,6 @@ def test_transform_phase_specs_have_single_pipeline_owner():
 
     compatibility_ids = (
         "dbt_deps",
-        "dbt_source_freshness",
-        "dbt_test_traffic_bronze_source_contract",
         "dbt_seed_asac_axes",
         "dbt_run_common_admin_dong_dimension",
         "dbt_test_common_admin_dong_dimension",
@@ -2094,7 +2090,7 @@ def test_split_phase_specs_isolate_citydata_fence_and_test_cadence():
         spec for spec in SILVER_DBT_PHASE_SPECS if spec.task_id == "dbt_run_silver"
     )
     assert silver_build.dbt_command == "build"
-    assert silver_build.selector == "ask_seoul_traffic_transform_incident_silver"
+    assert silver_build.selector == "ask_seoul_traffic_transform_incident_hot_build"
     assert silver_build.silver_persisted is True
     assert silver_build.selector_by_test_tier is None
 
@@ -2236,15 +2232,10 @@ def test_traffic_transform_uses_only_the_silver_phase_contract():
 
     expected_phase_contracts = {
         "dbt_deps": ("deps", None),
-        "dbt_source_freshness": (
-            "source freshness",
-            "ask_seoul_traffic_transform_source",
+        "dbt_run_silver": (
+            "build",
+            "ask_seoul_traffic_transform_incident_hot_build",
         ),
-        "dbt_test_traffic_bronze_source_contract": (
-            "test",
-            "ask_seoul_traffic_transform_incident_preflight_contracts",
-        ),
-        "dbt_run_silver": ("build", "ask_seoul_traffic_transform_incident_silver"),
     }
     assert set(dag.task_ids) >= set(expected_phase_contracts)
     assert list(module.dbt_phase_tasks) == list(expected_phase_contracts)
@@ -2261,16 +2252,15 @@ def test_traffic_transform_uses_only_the_silver_phase_contract():
     )
 
 
-def test_contract_gates_are_the_only_path_into_persisted_silver():
+def test_pin_and_compound_receipt_build_are_the_only_path_into_persisted_silver():
     module = load_transform_module()
     dag = module.dag
 
-    # #510: the combined prepare task sits between the Bronze contract gate and
-    # dbt_run_silver so the pinned run is fresh at build time. The
-    # contract gate must still be an unbypassable ancestor of persisted Silver.
-    assert dag.task_dict[
-        "dbt_test_traffic_bronze_source_contract"
-    ].downstream_task_ids == {"resolve_traffic_snapshot_run"}
+    # The resolver keeps the #510 latest-pin fence immediately before the
+    # compound model+receipt build.
+    assert dag.task_dict["dbt_deps"].downstream_task_ids == {
+        "resolve_traffic_snapshot_run"
+    }
     assert dag.task_dict["dbt_run_silver"].upstream_task_ids == {
         "resolve_traffic_snapshot_run",
     }
@@ -2280,8 +2270,6 @@ def test_contract_gates_are_the_only_path_into_persisted_silver():
     }
     assert {
         "dbt_deps",
-        "dbt_source_freshness",
-        "dbt_test_traffic_bronze_source_contract",
         "resolve_traffic_snapshot_run",
     } <= silver_ancestors
 
