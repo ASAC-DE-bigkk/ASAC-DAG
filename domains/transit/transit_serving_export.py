@@ -18,7 +18,13 @@ watchdog 몫(계약 §7.4), Publisher 는 freshness 실측값만 ``_catalog`` �
 
 from __future__ import annotations
 
+import os
+
 from common.serving.dag_factory import build_serving_export_dag
+
+# 프로젝트 target 관례(DBT_TARGET, 기본 prod) — 컷오버(#556), citydata_serving_export 와 동일.
+# 스키마는 prod/dev 동일 transit(#204 — 환경 분리는 카탈로그 몫)이라 노브 불필요.
+_TARGET = os.environ.get("DBT_TARGET", "prod")
 
 # 티어 = product_id 묶음. 각 골드의 publication_trigger.schedule_cron(계약)이 아래 스케줄과 정렬돼 있다.
 FAST = [
@@ -36,12 +42,12 @@ DAILY = [
 
 transit_serving_export_fast = build_serving_export_dag(
     domain="transit", product_ids=FAST, schedule="10,25,40,55 * * * *",
-    dag_id="transit_serving_export_fast")
+    dag_id="transit_serving_export_fast", target=_TARGET)
 
 transit_serving_export_hourly = build_serving_export_dag(
     domain="transit", product_ids=HOURLY, schedule="40 * * * *",
-    dag_id="transit_serving_export_hourly")
+    dag_id="transit_serving_export_hourly", target=_TARGET)
 
 transit_serving_export_daily = build_serving_export_dag(
     domain="transit", product_ids=DAILY, schedule="40 8 * * *",
-    dag_id="transit_serving_export_daily")
+    dag_id="transit_serving_export_daily", target=_TARGET)
