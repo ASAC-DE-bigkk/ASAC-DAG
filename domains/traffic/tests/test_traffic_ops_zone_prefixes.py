@@ -1,13 +1,19 @@
-"""#60 존 이사 — env 로 경로를 지정하고 미설정 시 구 위치 폴백 (#561).
+"""#60 존 이사 — ops 존이 기본값, env 는 롤백용 (#561).
 
-컨벤션은 transit(#547/#549)·commerce(#552/#553)와 동일하다. target 분기를 코드에
-박지 않는 이유:
+#570 은 구 위치를 기본값으로 두고 env 로 ops 존을 지정하는 방식이었다. 근거는
+"dev 가동 중 배포해도 진행 중인 pending·checkpoint 가 고아가 되지 않는다" 였는데,
+prod 를 맥미니 공용 런타임에서 돌리고 로컬 dev 를 정지하는 배포 모델이 확정되면서
+그 전제가 사라졌다. 보호할 "가동 중 dev" 가 없고, 대신 **키 누락 시 prod 루트 오염**
+이라는 실패 모드만 남는다.
 
-- #60 이 아직 OPEN 이라 매핑이 확정 전이다. env 면 코드 배포 없이 되돌릴 수 있다.
-- 이 팀은 환경별로 `.env.dev` / `.env.prod` 를 통째로 갈아끼운다. 경로 결정을
-  거기 두는 편이 실제 운영과 맞는다.
-- 미설정 = 구 위치이므로, dev 가동 중에 배포해도 진행 중인 pending receipt·
-  run ledger·checkpoint 가 고아가 되지 않는다(PR#550 사고 유형 회피).
+그래서 기본값을 뒤집는다. 머지된 타 도메인과도 이쪽이 일치한다:
+
+- common(#573)  `os.environ.get("ASAC_ERRORS_PREFIX", "ops/errors")`
+- common(#573)  `os.environ.get("ASAC_METRICS_PREFIX", "ops/metrics")`
+- culture(#579) `OPS_REPORTS_ROOT = "ops/reports/culture"` (env 없이 상수)
+- traffic(#585) `os.environ.get("ASAC_RECOVERY_PREFIX", "ops/recovery")`
+
+env 는 이제 "새 경로 지정"이 아니라 **롤백 스위치**다.
 """
 
 from __future__ import annotations
@@ -41,19 +47,17 @@ class _NullStorage:
 # --- receipts -----------------------------------------------------------
 
 
-def test_receipt_prefix_falls_back_to_legacy_root(monkeypatch):
+def test_receipt_prefix_defaults_to_ops_control_zone(monkeypatch):
+    # pending 이 다음 실행을 좌우하는 제어 상태라 TTL 이 걸리면 안 된다 → control 존.
     monkeypatch.delenv("TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", raising=False)
 
-    assert receipt_prefix() == "traffic-snapshot-receipts"
-
-
-def test_receipt_prefix_follows_env(monkeypatch):
-    # pending 이 다음 실행을 좌우하는 제어 상태라 TTL 이 걸리면 안 된다 → control 존.
-    monkeypatch.setenv(
-        "TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", "ops/control/state/traffic/snapshot_receipts"
-    )
-
     assert receipt_prefix() == "ops/control/state/traffic/snapshot_receipts"
+
+
+def test_receipt_prefix_can_roll_back_via_env(monkeypatch):
+    monkeypatch.setenv("TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", "traffic-snapshot-receipts")
+
+    assert receipt_prefix() == "traffic-snapshot-receipts"
 
 
 def test_receipt_prefix_strips_trailing_slash(monkeypatch):
@@ -62,10 +66,8 @@ def test_receipt_prefix_strips_trailing_slash(monkeypatch):
     assert receipt_prefix() == "ops/receipts/traffic"
 
 
-def test_receipt_keys_follow_the_resolved_zone(monkeypatch):
-    monkeypatch.setenv(
-        "TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", "ops/control/state/traffic/snapshot_receipts"
-    )
+def test_receipt_keys_default_to_the_ops_zone(monkeypatch):
+    monkeypatch.delenv("TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", raising=False)
     receipts = TrafficSnapshotReceipts(_NullStorage())
 
     assert receipts.pending_key("run-1").startswith(
@@ -74,8 +76,8 @@ def test_receipt_keys_follow_the_resolved_zone(monkeypatch):
     )
 
 
-def test_receipt_keys_keep_legacy_zone_without_env(monkeypatch):
-    monkeypatch.delenv("TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", raising=False)
+def test_receipt_keys_follow_the_rollback_env(monkeypatch):
+    monkeypatch.setenv("TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", "traffic-snapshot-receipts")
     receipts = TrafficSnapshotReceipts(_NullStorage())
 
     assert receipts.pending_key("run-1").startswith(
@@ -86,59 +88,55 @@ def test_receipt_keys_keep_legacy_zone_without_env(monkeypatch):
 # --- run ledger ---------------------------------------------------------
 
 
-def test_run_ledger_prefix_falls_back_to_legacy_root(monkeypatch):
+def test_run_ledger_prefix_defaults_to_ops_control_zone(monkeypatch):
+    # watchdog 이 "누락 run" 판정에 쓰므로 TTL 삭제 시 오탐이 난다 → control 존.
     monkeypatch.delenv("TRAFFIC_RUN_LEDGER_PREFIX", raising=False)
 
-    assert run_ledger_prefix() == "traffic-run-ledger"
-
-
-def test_run_ledger_prefix_follows_env(monkeypatch):
-    # watchdog 이 "누락 run" 판정에 쓰므로 TTL 삭제 시 오탐이 난다 → control 존.
-    monkeypatch.setenv(
-        "TRAFFIC_RUN_LEDGER_PREFIX", "ops/control/state/traffic/run_ledger"
-    )
-
     assert run_ledger_prefix() == "ops/control/state/traffic/run_ledger"
+
+
+def test_run_ledger_prefix_can_roll_back_via_env(monkeypatch):
+    monkeypatch.setenv("TRAFFIC_RUN_LEDGER_PREFIX", "traffic-run-ledger")
+
+    assert run_ledger_prefix() == "traffic-run-ledger"
 
 
 # --- reliability history ------------------------------------------------
 
 
-def test_reliability_history_key_falls_back_to_legacy_root(monkeypatch):
+def test_reliability_history_key_defaults_to_ops_reports_zone(monkeypatch):
     monkeypatch.delenv("TRAFFIC_RELIABILITY_HISTORY_PREFIX", raising=False)
-
-    assert history_object_key(date(2026, 7, 29)).startswith(
-        "reliability/date=2026-07-29/"
-    )
-
-
-def test_reliability_history_key_follows_env(monkeypatch):
-    monkeypatch.setenv(
-        "TRAFFIC_RELIABILITY_HISTORY_PREFIX", "ops/reports/traffic/type=reliability"
-    )
 
     assert history_object_key(date(2026, 7, 29)).startswith(
         "ops/reports/traffic/type=reliability/date=2026-07-29/"
     )
 
 
+def test_reliability_history_key_can_roll_back_via_env(monkeypatch):
+    monkeypatch.setenv("TRAFFIC_RELIABILITY_HISTORY_PREFIX", "reliability")
+
+    assert history_object_key(date(2026, 7, 29)).startswith(
+        "reliability/date=2026-07-29/"
+    )
+
+
 # --- landing checkpoint -------------------------------------------------
 
 
-def test_checkpoint_prefix_falls_back_under_raw(monkeypatch):
+def test_checkpoint_prefix_defaults_out_of_raw(monkeypatch):
+    # 약속② — raw 는 박제만. checkpoint 는 다음 실행을 바꾸는 가변 상태다.
     monkeypatch.delenv("TRAFFIC_CHECKPOINT_PREFIX", raising=False)
     from traffic_ingest.common import runtime
 
     importlib.reload(runtime)
 
-    assert runtime.checkpoint_prefix() == "raw/_checkpoints"
+    assert runtime.checkpoint_prefix() == "ops/control/checkpoints/traffic"
 
 
-def test_checkpoint_prefix_follows_env(monkeypatch):
-    # 약속② — raw 는 박제만. checkpoint 는 다음 실행을 바꾸는 가변 상태다.
-    monkeypatch.setenv("TRAFFIC_CHECKPOINT_PREFIX", "ops/control/checkpoints/traffic")
+def test_checkpoint_prefix_can_roll_back_via_env(monkeypatch):
+    monkeypatch.setenv("TRAFFIC_CHECKPOINT_PREFIX", "raw/_checkpoints")
     from traffic_ingest.common import runtime
 
     importlib.reload(runtime)
 
-    assert runtime.checkpoint_prefix() == "ops/control/checkpoints/traffic"
+    assert runtime.checkpoint_prefix() == "raw/_checkpoints"

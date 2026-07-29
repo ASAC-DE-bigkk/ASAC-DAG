@@ -52,16 +52,17 @@ def raw_prefix() -> str:
 
 
 def checkpoint_prefix() -> str:
-    """landing checkpoint 루트 — `WEATHER_CHECKPOINT_PREFIX` 우선(#60 약속②/#561).
+    """landing checkpoint 루트 — 기본 ops 존, `WEATHER_CHECKPOINT_PREFIX` 는 롤백용(#60 약속②).
 
     checkpoint 는 다음 실행의 재개 지점을 바꾸는 가변 상태라, 불변 박제 구역인
-    raw 밖(ops/control)이 목적지다. 미설정 시 구 위치 `{raw_prefix}/_checkpoints`
-    폴백이라 dev 는 그대로 두고 prod 만 옮길 수 있다.
+    raw 밖(ops/control)이 목적지다. 기본값이 곧 목적지이므로 배포만 하면 맞고,
+    env 는 구 위치(`raw/_checkpoints`)로 되돌릴 때만 쓴다 — common(#573)·
+    culture(#579)·recovery(#585)와 같은 방식.
     """
     configured = os.environ.get("WEATHER_CHECKPOINT_PREFIX", "").strip()
     if configured:
         return configured.rstrip("/")
-    return f"{raw_prefix().rstrip('/')}/_checkpoints"
+    return "ops/control/checkpoints/weather"
 
 
 def trino_catalog() -> str:
