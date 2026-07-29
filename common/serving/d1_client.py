@@ -178,14 +178,21 @@ class HttpD1Client:
             headers={"Authorization": f"Bearer {self._token}"}, timeout=120,
         )
         response = resp.json()
-        if not response.get("success"):
+        result = response.get("result") or []
+        failed_statements = [statement for statement in result if statement.get("success") is False]
+        if not response.get("success") or failed_statements:
             # Surface D1 errors without echoing the request (which never carries the token anyway).
-            raise RuntimeError(f"D1 API 실패: {json.dumps(response.get('errors'))[:300]}")
+            errors = response.get("errors") or [statement.get("errors") for statement in failed_statements]
+            raise RuntimeError(f"D1 API 실패: {json.dumps(errors)[:300]}")
         return response
 
     def _query(self, sql: str) -> list[dict[str, Any]]:
         response = self._request({"sql": sql})
         result = response.get("result") or []
+        failed_statements = [statement for statement in result if statement.get("success") is False]
+        if failed_statements:
+            errors = [statement.get("errors") for statement in failed_statements]
+            raise RuntimeError(f"D1 API 실패: {json.dumps(errors)[:300]}")
         return (result[-1].get("results") or []) if result else []
 
     def _query_batch(self, statements: Sequence[str]) -> list[list[dict[str, Any]]]:

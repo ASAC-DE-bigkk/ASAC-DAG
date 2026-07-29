@@ -26,9 +26,11 @@ class FakeD1:
     def __init__(self) -> None:
         self.tables: dict[str, list[dict[str, Any]]] = {}
         self.primary_keys: dict[str, tuple[str, ...]] = {}
+        self.columns_by_table: dict[str, list[Column]] = {}
         self.catalog: dict[str, dict[str, Any]] = {}
         self.ledger: list[dict[str, Any]] = []
         self.previous_tables: dict[str, list[dict[str, Any]]] = {}
+        self.replace_calls = 0
 
     def table_row_count(self, name: str) -> int:
         return len(self.tables.get(name, []))
@@ -48,11 +50,14 @@ class FakeD1:
     def ensure_table(self, name: str, columns, primary_key) -> None:
         self.tables.setdefault(name, [])
         self.primary_keys[name] = tuple(primary_key)
+        self.columns_by_table.setdefault(name, list(columns))
 
     def replace_table(self, name: str, columns, rows, primary_key) -> None:
+        self.replace_calls += 1
         if name in self.tables:
             self.previous_tables[name] = [dict(row) for row in self.tables[name]]
         self.primary_keys[name] = tuple(primary_key)
+        self.columns_by_table[name] = list(columns)
         self.tables[name] = [dict(r) for r in rows]  # atomic swap semantics
 
     def restore_replaced_table(self, name: str) -> None:
@@ -234,6 +239,32 @@ def test_repeated_upsert_replaces_the_existing_primary_key_row():
     assert d1.table_row_count(contract.model_name) == 1
     assert d1.tables[contract.model_name][0]["forecast_at"] == "new"
     assert report.records[0].d1_row_count == 1
+    assert d1.replace_calls == 0
+
+
+def test_exact_set_upsert_replaces_the_full_source_set_and_schema():
+    contract = _contract(publication_mode="upsert", upsert_strategy="exact_set")
+    d1 = FakeD1()
+    d1.tables[contract.model_name] = [
+        {"product_row_id": "stale", "place_id": "old", "forecast_at": "old"},
+    ]
+    current_columns = COLUMNS + [("new_metric", "integer")]
+    current_rows = [
+        {"product_row_id": "current", "place_id": "new", "forecast_at": "now", "new_metric": 1},
+    ]
+
+    report = publish(
+        [contract],
+        FakeSource({contract.model_name: ReadPlan(current_columns, current_rows)}),
+        d1,
+        FakeSmoke(),
+        source_run_id="upsert-exact-set",
+    )
+
+    assert report.ok
+    assert d1.tables[contract.model_name] == current_rows
+    assert d1.columns_by_table[contract.model_name] == current_columns
+    assert report.records[0].d1_row_count == 1
 
 
 def test_partial_truncation_retains_last_good():
@@ -288,6 +319,24 @@ def test_snapshot_catalog_registration_failure_restores_last_good_and_records_le
 
     with pytest.raises(PublicationError):
         publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="catalog-failure")
+
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert d1.ledger[-1]["outcome"] == "failed"
+    assert d1.ledger[-1]["rollback_status"] == "restored"
+
+
+def test_exact_set_upsert_catalog_failure_restores_last_good_and_records_ledger():
+    contract = _contract(publication_mode="upsert", upsert_strategy="exact_set")
+    d1 = ExplodingCatalogD1()
+    old_rows = _rows(2)
+    old_catalog = {"name": contract.model_name, "row_count": 2, "publication_id": "old"}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))})
+
+    with pytest.raises(PublicationError):
+        publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="upsert-catalog-failure")
 
     assert d1.tables[contract.model_name] == old_rows
     assert d1.catalog[contract.model_name] == old_catalog

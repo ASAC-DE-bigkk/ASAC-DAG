@@ -45,6 +45,7 @@ def _manifest(tmp_path):
                     "external": True,
                     "product_id": "traffic_flow_link_latest",
                     "publication_mode": "upsert",
+                    "upsert_strategy": "exact_set",
                     "zero_policy": "retain_last_good",
                     "primary_key": ["link_id"],
                 }
@@ -89,6 +90,13 @@ def test_load_domain_contracts_returns_the_exact_enabled_domain_set(tmp_path):
     contracts = loader(_manifest(tmp_path), "weather", WEATHER_PRODUCTS)
 
     assert [contract.product_id for contract in contracts] == sorted(WEATHER_PRODUCTS)
+
+
+def test_load_contracts_reads_opt_in_upsert_strategy(tmp_path):
+    contract = contract_module.load_contracts(_manifest(tmp_path), ["traffic_flow_link_latest"])[0]
+
+    assert contract.publication_mode == "upsert"
+    assert contract.upsert_strategy == "exact_set"
 
 
 def test_non_exact_domain_exporter_can_load_its_intended_citydata_subset(tmp_path):

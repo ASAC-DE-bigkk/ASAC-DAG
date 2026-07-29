@@ -55,6 +55,7 @@
 | `freshness_slo_minutes` | int | > 0 | — | `event_time` 최신값 지연 임계. **v1.1: `event_time` 선언 제품은 조건부 필수** (§3.1 참조) |
 | `shape` | enum | `wide` \| `rollup` \| `event` | 없음 | 서빙 형태 분류 |
 | `reliability` | object | rollup 전용, [§5.3](#53-reliability-rollup-전용) | 없음 | 표본 신뢰도 정책 |
+| `upsert_strategy` | enum | `merge` \| `exact_set` (`publication_mode: upsert`에서만) | `merge` | `exact_set`은 전체 Gold 결과로 staging 교체·복구를 수행 |
 
 ### 3.3 YAML에서 제외 — 실측·타 소유
 
@@ -78,6 +79,8 @@ Publisher가 `_catalog`/publication 테이블에 매 게시마다 기록한다.
 | `append` | 최근 구간만 삭제→재삽입 + 신규. 이력·누적형 | 멱등(구간 재적재) |
 
 `snapshot`은 DROP→CREATE 중간 상태를 외부에 노출하지 않도록 staging 적재 후 pointer를 마지막에 전환한다(원자 게시). 게시할 것이 없으면(0행 등) [§5.1](#51-zero_policy)에 따른다.
+
+`upsert_strategy: exact_set`은 `upsert`의 제품 식별·PK 의미는 유지하되, 이번 실행의 전체 Gold 결과를 정본으로 간주한다. Publisher는 staging 적재 후 원자 전환하고, read-back·catalog·smoke 실패 시 직전 정상본을 복구한다. 미선언 `upsert`는 기존 `merge` 방식으로 유지된다.
 
 ## 5. 데이터 품질 게이트
 
@@ -186,6 +189,7 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 
 **개정 이력**
 
+- **v1.2** (2026-07-30): 선택 필드 `upsert_strategy` 추가. `exact_set`은 명시 opt-in한 upsert 제품에만 staging 교체·last-known-good 복구를 적용하며, 미선언 제품과 다른 도메인의 upsert 동작은 `merge`로 유지.
 - **v1.1** (2026-07-24, [보강 결정](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/478#issuecomment-5065980055)): `freshness_slo_minutes` 조건부 필수 승격(§3.1) + §7.4 운영 감시 책임 신설. 필수 규칙 변경이지만 **채택 전 amend**(당시 `meta.serving` 채택 도메인 0, 마이그레이션 비용 0)라 v2가 아닌 v1.1로 처리. Pilot 채택 이후부터는 본 §8을 엄격 적용한다.
 - **v1** (2026-07-23, [최종 결정](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/478#issuecomment-5056366122)): 최초 확정.
 

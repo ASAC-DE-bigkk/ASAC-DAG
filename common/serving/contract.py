@@ -25,6 +25,7 @@ class ServingContract:
     publication_mode: str
     zero_policy: str
     primary_key: tuple[str, ...]
+    upsert_strategy: str | None = None
     partial_min_ratio: float | None = None
     reliability: dict[str, Any] | None = None
     event_time: str | None = None
@@ -91,6 +92,7 @@ def load_contracts(
                 publication_mode=str(serving.get("publication_mode", "")),
                 zero_policy=str(serving.get("zero_policy", "retain_last_good")),
                 primary_key=tuple(serving.get("primary_key") or ()),
+                upsert_strategy=serving.get("upsert_strategy"),
                 partial_min_ratio=partial.get("min_publish_ratio") if isinstance(partial, dict) else None,
                 reliability=serving.get("reliability") if isinstance(serving.get("reliability"), dict) else None,
                 event_time=serving.get("event_time"),
