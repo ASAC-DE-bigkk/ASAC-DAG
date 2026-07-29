@@ -27,6 +27,8 @@ class FakeD1:
         self.tables: dict[str, list[dict[str, Any]]] = {}
         self.primary_keys: dict[str, tuple[str, ...]] = {}
         self.catalog: dict[str, dict[str, Any]] = {}
+        self.ledger: list[dict[str, Any]] = []
+        self.previous_tables: dict[str, list[dict[str, Any]]] = {}
 
     def table_row_count(self, name: str) -> int:
         return len(self.tables.get(name, []))
@@ -48,8 +50,19 @@ class FakeD1:
         self.primary_keys[name] = tuple(primary_key)
 
     def replace_table(self, name: str, columns, rows, primary_key) -> None:
+        if name in self.tables:
+            self.previous_tables[name] = [dict(row) for row in self.tables[name]]
         self.primary_keys[name] = tuple(primary_key)
         self.tables[name] = [dict(r) for r in rows]  # atomic swap semantics
+
+    def restore_replaced_table(self, name: str) -> None:
+        if name in self.previous_tables:
+            self.tables[name] = self.previous_tables.pop(name)
+        else:
+            self.tables.pop(name, None)
+
+    def finalize_replaced_table(self, name: str) -> None:
+        self.previous_tables.pop(name, None)
 
     def delete_where_gte(self, name: str, column: str, trino_literal: str) -> None:
         cutoff = trino_literal.strip().strip("'")
@@ -74,6 +87,12 @@ class FakeD1:
         for row in catalog_rows:
             self.catalog[row["name"]] = dict(row)
 
+    def delete_catalog_row(self, name: str) -> None:
+        self.catalog.pop(name, None)
+
+    def append_publication_ledger(self, record: dict[str, Any]) -> None:
+        self.ledger.append(dict(record))
+
     def catalog_domain_count(self, model_names: set[str]) -> int:
         return sum(1 for n in model_names if n in self.catalog)
 
@@ -83,6 +102,13 @@ class ForgetfulCatalogD1(FakeD1):
 
     def upsert_catalog(self, catalog_rows) -> None:  # noqa: D401 - intentional no-op
         pass
+
+
+class ExplodingCatalogD1(FakeD1):
+    """Fails after snapshot promotion, before a new catalog value is committed."""
+
+    def upsert_catalog(self, catalog_rows) -> None:
+        raise RuntimeError("simulated catalog write failure")
 
 
 class FakeSource:
@@ -248,7 +274,25 @@ def test_catalog_self_check_detects_missing_registration():
     with pytest.raises(PublicationError) as excinfo:
         publish([contract], source, d1, FakeSmoke(), source_run_id="run-6")
     assert any("자기검증" in f for f in excinfo.value.report.failures)
-    assert d1.table_row_count(contract.model_name) == 3  # data written, but registration missing => fail
+    assert d1.table_row_count(contract.model_name) == 0  # failed first publication leaves no partial snapshot
+
+
+def test_snapshot_catalog_registration_failure_restores_last_good_and_records_ledger():
+    contract = _contract()
+    d1 = ExplodingCatalogD1()
+    old_rows = _rows(2)
+    old_catalog = {"name": contract.model_name, "row_count": 2, "publication_id": "old"}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))})
+
+    with pytest.raises(PublicationError):
+        publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="catalog-failure")
+
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert d1.ledger[-1]["outcome"] == "failed"
+    assert d1.ledger[-1]["rollback_status"] == "restored"
 
 
 def test_smoke_failure_on_external_product_raises():
@@ -259,6 +303,24 @@ def test_smoke_failure_on_external_product_raises():
     with pytest.raises(PublicationError) as excinfo:
         publish([contract], source, d1, FakeSmoke(status="failed"), source_run_id="run-7")
     assert any("smoke" in f for f in excinfo.value.report.failures)
+
+
+def test_snapshot_smoke_failure_restores_last_good_catalog_and_records_ledger():
+    contract = _contract()
+    d1 = FakeD1()
+    old_rows = _rows(2)
+    old_catalog = {"name": contract.model_name, "row_count": 2, "publication_id": "old"}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))})
+
+    with pytest.raises(PublicationError):
+        publish([contract], source, d1, FakeSmoke(status="failed"), source_run_id="smoke-failure")
+
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert d1.ledger[-1]["outcome"] == "failed"
+    assert d1.ledger[-1]["rollback_status"] == "restored"
 
 
 def test_not_evaluated_smoke_is_recorded_without_failing_d1_publication():

@@ -7,7 +7,15 @@ from typing import Any
 
 import pytest
 
-from common.serving.d1_client import CATALOG_COLUMNS, HttpD1Client
+from common.serving.d1_client import (
+    CATALOG_COLUMNS,
+    MAX_API_BATCH_BYTES,
+    MAX_SQL_STATEMENT_BYTES,
+    MAX_STATEMENTS_PER_API_BATCH,
+    HttpD1Client,
+    build_insert_statements,
+    group_api_batches,
+)
 
 
 class LegacyCatalogClient(HttpD1Client):
@@ -29,6 +37,9 @@ class LegacyCatalogClient(HttpD1Client):
             self.columns.append(sql.split('"')[1])
         return []
 
+    def _query_batch(self, statements: list[str]) -> list[list[dict[str, Any]]]:
+        return [self._query(statement) for statement in statements]
+
 
 class SqliteCatalogClient(HttpD1Client):
     """Real SQLite seam for preserving fields outside the v1.1 catalog model."""
@@ -48,6 +59,9 @@ class SqliteCatalogClient(HttpD1Client):
         cursor = self.connection.execute(sql)
         self.connection.commit()
         return [dict(row) for row in cursor.fetchall()] if cursor.description else []
+
+    def _query_batch(self, statements: list[str]) -> list[list[dict[str, Any]]]:
+        return [self._query(statement) for statement in statements]
 
 
 def _catalog_row() -> dict[str, Any]:
@@ -159,3 +173,101 @@ def test_snapshot_replacement_requires_a_contract_primary_key():
             [{"product_row_id": "row-1"}],
             (),
         )
+
+
+def test_insert_statements_pack_rows_by_rendered_utf8_sql_bytes():
+    rows = [{"product_row_id": f"row-{index}", "label": "용신동" * 300} for index in range(120)]
+
+    statements = build_insert_statements(
+        "gold_weather_place_risk_window",
+        [("product_row_id", "varchar"), ("label", "varchar")],
+        rows,
+        replace=False,
+    )
+
+    assert len(statements) > 1
+    assert all(len(statement.encode("utf-8")) <= MAX_SQL_STATEMENT_BYTES for statement in statements)
+    assert sum(statement.count("('row-") for statement in statements) == len(rows)
+
+
+def test_insert_statements_reject_one_row_that_exceeds_sql_budget_before_http():
+    with pytest.raises(ValueError, match=str(MAX_SQL_STATEMENT_BYTES)):
+        build_insert_statements(
+            "gold_weather_place_risk_window",
+            [("product_row_id", "varchar"), ("label", "varchar")],
+            [{"product_row_id": "oversized", "label": "용" * 30_000}],
+            replace=False,
+        )
+
+
+def test_group_api_batches_limits_statement_count_and_total_utf8_body_bytes():
+    statement = "INSERT INTO risk (label) VALUES ('" + ("a" * 60_000) + "');"
+
+    batches = group_api_batches([statement] * 9)
+
+    assert len(batches) == 3
+    assert all(len(batch) <= MAX_STATEMENTS_PER_API_BATCH for batch in batches)
+    assert all(
+        sum(len(sql.encode("utf-8")) for sql in batch) <= MAX_API_BATCH_BYTES
+        for batch in batches
+    )
+
+
+def test_query_batch_sends_one_cloudflare_batch_request(monkeypatch):
+    d1 = HttpD1Client(api_url="https://example.invalid", token="test-token")
+    sent: list[dict[str, Any]] = []
+
+    def fake_request(body: dict[str, Any]) -> dict[str, Any]:
+        sent.append(body)
+        return {
+            "success": True,
+            "result": [
+                {"success": True, "results": [{"id": 1}]},
+                {"success": True, "results": [{"id": 2}]},
+            ],
+        }
+
+    monkeypatch.setattr(d1, "_request", fake_request, raising=False)
+
+    assert d1._query_batch(["SELECT 1;", "SELECT 2;"]) == [[{"id": 1}], [{"id": 2}]]
+    assert sent == [{"batch": [{"sql": "SELECT 1;"}, {"sql": "SELECT 2;"}]}]
+
+
+def test_snapshot_restore_reactivates_previous_table_after_post_promotion_failure():
+    d1 = SqliteCatalogClient()
+    table = "gold_weather_place_current_outlook"
+    columns = [("product_row_id", "varchar"), ("forecast_at", "timestamp")]
+
+    d1.replace_table(table, columns, [{"product_row_id": "old", "forecast_at": "old"}], ("product_row_id",))
+    d1.replace_table(table, columns, [{"product_row_id": "new", "forecast_at": "new"}], ("product_row_id",))
+    d1.restore_replaced_table(table)
+
+    assert d1._query(f'SELECT product_row_id FROM "{table}";') == [{"product_row_id": "old"}]
+    assert d1._query(f"SELECT name FROM sqlite_master WHERE name = '{table}__previous';") == []
+
+
+def test_publication_ledger_is_append_only_and_records_publication_stage():
+    d1 = SqliteCatalogClient()
+    record = {
+        "publication_id": "p-1",
+        "product_id": "weather_place_risk_window",
+        "model_name": "gold_weather_place_risk_window",
+        "source_run_id": "run-1",
+        "attempted_at": "2026-07-29T00:00:00+00:00",
+        "outcome": "published",
+        "stage": "completed",
+        "source_row_count": 304878,
+        "published_row_count": 304878,
+        "d1_row_count": 304878,
+        "api_smoke_status": "not_evaluated",
+        "rollback_status": "not_needed",
+        "reason": "ok",
+    }
+
+    d1.append_publication_ledger(record)
+
+    assert d1._query("SELECT publication_id, outcome, stage FROM _publication_ledger;") == [
+        {"publication_id": "p-1", "outcome": "published", "stage": "completed"}
+    ]
+    with pytest.raises(sqlite3.IntegrityError):
+        d1.append_publication_ledger(record)

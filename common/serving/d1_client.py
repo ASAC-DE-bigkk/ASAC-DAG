@@ -8,6 +8,7 @@ it reads its token/account/db from the environment and never logs the token.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Protocol, Sequence
 
 Column = tuple[str, str]  # (name, trino_type)
@@ -16,7 +17,12 @@ _SQLITE_TYPE = {
     "integer": "INTEGER", "bigint": "INTEGER", "smallint": "INTEGER", "tinyint": "INTEGER",
     "boolean": "INTEGER", "double": "REAL", "real": "REAL",
 }
-_INSERT_BATCH = 100
+# Cloudflare D1 permits a 100,000-byte SQL statement. Leave margin for the
+# statement itself and keep API request batches bounded so staging writes stay
+# comfortably below the query-duration limit.
+MAX_SQL_STATEMENT_BYTES = 80_000
+MAX_STATEMENTS_PER_API_BATCH = 4
+MAX_API_BATCH_BYTES = 256_000
 
 
 def sqlite_type(trino_type: str) -> str:
@@ -34,6 +40,84 @@ def sql_literal(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _utf8_bytes(value: str) -> int:
+    return len(value.encode("utf-8"))
+
+
+def build_insert_statements(
+    name: str,
+    columns: Sequence[Column],
+    rows: Sequence[dict[str, Any]],
+    *,
+    replace: bool,
+) -> list[str]:
+    """Render INSERT statements without exceeding D1's per-statement budget."""
+
+    if not rows:
+        return []
+    colnames = [column for column, _ in columns]
+    verb = "INSERT OR REPLACE INTO" if replace else "INSERT INTO"
+    head = f'{verb} "{name}" ("' + '", "'.join(colnames) + '") VALUES\n'
+    tail = ";"
+    fixed_bytes = _utf8_bytes(head + tail)
+    rendered_rows = [
+        "(" + ", ".join(sql_literal(row.get(column)) for column in colnames) + ")"
+        for row in rows
+    ]
+
+    statements: list[str] = []
+    current_rows: list[str] = []
+    current_bytes = fixed_bytes
+    for rendered in rendered_rows:
+        rendered_bytes = _utf8_bytes(rendered)
+        separator_bytes = _utf8_bytes(",\n") if current_rows else 0
+        if fixed_bytes + rendered_bytes > MAX_SQL_STATEMENT_BYTES:
+            raise ValueError(
+                f"{name}: one rendered row exceeds SQL byte budget "
+                f"{MAX_SQL_STATEMENT_BYTES}"
+            )
+        if current_rows and current_bytes + separator_bytes + rendered_bytes > MAX_SQL_STATEMENT_BYTES:
+            statements.append(head + ",\n".join(current_rows) + tail)
+            current_rows = []
+            current_bytes = fixed_bytes
+            separator_bytes = 0
+        current_rows.append(rendered)
+        current_bytes += separator_bytes + rendered_bytes
+
+    if current_rows:
+        statements.append(head + ",\n".join(current_rows) + tail)
+    return statements
+
+
+def _api_batch_bytes(statements: Sequence[str]) -> int:
+    body = {"batch": [{"sql": statement} for statement in statements]}
+    return _utf8_bytes(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+
+
+def group_api_batches(statements: Sequence[str]) -> list[list[str]]:
+    """Group already-safe statements into bounded Cloudflare D1 API batches."""
+
+    batches: list[list[str]] = []
+    current: list[str] = []
+    for statement in statements:
+        if _utf8_bytes(statement) > MAX_SQL_STATEMENT_BYTES:
+            raise ValueError(f"statement exceeds SQL byte budget {MAX_SQL_STATEMENT_BYTES}")
+        candidate = [*current, statement]
+        if current and (
+            len(candidate) > MAX_STATEMENTS_PER_API_BATCH
+            or _api_batch_bytes(candidate) > MAX_API_BATCH_BYTES
+        ):
+            batches.append(current)
+            current = [statement]
+        else:
+            current = candidate
+        if _api_batch_bytes(current) > MAX_API_BATCH_BYTES:
+            raise ValueError(f"statement exceeds API batch byte budget {MAX_API_BATCH_BYTES}")
+    if current:
+        batches.append(current)
+    return batches
+
+
 class D1Client(Protocol):
     def table_row_count(self, name: str) -> int: ...
     def primary_key_stats(self, name: str, primary_key: Sequence[str]) -> tuple[int, int, int]: ...
@@ -41,10 +125,14 @@ class D1Client(Protocol):
     def catalog_row(self, name: str) -> dict[str, Any] | None: ...
     def ensure_table(self, name: str, columns: Sequence[Column], primary_key: Sequence[str]) -> None: ...
     def replace_table(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], primary_key: Sequence[str]) -> None: ...
+    def restore_replaced_table(self, name: str) -> None: ...
+    def finalize_replaced_table(self, name: str) -> None: ...
     def delete_where_gte(self, name: str, column: str, trino_literal: str) -> None: ...
     def insert_rows(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], *, replace: bool) -> None: ...
     def upsert_catalog(self, catalog_rows: Sequence[dict[str, Any]]) -> None: ...
+    def delete_catalog_row(self, name: str) -> None: ...
     def catalog_domain_count(self, model_names: set[str]) -> int: ...
+    def append_publication_ledger(self, record: dict[str, Any]) -> None: ...
 
 
 # ---- catalog schema (single source for both real client and Worker) -----------------
@@ -60,6 +148,19 @@ CATALOG_COLUMNS = tuple(name for name, _ in CATALOG_COLUMN_TYPES)
 CATALOG_DDL = "CREATE TABLE IF NOT EXISTS _catalog (" + ", ".join(
     f"{name} {column_type}" for name, column_type in CATALOG_COLUMN_TYPES
 ) + ");"
+PUBLICATION_LEDGER_COLUMN_TYPES = (
+    ("publication_id", "TEXT PRIMARY KEY"), ("product_id", "TEXT NOT NULL"),
+    ("model_name", "TEXT NOT NULL"), ("source_run_id", "TEXT NOT NULL"),
+    ("attempted_at", "TEXT NOT NULL"), ("outcome", "TEXT NOT NULL"),
+    ("stage", "TEXT NOT NULL"), ("source_row_count", "INTEGER NOT NULL"),
+    ("published_row_count", "INTEGER NOT NULL"), ("d1_row_count", "INTEGER NOT NULL"),
+    ("api_smoke_status", "TEXT NOT NULL"), ("rollback_status", "TEXT NOT NULL"),
+    ("reason", "TEXT NOT NULL"),
+)
+PUBLICATION_LEDGER_COLUMNS = tuple(name for name, _ in PUBLICATION_LEDGER_COLUMN_TYPES)
+PUBLICATION_LEDGER_DDL = "CREATE TABLE IF NOT EXISTS _publication_ledger (" + ", ".join(
+    f"{name} {column_type}" for name, column_type in PUBLICATION_LEDGER_COLUMN_TYPES
+) + ");"
 
 
 class HttpD1Client:
@@ -69,21 +170,32 @@ class HttpD1Client:
         self._api_url = api_url
         self._token = token  # never logged
 
-    def _query(self, sql: str) -> list[dict[str, Any]]:
-        import json
-
+    def _request(self, body: dict[str, Any]) -> dict[str, Any]:
         import requests  # lazy import so tests never need it
 
         resp = requests.post(
-            self._api_url, json={"sql": sql},
+            self._api_url, json=body,
             headers={"Authorization": f"Bearer {self._token}"}, timeout=120,
         )
-        body = resp.json()
-        if not body.get("success"):
+        response = resp.json()
+        if not response.get("success"):
             # Surface D1 errors without echoing the request (which never carries the token anyway).
-            raise RuntimeError(f"D1 API 실패: {json.dumps(body.get('errors'))[:300]}")
-        result = body.get("result") or []
+            raise RuntimeError(f"D1 API 실패: {json.dumps(response.get('errors'))[:300]}")
+        return response
+
+    def _query(self, sql: str) -> list[dict[str, Any]]:
+        response = self._request({"sql": sql})
+        result = response.get("result") or []
         return (result[-1].get("results") or []) if result else []
+
+    def _query_batch(self, statements: Sequence[str]) -> list[list[dict[str, Any]]]:
+        if not statements:
+            return []
+        response = self._request({"batch": [{"sql": statement} for statement in statements]})
+        result = response.get("result") or []
+        if len(result) != len(statements) or any(not item.get("success") for item in result):
+            raise RuntimeError("D1 API batch 일부 statement 실패")
+        return [(item.get("results") or []) for item in result]
 
     def _create_ddl(
         self,
@@ -107,16 +219,17 @@ class HttpD1Client:
             f'ON "{name}" ("{columns}");'
         )
 
+    def _table_exists(self, name: str) -> bool:
+        out = self._query(
+            "SELECT name FROM sqlite_master "
+            f"WHERE type = 'table' AND name = {sql_literal(name)};"
+        )
+        return bool(out)
+
     def _insert_batches(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], *, replace: bool) -> None:
-        colnames = [c for c, _ in columns]
-        verb = "INSERT OR REPLACE INTO" if replace else "INSERT INTO"
-        head = f'{verb} "{name}" ("' + '", "'.join(colnames) + '") VALUES\n'
-        for i in range(0, len(rows), _INSERT_BATCH):
-            values = ",\n".join(
-                "(" + ", ".join(sql_literal(row.get(c)) for c in colnames) + ")"
-                for row in rows[i:i + _INSERT_BATCH]
-            )
-            self._query(head + values + ";")
+        statements = build_insert_statements(name, columns, rows, replace=replace)
+        for batch in group_api_batches(statements):
+            self._query_batch(batch)
 
     def table_row_count(self, name: str) -> int:
         try:
@@ -178,7 +291,29 @@ class HttpD1Client:
         # global index-name collision on the next snapshot replacement.
         self._query(self._create_ddl(staging, columns, primary_key))
         self._insert_batches(staging, columns, rows, replace=False)
-        self._query(f'DROP TABLE IF EXISTS "{name}"; ALTER TABLE "{staging}" RENAME TO "{name}";')
+        previous = f"{name}__previous"
+        if self._table_exists(previous):
+            raise RuntimeError(f"{name}: unfinished previous snapshot exists; restore or finalize it before publishing")
+        if self._table_exists(name):
+            self._query(
+                f'ALTER TABLE "{name}" RENAME TO "{previous}"; '
+                f'ALTER TABLE "{staging}" RENAME TO "{name}";'
+            )
+        else:
+            self._query(f'ALTER TABLE "{staging}" RENAME TO "{name}";')
+
+    def restore_replaced_table(self, name: str) -> None:
+        previous = f"{name}__previous"
+        if self._table_exists(previous):
+            self._query(
+                f'DROP TABLE IF EXISTS "{name}"; '
+                f'ALTER TABLE "{previous}" RENAME TO "{name}";'
+            )
+        else:
+            self._query(f'DROP TABLE IF EXISTS "{name}";')
+
+    def finalize_replaced_table(self, name: str) -> None:
+        self._query(f'DROP TABLE IF EXISTS "{name}__previous";')
 
     def delete_where_gte(self, name: str, column: str, trino_literal: str) -> None:
         self._query(f'DELETE FROM "{name}" WHERE "{column}" >= {trino_literal};')
@@ -219,9 +354,19 @@ class HttpD1Client:
                 f'ON CONFLICT("name") DO UPDATE SET {update_columns};'
             )
 
+    def delete_catalog_row(self, name: str) -> None:
+        self._ensure_catalog_schema()
+        self._query(f"DELETE FROM _catalog WHERE name = {sql_literal(name)};")
+
     def catalog_domain_count(self, model_names: set[str]) -> int:
         if not model_names:
             return 0
         names = ", ".join(sql_literal(n) for n in sorted(model_names))
         out = self._query(f"SELECT count(*) c FROM _catalog WHERE name IN ({names});")
         return int(out[0].get("c", 0)) if out else 0
+
+    def append_publication_ledger(self, record: dict[str, Any]) -> None:
+        self._query(PUBLICATION_LEDGER_DDL)
+        columns = '", "'.join(PUBLICATION_LEDGER_COLUMNS)
+        values = ", ".join(sql_literal(record.get(column)) for column in PUBLICATION_LEDGER_COLUMNS)
+        self._query(f'INSERT INTO _publication_ledger ("{columns}") VALUES ({values});')

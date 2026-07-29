@@ -24,6 +24,10 @@ def test_traffic_serving_export_delegates_all_six_products_to_common_publisher(m
 
     factory_module.build_serving_export_dag = build_serving_export_dag
     monkeypatch.setitem(sys.modules, "common.serving.dag_factory", factory_module)
+    asset_module = types.ModuleType("traffic_ingest.assets")
+    asset_module.TRAFFIC_GOLD_PUBLICATION_READY_ASSET = "iceberg://traffic/gold/publication-ready"
+    asset_module.schedule_asset = lambda asset: ("asset", asset)
+    monkeypatch.setitem(sys.modules, "traffic_ingest.assets", asset_module)
 
     spec = importlib.util.spec_from_file_location("traffic_serving_export_under_test", DAG_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -42,7 +46,7 @@ def test_traffic_serving_export_delegates_all_six_products_to_common_publisher(m
             "traffic_flow_anomaly_current",
         ],
         "exact_domain_contracts": True,
-        "schedule": None,
+        "schedule": ("asset", "iceberg://traffic/gold/publication-ready"),
         "dag_id": "traffic_serving_export",
         "target": "dev",
         "schema": "traffic",
@@ -60,3 +64,10 @@ def test_traffic_export_is_visible_to_airflow_safe_mode():
 
 def test_traffic_export_is_the_only_traffic_serving_dag():
     assert not (DAG_PATH.parent / "traffic_insight_serving_export.py").exists()
+
+
+def test_traffic_export_subscribes_only_to_the_validated_gold_terminal_asset():
+    source = DAG_PATH.read_text(encoding="utf-8")
+
+    assert "TRAFFIC_GOLD_PUBLICATION_READY_ASSET" in source
+    assert "schedule=schedule_asset(TRAFFIC_GOLD_PUBLICATION_READY_ASSET)" in source

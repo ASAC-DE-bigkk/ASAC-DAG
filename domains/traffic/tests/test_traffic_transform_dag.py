@@ -102,6 +102,9 @@ def test_gold_dag_schedule_and_guard_order():
     assert dag.task_dict["resolve_traffic_gold_snapshot_run"].downstream_task_ids == {
         "admit_traffic_gold_snapshot"
     }
+    assert module.TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF in dag.task_dict[
+        "mark_traffic_gold_success"
+    ].kwargs["outlets"]
 
 
 @pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])
