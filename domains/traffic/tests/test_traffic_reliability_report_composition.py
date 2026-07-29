@@ -438,6 +438,27 @@ def test_pipeline_latest_stage_failure_is_fail():
     assert result["status"] == "FAIL"
 
 
+def test_pipeline_daily_contract_failure_is_visible_and_forces_red():
+    audit = {
+        "status": "FAIL",
+        "selector": "ask_seoul_traffic_daily_assurance",
+        "elapsed_seconds": 12.5,
+        "selected_count": 212,
+        "failure": "dbt_exit_1",
+    }
+
+    result = composition.compose_traffic_pipeline_report(
+        data_plane=_pipeline_data_plane(),
+        stages=_pipeline_stages(),
+        history=[],
+        detected_at=datetime(2026, 7, 19, 9, 0, tzinfo=report.KST),
+        contract_audit=audit,
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["contract_audit"] == audit
+
+
 def test_pipeline_recovered_stage_failure_is_warn():
     stages = _pipeline_stages(status="WARN", stage_status="WARN")
     stages["stages"][0]["reason"] = "recovered_failure"

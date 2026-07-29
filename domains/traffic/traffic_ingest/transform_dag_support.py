@@ -31,6 +31,8 @@ from traffic_ingest.silver_snapshot_fence import (
     collect_silver_snapshot_evidence,
 )
 from traffic_ingest.transform_admission import (
+    GOLD_SUCCESS_MARKER_KEY,
+    SILVER_SUCCESS_MARKER_KEY,
     TransformAdmissionError,
     TransformIdentity,
     TransformSuccessMarker,
@@ -40,8 +42,6 @@ from traffic_ingest.transform_specs import DbtPhaseSpec
 
 
 TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
-SILVER_SUCCESS_MARKER_KEY = "ask_seoul.traffic.silver_transform.last_success.v1"
-GOLD_SUCCESS_MARKER_KEY = "ask_seoul.traffic.gold_transform.last_success.v1"
 SILVER_OUTPUT_EVIDENCE_XCOM_KEY = "traffic_silver_output_evidence"
 STALE_INCIDENT_RUN_IDS_XCOM_KEY = "traffic_stale_incident_run_ids"
 SILVER_ASSET_CONTRACT = "traffic_incident_silver.v1"

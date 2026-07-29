@@ -536,7 +536,7 @@ def test_traffic_formatter_error_remains_task_failure(monkeypatch):
         module.collect_and_notify(run_id="report-run")
 
 
-def test_traffic_pipeline_reliability_dag_has_three_serial_tasks(monkeypatch):
+def test_traffic_pipeline_reliability_dag_has_four_serial_tasks(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv(
         "ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/webhook"
@@ -549,16 +549,20 @@ def test_traffic_pipeline_reliability_dag_has_three_serial_tasks(monkeypatch):
     assert dag.kwargs["catchup"] is False
     assert dag.kwargs["max_active_runs"] == 1
     assert set(dag.task_dict) == {
+        "audit_traffic_dbt_contracts",
         "collect_traffic_data_plane",
         "compose_traffic_pipeline_reliability",
         "deliver_traffic_pipeline_reliability",
     }
+    audit = dag.task_dict["audit_traffic_dbt_contracts"]
     collect = dag.task_dict["collect_traffic_data_plane"]
     compose = dag.task_dict["compose_traffic_pipeline_reliability"]
     deliver = dag.task_dict["deliver_traffic_pipeline_reliability"]
+    assert audit.kwargs["pool"] == "trino_traffic_heavy"
     assert collect.kwargs["pool"] == "trino_traffic_heavy"
     assert "pool" not in compose.kwargs
     assert "pool" not in deliver.kwargs
+    assert audit.downstream_task_ids == {collect.task_id}
     assert collect.downstream_task_ids == {compose.task_id}
     assert compose.downstream_task_ids == {deliver.task_id}
     assert all(

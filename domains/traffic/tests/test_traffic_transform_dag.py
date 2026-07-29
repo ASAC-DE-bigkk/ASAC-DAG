@@ -47,7 +47,7 @@ def _silver_ti(
     )
 
 
-def test_silver_dag_uses_eight_observable_tasks_without_a_stale_pin_gap():
+def test_silver_dag_uses_six_observable_tasks_without_a_stale_pin_gap():
     module = load_transform_module()
     dag = module.dag
 
@@ -56,8 +56,6 @@ def test_silver_dag_uses_eight_observable_tasks_without_a_stale_pin_gap():
     assert set(dag.task_ids) == {
         "validate_dev_runtime",
         "dbt_deps",
-        "dbt_source_freshness",
-        "dbt_test_traffic_bronze_source_contract",
         module.SNAPSHOT_TASK_ID,
         "dbt_run_silver",
         "publish_traffic_incident_silver_asset",
@@ -67,14 +65,8 @@ def test_silver_dag_uses_eight_observable_tasks_without_a_stale_pin_gap():
         "dbt_deps"
     }
     assert dag.task_dict["dbt_deps"].downstream_task_ids == {
-        "dbt_source_freshness"
+        "resolve_traffic_snapshot_run"
     }
-    assert dag.task_dict["dbt_source_freshness"].downstream_task_ids == {
-        "dbt_test_traffic_bronze_source_contract"
-    }
-    assert dag.task_dict[
-        "dbt_test_traffic_bronze_source_contract"
-    ].downstream_task_ids == {"resolve_traffic_snapshot_run"}
     assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {
         "dbt_run_silver"
     }
@@ -98,9 +90,6 @@ def test_gold_dag_schedule_and_guard_order():
     }
     assert dag.kwargs["max_active_runs"] == 1
     assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
-        "select_traffic_test_tier"
-    }
-    assert dag.task_dict["select_traffic_test_tier"].downstream_task_ids == {
         "resolve_traffic_gold_snapshot_run"
     }
     assert dag.task_dict["resolve_traffic_gold_snapshot_run"].downstream_task_ids == {
@@ -123,25 +112,13 @@ def test_split_dags_allow_dev_or_prod_target(loader):
 @pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])
 def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
     module = loader()
-    critical_task_ids = {"dbt_run_silver", "dbt_test_gold"}
+    critical_task_ids = {"dbt_run_silver", "dbt_run_gold"}
     local_workload_task_ids = {"dbt_deps", "dbt_deps_gold"}
-    # Pre-write checks read Trino but do not need to serialize behind the
-    # heavy pool with actual writes: keeping them off it shortens the window
-    # between pinning a snapshot and dbt_run_silver, so the pin is less
-    # likely to be superseded by a newer Bronze run under pool contention.
-    light_trino_task_ids = {
-        "dbt_source_freshness",
-        "dbt_test_traffic_bronze_source_contract",
-    }
-
     assert module.TRINO_TRANSFORM_POOL == "trino_traffic_transform"
     for task_id, task in module.dbt_phase_tasks.items():
         if task_id in local_workload_task_ids:
             assert "pool" not in task.kwargs
             assert task.kwargs["op_kwargs"]["threads"] is None
-        elif task_id in light_trino_task_ids:
-            assert "pool" not in task.kwargs
-            assert task.kwargs["op_kwargs"]["threads"] == 2
         else:
             assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
             assert task.kwargs["op_kwargs"]["threads"] == 2
@@ -465,7 +442,7 @@ def test_metrics_use_latest_current_run_dbt_artifact_path():
     ti = types.SimpleNamespace(
         xcom_pull=lambda *, task_ids, key=None: (
             {"run_results_path": terminal_path}
-            if task_ids == "dbt_test_gold" and key is None
+            if task_ids == "dbt_run_gold" and key is None
             else None
         )
     )
@@ -489,11 +466,11 @@ def test_metrics_use_earlier_success_artifact_when_later_phases_have_none():
 
 def test_metrics_use_earlier_failure_artifact():
     module = load_transform_module()
-    failure_path = "/tmp/traffic-freshness-failure/run_results.json"
+    failure_path = "/tmp/traffic-silver-failure/run_results.json"
     ti = types.SimpleNamespace(
         xcom_pull=lambda *, task_ids, key=None: (
             {"dbt_run_results_path": failure_path}
-            if task_ids == "dbt_source_freshness" and key == module.DBT_FAILURE_XCOM_KEY
+            if task_ids == "dbt_run_silver" and key == module.DBT_FAILURE_XCOM_KEY
             else None
         )
     )

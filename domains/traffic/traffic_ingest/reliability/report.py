@@ -215,10 +215,14 @@ def compose_traffic_pipeline_report(
     stages: dict[str, Any],
     history: list[dict[str, Any]],
     detected_at: datetime,
+    contract_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data_status = str(data_plane.get("status") or "FAIL").upper()
     control_status = str(stages.get("status") or "UNKNOWN").upper()
     status = _pipeline_status(data_status, control_status)
+    if contract_audit is not None:
+        audit_status = str(contract_audit.get("status") or "FAIL").upper()
+        status = _pipeline_status(status, audit_status)
     stage_items = stages.get("stages")
     if not isinstance(stage_items, list):
         stage_items = []
@@ -247,6 +251,8 @@ def compose_traffic_pipeline_report(
         "stages": stage_items,
         "bottleneck": _select_bottleneck(stage_items),
     }
+    if contract_audit is not None:
+        result["contract_audit"] = dict(contract_audit)
     result["trend"] = _trend(history, report_date, status)
     return result
 

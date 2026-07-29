@@ -27,9 +27,6 @@ def test_flow_transform_owns_only_flow_silver_materialization():
         "dbt_run_flow_silver"
     }
     assert dag.task_dict["dbt_run_flow_silver"].downstream_task_ids == {
-        "dbt_test_flow_silver"
-    }
-    assert dag.task_dict["dbt_test_flow_silver"].downstream_task_ids == {
         "publish_traffic_flow_silver_asset"
     }
 
@@ -41,16 +38,13 @@ def test_flow_transform_phase_specs_are_narrow_and_pinned():
     assert list(specs) == [
         "dbt_deps_flow_silver",
         "dbt_run_flow_silver",
-        "dbt_test_flow_silver",
     ]
     assert specs["dbt_run_flow_silver"].selector == (
-        "ask_seoul_traffic_transform_flow_silver_model"
+        "ask_seoul_traffic_transform_flow_hot_build"
     )
-    assert specs["dbt_test_flow_silver"].selector == (
-        "ask_seoul_traffic_transform_flow_silver_tests"
-    )
+    assert specs["dbt_run_flow_silver"].dbt_command == "build"
     assert specs["dbt_run_flow_silver"].snapshot_required is True
-    assert specs["dbt_test_flow_silver"].snapshot_required is True
+    assert specs["dbt_run_flow_silver"].silver_persisted is True
 
 
 def test_flow_silver_asset_is_published_only_with_exact_pair_metadata():
