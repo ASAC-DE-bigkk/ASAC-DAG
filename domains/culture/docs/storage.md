@@ -16,6 +16,33 @@ raw/culture/<소스>/<데이터셋>/load_date=<KST>/ingest_ts=<UTC>/page-NNNN.<x
   (bronze 적재 실패는 `load_failed` 필드로 표기) → [reliability.md](reliability.md)
 - dev → 버킷 `seoul-dev`, prod → `seoul`.
 
+### `_manifest.json` — 완결 확인서 (ASK-Seoul#60 약속 ③)
+
+랜딩 폴더가 **완결됐는지, 무엇이 들어 있는지**를 raw 만 보고 알 수 있게 하는 파일.
+데이터를 전부 쓴 뒤 **마지막에** 쓰이므로(R1), 쓰다 만 폴더에는 존재하지 않는다.
+
+| 필드 | 의미 |
+|------|------|
+| `run_id` · `dataset` · `load_date` | 이 랜딩의 신원 |
+| `object_keys` | 이 랜딩이 쓴 객체 키 목록(버킷 상대 경로) — 리니지·백필의 근거 |
+| `expected_count` | `{rows_min, rows_baseline}` — 계약 하한과 직전 good 런(HWM) |
+| `actual_count` | `{rows, objects}` — 실제 수집 행·객체 |
+| `completed_at` | 확인서 작성 시각(ISO-8601 UTC). R1 상 이것이 랜딩 완료 시각 |
+| `status` | `complete` / `complete_with_violations` |
+| 그 외 | `title`·`kind`·`request_params`·`pages`·`bytes`·`checks` — culture 재현용 확장 |
+
+- **`expected_count` 는 원천이 주장하는 총계가 아니다.** 서울 openapi 의
+  `list_total_count` 는 신뢰 대상이 아니며(#147 — 실제 19,377행에 3,925를 `INFO-000`
+  으로 반환해 80% 조용한 누락), 그 값을 기대치로 삼으면 검증 장치가 거짓말을 정답으로
+  삼는다. 그래서 기대는 **계약 하한 + 직전 good 런**으로 정의한다.
+- **`status` 가 필요한 이유**: 확인서는 위반이 있어도 쓰인다. 볼륨 급락(#147)은 확인서를
+  쓴 **뒤** `result.error` 로 승격되므로, "확인서가 있다 = 온전하다" 가 성립하지 않는
+  랜딩이 실제로 남는다. 확인서만 보고 그걸 가르는 유일한 표식이다.
+- **소비 계약(R3)**: 확인서 없는 폴더는 읽지 않는다. `load_bronze_from_raw` 는 같은 run 이
+  넘긴 `object_keys` 만 읽고, 백필은 확인서 기반이라 양쪽 모두 자연히 만족한다.
+- 필드는 **추가만** 한다 — 기존 확인서를 소급 수정하지 않는다(#60 "기존 객체 이동 0건").
+  2026-07-29 이전 확인서 561건에는 아래 3필드가 없다.
+
 ## bronze Iceberg 테이블 (`load_bronze` 태스크가 매 run 적재)
 
 - `load_bronze`가 fetch_raw가 박제한 **R2 raw만 다시 읽어** 적재(API 재호출 없음) — 매 run의
