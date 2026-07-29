@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+import pytest
+
 from common.serving.d1_client import CATALOG_COLUMNS, HttpD1Client
 
 
@@ -35,8 +37,14 @@ class SqliteCatalogClient(HttpD1Client):
         super().__init__(api_url="https://example.invalid", token="test-token")
         self.connection = sqlite3.connect(":memory:")
         self.connection.row_factory = sqlite3.Row
+        self.queries: list[str] = []
 
     def _query(self, sql: str) -> list[dict[str, Any]]:
+        self.queries.append(sql)
+        if ";" in sql.rstrip(";"):
+            self.connection.executescript(sql)
+            self.connection.commit()
+            return []
         cursor = self.connection.execute(sql)
         self.connection.commit()
         return [dict(row) for row in cursor.fetchall()] if cursor.description else []
@@ -109,3 +117,45 @@ def test_catalog_upsert_preserves_legacy_serving_tier_on_existing_row():
         "description": _catalog_row()["description"],
         "serving_tier": "public",
     }
+
+
+def test_serving_table_enforces_contract_primary_key_and_reports_readback_counts():
+    d1 = SqliteCatalogClient()
+    table = "gold_weather_place_current_outlook"
+    columns = [("product_row_id", "varchar"), ("forecast_at", "timestamp")]
+
+    assert hasattr(d1, "primary_key_stats")
+    d1.ensure_table(table, columns, ("product_row_id",))
+    d1.insert_rows(table, columns, [{"product_row_id": "row-1", "forecast_at": "old"}], replace=False)
+    d1.insert_rows(table, columns, [{"product_row_id": "row-1", "forecast_at": "new"}], replace=True)
+
+    assert any('CREATE UNIQUE INDEX IF NOT EXISTS "gold_weather_place_current_outlook__pk_uq"' in query for query in d1.queries)
+    assert d1.primary_key_stats(table, ("product_row_id",)) == (1, 1, 0)
+
+
+def test_repeated_snapshot_swaps_keep_a_physical_primary_key_constraint():
+    d1 = SqliteCatalogClient()
+    table = "gold_weather_place_current_outlook"
+    columns = [("product_row_id", "varchar"), ("forecast_at", "timestamp")]
+
+    d1.replace_table(table, columns, [{"product_row_id": "row-1", "forecast_at": "first"}], ("product_row_id",))
+    d1.replace_table(table, columns, [{"product_row_id": "row-1", "forecast_at": "second"}], ("product_row_id",))
+
+    assert any(row["unique"] for row in d1._query(f'PRAGMA index_list("{table}");'))
+    with pytest.raises(sqlite3.IntegrityError):
+        d1._query(
+            'INSERT INTO "gold_weather_place_current_outlook" ("product_row_id", "forecast_at") '
+            "VALUES ('row-1', 'duplicate');"
+        )
+
+
+def test_snapshot_replacement_requires_a_contract_primary_key():
+    d1 = SqliteCatalogClient()
+
+    with pytest.raises(ValueError, match="primary_key is required"):
+        d1.replace_table(
+            "gold_weather_place_current_outlook",
+            [("product_row_id", "varchar")],
+            [{"product_row_id": "row-1"}],
+            (),
+        )

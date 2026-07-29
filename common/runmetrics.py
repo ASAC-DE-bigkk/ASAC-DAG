@@ -12,7 +12,7 @@
 - HttpCore(#78) 카운터: 모듈 레벨 contextvar 컬렉터. track 이 활성화하는 동안에만
   HttpCore 가 요청/재시도를 집계한다(비활성 기본은 no-op — 기존 도메인 무영향).
 - sink(기본 R2, #77 errors sink 동형): 오브젝트 키
-  `metrics/date=YYYY-MM-DD/domain=<domain>/<dag_id>__<task_id>__<run_id>__try<N>.json`
+  `ops/metrics/<domain>/observed_date=YYYY-MM-DD/<dag_id>__<task_id>__<run_id>__try<N>.json`
   (dev=seoul-dev, prod=seoul 기존 버킷 재사용 — R2_DEV_* dev 우선 규약).
   ASAC_METRICS_DIR 설정 시 로컬 파일 sink(디버그) — 선택 로직은 `resolve_sink()`.
   sink 를 분리해 나중에 DB sink 로 교체 가능(write(record) 계약).
@@ -272,21 +272,24 @@ class MetricsR2Sink:
     - 버킷/자격은 errors sink 와 같은 env 규약: R2_ENDPOINT/R2_ACCESS_KEY_ID/
       R2_SECRET_ACCESS_KEY/R2_BUCKET_NAME, dev 타깃이면 R2_DEV_* 우선(버킷 분리 —
       dev=seoul-dev, prod=seoul 기존 버킷 재사용).
-    - 오브젝트 키: metrics/date=YYYY-MM-DD/domain=<domain>/<이름>.json
+    - 오브젝트 키: ops/metrics/<domain>/observed_date=YYYY-MM-DD/<이름>.json (#60/#573)
       (이름 규약은 _record_object_name — bronze 는 dag/task/run/try, silver 는 모델/invocation).
     - put_object 주입은 테스트용(가짜 클라이언트) — 미지정 시 boto3 지연 임포트.
     - 나중에 DB sink 교체 시 write(record) 계약만 유지하면 된다.
     """
 
-    def __init__(self, *, prefix: str = "metrics",
+    def __init__(self, *, prefix: str | None = None,
                  put_object: Callable[[str, bytes], None] | None = None) -> None:
-        self.prefix = prefix
+        # ops 존 관측 카테고리(ASK-Seoul#60/#573) — ops/metrics/<domain>/observed_date=…/…
+        self.prefix = prefix if prefix is not None else os.environ.get(
+            "ASAC_METRICS_PREFIX", "ops/metrics")
         self._put_object = put_object
 
     def object_key(self, record: dict[str, Any]) -> str:
+        # 도메인이 카테고리 다음 bare 세그먼트, 날짜 키는 observed_date= 로 통일(#60).
         return (
-            f"{self.prefix}/date={_record_date(record)}"
-            f"/domain={_safe_segment(record.get('domain'))}"
+            f"{self.prefix}/{_safe_segment(record.get('domain'))}"
+            f"/observed_date={_record_date(record)}"
             f"/{_record_object_name(record)}"
         )
 

@@ -107,10 +107,11 @@ def test_registry_unknown_slug_falls_back_to_unhandled():
 
 
 # ── 경로 규약 ───────────────────────────────────────────────────────────────────
-def test_object_key_follows_date_first_convention():
+def test_object_key_follows_ops_domain_first_convention():
+    # ops 존 도메인-우선(#60/#573) — ops/errors/<domain>/observed_date=…/dag_id=…/
     key = build_object_key(_make_problem())
     assert key == (
-        "errors/observed_date=2026-07-03/domain=traffic/dag_id=traffic_incident_bronze/"
+        "ops/errors/traffic/observed_date=2026-07-03/dag_id=traffic_incident_bronze/"
         "scheduled__2026-07-03T03-10-00-00-00__031245123456_api-timeout.json"
     )
 
@@ -124,7 +125,7 @@ def test_object_key_sanitizes_reserved_characters():
 
 def test_object_key_missing_fields_become_unknown():
     key = build_object_key(_make_problem(domain=None, dag_id=None, run_id=None))
-    assert "/domain=unknown/" in key and "/dag_id=unknown/" in key
+    assert key.startswith("ops/errors/unknown/") and "/dag_id=unknown/" in key
     assert key.rsplit("/", 1)[1].startswith("unknown__")
 
 
@@ -175,7 +176,7 @@ def test_callback_writes_problem_from_context():
 
     assert len(written) == 1
     key, body = written[0]
-    assert "/domain=traffic/dag_id=traffic_incident_bronze/" in key
+    assert "ops/errors/traffic/" in key and "/dag_id=traffic_incident_bronze/" in key
     document = json.loads(body)
     assert document["type"] == "urn:asac:error:api-timeout"
     assert document["task_id"] == "land_seoul_traffic_raw"

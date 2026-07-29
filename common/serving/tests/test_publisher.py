@@ -25,10 +25,16 @@ COLUMNS: list[Column] = [("product_row_id", "varchar"), ("place_id", "varchar"),
 class FakeD1:
     def __init__(self) -> None:
         self.tables: dict[str, list[dict[str, Any]]] = {}
+        self.primary_keys: dict[str, tuple[str, ...]] = {}
         self.catalog: dict[str, dict[str, Any]] = {}
 
     def table_row_count(self, name: str) -> int:
         return len(self.tables.get(name, []))
+
+    def primary_key_stats(self, name: str, primary_key) -> tuple[int, int, int]:
+        rows = self.tables.get(name, [])
+        values = [tuple(row.get(column) for column in primary_key) for row in rows]
+        return len(rows), len(set(values)), sum(1 for value in values if any(part is None for part in value))
 
     def table_max(self, name: str, column: str) -> Any | None:
         values = [r.get(column) for r in self.tables.get(name, []) if r.get(column) is not None]
@@ -37,10 +43,12 @@ class FakeD1:
     def catalog_row(self, name: str) -> dict[str, Any] | None:
         return dict(self.catalog[name]) if name in self.catalog else None
 
-    def ensure_table(self, name: str, columns) -> None:
+    def ensure_table(self, name: str, columns, primary_key) -> None:
         self.tables.setdefault(name, [])
+        self.primary_keys[name] = tuple(primary_key)
 
-    def replace_table(self, name: str, columns, rows) -> None:
+    def replace_table(self, name: str, columns, rows, primary_key) -> None:
+        self.primary_keys[name] = tuple(primary_key)
         self.tables[name] = [dict(r) for r in rows]  # atomic swap semantics
 
     def delete_where_gte(self, name: str, column: str, trino_literal: str) -> None:
@@ -48,7 +56,19 @@ class FakeD1:
         self.tables[name] = [r for r in self.tables.get(name, []) if str(r.get(column)) < cutoff]
 
     def insert_rows(self, name: str, columns, rows, *, replace: bool) -> None:
-        self.tables.setdefault(name, []).extend(dict(r) for r in rows)
+        table = self.tables.setdefault(name, [])
+        if not replace:
+            table.extend(dict(row) for row in rows)
+            return
+        primary_key = self.primary_keys[name]
+        positions = {tuple(row.get(column) for column in primary_key): index for index, row in enumerate(table)}
+        for row in rows:
+            key = tuple(row.get(column) for column in primary_key)
+            if key in positions:
+                table[positions[key]] = dict(row)
+            else:
+                positions[key] = len(table)
+                table.append(dict(row))
 
     def upsert_catalog(self, catalog_rows) -> None:
         for row in catalog_rows:
@@ -76,13 +96,13 @@ class FakeSource:
 
 
 class FakeSmoke:
-    def __init__(self, ok: bool = True) -> None:
-        self.ok = ok
+    def __init__(self, status: str = "passed") -> None:
+        self.status = status
         self.checked: list[str] = []
 
-    def check(self, model_name: str) -> bool:
+    def check(self, model_name: str) -> str:
         self.checked.append(model_name)
-        return self.ok
+        return self.status
 
 
 def _contract(**overrides: Any) -> ServingContract:
@@ -112,7 +132,7 @@ def test_snapshot_publish_success_records_metadata():
     contract = _contract()
     d1 = FakeD1()
     source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))})
-    smoke = FakeSmoke(ok=True)
+    smoke = FakeSmoke(status="passed")
 
     report = publish([contract], source, d1, smoke, source_run_id="run-1")
 
@@ -122,6 +142,10 @@ def test_snapshot_publish_success_records_metadata():
     assert rec.serving_status == STATUS_PUBLISHED
     assert rec.source_run_id == "run-1"
     assert rec.publication_id and rec.published_row_count == 3
+    assert rec.d1_row_count == 3
+    assert rec.distinct_primary_key_count == 3
+    assert rec.null_primary_key_count == 0
+    assert rec.api_smoke_status == "passed"
     assert rec.published_bytes > 0 and rec.freshness == "2026-07-22T00:00:00"
     cat = d1.catalog_row(contract.model_name)
     assert cat["product_id"] == "weather_place_current_outlook" and cat["serving_status"] == STATUS_PUBLISHED
@@ -153,6 +177,37 @@ def test_zero_rows_fail_policy_raises_and_protects_table():
         publish([contract], source, d1, FakeSmoke(), source_run_id="run-3")
     assert d1.table_row_count(contract.model_name) == 4  # last-known-good intact
     assert any("zero_policy=fail" in f for f in excinfo.value.report.failures)
+
+
+def test_duplicate_snapshot_source_primary_key_fails_before_replacing_last_good():
+    contract = _contract()
+    d1 = FakeD1()
+    d1.tables[contract.model_name] = _rows(1)
+    duplicate_rows = [
+        {"product_row_id": "same", "place_id": "p", "forecast_at": "2026-07-22T00:00:00"},
+        {"product_row_id": "same", "place_id": "p", "forecast_at": "2026-07-22T01:00:00"},
+    ]
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=duplicate_rows)})
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish([contract], source, d1, FakeSmoke(), source_run_id="duplicate-snapshot")
+
+    assert d1.table_row_count(contract.model_name) == 1
+    assert any("source primary key" in failure for failure in excinfo.value.report.failures)
+
+
+def test_repeated_upsert_replaces_the_existing_primary_key_row():
+    contract = _contract(publication_mode="upsert")
+    d1 = FakeD1()
+    first = ReadPlan(columns=COLUMNS, rows=[{"product_row_id": "same", "place_id": "p", "forecast_at": "old"}])
+    second = ReadPlan(columns=COLUMNS, rows=[{"product_row_id": "same", "place_id": "p", "forecast_at": "new"}])
+
+    publish([contract], FakeSource({contract.model_name: first}), d1, FakeSmoke(), source_run_id="upsert-1")
+    report = publish([contract], FakeSource({contract.model_name: second}), d1, FakeSmoke(), source_run_id="upsert-2")
+
+    assert d1.table_row_count(contract.model_name) == 1
+    assert d1.tables[contract.model_name][0]["forecast_at"] == "new"
+    assert report.records[0].d1_row_count == 1
 
 
 def test_partial_truncation_retains_last_good():
@@ -202,8 +257,19 @@ def test_smoke_failure_on_external_product_raises():
     source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(2))})
 
     with pytest.raises(PublicationError) as excinfo:
-        publish([contract], source, d1, FakeSmoke(ok=False), source_run_id="run-7")
+        publish([contract], source, d1, FakeSmoke(status="failed"), source_run_id="run-7")
     assert any("smoke" in f for f in excinfo.value.report.failures)
+
+
+def test_not_evaluated_smoke_is_recorded_without_failing_d1_publication():
+    contract = _contract()
+    d1 = FakeD1()
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(2))})
+
+    report = publish([contract], source, d1, FakeSmoke(status="not_evaluated"), source_run_id="run-no-api")
+
+    assert report.ok
+    assert report.records[0].api_smoke_status == "not_evaluated"
 
 
 def test_append_uses_last_good_max_and_windows():
@@ -217,11 +283,17 @@ def test_append_uses_last_good_max_and_windows():
         primary_key=("area_cd", "event_at"),
     )
     d1 = FakeD1()
-    d1.tables[contract.model_name] = [{"event_at": "2026-07-01 00:00:00"}, {"event_at": "2026-07-02 00:00:00"}]
+    d1.tables[contract.model_name] = [
+        {"area_cd": "a", "event_at": "2026-07-01 00:00:00"},
+        {"area_cd": "a", "event_at": "2026-07-02 00:00:00"},
+    ]
     d1.catalog[contract.model_name] = {"name": contract.model_name, "row_count": 2}
     plan = ReadPlan(
-        columns=[("event_at", "timestamp")],
-        rows=[{"event_at": "2026-07-02 00:00:00"}, {"event_at": "2026-07-03 00:00:00"}],
+        columns=[("area_cd", "varchar"), ("event_at", "timestamp")],
+        rows=[
+            {"area_cd": "a", "event_at": "2026-07-02 00:00:00"},
+            {"area_cd": "a", "event_at": "2026-07-03 00:00:00"},
+        ],
         delete_column="event_at",
         delete_literal="'2026-07-02 00:00:00'",
     )

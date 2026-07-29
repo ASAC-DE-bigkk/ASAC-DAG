@@ -101,3 +101,43 @@ def load_contracts(
         )
     contracts.sort(key=lambda c: c.model_name)
     return contracts
+
+
+def load_domain_contracts(
+    manifest_path: str | Path,
+    domain: str,
+    product_ids: Iterable[str],
+) -> list[ServingContract]:
+    """Load one wrapper's complete enabled domain contract set.
+
+    A domain exporter must not silently publish a subset of its enabled dbt
+    contracts. Model names remain the dbt-owned domain boundary, so no D1 table
+    or product list is duplicated in the DAG factory.
+    """
+    requested = list(product_ids)
+    duplicates = sorted({product_id for product_id in requested if requested.count(product_id) > 1})
+    if duplicates:
+        raise ValueError(f"{domain}: duplicate product_ids={','.join(duplicates)}")
+
+    prefix = f"gold_{domain}_"
+    enabled_domain_contracts = [
+        contract
+        for contract in load_contracts(manifest_path)
+        if contract.model_name.startswith(prefix)
+    ]
+    enabled_ids = {contract.product_id for contract in enabled_domain_contracts}
+    requested_ids = set(requested)
+    missing = sorted(enabled_ids - requested_ids)
+    unexpected = sorted(requested_ids - enabled_ids)
+    if missing or unexpected:
+        detail = " ".join(
+            part
+            for part in (
+                f"missing={','.join(missing)}" if missing else "",
+                f"unexpected={','.join(unexpected)}" if unexpected else "",
+            )
+            if part
+        )
+        raise ValueError(f"{domain}: enabled serving exact-set mismatch {detail}")
+
+    return enabled_domain_contracts

@@ -45,7 +45,7 @@ class SourceReader(Protocol):
 
 
 class SmokeTester(Protocol):
-    def check(self, model_name: str) -> bool: ...
+    def check(self, model_name: str) -> str: ...
 
 
 @dataclass
@@ -59,8 +59,12 @@ class ProductRecord:
     reason: str
     source_row_count: int = 0
     published_row_count: int = 0
+    d1_row_count: int = 0
+    distinct_primary_key_count: int = 0
+    null_primary_key_count: int = 0
     published_bytes: int = 0
     freshness: str | None = None
+    api_smoke_status: str = "not_evaluated"
 
 
 @dataclass
@@ -112,13 +116,26 @@ def _catalog_row(contract: ServingContract, columns: Sequence[Column], record: P
     }
 
 
-def _write(d1: D1Client, contract: ServingContract, plan: ReadPlan, rows: Sequence[dict[str, Any]]) -> int:
-    """Write ``rows`` per publication_mode; return the published row count."""
+def _primary_key_stats(rows: Sequence[dict[str, Any]], primary_key: Sequence[str]) -> tuple[int, int, int]:
+    if not primary_key:
+        raise ValueError("primary_key is required for publication")
+    values = [tuple(row.get(column) for column in primary_key) for row in rows]
+    null_count = sum(1 for value in values if any(part is None for part in value))
+    return len(rows), len(set(values)), null_count
+
+
+def _write(
+    d1: D1Client,
+    contract: ServingContract,
+    plan: ReadPlan,
+    rows: Sequence[dict[str, Any]],
+) -> tuple[int, int, int]:
+    """Write ``rows`` per publication_mode and return physical D1 PK statistics."""
     mode = contract.publication_mode
     if mode == "snapshot":
-        d1.replace_table(contract.model_name, plan.columns, rows)  # staging swap protects last-good
-        return len(rows)
-    d1.ensure_table(contract.model_name, plan.columns)
+        d1.replace_table(contract.model_name, plan.columns, rows, contract.primary_key)  # staging swap protects last-good
+        return d1.primary_key_stats(contract.model_name, contract.primary_key)
+    d1.ensure_table(contract.model_name, plan.columns, contract.primary_key)
     if mode == "append":
         if plan.delete_column and plan.delete_literal is not None:
             d1.delete_where_gte(contract.model_name, plan.delete_column, plan.delete_literal)
@@ -127,7 +144,7 @@ def _write(d1: D1Client, contract: ServingContract, plan: ReadPlan, rows: Sequen
         d1.insert_rows(contract.model_name, plan.columns, rows, replace=True)
     else:
         raise ValueError(f"unknown publication_mode: {mode!r}")
-    return d1.table_row_count(contract.model_name)
+    return d1.primary_key_stats(contract.model_name, contract.primary_key)
 
 
 def publish(
@@ -181,8 +198,19 @@ def publish(
             continue
 
         rows, degraded = gatelib.apply_reliability(contract, plan.rows)
+        record.source_row_count = len(rows)
+        source_row_count, source_distinct_count, source_null_count = _primary_key_stats(rows, contract.primary_key)
+        if source_row_count != source_distinct_count or source_null_count:
+            record.serving_status = STATUS_FAILED
+            record.reason = (
+                "source primary key validation failed: "
+                f"rows={source_row_count} distinct={source_distinct_count} null={source_null_count}"
+            )
+            report.failures.append(f"{contract.model_name}: {record.reason}")
+            report.records.append(record)
+            continue
         try:
-            written = _write(d1, contract, plan, rows)
+            d1_row_count, distinct_primary_key_count, null_primary_key_count = _write(d1, contract, plan, rows)
         except Exception as exc:  # noqa: BLE001 -- record + continue; snapshot last-good is intact
             record.serving_status = STATUS_FAILED
             record.reason = f"write 실패: {type(exc).__name__}: {exc}"
@@ -190,7 +218,28 @@ def publish(
             report.records.append(record)
             continue
 
-        record.published_row_count = written
+        record.d1_row_count = d1_row_count
+        record.distinct_primary_key_count = distinct_primary_key_count
+        record.null_primary_key_count = null_primary_key_count
+        if (
+            d1_row_count != distinct_primary_key_count
+            or null_primary_key_count != 0
+            or (
+                contract.publication_mode in {"snapshot", "upsert"}
+                and d1_row_count != source_row_count
+            )
+        ):
+            record.serving_status = STATUS_FAILED
+            record.reason = (
+                "D1 primary key read-back validation failed: "
+                f"source={source_row_count} rows={d1_row_count} "
+                f"distinct={distinct_primary_key_count} null={null_primary_key_count}"
+            )
+            report.failures.append(f"{contract.model_name}: {record.reason}")
+            report.records.append(record)
+            continue
+
+        record.published_row_count = d1_row_count
         record.published_bytes = len(json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8"))
         record.freshness = _freshness(contract, rows)
         record.serving_status = (
@@ -210,11 +259,17 @@ def publish(
 
     # API Smoke Test — external published products must be reachable.
     published_status = {STATUS_PUBLISHED, STATUS_DEGRADED}
-    status_by_model = {r.model_name: r.serving_status for r in report.records}
+    records_by_model = {record.model_name: record for record in report.records}
     for contract in contracts:
-        if contract.external and status_by_model.get(contract.model_name) in published_status:
-            if not smoke.check(contract.model_name):
+        record = records_by_model.get(contract.model_name)
+        if contract.external and record and record.serving_status in published_status:
+            record.api_smoke_status = smoke.check(contract.model_name)
+            if record.api_smoke_status == "failed":
                 report.failures.append(f"{contract.model_name}: API smoke test 실패")
+            elif record.api_smoke_status not in {"passed", "not_evaluated"}:
+                report.failures.append(
+                    f"{contract.model_name}: invalid API smoke status={record.api_smoke_status!r}"
+                )
 
     if report.failures:
         raise PublicationError(report)

@@ -1,9 +1,9 @@
 """Problem → R2 적재 (경로 규약 + 저장 직전 redaction) (#77).
 
-경로 규약(날짜-우선 파티션, per-error JSON — R2 는 append 불가·에러 발생량이
-적어 rolling JSONL 불채택):
+경로 규약(ops 존 도메인-우선, per-error JSON — R2 는 append 불가·에러 발생량이
+적어 rolling JSONL 불채택. #60/#573 에서 루트 errors/ 날짜-우선에서 전환):
 
-    errors/observed_date=YYYY-MM-DD/domain=<domain>/dag_id=<dag_id>/
+    ops/errors/<domain>/observed_date=YYYY-MM-DD/dag_id=<dag_id>/
         <run_id>__<HHMMSSffffff>_<type-slug>.json
 
 - observed_date 는 occurred_at 의 UTC 날짜.
@@ -26,7 +26,9 @@ from common.security import redact, refresh_env_secrets
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_PREFIX = "errors"
+# ops 존 관측 카테고리(ASK-Seoul#60) — ops/errors/<domain>/observed_date=…/…
+# 구경로(루트 errors/)는 신규 쓰기 중단, R2 소비자(reader) 부재 실측으로 dual-read 없음(#573).
+DEFAULT_PREFIX = os.environ.get("ASAC_ERRORS_PREFIX", "ops/errors")
 
 
 def errors_prefix(domain: str | None, env: dict[str, str] | None = None) -> str:
@@ -68,11 +70,12 @@ def _r2_env(name: str) -> str:
 
 
 def build_object_key(problem: Problem, *, prefix: str = DEFAULT_PREFIX) -> str:
+    # 도메인이 카테고리 바로 다음의 bare 세그먼트(#60 A 구조) — 날짜는 그 아래.
     observed_date = problem.occurred_at.astimezone(timezone.utc).date().isoformat()
     occurred = problem.occurred_at.astimezone(timezone.utc).strftime("%H%M%S%f")
     return (
-        f"{prefix}/observed_date={observed_date}"
-        f"/domain={_safe_segment(problem.domain)}"
+        f"{prefix}/{_safe_segment(problem.domain)}"
+        f"/observed_date={observed_date}"
         f"/dag_id={_safe_segment(problem.dag_id)}"
         f"/{_safe_segment(problem.run_id)}__{occurred}_{_safe_segment(problem.type_slug)}.json"
     )
