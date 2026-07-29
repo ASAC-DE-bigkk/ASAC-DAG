@@ -98,8 +98,23 @@ def _with_date_window(endpoint: str, params: dict, opts: IngestOptions) -> dict:
     return params
 
 
-def _manifest(ds: Dataset, ctx: RunContext, result: DatasetResult, params: dict) -> dict:
-    """이번 실행을 재구성할 수 있게 하는 _manifest.json 내용을 만든다."""
+def _manifest(ds: Dataset, ctx: RunContext, result: DatasetResult, params: dict,
+              baseline_rows: int | None = None) -> dict:
+    """이번 실행을 재구성할 수 있게 하는 _manifest.json 내용을 만든다.
+
+    ASK-Seoul#60 약속 ③ R2 의 **필수 6필드**를 모두 담는다 —
+    ``run_id·dataset·load_date·object_keys·expected/actual count·completed_at·status``.
+    나머지 필드(title·kind·request_params 등)는 culture 재현용 확장이다.
+
+    **``expected_count`` 를 원천 총계로 두지 않는 이유**: 서울 openapi 의
+    ``list_total_count`` 는 신뢰 대상이 아니다(#147 — 실제 19,377행에 3,925를 INFO-000
+    으로 반환해 80% 가 조용히 누락). 그 값을 기대치로 삼으면 규약이 요구한 검증 장치가
+    **거짓말을 정답으로 삼는** 구조가 된다. 그래서 기대는 "원천의 주장"이 아니라
+    **계약이 요구하는 하한(min_rows)과 직전 good 런(HWM)** 으로 정의하고, 확인서가
+    그 정의를 자기 안에 밝힌다. 같은 재료가 ``checks`` 에도 있지만, 일반 소비자가
+    culture 의 checks 스키마를 몰라도 읽을 수 있게 최상위 규약 필드로 승격한다.
+    """
+    violations = (result.checks or {}).get("violations") or []
     return {
         "dataset": ds.name,
         "title": ds.title,
@@ -115,6 +130,17 @@ def _manifest(ds: Dataset, ctx: RunContext, result: DatasetResult, params: dict)
         "rows": result.rows,
         "bytes": result.bytes_written,
         "object_keys": result.object_keys,
+        # R1 상 확인서는 데이터를 전부 쓴 뒤 마지막에 쓰이므로, 이 시각이 곧 랜딩 완료
+        # 시각이다. DatasetResult.finished_ts 는 ingest_dataset 의 finally 에서 채워져
+        # 확인서 조립 시점엔 아직 비어 있어 재사용할 수 없다.
+        "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        # 닫힌 집합 2값. 확인서는 성공 경로에서만 쓰이므로(_FetchAbort·_FetchSkip 은 조기
+        # return) failed 는 정의하지 않는다. 다만 **위반이 있어도 확인서는 쓰인다** —
+        # 볼륨 급락(#147)은 확인서를 쓴 뒤 result.error 로 승격되므로, 확인서가 있으면서
+        # 그 run 은 실패인 랜딩이 실제로 남는다. 확인서만 보고 그걸 구분하라고 두는 값.
+        "status": "complete" if not violations else "complete_with_violations",
+        "expected_count": {"rows_min": ds.min_rows, "rows_baseline": baseline_rows},
+        "actual_count": {"rows": result.rows, "objects": len(result.object_keys)},
         "checks": result.checks,  # 수집 검증 결과(완전성·드리프트·freshness)
     }
 
@@ -359,7 +385,7 @@ def ingest_dataset(
         )
         if result.checks["violations"]:
             print(f"  [contract] {ds.name}: " + " | ".join(result.checks["violations"]))
-        landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params))
+        landing.write_manifest(prefix, _manifest(ds, landing.ctx, result, params, baseline))
         # 볼륨 급락(#147)은 warn 이 아니라 **실패로 승격** — fetch_raw 태스크가 빨개져
         # 기존 retries 가 당일 재시도한다(서울은 당일만 복구 가능). 다른 위반(v0)은 현행
         # 유지(리포트 surface 만).
