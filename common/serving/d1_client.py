@@ -36,10 +36,11 @@ def sql_literal(value: Any) -> str:
 
 class D1Client(Protocol):
     def table_row_count(self, name: str) -> int: ...
+    def primary_key_stats(self, name: str, primary_key: Sequence[str]) -> tuple[int, int, int]: ...
     def table_max(self, name: str, column: str) -> Any | None: ...
     def catalog_row(self, name: str) -> dict[str, Any] | None: ...
-    def ensure_table(self, name: str, columns: Sequence[Column]) -> None: ...
-    def replace_table(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]]) -> None: ...
+    def ensure_table(self, name: str, columns: Sequence[Column], primary_key: Sequence[str]) -> None: ...
+    def replace_table(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], primary_key: Sequence[str]) -> None: ...
     def delete_where_gte(self, name: str, column: str, trino_literal: str) -> None: ...
     def insert_rows(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], *, replace: bool) -> None: ...
     def upsert_catalog(self, catalog_rows: Sequence[dict[str, Any]]) -> None: ...
@@ -84,9 +85,27 @@ class HttpD1Client:
         result = body.get("result") or []
         return (result[-1].get("results") or []) if result else []
 
-    def _create_ddl(self, name: str, columns: Sequence[Column]) -> str:
+    def _create_ddl(
+        self,
+        name: str,
+        columns: Sequence[Column],
+        primary_key: Sequence[str] = (),
+    ) -> str:
+        if not primary_key:
+            raise ValueError(f"{name}: primary_key is required for D1 publication")
         cols = ", ".join(f'"{c}" {sqlite_type(t)}' for c, t in columns)
+        key_columns = '", "'.join(primary_key)
+        cols += f', UNIQUE ("{key_columns}")'
         return f'CREATE TABLE "{name}" ({cols});'
+
+    def _ensure_unique_primary_key(self, name: str, primary_key: Sequence[str]) -> None:
+        if not primary_key:
+            raise ValueError(f"{name}: primary_key is required for D1 publication")
+        columns = '", "'.join(primary_key)
+        self._query(
+            f'CREATE UNIQUE INDEX IF NOT EXISTS "{name}__pk_uq" '
+            f'ON "{name}" ("{columns}");'
+        )
 
     def _insert_batches(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], *, replace: bool) -> None:
         colnames = [c for c, _ in columns]
@@ -106,6 +125,25 @@ class HttpD1Client:
             return 0  # table absent
         return int(out[0].get("c", 0)) if out else 0
 
+    def primary_key_stats(self, name: str, primary_key: Sequence[str]) -> tuple[int, int, int]:
+        if not primary_key:
+            raise ValueError(f"{name}: primary_key is required for D1 read-back")
+        columns = '", "'.join(primary_key)
+        null_predicate = " OR ".join(f'"{column}" IS NULL' for column in primary_key)
+        out = self._query(
+            f'SELECT '
+            f'(SELECT count(*) FROM "{name}") AS row_count, '
+            f'(SELECT count(*) FROM (SELECT "{columns}" FROM "{name}" GROUP BY "{columns}")) '
+            f'AS distinct_primary_key_count, '
+            f'(SELECT count(*) FROM "{name}" WHERE {null_predicate}) AS null_primary_key_count;'
+        )
+        row = out[0] if out else {}
+        return (
+            int(row.get("row_count", 0)),
+            int(row.get("distinct_primary_key_count", 0)),
+            int(row.get("null_primary_key_count", 0)),
+        )
+
     def table_max(self, name: str, column: str) -> Any | None:
         try:
             out = self._query(f'SELECT max("{column}") m FROM "{name}";')
@@ -120,16 +158,25 @@ class HttpD1Client:
             return None
         return out[0] if out else None
 
-    def ensure_table(self, name: str, columns: Sequence[Column]) -> None:
+    def ensure_table(self, name: str, columns: Sequence[Column], primary_key: Sequence[str]) -> None:
         cols = ", ".join(f'"{c}" {sqlite_type(t)}' for c, t in columns)
         self._query(f'CREATE TABLE IF NOT EXISTS "{name}" ({cols});')
+        self._ensure_unique_primary_key(name, primary_key)
 
-    def replace_table(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]]) -> None:
+    def replace_table(
+        self,
+        name: str,
+        columns: Sequence[Column],
+        rows: Sequence[dict[str, Any]],
+        primary_key: Sequence[str],
+    ) -> None:
         # Staging populate first; only swap after a full successful load so a mid-load
         # failure leaves the previous published table (last-known-good) untouched.
         staging = f"{name}__staging"
         self._query(f'DROP TABLE IF EXISTS "{staging}";')
-        self._query(self._create_ddl(staging, columns))
+        # A table-level UNIQUE constraint survives the staging rename without a
+        # global index-name collision on the next snapshot replacement.
+        self._query(self._create_ddl(staging, columns, primary_key))
         self._insert_batches(staging, columns, rows, replace=False)
         self._query(f'DROP TABLE IF EXISTS "{name}"; ALTER TABLE "{staging}" RENAME TO "{name}";')
 
