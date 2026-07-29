@@ -23,6 +23,19 @@
 - **영향 범위** — 실패 시 `culture_transform` 전체(silver 10 + gold 14 + 계약 테스트)와
   Asset 하류 `culture_slo`. 수집(`culture_bronze`)은 무관해 데이터 유실은 없고 신선도만 정지.
 
+## 2026-07-27 — culture D1 서빙 export DAG 신설 (#520)
+
+- **`culture_serving_export` — 공통 Publisher factory 소비자 1호** — 외부 gold 7종을
+  Serving Contract v1.1(`meta.serving`, ASAC-DBT#346)에 따라 Cloudflare D1(팀 공용
+  `ask-seoul-dev-d1`)에 전량 스냅샷 게시. 스케줄 `30 4 * * *` KST(transform ~03:22 후 ·
+  culture_slo 05:01 전), 계약의 `publication_trigger.schedule_cron` 과 일치(§6).
+  파이프라인은 전부 공통(#505): Gate→D1 Write→Verify→`_catalog` Upsert→Smoke→자기검증.
+  → `culture_serving_export.py` (도메인 쪽은 이 얇은 파일 하나)
+- **윈도우(append) 방식 기각 근거** — 공통 append lookback 이 `last_good_max` 기준이라
+  미래 날짜 행 13.1만을 가진 `activity_by_dong` 에서 창이 깨진다. 수정은 `common/serving`
+  변경 = 멘토 게이트라, Workers Paid 예산(7종 ~28.1만/일 ≈ 8.6M/월, 포함량의 ~22%) 안에서
+  전량 스냅샷(A안) 채택. → `docs/design/2026-07-27-culture-serving-export-d1.md`
+
 ## 2026-07-27 — 공연 상세 야간 안티조인 전환 (#518)
 
 - **`kopis_performance_detail` → `missing_only_nightly`** — 야간엔 신규 공연만
