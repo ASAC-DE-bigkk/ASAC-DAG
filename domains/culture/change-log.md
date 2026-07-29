@@ -3,6 +3,31 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-29 — run 리포트를 raw 밖으로, 볼륨 HWM 은 control 존 분리 (#579)
+
+- **`write_run_report` 목적지 이동** — `raw/culture/_reports/load_date=…` →
+  `ops/reports/culture/observed_date=…`. raw 는 "영구 보존·이동 금지" 구역(#60 약속 ②)이라
+  관측 산출물이 거기 살면 그 규칙이 가변물까지 영구 보존한다. 날짜 키가 `observed_date` 인
+  이유는 이 파일의 날짜가 원본 수신일이 아니라 **관측일**이고 자동 삭제·감사가 그 기준으로
+  돌기 때문. → `source/config.py`(존 상수 3종) · `source/ingest.py`
+- **리포트를 통째로 옮기면 안 되는 이유 = `run_report.json` 의 역할이 둘** — SLO·대시보드가
+  읽는 관측 기록이면서 동시에 **#147 볼륨 가드의 기준선(HWM) 공급원**이다. `ops/reports/` 는
+  TTL 대상 구역이라 거기서만 기준선을 읽으면 **lifecycle 이 걸리는 순간 가드가 조용히
+  꺼진다** — `load_baselines` 가 fail-open 이라 에러도 안 나고 로그 한 줄만 남는다. #60 이
+  `ops/control/` 을 "HWM·커서·diff 기준"이라 콕 집어 쓴 게 이 경우다.
+- **`write_volume_hwm` 신설** — `ops/control/state/culture/volume_hwm.json` 단일 최신본
+  (누적 장부). 데이터셋별 "가장 최근 성공 run 의 rows". 리포트 5건을 훑던 종전 방식과 결과는
+  같지만 **창이 없어** 부분 run 이 연속돼도 기준선이 밀려나지 않는다. 두 가지를 일부러 안
+  한다: ⓐ 에러난 데이터셋 미반영(실패 런 부분 rows 가 기준선을 끌어내리면 다음 날 진짜
+  급락이 정상으로 보인다) ⓑ 과거 `ingest_ts` 는 기존 값을 덮지 않음(백필·재실행 방어).
+- **과도기 dual-read** — `load_baselines` 는 control HWM 우선 → 없으면 옛 리포트 스캔 폴백.
+  없으면 **전환 첫날 볼륨 가드가 통째로 꺼진다.** `scan_new_reports` 는 신·구 prefix 양쪽을
+  훑고 배치 안에서도 `ingest_ts` 로 중복을 접는다 — 같은 리포트가 두 존에 있는 상황이
+  실제로 있다(prod 승격 중 복사된 61건). → `slo/loader.py` · `culture_bronze.py`
+- **기존 62건은 이동 0건** — #60 "기존 객체 이동 0건", 전환은 새 쓰기부터. 물리 이사 대상으로
+  명시된 건 가변 상태 3건(`_diff_target`·`_backup`·`_checkpoints`)뿐이고 culture 리포트는
+  거기 없다. → `tests/test_reports_ops_zone.py`(11건), `docs/storage.md`, `docs/architecture.md`
+
 ## 2026-07-29 — 완결 확인서에 #60 필수 6필드 (#577)
 
 - **`_manifest.json` 에 `completed_at`·`status`·`expected_count`·`actual_count` 추가.**

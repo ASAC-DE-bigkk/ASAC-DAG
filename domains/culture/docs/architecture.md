@@ -85,7 +85,8 @@ dbt_deps ──▶ dbt_source_freshness ──▶ dbt_seed ──▶ dbt_run ─
 - [`culture_facility_refresh`](../culture_facility_refresh.py) (일요일 05:30) — 시설 상세 전수
   리프레시(`detail_mode=full`·`max_detail=2000`). 평일 신규분 top-up과 이원화(#206·#466).
 - [`culture_maintenance`](../culture_maintenance.py) (일요일 04:30) — Iceberg optimize +
-  expire_snapshots(7d) + 고아 파일·옛 metadata 정리(#157). raw·`_reports`는 의도적 비대상.
+  expire_snapshots(7d) + 고아 파일·옛 metadata 정리(#157). raw는 의도적 비대상
+  (재현 불가 경계). 운영 산출물 보존은 `ops/` 존의 lifecycle 소관 — #60 약속 ②.
 
 ### 데이터 흐름 (오케스트레이션 관점)
 
@@ -144,7 +145,8 @@ fetch(원본 박제)와 load(bronze 적재) 두 계열. fetch는 진입점 둘�
                              ├─ sink.get(raw 객체) → parse_records
                              └─ warehouse.load          bronze Iceberg (멱등)
 
-[DAG]  _report ─▶ build_run_report(summaries) ─▶ write_run_report() ─▶ R2 _reports/…/run_report.json
+[DAG]  _report ─▶ build_run_report(summaries) ─┬▶ write_run_report() ─▶ ops/reports/culture/…
+                                              └▶ write_volume_hwm()  ─▶ ops/control/state/culture/
 ```
 
 - **`ingest_one`** (DAG) — 데이터셋 1개. `ctx`(=`ingest_ts`)를 **상류 `plan`에서 받아** 15개

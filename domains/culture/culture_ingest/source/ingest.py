@@ -504,12 +504,73 @@ def write_run_report(
     env_file: str | None = None,
     dry_run: bool = False,
     local_dir: str = "./_dryrun",
-    root: str = culture_config.LANDING_ROOT,
+    root: str = culture_config.OPS_REPORTS_ROOT,
 ) -> str:
-    """run 리포트를 적재 대상에 JSON으로 남긴다. 키를 반환."""
-    key = f"{root}/_reports/load_date={ctx.load_date}/ingest_ts={ctx.ingest_ts}/run_report.json"
+    """run 리포트를 ops/reports 존에 JSON으로 남긴다. 키를 반환.
+
+    #60 약속 ② — 예전엔 ``raw/culture/_reports/`` 였다. raw 는 "영구 보존·이동 금지"
+    구역이라 관측 산출물이 거기 살면 그 규칙이 가변물까지 영구 보존한다.
+    날짜 키가 ``observed_date`` 인 이유: 이 파일의 날짜는 원본을 받은 날이 아니라
+    **관측한 날**이고, 자동 삭제·감사가 그 기준으로 돈다(#60 A절).
+    """
+    key = f"{root}/observed_date={ctx.load_date}/ingest_ts={ctx.ingest_ts}/run_report.json"
     body = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
     sink = LocalSink(local_dir) if dry_run else build_r2_sink(target, env_file)
+    sink.put(key, body, "application/json")
+    return key
+
+
+def merge_volume_hwm(previous: dict, report: dict, ingest_ts: str) -> dict:
+    """직전 HWM 에 이번 run 의 무에러 rows 를 얹어 새 HWM 문서를 만든다(순수 함수).
+
+    데이터셋별로 "가장 최근 성공 run 의 rows" 를 들고 있는 누적 장부다. 리포트 5건을
+    훑던 종전 방식(``load_baselines``)과 결과는 같지만, 부분 run 이 연속돼도 창 밖으로
+    밀려나지 않는다 — 창이 없기 때문.
+
+    두 가지를 일부러 안 한다:
+
+    * **에러난 데이터셋은 반영하지 않는다** — 실패 런의 부분 rows 로 기준선을 끌어내리면
+      다음 날 진짜 급락이 정상으로 보인다. 볼륨 위반은 result.error 로 승격되므로(#147)
+      급락한 run 자체도 여기서 걸러진다.
+    * **과거 ingest_ts 는 기존 값을 덮지 않는다** — 백필·재실행이 옛 rows 로 기준선을
+      되돌리는 것을 막는다. 같은 ts 재실행은 값이 같으므로 허용(``>=``).
+    """
+    datasets = dict(previous.get("datasets") or {})
+    stale = ingest_ts < str(previous.get("source_ingest_ts") or "")
+    if not stale:
+        for s in report.get("datasets", []):
+            if s.get("rows") and not s.get("error"):
+                datasets[s["name"]] = int(s["rows"])
+    return {
+        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source_ingest_ts": previous.get("source_ingest_ts") if stale else ingest_ts,
+        "datasets": datasets,
+    }
+
+
+def write_volume_hwm(
+    report: dict,
+    *,
+    ctx: RunContext,
+    target: str = "dev",
+    env_file: str | None = None,
+    dry_run: bool = False,
+    local_dir: str = "./_dryrun",
+    key: str = culture_config.VOLUME_HWM_KEY,
+) -> str:
+    """볼륨 HWM(#147 기준선)을 ops/control 존에 단일 최신본으로 남긴다. 키를 반환.
+
+    리포트와 **같은 내용을 왜 또 쓰나** — 존이 다르기 때문이다. 리포트는 지나간 기록이라
+    TTL 대상이고, 기준선은 지워지면 다음 실행의 볼륨 가드가 꺼지는 상태값이라 TTL 금지
+    구역에 있어야 한다(#60 존 표). 한곳에 두면 lifecycle 하나로 #147 이 조용히 무력화된다.
+    """
+    sink = LocalSink(local_dir) if dry_run else build_r2_sink(target, env_file)
+    try:
+        previous = json.loads(sink.get(key))
+    except Exception:  # noqa: BLE001 -- 첫 실행/유실 → 빈 장부에서 시작
+        previous = {}
+    body = json.dumps(merge_volume_hwm(previous, report, ctx.ingest_ts),
+                      ensure_ascii=False, indent=2).encode("utf-8")
     sink.put(key, body, "application/json")
     return key
 
@@ -534,6 +595,24 @@ _BASELINE_SCAN_REPORTS = 5  # 부분 run(주간 refresh·백필)이 껴도 이 �
 
 
 def load_baselines(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
+    """볼륨 HWM {dataset: rows} 를 읽는다(#147) — control 존 우선, 레거시 리포트 폴백.
+
+    #60 약속 ② 이후 기준선의 진실원은 ``ops/control/state/culture/volume_hwm.json``
+    이다. 그 파일이 아직 없는 전환 직후 몇 run 을 위해 옛 경로(raw 안 리포트) 스캔을
+    폴백으로 남긴다 — 없으면 전환 첫날 볼륨 가드가 통째로 꺼진다. HWM 이 한 번
+    쓰이면 폴백은 다시 안 탄다. 옛 리포트가 다 흘러가면 폴백 제거 예정.
+    """
+    try:
+        doc = json.loads(sink.get(culture_config.VOLUME_HWM_KEY))
+        hwm = {k: int(v) for k, v in (doc.get("datasets") or {}).items() if v}
+        if hwm:
+            return hwm
+    except Exception:  # noqa: BLE001 -- 첫 전환 run/유실 → 아래 레거시 스캔
+        pass
+    return _load_baselines_legacy(sink, root, before_ingest_ts=before_ingest_ts)
+
+
+def _load_baselines_legacy(sink, root: str, *, before_ingest_ts: str) -> dict[str, int]:
     """직전 run_report 들에서 {dataset: rows} 볼륨 HWM 을 읽는다(#147, 병합 #206).
 
     ``before_ingest_ts`` 이전(=이번 실행보다 과거) 리포트를 최신순으로 최대
