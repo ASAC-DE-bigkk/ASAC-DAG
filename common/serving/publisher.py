@@ -126,6 +126,12 @@ def _primary_key_stats(rows: Sequence[dict[str, Any]], primary_key: Sequence[str
     return len(rows), len(set(values)), null_count
 
 
+def _uses_replace_lifecycle(contract: ServingContract) -> bool:
+    return contract.publication_mode == "snapshot" or (
+        contract.publication_mode == "upsert" and contract.upsert_strategy == "exact_set"
+    )
+
+
 def _write(
     d1: D1Client,
     contract: ServingContract,
@@ -134,7 +140,7 @@ def _write(
 ) -> tuple[int, int, int]:
     """Write ``rows`` per publication_mode and return physical D1 PK statistics."""
     mode = contract.publication_mode
-    if mode == "snapshot":
+    if _uses_replace_lifecycle(contract):
         d1.replace_table(contract.model_name, plan.columns, rows, contract.primary_key)  # staging swap protects last-good
         return d1.primary_key_stats(contract.model_name, contract.primary_key)
     d1.ensure_table(contract.model_name, plan.columns, contract.primary_key)
@@ -207,7 +213,7 @@ def _fail_after_write(
 ) -> None:
     record.serving_status = STATUS_FAILED
     record.reason = message
-    if contract.publication_mode == "snapshot":
+    if _uses_replace_lifecycle(contract):
         _restore_snapshot(
             d1,
             record,
@@ -366,7 +372,7 @@ def publish(
             )
             continue
 
-        if contract.publication_mode == "snapshot":
+        if _uses_replace_lifecycle(contract):
             d1.finalize_replaced_table(contract.model_name)
         record.stage = "completed"
         _append_ledger(d1, record, outcome=record.serving_status)

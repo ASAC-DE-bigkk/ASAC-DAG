@@ -233,6 +233,24 @@ def test_query_batch_sends_one_cloudflare_batch_request(monkeypatch):
     assert sent == [{"batch": [{"sql": "SELECT 1;"}, {"sql": "SELECT 2;"}]}]
 
 
+def test_query_rejects_a_failed_statement_in_a_multi_statement_response(monkeypatch):
+    d1 = HttpD1Client(api_url="https://example.invalid", token="test-token")
+    monkeypatch.setattr(
+        d1,
+        "_request",
+        lambda body: {
+            "success": True,
+            "result": [
+                {"success": True, "results": []},
+                {"success": False, "errors": [{"message": "rename failed"}], "results": []},
+            ],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="D1 API"):
+        d1._query('DROP TABLE IF EXISTS "gold_traffic"; ALTER TABLE "gold_traffic__staging" RENAME TO "gold_traffic";')
+
+
 def test_snapshot_restore_reactivates_previous_table_after_post_promotion_failure():
     d1 = SqliteCatalogClient()
     table = "gold_weather_place_current_outlook"
