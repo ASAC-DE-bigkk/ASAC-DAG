@@ -113,6 +113,38 @@ def test_baselines_fall_back_to_legacy_before_first_hwm_exists(tmp_path):
     assert got == {"a": 19377}
 
 
+def test_first_hwm_write_inherits_baselines_of_datasets_skipped_tonight(tmp_path):
+    """#582 — 첫 쓰기는 물려받을 과거가 없어 그날 skip 된 데이터셋을 통째로 잃었다.
+
+    `kopis_facility_detail` 은 야간 top-up 대상이 0건이면 skipped(rows=0)로 끝나는 게
+    정상 경로다(#466·#562). 하필 그런 밤에 첫 HWM 쓰기가 걸리면 기준선이 빠지고,
+    `load_baselines` 는 HWM 이 **비어 있을 때만** 폴백하므로 다시 복구되지 않는다 —
+    그 데이터셋의 볼륨 가드(#147)가 조용히 꺼진 채 굳는다.
+    """
+    sink = LocalSink(str(tmp_path))
+    sink.put(_legacy_report_key("20260727T180000Z"),
+             json.dumps(_report([{"name": "event", "rows": 19000},
+                                 {"name": "facility_detail", "rows": 1700}])).encode(),
+             "application/json")
+    # 오늘 밤: facility_detail 은 신규 0건이라 skip
+    write_volume_hwm(_report([{"name": "event", "rows": 19472},
+                              {"name": "facility_detail", "rows": 0,
+                               "error": "skipped (detail top-up: no missing ids)"}]),
+                     ctx=CTX, dry_run=True, local_dir=str(tmp_path))
+
+    got = load_baselines(sink, cfg.LANDING_ROOT, before_ingest_ts="20260731T000000Z")
+    assert got == {"event": 19472, "facility_detail": 1700}, \
+        "첫 쓰기가 그날 skip 된 데이터셋의 기준선을 잃었다"
+
+
+def test_hwm_bootstrap_is_noop_once_legacy_reports_are_gone(tmp_path):
+    """옛 리포트를 정리한 뒤에는 부트스트랩이 아무것도 안 한다 — 폴백 제거의 전제."""
+    write_volume_hwm(_report([{"name": "event", "rows": 19472}]),
+                     ctx=CTX, dry_run=True, local_dir=str(tmp_path))
+    doc = json.loads((tmp_path / cfg.VOLUME_HWM_KEY).read_text(encoding="utf-8"))
+    assert doc["datasets"] == {"event": 19472}
+
+
 def test_baselines_return_empty_when_neither_zone_has_anything(tmp_path):
     """fail-open 유지 — 기준선이 없다고 수집을 막지는 않는다."""
     assert load_baselines(LocalSink(str(tmp_path)), cfg.LANDING_ROOT,
