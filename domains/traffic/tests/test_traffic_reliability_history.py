@@ -82,7 +82,7 @@ def _report() -> dict[str, object]:
 
 def test_history_key_is_domain_and_kst_date_scoped():
     assert history_object_key(date(2026, 7, 20)) == (
-        "reliability/date=2026-07-20/domain=traffic/"
+        "ops/reports/traffic/type=reliability/date=2026-07-20/domain=traffic/"
         "pipeline-reliability-v2.json"
     )
 

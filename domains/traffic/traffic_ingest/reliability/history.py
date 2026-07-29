@@ -34,15 +34,16 @@ class HistoryWriteError(RuntimeError):
 
 
 def history_prefix() -> str:
-    """리포트 루트 — `TRAFFIC_RELIABILITY_HISTORY_PREFIX` 가 있으면 그 값(#60/#561).
+    """리포트 루트 — 기본 ops 존, `TRAFFIC_RELIABILITY_HISTORY_PREFIX` 는 롤백용(#60).
 
     지나간 실행의 기록이라 ops/reports 존(카테고리별 TTL 허용)이 목적지다.
-    미설정 시 구 위치 폴백 — dev 는 그대로 둔 채 prod 만 옮길 수 있다.
+    기본값이 곧 목적지이므로 배포만 하면 맞고, env 는 구 위치(루트 `reliability`)로
+    되돌릴 때만 쓴다 — culture(#579) 의 `OPS_REPORTS_ROOT` 와 같은 목적지.
     """
     configured = os.environ.get(
         f"{DOMAIN.upper()}_RELIABILITY_HISTORY_PREFIX", ""
     ).strip()
-    return configured.rstrip("/") if configured else "reliability"
+    return configured.rstrip("/") if configured else f"ops/reports/{DOMAIN}/type=reliability"
 
 
 def history_object_key(report_date: date) -> str:
