@@ -451,9 +451,11 @@ def coalesce_deferred_incident_runs(
     snapshot_task_id: str,
     incident_manifest_factory: Callable[[], Any],
     stale_xcom_key: str = STALE_INCIDENT_RUN_IDS_XCOM_KEY,
+    replacement_run_id: str | None = None,
 ) -> tuple[str, ...]:
     """Invalidate superseded Bronze inputs only after replacement Silver is durable."""
-    replacement_run_id = task_instance.xcom_pull(task_ids=snapshot_task_id)
+    if replacement_run_id is None:
+        replacement_run_id = task_instance.xcom_pull(task_ids=snapshot_task_id)
     if not isinstance(replacement_run_id, str) or not replacement_run_id.strip():
         raise AirflowFailException("Traffic replacement Silver snapshot is invalid")
     raw_stale_run_ids = task_instance.xcom_pull(
