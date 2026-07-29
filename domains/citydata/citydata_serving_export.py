@@ -21,8 +21,8 @@ import os
 
 from common.serving.dag_factory import build_serving_export_dag
 
-# 프로젝트 target 관례(ASK_SEOUL_TARGET/DBT_TARGET, 기본 prod) — 컷오버(#556). runmetrics._resolve_target 와 동일.
-_TARGET = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod"))
+# 프로젝트 target 관례(DBT_TARGET, 기본 prod) — 컷오버(#556). runmetrics._resolve_target 와 동일.
+_TARGET = os.environ.get("DBT_TARGET", "prod")
 # 스키마: prod=citydata, dev=seoul_citydata (transform·dbt profiles 와 정렬).
 _SCHEMA = "citydata" if _TARGET == "prod" else "seoul_citydata"
 
