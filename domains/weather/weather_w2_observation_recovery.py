@@ -25,7 +25,11 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from common.runtime_guard import (  # noqa: E402
+    TARGET_CHOICES,
+    default_target,
+    validate_dev_runtime,
+)
 from common.security import redact, sanitize_log_value  # noqa: E402
 from weather_ingest.common.runtime import trino_cursor  # noqa: E402
 from weather_ingest.run_manifest import (  # noqa: E402
@@ -90,10 +94,10 @@ CHECKPOINT_PREFIX = "ask_seoul.weather.w2_observation_recovery"
 CHECKPOINT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 DEFAULT_PARAMS = {
     "target": Param(
-        default="dev",
+        default=default_target(),
         type="string",
-        enum=["dev"],
-        description="dbt target profile name. Historical recovery is dev-only.",
+        enum=list(TARGET_CHOICES),
+        description="dbt target profile name; defaults to the runtime env (#561).",
     ),
     "repair_start_at": Param(
         default="2026-07-02 00:00:00.000000",

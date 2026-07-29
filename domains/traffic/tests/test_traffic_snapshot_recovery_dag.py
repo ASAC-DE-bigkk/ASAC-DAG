@@ -19,7 +19,7 @@ def test_recovery_dag_is_manual_and_uses_only_recovery_selectors():
     assert dag.kwargs["schedule"] is None
     assert dag.kwargs["catchup"] is False
     assert dag.kwargs["max_active_runs"] == 1
-    assert dag.kwargs["params"]["target"].schema["enum"] == ["dev"]
+    assert dag.kwargs["params"]["target"].schema["enum"] == ["dev", "prod"]
     assert dag.kwargs["params"]["snapshot_dag_run_id"].value == ""
 
     expected_task_order = [

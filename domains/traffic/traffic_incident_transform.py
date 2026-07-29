@@ -24,7 +24,11 @@ from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa:
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
-from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from common.runtime_guard import (  # noqa: E402
+    TARGET_CHOICES,
+    default_target,
+    validate_dev_runtime,
+)
 from traffic_dbt_failure import (  # noqa: E402
     R2RecoveryRecordSink,
     build_failure_notification,
@@ -81,10 +85,10 @@ PIN_CRITICAL_PRIORITY = 10
 DBT_RETRY_DELAY = timedelta(minutes=2)
 DEFAULT_PARAMS = {
     "target": Param(
-        default="dev",
+        default=default_target(),
         type="string",
-        enum=["dev"],
-        description="dbt target profile name (dev only until production rollout).",
+        enum=list(TARGET_CHOICES),
+        description="dbt target profile name; defaults to the runtime env (#561).",
     )
 }
 record_traffic_problem = problem_failure_callback(domain="traffic")

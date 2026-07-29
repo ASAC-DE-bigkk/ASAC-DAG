@@ -289,8 +289,26 @@ def test_weather_transform_limits_target_param_to_dev_or_prod():
 
     target_param = module.DEFAULT_PARAMS["target"]
 
-    assert target_param.value == "dev"
-    assert target_param.schema["enum"] == ["dev"]
+    assert target_param.schema["enum"] == ["dev", "prod"]
+    assert target_param.value in {"dev", "prod"}
+
+
+def test_weather_transform_target_param_default_follows_runtime_env(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    monkeypatch.setenv("DBT_TARGET", "prod")
+
+    module = load_transform_module()
+
+    assert module.DEFAULT_PARAMS["target"].value == "prod"
+
+
+def test_weather_transform_target_param_defaults_to_dev_without_runtime_env(monkeypatch):
+    monkeypatch.delenv("ASK_SEOUL_TARGET", raising=False)
+    monkeypatch.delenv("DBT_TARGET", raising=False)
+
+    module = load_transform_module()
+
+    assert module.DEFAULT_PARAMS["target"].value == "dev"
 
 
 def test_weather_transform_publishes_dbt_run_metrics_as_non_gating_teardown():

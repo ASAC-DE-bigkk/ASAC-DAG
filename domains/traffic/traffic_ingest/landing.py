@@ -84,12 +84,17 @@ class TrafficLanding:
         source: TopisPageSource,
         raw_store: RawObjectStore,
         raw_prefix: str,
+        checkpoint_prefix: str | None = None,
         clock: Callable[[], datetime],
         request_id: Callable[[], str],
     ) -> None:
         self._source = source
         self._raw_store = raw_store
         self._raw_prefix = raw_prefix.rstrip("/")
+        # 미지정 = 구 위치(raw 안). 호출자가 ops 존을 주면 그쪽으로 간다(#60 약속②).
+        self._checkpoint_prefix = (
+            checkpoint_prefix or f"{self._raw_prefix}/_checkpoints"
+        ).rstrip("/")
         self._clock = clock
         self._request_id = request_id
 
@@ -102,7 +107,7 @@ class TrafficLanding:
 
     def _checkpoint_key(self, run: RunIdentity) -> str:
         return (
-            f"{self._raw_prefix}/_checkpoints/seoul_traffic_incident/"
+            f"{self._checkpoint_prefix}/seoul_traffic_incident/"
             f"dag_id={self._safe_key_segment(run.dag_id)}/"
             f"run_id={self._safe_key_segment(run.run_id)}/landing.json"
         )

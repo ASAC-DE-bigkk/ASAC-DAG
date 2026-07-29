@@ -27,7 +27,7 @@ def test_full_contract_audit_is_daily_read_only_and_fail_closed():
     assert module.dag.kwargs["max_active_runs"] == 1
     assert module.dag.kwargs["is_paused_upon_creation"] is True
     assert module.dag.kwargs["catchup"] is False
-    assert module.DEFAULT_PARAMS["target"].schema["enum"] == ["dev"]
+    assert module.DEFAULT_PARAMS["target"].schema["enum"] == ["dev", "prod"]
 
     expected_order = [
         "validate_dev_runtime",

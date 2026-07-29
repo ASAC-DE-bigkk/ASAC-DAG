@@ -105,12 +105,12 @@ def test_gold_dag_schedule_and_guard_order():
 
 
 @pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])
-def test_split_dags_keep_dev_only_target(loader):
+def test_split_dags_allow_dev_or_prod_target(loader):
     module = loader()
     target = module.DEFAULT_PARAMS["target"]
 
-    assert target.value == "dev"
-    assert target.schema["enum"] == ["dev"]
+    assert target.schema["enum"] == ["dev", "prod"]
+    assert target.value in {"dev", "prod"}
 
 
 @pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])

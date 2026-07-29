@@ -18,6 +18,27 @@ _TARGET_CATALOGS = {
     "dev": ("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev"),
     "prod": ("TRINO_ICEBERG_CATALOG", "iceberg"),
 }
+TARGET_CHOICES = ("dev", "prod")
+_TARGET_ALIASES = ("ASK_SEOUL_TARGET", "DBT_TARGET")
+
+
+def default_target(env: Mapping[str, str] | None = None) -> str:
+    """DAG ``target`` Param 의 기본값 — 런타임 env 를 따라간다.
+
+    bronze 는 env(``is_dev_target()``)로, transform 은 DAG param 으로 타깃을 정하던
+    이원화(#236)를 없앤다. env 를 prod 로 넘기면 transform param 도 같이 따라오므로
+    "bronze=prod / silver=dev" 엇갈림이 생기지 않는다.
+
+    알 수 없는 값은 ``dev`` 로 clamp 한다 — Param ``enum`` 밖의 기본값은 DAG 파싱
+    자체를 깨뜨리는데, 그러면 잘못된 값 하나가 도메인 전체를 스케줄에서 지운다.
+    실제 거부는 태스크 시점의 :func:`validate_dev_runtime` 이 맡는다.
+    """
+    values = os.environ if env is None else env
+    for name in _TARGET_ALIASES:
+        candidate = str(values.get(name, "")).strip().lower()
+        if candidate:
+            return candidate if candidate in TARGET_CHOICES else "dev"
+    return "dev"
 
 
 def validate_dev_runtime(

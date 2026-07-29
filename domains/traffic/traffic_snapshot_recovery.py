@@ -30,7 +30,11 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.discord import COLOR_FAIL, COLOR_OK, first_notice_for_run, send_embed  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from common.runtime_guard import (  # noqa: E402
+    TARGET_CHOICES,
+    default_target,
+    validate_dev_runtime,
+)
 from traffic_dbt_failure import (  # noqa: E402
     R2RecoveryRecordSink,
     build_failure_notification,
@@ -110,10 +114,10 @@ RECOVERY_PURPOSE = "historical-snapshot-validation"
 record_traffic_problem = problem_failure_callback(domain="traffic")
 DEFAULT_PARAMS = {
     "target": Param(
-        default="dev",
+        default=default_target(),
         type="string",
-        enum=["dev"],
-        description="dbt target profile name (dev only).",
+        enum=list(TARGET_CHOICES),
+        description="dbt target profile name; defaults to the runtime env (#561).",
     ),
     "snapshot_dag_run_id": Param(
         default="",

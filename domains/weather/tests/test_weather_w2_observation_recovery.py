@@ -787,7 +787,7 @@ def test_manual_recovery_dag_shape_is_serial_dev_only_and_domain_pooled():
     assert dag.dag_id == "weather_w2_observation_recovery"
     assert dag.kwargs["schedule"] is None
     assert dag.kwargs["max_active_runs"] == 1
-    assert dag.kwargs["params"]["target"].schema["enum"] == ["dev"]
+    assert dag.kwargs["params"]["target"].schema["enum"] == ["dev", "prod"]
     assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
         "recover_observation_windows"
     }
