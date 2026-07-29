@@ -94,12 +94,7 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
         ],
         gold: [
             "dbt_deps_gold",
-            "dbt_seed_asac_axes",
-            "dbt_run_common_admin_dong_dimension",
-            "dbt_test_common_admin_dong_dimension",
-            "dbt_test_asac_axes_seed_contract",
             "dbt_run_gold",
-            "dbt_test_gold",
         ],
     }
 

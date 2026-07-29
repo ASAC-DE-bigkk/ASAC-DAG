@@ -78,8 +78,8 @@ from traffic_ingest.transform_specs import GOLD_DBT_PHASE_SPECS  # noqa: E402
 from traffic_ingest.transform_test_tier import (  # noqa: E402
     SELECT_TEST_TIER_TASK_ID,  # noqa: F401
     TrafficTestTier,  # noqa: F401
-    select_traffic_test_tier,
-    mark_traffic_test_tier,
+    mark_traffic_test_tier,  # noqa: F401
+    select_traffic_test_tier,  # noqa: F401
 )
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 
@@ -147,8 +147,7 @@ def admit_traffic_gold_snapshot(**context) -> dict[str, object]:
 
 
 def mark_traffic_gold_success(**context) -> dict[str, object]:
-    """Advance cadence conservatively, then persist the admission marker last."""
-    mark_traffic_test_tier(**context)
+    """Persist the admission marker only after the hot build receipt passes."""
     ti = context["ti"]
     serialized = write_success_marker(
         variable=Variable,
@@ -182,7 +181,7 @@ def run_dbt_phase(
     **context,
 ) -> dict[str, object]:
     def guard_current_silver_output() -> None:
-        mismatch_action = "skip" if dbt_command == "run" else "fail"
+        mismatch_action = "skip" if dbt_command in {"run", "build"} else "fail"
         expected_evidence = silver_output_evidence_from_resolver(
             context["ti"],
             snapshot_task_id=snapshot_task_id,
@@ -274,11 +273,6 @@ with DAG(
         op_kwargs={"domain": "traffic", "requested_target": "{{ params.target }}"},
         on_failure_callback=record_traffic_problem,
     )
-    select_test_tier = PythonOperator(
-        task_id="select_traffic_test_tier",
-        python_callable=select_traffic_test_tier,
-        on_failure_callback=record_traffic_problem,
-    )
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
         python_callable=resolve_traffic_gold_snapshot_run,
@@ -323,7 +317,6 @@ with DAG(
 
     chain = [
         validate_runtime,
-        select_test_tier,
         resolve_snapshot,
         admit_snapshot,
         *dbt_phase_tasks.values(),

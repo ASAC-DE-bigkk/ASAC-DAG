@@ -32,7 +32,7 @@ def _use_current_silver_evidence(
     monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
 
 
-def test_gold_dag_is_independent_and_owns_test_tier_marker():
+def test_gold_dag_is_independent_and_owns_hot_publication_marker():
     module = load_gold_transform_module()
     dag = module.dag
 
@@ -47,9 +47,6 @@ def test_gold_dag_is_independent_and_owns_test_tier_marker():
     assert dag.kwargs["max_active_runs"] == 1
     assert "dbt_run_silver" not in dag.task_ids
     assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
-        "select_traffic_test_tier"
-    }
-    assert dag.task_dict["select_traffic_test_tier"].downstream_task_ids == {
         "resolve_traffic_gold_snapshot_run"
     }
     assert dag.task_dict["resolve_traffic_gold_snapshot_run"].downstream_task_ids == {
@@ -58,20 +55,21 @@ def test_gold_dag_is_independent_and_owns_test_tier_marker():
     assert dag.task_dict["admit_traffic_gold_snapshot"].downstream_task_ids == {
         "dbt_deps_gold"
     }
-    assert dag.task_dict["dbt_test_gold"].downstream_task_ids == {
+    assert dag.task_dict["dbt_run_gold"].downstream_task_ids == {
         "mark_traffic_gold_success"
     }
+    assert "select_traffic_test_tier" not in dag.task_ids
+    assert "dbt_test_gold" not in dag.task_ids
 
 
-def test_gold_validation_fence_outranks_silver_writer_without_promoting_gold_run():
+def test_gold_hot_build_receipt_outranks_silver_writer():
     gold = load_gold_transform_module()
 
     assert gold.PIN_CRITICAL_PRIORITY > 10
     assert (
-        gold.dag.task_dict["dbt_test_gold"].kwargs["priority_weight"]
+        gold.dag.task_dict["dbt_run_gold"].kwargs["priority_weight"]
         == gold.PIN_CRITICAL_PRIORITY
     )
-    assert gold.dag.task_dict["dbt_run_gold"].kwargs["priority_weight"] == 1
 
 
 def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_bronze(

@@ -90,9 +90,6 @@ def test_gold_dag_schedule_and_guard_order():
     }
     assert dag.kwargs["max_active_runs"] == 1
     assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
-        "select_traffic_test_tier"
-    }
-    assert dag.task_dict["select_traffic_test_tier"].downstream_task_ids == {
         "resolve_traffic_gold_snapshot_run"
     }
     assert dag.task_dict["resolve_traffic_gold_snapshot_run"].downstream_task_ids == {
@@ -115,7 +112,7 @@ def test_split_dags_allow_dev_or_prod_target(loader):
 @pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])
 def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
     module = loader()
-    critical_task_ids = {"dbt_run_silver", "dbt_test_gold"}
+    critical_task_ids = {"dbt_run_silver", "dbt_run_gold"}
     local_workload_task_ids = {"dbt_deps", "dbt_deps_gold"}
     assert module.TRINO_TRANSFORM_POOL == "trino_traffic_transform"
     for task_id, task in module.dbt_phase_tasks.items():
@@ -445,7 +442,7 @@ def test_metrics_use_latest_current_run_dbt_artifact_path():
     ti = types.SimpleNamespace(
         xcom_pull=lambda *, task_ids, key=None: (
             {"run_results_path": terminal_path}
-            if task_ids == "dbt_test_gold" and key is None
+            if task_ids == "dbt_run_gold" and key is None
             else None
         )
     )
