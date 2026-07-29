@@ -275,7 +275,36 @@ def _handoff_rows(spec, m: dict, col_defs: list) -> tuple[list, list, list]:
     return col_rows, ext_row, pat_rows
 
 
+def _glossary_rows(cur, qschema: str) -> list:
+    """코드값 → 한국어 라벨 용어사전(d1_catalog_glossary) — 웨어하우스 실데이터에서 파생.
+
+    D1 롤업엔 코드만 실리는 열거값(major/category/event_type/gu_code)의 한국어 의미를
+    MCP/API 담당자가 D1 만으로 알 수 있게 한다(오너 지시 — 용어의 실제 한국어 뜻 정리).
+    소스는 gold 의 `*_ko` 라벨 컬럼·행정동 참조 테이블이라 하드코딩이 없다(계보 유지).
+    """
+    rows: list = []
+    specs = [
+        ("major", f"select distinct major, major_ko from {qschema}.gold_license_cohort_survival",
+         "gold_license_cohort_survival.major_ko"),
+        ("category", f"select distinct category, category_ko from {qschema}.gold_license_cohort_survival",
+         "gold_license_cohort_survival.category_ko"),
+        ("event_type", f"select distinct event_type, event_type_ko from {qschema}.gold_license_seasonality",
+         "gold_license_seasonality.event_type_ko"),
+        ("gu_code", f"select sgg_code, max(sgg_name) from {qschema}.bronze_ref_admin_dong "
+                    f"group by sgg_code", "bronze_ref_admin_dong(참조 스냅샷 — 미수록 구는 라벨 부재 가능)"),
+    ]
+    for field, sql, src in specs:
+        try:
+            cur.execute(sql)  # security: allow-sql — qschema 는 _qualified() 검증 식별자, 상수 SELECT
+            rows.extend((field, str(r[0]), str(r[1]), src)
+                        for r in cur.fetchall() if r[0] is not None and r[1] is not None)
+        except Exception as exc:                       # 라벨 소스 부재 시 해당 필드만 생략
+            log.warning("glossary %s 생략: %s", field, exc)
+    return rows
+
+
 _HANDOFF_DDL = {
+    "d1_catalog_glossary": ('"field" TEXT, "code" TEXT, "label_ko" TEXT, "source" TEXT'),
     "d1_catalog_columns": ('"product_id" TEXT, "table_name" TEXT, "ordinal" INTEGER, '
                            '"column_name" TEXT, "type" TEXT, "description_ko" TEXT'),
     "d1_catalog_ext": ('"product_id" TEXT, "table_name" TEXT, "source_model" TEXT, '
@@ -286,6 +315,7 @@ _HANDOFF_DDL = {
                           '"insight_sample_ko" TEXT'),
 }
 _HANDOFF_COLS = {
+    "d1_catalog_glossary": ["field", "code", "label_ko", "source"],
     "d1_catalog_columns": ["product_id", "table_name", "ordinal", "column_name", "type", "description_ko"],
     "d1_catalog_ext": ["product_id", "table_name", "source_model", "tier", "grain",
                        "primary_key", "rollup_rule", "time_axis"],
@@ -294,17 +324,19 @@ _HANDOFF_COLS = {
 }
 
 
-def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_rows: list) -> None:
-    """보조 테이블 3종 전량 교체 게시(commerce 소유 — 공유 메타 무접촉, 멱등)."""
-    for table, rows in (("d1_catalog_columns", columns_rows),
+def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_rows: list,
+                     glossary_rows: list) -> None:
+    """보조 테이블 4종 전량 교체 게시(commerce 소유 — 공유 메타 무접촉, 멱등)."""
+    for table, rows in (("d1_catalog_glossary", glossary_rows),
+                        ("d1_catalog_columns", columns_rows),
                         ("d1_catalog_ext", ext_rows),
                         ("d1_usage_patterns", pattern_rows)):
         _d1(f'DROP TABLE IF EXISTS "{table}"; '            # security: allow-sql — 상수 DDL
             f'CREATE TABLE "{table}" ({_HANDOFF_DDL[table]});', token)
         if rows:
             _insert_rows(table, _HANDOFF_COLS[table], rows, token)
-    log.info("[serving export] 핸드오프 메타 게시: columns=%d ext=%d patterns=%d",
-             len(columns_rows), len(ext_rows), len(pattern_rows))
+    log.info("[serving export] 핸드오프 메타 게시: columns=%d ext=%d patterns=%d glossary=%d",
+             len(columns_rows), len(ext_rows), len(pattern_rows), len(glossary_rows))
 
 
 def _check_contract_drift(meta: dict[str, dict]) -> None:
@@ -510,7 +542,8 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
 
         _upsert_catalog(catalog_rows, token, cat_columns)   # 공유 _catalog(성공분만 upsert — 타 도메인·스킵분 행 보존)
         _upsert_meta(meta_rows, token)
-        _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats)
+        _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats,
+                         _glossary_rows(cur, qschema))
     finally:
         conn.close()
 

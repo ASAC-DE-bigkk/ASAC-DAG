@@ -22,6 +22,9 @@ response:
   선언분, 다제품 모델은 d1_table 필터). 매 export 전량 교체(멱등), 공유 메타 무접촉.
 - 검증: export 실기록 — columns **222행(설명 221/222)**, ext 22행(grain/PK 정확).
   usage_patterns 는 22제품 패턴 채굴(D1 실행 검증 — 진행분 8제품 77패턴) 후 dbt 선언→재export.
+- 추가(용어 한국어 정리 지시): `d1_catalog_glossary`(field·code·label_ko·source) — D1 롤업에
+  코드만 실리는 열거값(major/category/event_type/gu_code)의 한국어 라벨을 웨어하우스 실데이터
+  (gold `*_ko` 컬럼·행정동 참조)에서 파생해 게시. 하드코딩 없음.
 
 ### 83. 처리로그 ops/logs 존 일단위 적재 — commerce_ops_logship 신설(도커 볼륨 무잔존)
 
