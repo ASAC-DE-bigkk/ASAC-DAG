@@ -114,6 +114,30 @@ _render_config = RenderConfig(
      tags=["seoul", "commerce", "silver", "dbt", "cosmos"], doc_md=__doc__)
 def commerce_load_silver():
     @task
+    def dbt_seed_taxonomy() -> dict:
+        """dbt seed(분류 체계 등 참조 시드) 멱등 재적재 — from-zero/이관 자가 치유.
+
+        prod 컷오버 실측(2026-07-29): seed 는 dev 에서 수동 1회만 실행돼 있어 신규 환경의
+        gold 22종 + silver(detail_health)가 `commerce_dataset_taxonomy` 부재로 전멸했다.
+        dbt 진입 레이어(silver)에서 매 run 실행해 환경 변경·이관 시에도 참조 시드가
+        항상 존재하게 한다(152행·수 초 — 존재 시 전량 교체 멱등).
+        """
+        import logging
+        import subprocess
+
+        log = logging.getLogger(__name__)
+        cmd = [DBT_BIN, "seed", "--project-dir", DBT_PROJECT_DIR,
+               "--profiles-dir", DBT_PROJECT_DIR, "--target", DBT_TARGET]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        tail = (proc.stdout or "")[-2000:]
+        if proc.returncode != 0:
+            log.error("dbt seed 실패(rc=%s): %s", proc.returncode, tail)
+            raise RuntimeError(f"dbt seed 실패 rc={proc.returncode}")
+        seeded = sum(1 for ln in tail.splitlines() if " OK loaded seed file " in ln)
+        log.info("dbt seed 완료: %d개 시드 적재(target=%s)", seeded, DBT_TARGET)
+        return {"seeds_loaded": seeded, "target": DBT_TARGET}
+
+    @task
     def enrich_admin_dong_ref() -> dict:
         """행정동↔법정동 참조(raw/common/admin_dong 최신본) → Iceberg 전량 교체."""
         from silver import enrich_tasks   # 지연 임포트 — DAG 파싱 경량 유지
@@ -277,7 +301,8 @@ def commerce_load_silver():
     )
 
     seed = seed_silver_if_empty()
-    [enrich_admin_dong_ref(), enrich_fill_jibun(), ensure_silver_marker()] >> seed
+    [dbt_seed_taxonomy(), enrich_admin_dong_ref(), enrich_fill_jibun(),
+     ensure_silver_marker()] >> seed
     # 원형 파이프라인 편승(#70): dbt(원형 4모델) → 마킹 → detail(카탈로그 구동) → 유지보수 → 리포트
     (seed >> dbt_silver >> notify_masked_address_summary() >> mark_silver_done()
      >> build_detail_catalog() >> load_details() >> maintain_silver_gold_tables() >> report_silver())
