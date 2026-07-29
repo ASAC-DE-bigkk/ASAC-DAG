@@ -4,6 +4,7 @@ The ``Airflow`` token keeps this thin factory wrapper visible to DAG safe-mode
 discovery even though Airflow imports live inside the common factory.
 """
 
+from common.runtime_guard import default_target
 from common.serving.dag_factory import build_serving_export_dag
 
 
@@ -15,6 +16,6 @@ dag = build_serving_export_dag(
     # cron is declared in dbt meta.serving.
     schedule=None,
     dag_id="weather_serving_export",
-    target="dev",
+    target=default_target(),
     schema="weather",
 )

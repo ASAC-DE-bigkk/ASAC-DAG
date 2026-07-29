@@ -4,6 +4,7 @@ The ``Airflow`` token keeps this thin factory wrapper visible to DAG safe-mode
 discovery even though Airflow imports live inside the common factory.
 """
 
+from common.runtime_guard import default_target
 from common.serving.dag_factory import build_serving_export_dag
 
 
@@ -19,6 +20,6 @@ dag = build_serving_export_dag(
     # completion signal and the matching v1.1 publication_trigger are added.
     schedule=None,
     dag_id="traffic_serving_export",
-    target="dev",
+    target=default_target(),
     schema="traffic",
 )

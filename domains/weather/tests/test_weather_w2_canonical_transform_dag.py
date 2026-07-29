@@ -57,7 +57,7 @@ def test_canonical_w2_dag_has_a_small_independent_phase_chain():
     assert module.dag.kwargs["schedule"] == [FakeAsset(module.WEATHER_BRONZE_ASSET)]
     assert module.dag.kwargs["max_active_runs"] == 1
     assert module.dag.kwargs["is_paused_upon_creation"] is True
-    assert module.DEFAULT_PARAMS["target"].schema["enum"] == ["dev"]
+    assert module.DEFAULT_PARAMS["target"].schema["enum"] == ["dev", "prod"]
 
     expected_order = [
         "validate_dev_runtime",
