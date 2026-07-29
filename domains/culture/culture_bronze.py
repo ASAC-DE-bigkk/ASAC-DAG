@@ -74,6 +74,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
     load_known_detail_ids,
     normalize_mapped_results,
     write_run_report,
+    write_volume_hwm,
 )
 from culture_ingest.common.notify import build_report_payload, notifier_from_env  # noqa: E402
 
@@ -312,6 +313,16 @@ def _report(**context) -> None:
         print(f"[culture bronze] run report -> {key}")
     except Exception as exc:  # noqa: BLE001 -- 리포트 적재 실패가 run 판정을 가리지 않게
         print(f"[culture bronze] run report 적재 실패(무시): {exc}")
+
+    # 볼륨 HWM(#147 기준선)은 리포트와 **별도 존**에 쓴다(#60 약속 ②) — 리포트는 TTL
+    # 대상 구역이라, 거기서만 기준선을 읽으면 lifecycle 이 걸리는 순간 볼륨 가드가
+    # 조용히 꺼진다. 여기도 실패는 삼킨다: 기준선은 보조 신호이므로 못 써도 수집 판정을
+    # 가리면 안 된다(다음 run 이 볼륨 검사를 생략할 뿐 — load_baselines 와 같은 fail-open).
+    try:
+        hwm_key = write_volume_hwm(report, ctx=ctx, target=params["target"])
+        print(f"[culture bronze] volume hwm -> {hwm_key}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[culture bronze] volume hwm 적재 실패(무시): {type(exc).__name__}")
 
     # Discord 완료 알림(best-effort) — URL 없으면 no-op. 알림 실패는 삼킨다(파이프라인 보호).
     try:
