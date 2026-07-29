@@ -567,8 +567,19 @@ def write_volume_hwm(
     sink = LocalSink(local_dir) if dry_run else build_r2_sink(target, env_file)
     try:
         previous = json.loads(sink.get(key))
-    except Exception:  # noqa: BLE001 -- 첫 실행/유실 → 빈 장부에서 시작
+    except Exception:  # noqa: BLE001 -- 첫 실행/유실 → 아래에서 레거시로 부트스트랩
         previous = {}
+    if not previous.get("datasets"):
+        # **첫 쓰기는 옛 리포트에서 물려받는다(#582).** 누적 장부는 두 번째 쓰기부터
+        # "부분 run 이 최신이어도 나머지는 과거 run 에서 보충된다"는 성질을 갖지만, 첫
+        # 쓰기에는 물려받을 과거가 없어 **그날 skip 된 데이터셋이 통째로 빠진다.**
+        # kopis_facility_detail 은 야간 top-up 대상 0건이면 skipped(rows=0)로 끝나는 게
+        # 정상 경로라(#466·#562), 하필 그런 밤에 첫 쓰기가 걸리면 기준선을 잃는다.
+        # load_baselines 는 HWM 이 **비어 있을 때만** 폴백하므로 14개짜리 장부는 폴백을
+        # 다시 안 타고, 빠진 데이터셋의 볼륨 가드(#147)가 조용히 꺼진 채 굳는다.
+        # 레거시 리포트를 제거한 뒤에는 {} 를 돌려주므로 자연히 no-op 이 된다.
+        previous = {"datasets": _load_baselines_legacy(
+            sink, culture_config.LANDING_ROOT, before_ingest_ts=ctx.ingest_ts)}
     body = json.dumps(merge_volume_hwm(previous, report, ctx.ingest_ts),
                       ensure_ascii=False, indent=2).encode("utf-8")
     sink.put(key, body, "application/json")
