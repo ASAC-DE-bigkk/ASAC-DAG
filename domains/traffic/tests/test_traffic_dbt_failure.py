@@ -325,7 +325,8 @@ def test_recovery_record_sink_writes_a_run_scoped_r2_document():
     ).write(record)
 
     assert key == written["key"]
-    assert key.startswith("recovery/observed_date=2026-07-13/domain=traffic/")
+    # ops 존 관측 카테고리(ASK-Seoul#60) — 도메인은 카테고리 바로 다음 bare 세그먼트.
+    assert key.startswith("ops/recovery/traffic/observed_date=2026-07-13/")
     assert "manual__2026-07-13T02-12-00-00-00__dbt_test_silver__try1.json" in key
     assert b'"failure_classification": "data-contract-violation"' in written["body"]
 

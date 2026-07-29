@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -220,13 +221,19 @@ def _safe_segment(value: Any) -> str:
     return _UNSAFE_SEGMENT_CHARS.sub("-", str(value))
 
 
+# ops 존 관측 카테고리(ASK-Seoul#60) — ops/recovery/<domain>/observed_date=…/…
+# 구경로(루트 recovery/)는 신규 쓰기 중단. 이 sink 는 write-only 라(코드베이스에
+# reader 0) dual-read 가 필요 없다 — errors(#573)·metrics(#573)·reports(#579) 와 동일.
+RECOVERY_PREFIX = os.environ.get("ASAC_RECOVERY_PREFIX", "ops/recovery")
+
+
 class R2RecoveryRecordSink:
     """Store a per-failure recovery record beside the existing R2 Problem objects."""
 
     def __init__(
         self,
         *,
-        prefix: str = "recovery",
+        prefix: str = RECOVERY_PREFIX,
         put_object: Callable[[str, bytes], None] | None = None,
     ) -> None:
         self.prefix = prefix
@@ -237,8 +244,9 @@ class R2RecoveryRecordSink:
             timezone.utc
         )
         date = occurred.date().isoformat()
+        # 도메인이 카테고리 바로 다음의 bare 세그먼트(#60 A 구조) — 날짜는 그 아래.
         return (
-            f"{self.prefix}/observed_date={date}/domain=traffic"
+            f"{self.prefix}/traffic/observed_date={date}"
             f"/dag_id={_safe_segment(record.get('dag_id'))}"
             f"/{_safe_segment(record.get('run_id'))}"
             f"__{_safe_segment(record.get('task_id'))}"
