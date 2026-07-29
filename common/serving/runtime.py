@@ -121,16 +121,16 @@ class HttpSmokeTester:
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
 
-    def check(self, model_name: str) -> bool:
+    def check(self, model_name: str) -> str:
         if not self._base_url:
-            return True  # no API configured (e.g. mock/local) => smoke is a no-op pass
+            return "not_evaluated"
         import requests
 
         try:
             resp = requests.get(f"{self._base_url}/data/{model_name}", params={"limit": 1}, timeout=30)
         except Exception:  # noqa: BLE001 -- unreachable API is a smoke failure
-            return False
-        return resp.status_code == 200
+            return "failed"
+        return "passed" if resp.status_code == 200 else "failed"
 
 
 def build_smoke_tester_from_env() -> HttpSmokeTester:

@@ -30,6 +30,20 @@ def _manifest_path(domain: str, dbt_project: str | None) -> str:
     return f"/opt/airflow/dbt/domains/{project}/target/manifest.json"
 
 
+def _load_export_contracts(
+    manifest_path: str,
+    domain: str,
+    product_ids: Sequence[str],
+    *,
+    exact_domain_contracts: bool,
+):
+    from common.serving.contract import load_contracts, load_domain_contracts
+
+    if exact_domain_contracts:
+        return load_domain_contracts(manifest_path, domain, product_ids)
+    return load_contracts(manifest_path, product_ids)
+
+
 def build_serving_export_dag(
     domain: str,
     product_ids: Sequence[str],
@@ -39,6 +53,7 @@ def build_serving_export_dag(
     dbt_project: str | None = None,
     target: str = "dev",
     schema: str | None = None,
+    exact_domain_contracts: bool = False,
 ):
     """Build a serving-export DAG for one domain. Returns an Airflow ``DAG``."""
     import os
@@ -47,7 +62,6 @@ def build_serving_export_dag(
     from airflow import DAG
     from airflow.providers.standard.operators.python import PythonOperator
 
-    from common.serving.contract import load_contracts
     from common.serving.publisher import publish
     from common.serving.runtime import (
         build_d1_client_from_env,
@@ -60,7 +74,12 @@ def build_serving_export_dag(
 
     def _run(**context) -> None:
         run_id = str(context.get("run_id") or context.get("ts") or "manual")
-        contracts = load_contracts(_manifest_path(domain, dbt_project), product_ids)
+        contracts = _load_export_contracts(
+            _manifest_path(domain, dbt_project),
+            domain,
+            product_ids,
+            exact_domain_contracts=exact_domain_contracts,
+        )
         if not contracts:
             raise RuntimeError(f"{domain}: product_ids {list(product_ids)} 에 해당하는 enabled 계약이 없다")
         source = build_trino_source_reader(context["params"].get("target", target), resolved_schema)
@@ -81,7 +100,12 @@ def build_serving_export_dag(
                     {
                         "product_id": r.product_id,
                         "serving_status": r.serving_status,
+                        "source_row_count": r.source_row_count,
                         "published_row_count": r.published_row_count,
+                        "d1_row_count": r.d1_row_count,
+                        "distinct_primary_key_count": r.distinct_primary_key_count,
+                        "null_primary_key_count": r.null_primary_key_count,
+                        "api_smoke_status": r.api_smoke_status,
                         "publication_id": r.publication_id,
                     }
                     for r in report.records

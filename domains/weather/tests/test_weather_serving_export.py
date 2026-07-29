@@ -32,7 +32,13 @@ def test_weather_serving_export_is_a_thin_common_publisher_wrapper(monkeypatch):
     assert module.dag is sentinel_dag
     assert captured == {
         "domain": "weather",
-        "product_ids": ["weather_place_current_outlook"],
+        "product_ids": [
+            "weather_place_current_outlook",
+            "weather_place_precipitation_window",
+            "weather_place_risk_window",
+            "weather_place_forecast_change_daily",
+        ],
+        "exact_domain_contracts": True,
         "schedule": None,
         "dag_id": "weather_serving_export",
         "target": "dev",
@@ -50,3 +56,7 @@ def test_weather_export_is_visible_to_airflow_safe_mode():
 
     assert "airflow" in source
     assert "dag" in source
+
+
+def test_weather_export_is_the_only_weather_serving_dag():
+    assert not (DAG_PATH.parent / "weather_insight_serving_export.py").exists()
