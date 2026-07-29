@@ -65,7 +65,10 @@ DOMAIN = os.environ.get("TRANSIT_DOMAIN", "transit")
 
 DEFAULT_PARAMS = {
     "target": Param(
-        default="dev",
+        # 배포 env 를 따른다(#575) — dev 박스(DBT_TARGET=dev)에선 기존과 동일한 dev 기본
+        # (실수로 prod 를 치지 않는 안전 게이트 유지), prod 스택에선 자동 prod.
+        # 하드코딩 "dev" 는 prod 컷오버 시 iceberg_dev CATALOG_NOT_FOUND 로 전 런 실패했다.
+        default=os.environ.get("DBT_TARGET", "dev"),
         type="string",
         enum=["dev", "prod"],
         description="dbt target profile name.",
