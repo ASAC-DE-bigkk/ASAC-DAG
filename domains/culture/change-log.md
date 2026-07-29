@@ -3,6 +3,26 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-29 — culture_transform 체인 맨 앞에 dbt deps (#564)
+
+- **`dbt_deps` 태스크 신설** — 체인이 `dbt_deps → dbt_source_freshness → dbt_seed →
+  dbt_run → dbt_test` 가 됐다. dbt 는 `packages.yml` 선언 수와 `dbt_packages/` 설치 수가
+  어긋나면 **파스 단계**에서 죽어(`dbt found N package(s) specified ... but only M
+  installed`) 네 태스크가 전부 시작조차 못 한다. → `culture_transform.py`
+- **어긋나는 경로가 둘** — ① `packages.yml` 에 패키지를 추가하는 PR(대기 중인 ASAC-DBT#347
+  이 서빙 계약 #346 의 복합 PK 근거로 `dbt_utils 1.3.1` 추가) ② `dbt_packages/` 유실
+  (gitignore 대상이라 `git clean -fdx`·컨테이너 재생성으로 사라지는데 **아무도 다시 설치해
+  주지 않았다**). ②는 #347 과 무관한 기존 취약점으로, culture 가 로컬 패키지 하나
+  (`asac_axes`, 심볼릭 링크)로 버텨 와서 드러나지 않았을 뿐이다.
+- **실측 근거** — scheduler 컨테이너에 culture 프로젝트를 복사해 재현: `dbt_packages` 삭제 시
+  `1 specified / 0 installed`, #347 의 packages.yml 적용 시 `2 specified / 1 installed`
+  로 각각 `Compilation Error`. `dbt deps` 를 먼저 돌리면 둘 다 해소되고 parse 성공.
+  컨테이너에서 dbt hub API·GitHub tarball 도달 확인(HTTP 200), `dbt deps --target dev`
+  플래그 호환 확인.
+- **선례** — citydata `install_deps: True` + `_dbt("deps")`, traffic `dbt_deps` 태스크.
+- **영향 범위** — 실패 시 `culture_transform` 전체(silver 10 + gold 14 + 계약 테스트)와
+  Asset 하류 `culture_slo`. 수집(`culture_bronze`)은 무관해 데이터 유실은 없고 신선도만 정지.
+
 ## 2026-07-27 — 공연 상세 야간 안티조인 전환 (#518)
 
 - **`kopis_performance_detail` → `missing_only_nightly`** — 야간엔 신규 공연만

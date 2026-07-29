@@ -3,7 +3,9 @@
 ``culture_bronze``의 load_bronze가 bronze Iceberg를 갱신하며 Asset을 발행하면
 이 DAG이 자동 기동한다(cron 우연 결합 없음 — bronze 성공 시에만 변환).
 
-체인: dbt_source_freshness → dbt_seed → dbt_run → dbt_test
+체인: dbt_deps → dbt_source_freshness → dbt_seed → dbt_run → dbt_test
+  * deps — packages.yml 의존성 설치(#564). 선언 수와 dbt_packages 설치 수가 어긋나면
+    dbt는 파스 단계에서 죽어 뒤의 세 태스크가 시작조차 못 한다.
   * source freshness — sources.yml의 계약(경고 30h/에러 48h)을 실측. error만 실패.
   * seed — sema_branch_location(분관 좌표)·sejong_location + asac_axes 패키지 seed(행정동 크로스워크·경계).
   * run/test — silver 9종 + gold 3종 빌드 후 계약 테스트.
@@ -72,6 +74,14 @@ with DAG(
     params=DEFAULT_PARAMS,
     tags=["transform", "culture", "silver", "gold", "dbt"],
 ) as dag:
+    # packages.yml 의존성 설치(#564) — 체인 맨 앞이어야 한다. dbt 는 선언 수와 dbt_packages
+    # 설치 수가 다르면 **파스 단계**에서 죽어(`dbt found N package(s) specified ... but only M
+    # installed`) freshness 부터 test 까지 전부 시작조차 못 한다. 두 경로로 어긋난다:
+    # ① packages.yml 에 패키지를 추가하는 PR(ASAC-DBT#347 의 dbt_utils) ② dbt_packages 유실
+    # (gitignore 대상 — git clean·컨테이너 재생성). citydata·traffic 은 이미 매 런 돌린다.
+    deps = BashOperator(task_id="dbt_deps", bash_command=_dbt("deps"),
+                        on_failure_callback=record_culture_problem)
+
     # bronze 신선도 게이트 — 48h 넘게 낡았으면 여기서 멈추고 수집부터 고치게 한다.
     freshness = BashOperator(task_id="dbt_source_freshness",
                              bash_command=_dbt("source freshness"),
@@ -90,4 +100,4 @@ with DAG(
                                bash_command=_dbt("test --exclude package:asac_axes tag:slo"),
                                on_failure_callback=record_culture_problem)
 
-    freshness >> seed >> run_models >> test_models
+    deps >> freshness >> seed >> run_models >> test_models
