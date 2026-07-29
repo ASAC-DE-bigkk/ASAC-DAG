@@ -65,6 +65,8 @@ class ProductRecord:
     published_bytes: int = 0
     freshness: str | None = None
     api_smoke_status: str = "not_evaluated"
+    stage: str = "initialized"
+    rollback_status: str = "not_needed"
 
 
 @dataclass
@@ -147,6 +149,76 @@ def _write(
     return d1.primary_key_stats(contract.model_name, contract.primary_key)
 
 
+def _ledger_row(record: ProductRecord, *, outcome: str) -> dict[str, Any]:
+    return {
+        "publication_id": record.publication_id,
+        "product_id": record.product_id,
+        "model_name": record.model_name,
+        "source_run_id": record.source_run_id,
+        "attempted_at": record.published_at,
+        "outcome": outcome,
+        "stage": record.stage,
+        "source_row_count": record.source_row_count,
+        "published_row_count": record.published_row_count,
+        "d1_row_count": record.d1_row_count,
+        "api_smoke_status": record.api_smoke_status,
+        "rollback_status": record.rollback_status,
+        "reason": record.reason,
+    }
+
+
+def _append_ledger(d1: D1Client, record: ProductRecord, *, outcome: str) -> None:
+    try:
+        d1.append_publication_ledger(_ledger_row(record, outcome=outcome))
+    except Exception as exc:  # noqa: BLE001 -- ledger failures must surface in the primary task
+        raise RuntimeError(f"publication ledger 기록 실패: {type(exc).__name__}: {exc}") from exc
+
+
+def _restore_snapshot(
+    d1: D1Client,
+    record: ProductRecord,
+    *,
+    previous_catalog: dict[str, Any] | None,
+    catalog_committed: bool,
+) -> None:
+    """Restore an activated snapshot and, only if needed, its old catalog row."""
+
+    try:
+        d1.restore_replaced_table(record.model_name)
+        if catalog_committed:
+            if previous_catalog is None:
+                d1.delete_catalog_row(record.model_name)
+            else:
+                d1.upsert_catalog([previous_catalog])
+        record.rollback_status = "restored"
+    except Exception as exc:  # noqa: BLE001 -- retain the original failure plus compensation failure
+        record.rollback_status = f"restore_failed:{type(exc).__name__}"
+
+
+def _fail_after_write(
+    d1: D1Client,
+    report: PublicationReport,
+    record: ProductRecord,
+    contract: ServingContract,
+    *,
+    message: str,
+    previous_catalog: dict[str, Any] | None,
+    catalog_committed: bool = False,
+) -> None:
+    record.serving_status = STATUS_FAILED
+    record.reason = message
+    if contract.publication_mode == "snapshot":
+        _restore_snapshot(
+            d1,
+            record,
+            previous_catalog=previous_catalog,
+            catalog_committed=catalog_committed,
+        )
+    report.failures.append(f"{contract.model_name}: {message}")
+    _append_ledger(d1, record, outcome="failed")
+    report.records.append(record)
+
+
 def publish(
     contracts: Sequence[ServingContract],
     source: SourceReader,
@@ -157,8 +229,6 @@ def publish(
 ) -> PublicationReport:
     """Publish each contract as one Publication unit. Raises ``PublicationError`` if any fails."""
     report = PublicationReport()
-    registered: dict[str, dict[str, Any]] = {}
-
     for contract in contracts:
         record = ProductRecord(
             product_id=contract.product_id,
@@ -187,13 +257,17 @@ def publish(
 
         if decision.decision == GateDecision.FAIL:
             record.serving_status = STATUS_FAILED
+            record.stage = "gate"
             report.failures.append(f"{contract.model_name}: {decision.reason}")
+            _append_ledger(d1, record, outcome="failed")
             report.records.append(record)
             continue
 
         if decision.decision == GateDecision.SKIP_RETAIN:
             record.serving_status = STATUS_SKIPPED
             record.published_row_count = last_good_count or 0  # last-known-good untouched
+            record.stage = "gate"
+            _append_ledger(d1, record, outcome="skipped_retained")
             report.records.append(record)
             continue
 
@@ -202,19 +276,24 @@ def publish(
         source_row_count, source_distinct_count, source_null_count = _primary_key_stats(rows, contract.primary_key)
         if source_row_count != source_distinct_count or source_null_count:
             record.serving_status = STATUS_FAILED
+            record.stage = "source_primary_key"
             record.reason = (
                 "source primary key validation failed: "
                 f"rows={source_row_count} distinct={source_distinct_count} null={source_null_count}"
             )
             report.failures.append(f"{contract.model_name}: {record.reason}")
+            _append_ledger(d1, record, outcome="failed")
             report.records.append(record)
             continue
         try:
+            record.stage = "write"
             d1_row_count, distinct_primary_key_count, null_primary_key_count = _write(d1, contract, plan, rows)
         except Exception as exc:  # noqa: BLE001 -- record + continue; snapshot last-good is intact
             record.serving_status = STATUS_FAILED
+            record.stage = "write"
             record.reason = f"write 실패: {type(exc).__name__}: {exc}"
             report.failures.append(f"{contract.model_name}: {record.reason}")
+            _append_ledger(d1, record, outcome="failed")
             report.records.append(record)
             continue
 
@@ -229,14 +308,12 @@ def publish(
                 and d1_row_count != source_row_count
             )
         ):
-            record.serving_status = STATUS_FAILED
-            record.reason = (
+            record.stage = "read_back"
+            _fail_after_write(d1, report, record, contract, message=(
                 "D1 primary key read-back validation failed: "
                 f"source={source_row_count} rows={d1_row_count} "
                 f"distinct={distinct_primary_key_count} null={null_primary_key_count}"
-            )
-            report.failures.append(f"{contract.model_name}: {record.reason}")
-            report.records.append(record)
+            ), previous_catalog=catalog)
             continue
 
         record.published_row_count = d1_row_count
@@ -245,31 +322,55 @@ def publish(
         record.serving_status = (
             STATUS_DEGRADED if (degraded or decision.serving_status == STATUS_DEGRADED) else STATUS_PUBLISHED
         )
-        registered[contract.model_name] = _catalog_row(contract, plan.columns, record)
-        report.records.append(record)
-
-    # _catalog upsert (self-domain, published/degraded only) + registration self-check (#477 ③).
-    if registered:
-        d1.upsert_catalog(list(registered.values()))
-        registered_count = d1.catalog_domain_count(set(registered))
-        if registered_count != len(registered):
-            report.failures.append(
-                f"_catalog 자기검증 실패: 등록 {registered_count} != 게시 {len(registered)} (적재됐으나 등록 누락 가능)"
-            )
-
-    # API Smoke Test — external published products must be reachable.
-    published_status = {STATUS_PUBLISHED, STATUS_DEGRADED}
-    records_by_model = {record.model_name: record for record in report.records}
-    for contract in contracts:
-        record = records_by_model.get(contract.model_name)
-        if contract.external and record and record.serving_status in published_status:
+        if contract.external:
+            record.stage = "api_smoke"
             record.api_smoke_status = smoke.check(contract.model_name)
             if record.api_smoke_status == "failed":
-                report.failures.append(f"{contract.model_name}: API smoke test 실패")
-            elif record.api_smoke_status not in {"passed", "not_evaluated"}:
-                report.failures.append(
-                    f"{contract.model_name}: invalid API smoke status={record.api_smoke_status!r}"
+                _fail_after_write(
+                    d1,
+                    report,
+                    record,
+                    contract,
+                    message="API smoke test 실패",
+                    previous_catalog=catalog,
                 )
+                continue
+            elif record.api_smoke_status not in {"passed", "not_evaluated"}:
+                _fail_after_write(
+                    d1,
+                    report,
+                    record,
+                    contract,
+                    message=f"invalid API smoke status={record.api_smoke_status!r}",
+                    previous_catalog=catalog,
+                )
+                continue
+
+        catalog_committed = False
+        try:
+            record.stage = "catalog"
+            d1.upsert_catalog([_catalog_row(contract, plan.columns, record)])
+            catalog_committed = True
+            registered_count = d1.catalog_domain_count({contract.model_name})
+            if registered_count != 1:
+                raise RuntimeError("_catalog 자기검증 실패: 등록 누락 가능")
+        except Exception as exc:  # noqa: BLE001 -- restore snapshot after any post-write catalog failure
+            _fail_after_write(
+                d1,
+                report,
+                record,
+                contract,
+                message=f"catalog 실패: {type(exc).__name__}: {exc}",
+                previous_catalog=catalog,
+                catalog_committed=catalog_committed,
+            )
+            continue
+
+        if contract.publication_mode == "snapshot":
+            d1.finalize_replaced_table(contract.model_name)
+        record.stage = "completed"
+        _append_ledger(d1, record, outcome=record.serving_status)
+        report.records.append(record)
 
     if report.failures:
         raise PublicationError(report)

@@ -4,8 +4,17 @@ The ``Airflow`` token keeps this thin factory wrapper visible to DAG safe-mode
 discovery even though Airflow imports live inside the common factory.
 """
 
+import os
+import sys
+
+DIR = os.path.dirname(os.path.abspath(__file__))
+for path in (DIR, os.path.dirname(DIR), os.path.dirname(os.path.dirname(DIR))):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
 from common.runtime_guard import default_target
 from common.serving.dag_factory import build_serving_export_dag
+from traffic_ingest.assets import TRAFFIC_GOLD_PUBLICATION_READY_ASSET, schedule_asset
 
 
 dag = build_serving_export_dag(
@@ -19,10 +28,8 @@ dag = build_serving_export_dag(
         "traffic_flow_anomaly_current",
     ],
     exact_domain_contracts=True,
-    # The upstream Gold transform is asset-triggered but does not yet emit a
-    # terminal Gold Asset. Keep the first dev publication manual until that
-    # completion signal and the matching v1.1 publication_trigger are added.
-    schedule=None,
+    # Only the terminal marker runs after Gold write and contract test success.
+    schedule=schedule_asset(TRAFFIC_GOLD_PUBLICATION_READY_ASSET),
     dag_id="traffic_serving_export",
     target=default_target(),
     schema="traffic",

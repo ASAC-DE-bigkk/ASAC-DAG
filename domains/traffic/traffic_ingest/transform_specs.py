@@ -48,34 +48,20 @@ SILVER_DBT_PHASE_SPECS = (
         heavy_pool=False,
     ),
     DbtPhaseSpec(
-        "dbt_test_traffic_incident_availability",
-        "test",
-        "ask_seoul_traffic_transform_availability",
-        heavy_pool=False,
-    ),
-    DbtPhaseSpec(
         "dbt_test_traffic_bronze_source_contract",
         "test",
-        "traffic_transform_contract_gate",
+        "ask_seoul_traffic_transform_incident_preflight_contracts",
         heavy_pool=False,
     ),
     DbtPhaseSpec(
         "dbt_run_silver",
-        "run",
+        "build",
         INCIDENT_SILVER_SELECTOR,
+        silver_persisted=True,
         fresh_parse=True,
         snapshot_required=True,
         pin_critical=True,
         silver_fence_mode="write",
-    ),
-    DbtPhaseSpec(
-        "dbt_test_silver",
-        "test",
-        INCIDENT_SILVER_SELECTOR,
-        silver_persisted=True,
-        snapshot_required=True,
-        pin_critical=True,
-        silver_fence_mode="verify",
     ),
 )
 
@@ -191,9 +177,9 @@ GOLD_DBT_PHASE_SPECS = (
 # Transitional view for the unsplit DAG. Keep its original phase order and do not
 # add the Gold-owned deps task until the two DAGs are wired independently.
 DBT_PHASE_SPECS = (
-    *SILVER_DBT_PHASE_SPECS[:-2],
+    *SILVER_DBT_PHASE_SPECS[:-1],
     *GOLD_DBT_PHASE_SPECS[1:-2],
-    *SILVER_DBT_PHASE_SPECS[-2:],
+    *SILVER_DBT_PHASE_SPECS[-1:],
     *GOLD_DBT_PHASE_SPECS[-2:],
 )
 DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)

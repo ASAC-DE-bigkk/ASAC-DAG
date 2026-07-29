@@ -21,8 +21,28 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Sequence
 
+from common.serving.publisher import ProductRecord
+
 # dbt project that owns each domain's manifest (weather+traffic share the monoproject).
 _DBT_PROJECT = {"weather": "traffic_weather", "traffic": "traffic_weather"}
+
+
+def publication_record_payload(record: ProductRecord) -> dict[str, object]:
+    """Keep the operator XCom aligned with the immutable publication ledger."""
+
+    return {
+        "product_id": record.product_id,
+        "serving_status": record.serving_status,
+        "source_row_count": record.source_row_count,
+        "published_row_count": record.published_row_count,
+        "d1_row_count": record.d1_row_count,
+        "distinct_primary_key_count": record.distinct_primary_key_count,
+        "null_primary_key_count": record.null_primary_key_count,
+        "api_smoke_status": record.api_smoke_status,
+        "publication_id": record.publication_id,
+        "stage": record.stage,
+        "rollback_status": record.rollback_status,
+    }
 
 
 def _manifest_path(domain: str, dbt_project: str | None) -> str:
@@ -97,17 +117,7 @@ def build_serving_export_dag(
                 "published": published,
                 "skipped": skipped,
                 "records": [
-                    {
-                        "product_id": r.product_id,
-                        "serving_status": r.serving_status,
-                        "source_row_count": r.source_row_count,
-                        "published_row_count": r.published_row_count,
-                        "d1_row_count": r.d1_row_count,
-                        "distinct_primary_key_count": r.distinct_primary_key_count,
-                        "null_primary_key_count": r.null_primary_key_count,
-                        "api_smoke_status": r.api_smoke_status,
-                        "publication_id": r.publication_id,
-                    }
+                    publication_record_payload(r)
                     for r in report.records
                 ],
             },

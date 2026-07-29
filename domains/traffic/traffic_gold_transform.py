@@ -40,6 +40,7 @@ from traffic_ingest import transform_runtime  # noqa: E402
 from traffic_ingest.transform_runtime import PREFLIGHT_SNAPSHOT_DAG_RUN_ID  # noqa: E402, F401
 from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_FLOW_SILVER_ASSET,
+    TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF,
     TRAFFIC_INCIDENT_SILVER_ASSET,
     schedule_asset,
 )
@@ -155,6 +156,12 @@ def mark_traffic_gold_success(**context) -> dict[str, object]:
         identity=_gold_identity(ti=ti),
         evidence=current_silver_output_evidence(),
     )
+    outlet_events = context.get("outlet_events")
+    if outlet_events is not None:
+        outlet_events[TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF].extra = {
+            "gold_dag_run_id": str(context.get("run_id") or ""),
+            "gold_success_marker": serialized,
+        }
     return {"marker": serialized}
 
 
@@ -302,6 +309,7 @@ with DAG(
     mark_success = PythonOperator(
         task_id="mark_traffic_gold_success",
         python_callable=mark_traffic_gold_success,
+        outlets=[TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF],
         pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",

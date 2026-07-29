@@ -47,15 +47,22 @@ def _silver_ti(
     )
 
 
-def test_silver_dag_schedule_and_guard_order():
+def test_silver_dag_uses_eight_observable_tasks_without_a_stale_pin_gap():
     module = load_transform_module()
     dag = module.dag
 
     assert dag.kwargs["schedule"].uri == module.TRAFFIC_INCIDENT_BRONZE_ASSET
     assert dag.kwargs["max_active_runs"] == 1
-    # #510: Bronze source gates run first (no pin needed), then the snapshot is
-    # pinned immediately before dbt_run_silver so the pin cannot be superseded by
-    # a newer Bronze run during the multi-minute gate phase (livelock fix).
+    assert set(dag.task_ids) == {
+        "validate_dev_runtime",
+        "dbt_deps",
+        "dbt_source_freshness",
+        "dbt_test_traffic_bronze_source_contract",
+        module.SNAPSHOT_TASK_ID,
+        "dbt_run_silver",
+        "publish_traffic_incident_silver_asset",
+        "publish_dbt_run_metrics",
+    }
     assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
         "dbt_deps"
     }
@@ -63,23 +70,20 @@ def test_silver_dag_schedule_and_guard_order():
         "dbt_source_freshness"
     }
     assert dag.task_dict["dbt_source_freshness"].downstream_task_ids == {
-        "dbt_test_traffic_incident_availability"
+        "dbt_test_traffic_bronze_source_contract"
     }
-    assert dag.task_dict[
-        "dbt_test_traffic_incident_availability"
-    ].downstream_task_ids == {"dbt_test_traffic_bronze_source_contract"}
     assert dag.task_dict[
         "dbt_test_traffic_bronze_source_contract"
     ].downstream_task_ids == {"resolve_traffic_snapshot_run"}
     assert dag.task_dict["resolve_traffic_snapshot_run"].downstream_task_ids == {
-        "admit_traffic_silver_snapshot"
+        "dbt_run_silver"
     }
-    assert dag.task_dict["admit_traffic_silver_snapshot"].downstream_task_ids == {
-        "assert_traffic_silver_snapshot_not_superseded"
+    assert dag.task_dict["dbt_run_silver"].downstream_task_ids == {
+        "publish_traffic_incident_silver_asset"
     }
     assert dag.task_dict[
-        "assert_traffic_silver_snapshot_not_superseded"
-    ].downstream_task_ids == {"dbt_run_silver"}
+        "publish_traffic_incident_silver_asset"
+    ].downstream_task_ids == {"publish_dbt_run_metrics"}
     assert "dbt_run_gold" not in dag.task_ids
     assert "select_traffic_test_tier" not in dag.task_ids
 
@@ -102,6 +106,9 @@ def test_gold_dag_schedule_and_guard_order():
     assert dag.task_dict["resolve_traffic_gold_snapshot_run"].downstream_task_ids == {
         "admit_traffic_gold_snapshot"
     }
+    assert module.TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF in dag.task_dict[
+        "mark_traffic_gold_success"
+    ].kwargs["outlets"]
 
 
 @pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])
@@ -116,7 +123,7 @@ def test_split_dags_allow_dev_or_prod_target(loader):
 @pytest.mark.parametrize("loader", [load_transform_module, load_gold_transform_module])
 def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
     module = loader()
-    critical_task_ids = {"dbt_run_silver", "dbt_test_silver", "dbt_test_gold"}
+    critical_task_ids = {"dbt_run_silver", "dbt_test_gold"}
     local_workload_task_ids = {"dbt_deps", "dbt_deps_gold"}
     # Pre-write checks read Trino but do not need to serialize behind the
     # heavy pool with actual writes: keeping them off it shortens the window
@@ -124,7 +131,6 @@ def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
     # likely to be superseded by a newer Bronze run under pool contention.
     light_trino_task_ids = {
         "dbt_source_freshness",
-        "dbt_test_traffic_incident_availability",
         "dbt_test_traffic_bronze_source_contract",
     }
 
@@ -146,37 +152,36 @@ def test_split_dbt_tasks_keep_pool_priority_threads_and_absolute_weight(loader):
 
     for task_id in (
         module.SNAPSHOT_TASK_ID,
-        "admit_traffic_silver_snapshot"
-        if module.dag.dag_id == "traffic_incident_transform"
-        else "admit_traffic_gold_snapshot",
+        "admit_traffic_gold_snapshot",
     ):
+        if task_id not in module.dag.task_dict:
+            continue
         task = module.dag.task_dict[task_id]
         assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
         assert task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
         assert task.kwargs["weight_rule"] == "absolute"
 
 
-def test_silver_marker_is_a_separate_task_after_asset_publication():
+def test_silver_publication_and_marker_share_one_airflow_success_boundary():
     module = load_transform_module()
     dag = module.dag
 
-    assert dag.task_dict["dbt_test_silver"].downstream_task_ids == {
+    assert dag.task_dict["dbt_run_silver"].downstream_task_ids == {
         "publish_traffic_incident_silver_asset"
     }
     assert dag.task_dict[
         "publish_traffic_incident_silver_asset"
-    ].downstream_task_ids == {"mark_traffic_silver_success"}
-    assert dag.task_dict["mark_traffic_silver_success"].downstream_task_ids == {
-        "publish_dbt_run_metrics"
-    }
+    ].downstream_task_ids == {"publish_dbt_run_metrics"}
+    assert "mark_traffic_silver_success" not in dag.task_ids
     publish_task = dag.task_dict["publish_traffic_incident_silver_asset"]
     assert publish_task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
     assert publish_task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
     assert publish_task.kwargs["weight_rule"] == "absolute"
 
 
-def test_silver_publication_never_writes_marker(monkeypatch):
+def test_silver_publication_writes_marker_after_preparing_asset(monkeypatch):
     module = load_transform_module()
+    calls = []
     evidence = {
         "silver_snapshot_evidence": {
             "snapshot_id": 42,
@@ -185,14 +190,27 @@ def test_silver_publication_never_writes_marker(monkeypatch):
             "compacted_files": ["a"],
         }
     }
-    monkeypatch.setattr(module, "publish_through_alias", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "verify_traffic_silver_write_evidence",
+        lambda *_args, **_kwargs: calls.append("verify"),
+    )
+    monkeypatch.setattr(
+        module,
+        "publish_through_alias",
+        lambda *_args, **_kwargs: calls.append("publish"),
+    )
 
     metadata = module.publish_traffic_incident_silver_asset(
         ti=_silver_ti(module, run_result=evidence), outlet_events={}
     )
 
     assert metadata["silver_snapshot_id"] == 42
-    assert FakeVariable.set_calls == []
+    assert calls == ["verify", "publish"]
+    marker = _marker_type().from_json(
+        FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY]
+    )
+    assert marker.identity == module.TransformIdentity.silver("incident-1")
 
 
 def test_silver_publication_coalesces_deferred_runs_before_emitting_asset(monkeypatch):
@@ -212,6 +230,9 @@ def test_silver_publication_coalesces_deferred_runs_before_emitting_asset(monkey
             calls.append(("coalesce", list(run_ids), replacement_run_id))
 
     monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+    monkeypatch.setattr(
+        module, "verify_traffic_silver_write_evidence", lambda *_args: None
+    )
     monkeypatch.setattr(
         module,
         "publish_through_alias",
@@ -233,7 +254,7 @@ def test_silver_publication_coalesces_deferred_runs_before_emitting_asset(monkey
     ]
 
 
-def test_silver_admission_coalesces_deferred_runs_when_exact_output_skips(monkeypatch):
+def test_prepare_snapshot_coalesces_deferred_runs_when_exact_output_skips(monkeypatch):
     module = load_transform_module()
     calls = []
     FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = _marker(
@@ -250,32 +271,53 @@ def test_silver_admission_coalesces_deferred_runs_when_exact_output_skips(monkey
             calls.append((list(run_ids), replacement_run_id))
 
     monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+    monkeypatch.setattr(
+        module, "verify_traffic_silver_write_evidence", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_traffic_snapshot_run",
+        lambda **_context: "incident-1",
+    )
 
     with pytest.raises(FakeAirflowSkipException):
-        module.admit_traffic_silver_snapshot(
+        module.prepare_traffic_silver_snapshot(
             ti=_silver_ti(module, stale_run_ids=["incident-old"])
         )
 
     assert calls == [(["incident-old"], "incident-1")]
 
 
-def test_assert_not_superseded_passes_when_pin_is_still_latest(monkeypatch):
+def test_prepare_snapshot_resolves_admits_and_checks_latest_in_one_call(monkeypatch):
     module = load_transform_module()
+    calls = []
 
     class Manifest:
         def latest_publishable_run_id(self):
+            calls.append("latest")
             return "incident-1"
 
     monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+    monkeypatch.setattr(
+        module,
+        "resolve_traffic_snapshot_run",
+        lambda **_context: calls.append("resolve") or "incident-1",
+    )
+    monkeypatch.setattr(
+        module,
+        "admit_transform",
+        lambda **_kwargs: calls.append("admit") or {"action": "RUN"},
+    )
 
-    result = module.assert_traffic_silver_snapshot_not_superseded(
+    result = module.prepare_traffic_silver_snapshot(
         ti=_silver_ti(module, incident_run_id="incident-1")
     )
 
     assert result == "incident-1"
+    assert calls == ["resolve", "admit", "latest"]
 
 
-def test_assert_not_superseded_skips_early_before_any_dbt_phase_runs(monkeypatch):
+def test_prepare_snapshot_skips_before_dbt_when_pin_is_superseded(monkeypatch):
     module = load_transform_module()
 
     class Manifest:
@@ -283,9 +325,19 @@ def test_assert_not_superseded_skips_early_before_any_dbt_phase_runs(monkeypatch
             return "incident-2"
 
     monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
+    monkeypatch.setattr(
+        module,
+        "resolve_traffic_snapshot_run",
+        lambda **_context: "incident-1",
+    )
+    monkeypatch.setattr(
+        module,
+        "admit_transform",
+        lambda **_kwargs: {"action": "RUN"},
+    )
 
     with pytest.raises(FakeAirflowSkipException):
-        module.assert_traffic_silver_snapshot_not_superseded(
+        module.prepare_traffic_silver_snapshot(
             ti=_silver_ti(module, incident_run_id="incident-1")
         )
 
@@ -305,6 +357,9 @@ def test_silver_publication_failure_cannot_write_marker(monkeypatch):
         "publish_through_alias",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("publish failed")),
     )
+    monkeypatch.setattr(
+        module, "verify_traffic_silver_write_evidence", lambda *_args: None
+    )
 
     with pytest.raises(RuntimeError, match="publish failed"):
         module.publish_traffic_incident_silver_asset(
@@ -313,7 +368,7 @@ def test_silver_publication_failure_cannot_write_marker(monkeypatch):
     assert FakeVariable.set_calls == []
 
 
-def test_mark_silver_success_uses_strict_dbt_run_evidence():
+def test_silver_publication_uses_strict_dbt_run_evidence(monkeypatch):
     module = load_transform_module()
     evidence = {
         "silver_snapshot_evidence": {
@@ -324,7 +379,13 @@ def test_mark_silver_success_uses_strict_dbt_run_evidence():
         }
     }
 
-    module.mark_traffic_silver_success(ti=_silver_ti(module, run_result=evidence))
+    monkeypatch.setattr(
+        module, "verify_traffic_silver_write_evidence", lambda *_args: None
+    )
+    monkeypatch.setattr(module, "publish_through_alias", lambda *_args, **_kwargs: None)
+    module.publish_traffic_incident_silver_asset(
+        ti=_silver_ti(module, run_result=evidence), outlet_events={}
+    )
 
     marker = _marker_type().from_json(
         FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY]
@@ -383,7 +444,7 @@ def test_metrics_teardown_is_terminal_without_failure_fanout(loader):
     module = loader()
     metrics = module.dag.task_dict["publish_dbt_run_metrics"]
     success_task_id = (
-        "mark_traffic_silver_success"
+        "publish_traffic_incident_silver_asset"
         if module.dag.dag_id == "traffic_incident_transform"
         else "mark_traffic_gold_success"
     )

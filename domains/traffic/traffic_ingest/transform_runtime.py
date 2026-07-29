@@ -43,13 +43,20 @@ def _fail_closed_fence(exc: Exception) -> None:
     raise AirflowFailException(f"invalid silver snapshot evidence: {exc}") from exc
 
 
-def _expected_write_evidence(ti: Any) -> SilverSnapshotEvidence:
+def expected_silver_write_evidence(ti: Any) -> SilverSnapshotEvidence:
     raw_result = ti.xcom_pull(task_ids="dbt_run_silver")
     if not isinstance(raw_result, dict):
         raise SnapshotFenceTelemetryError("dbt_run_silver result is missing")
     if "silver_snapshot_evidence" not in raw_result:
         raise SnapshotFenceTelemetryError("silver_snapshot_evidence is missing")
     return SilverSnapshotEvidence.from_dict(raw_result["silver_snapshot_evidence"])
+
+
+def verify_silver_write_evidence(ti: Any) -> SilverSnapshotEvidence:
+    """Fail closed unless the Silver snapshot still matches the dbt build result."""
+    expected = expected_silver_write_evidence(ti)
+    assert_snapshot_unchanged(expected, collect_silver_snapshot_evidence())
+    return expected
 
 
 def run_dbt_phase(
@@ -161,7 +168,7 @@ def run_dbt_phase(
         if silver_fence_mode == "write":
             baseline = collect_silver_snapshot_evidence()
         elif silver_fence_mode == "verify":
-            expected = _expected_write_evidence(ti)
+            expected = expected_silver_write_evidence(ti)
             assert_snapshot_unchanged(expected, collect_silver_snapshot_evidence())
     except Exception as exc:  # fence telemetry and external rewrites both fail closed
         _fail_closed_fence(exc)
@@ -262,4 +269,8 @@ def run_dbt_phase(
     raise AirflowFailException(message)
 
 
-__all__ = ["run_dbt_phase"]
+__all__ = [
+    "expected_silver_write_evidence",
+    "run_dbt_phase",
+    "verify_silver_write_evidence",
+]
