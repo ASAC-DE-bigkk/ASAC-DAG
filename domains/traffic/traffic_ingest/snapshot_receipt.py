@@ -12,19 +12,22 @@ from zoneinfo import ZoneInfo
 
 
 RECEIPT_VERSION = 1
-RECEIPT_PREFIX = "traffic-snapshot-receipts"
+# pending receipt 는 "다음 실행의 동작을 바꾸는" 제어 상태라 ops/control 존이
+# 목적지다(TTL 금지 — 지워지면 materialization 이 멈춘다). 구 위치는
+# 루트 `traffic-snapshot-receipts`.
+RECEIPT_PREFIX = "ops/control/state/traffic/snapshot_receipts"
 
 
 def receipt_prefix() -> str:
-    """receipt 루트 — `TRAFFIC_SNAPSHOT_RECEIPT_PREFIX` 가 있으면 그 값(#60/#561).
+    """receipt 루트 — 기본 ops 존, `TRAFFIC_SNAPSHOT_RECEIPT_PREFIX` 는 롤백용(#60).
 
-    pending receipt 는 "다음 실행의 동작을 바꾸는" 제어 상태라 ops/control 존이
-    목적지다(TTL 금지 — 지워지면 materialization 이 멈춘다). 미설정 시 구 위치라
-    dev 가동 중 배포해도 진행 중인 pending 이 고아가 되지 않는다.
-    (transit#549 · commerce#553 과 동일 컨벤션)
+    기본값이 곧 목적지이므로 배포만 하면 맞고, env 는 구 위치로 되돌릴 때만 쓴다 —
+    common(#573)·culture(#579)·recovery(#585)와 같은 방식.
     """
     configured = os.environ.get("TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", "").strip()
     return configured.rstrip("/") if configured else RECEIPT_PREFIX
+
+
 INCIDENT_SOURCE_ID = "seoul_traffic_incident"
 KST = ZoneInfo("Asia/Seoul")
 _MISSING_OBJECT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})

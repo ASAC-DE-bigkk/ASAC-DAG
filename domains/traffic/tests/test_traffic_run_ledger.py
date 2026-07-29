@@ -83,7 +83,9 @@ def test_ledger_uses_deterministic_status_keys_and_never_persists_error_messages
     assert len(storage.objects) == 2
     failed_key = next(key for key in storage.objects if key.endswith("__FAILED.json"))
     failed = storage.objects[failed_key]
-    assert "traffic-run-ledger/observed_date=2026-07-15/" in failed_key
+    assert (
+        "ops/control/state/traffic/run_ledger/observed_date=2026-07-15/" in failed_key
+    )
     assert failed == {
         "dag_id": "traffic_incident_bronze",
         "run_id": "scheduled__2026-07-15T00:00:00+00:00",

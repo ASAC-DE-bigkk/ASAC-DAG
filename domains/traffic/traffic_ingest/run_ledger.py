@@ -9,17 +9,20 @@ from typing import Any, Protocol
 from urllib.parse import quote
 
 
-RUN_LEDGER_PREFIX = "traffic-run-ledger"
+# watchdog 이 "누락 run" 판정 근거로 읽으므로 TTL 로 지워지면 오탐이 난다 →
+# ops/control 존이 목적지. 구 위치는 루트 `traffic-run-ledger`.
+RUN_LEDGER_PREFIX = "ops/control/state/traffic/run_ledger"
 
 
 def run_ledger_prefix() -> str:
-    """ledger 루트 — `TRAFFIC_RUN_LEDGER_PREFIX` 가 있으면 그 값(#60/#561).
+    """ledger 루트 — 기본 ops 존, `TRAFFIC_RUN_LEDGER_PREFIX` 는 롤백용(#60).
 
-    watchdog 이 "누락 run" 판정 근거로 읽으므로 TTL 로 지워지면 오탐이 난다 →
-    ops/control 존이 목적지. 미설정 시 구 위치 폴백.
+    기본값이 곧 목적지이므로 배포만 하면 맞고, env 는 구 위치로 되돌릴 때만 쓴다.
     """
     configured = os.environ.get("TRAFFIC_RUN_LEDGER_PREFIX", "").strip()
     return configured.rstrip("/") if configured else RUN_LEDGER_PREFIX
+
+
 STATUS_STARTED = "STARTED"
 STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
