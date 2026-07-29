@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -9,6 +10,16 @@ from urllib.parse import quote
 
 
 RUN_LEDGER_PREFIX = "traffic-run-ledger"
+
+
+def run_ledger_prefix() -> str:
+    """ledger 루트 — `TRAFFIC_RUN_LEDGER_PREFIX` 가 있으면 그 값(#60/#561).
+
+    watchdog 이 "누락 run" 판정 근거로 읽으므로 TTL 로 지워지면 오탐이 난다 →
+    ops/control 존이 목적지. 미설정 시 구 위치 폴백.
+    """
+    configured = os.environ.get("TRAFFIC_RUN_LEDGER_PREFIX", "").strip()
+    return configured.rstrip("/") if configured else RUN_LEDGER_PREFIX
 STATUS_STARTED = "STARTED"
 STATUS_SUCCESS = "SUCCESS"
 STATUS_FAILED = "FAILED"
@@ -224,7 +235,7 @@ class TrafficRunLedger:
     ) -> str:
         observed_date = event_at.date().isoformat()
         return (
-            f"{RUN_LEDGER_PREFIX}/observed_date={observed_date}/"
+            f"{run_ledger_prefix()}/observed_date={observed_date}/"
             f"dag_id={_safe_segment(dag_id)}/"
             f"{_safe_segment(run_id)}__{status}.json"
         )
@@ -267,7 +278,7 @@ class TrafficRunLedger:
         keys: list[str] = []
         for observed_date in sorted(dates):
             prefix = (
-                f"{RUN_LEDGER_PREFIX}/observed_date={observed_date}/"
+                f"{run_ledger_prefix()}/observed_date={observed_date}/"
                 f"dag_id={_safe_segment(dag_id)}/"
             )
             keys.extend(storage.list_keys(prefix))

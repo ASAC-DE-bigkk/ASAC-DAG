@@ -7,7 +7,13 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Protocol
 
-from weather_ingest.common.runtime import fetch_url, raw_prefix, r2_env, trino_cursor
+from weather_ingest.common.runtime import (
+    checkpoint_prefix,
+    fetch_url,
+    raw_prefix,
+    r2_env,
+    trino_cursor,
+)
 from weather_ingest.kma import build_kma_url
 from weather_ingest.landing import KmaLanding
 from weather_ingest.run_manifest import WeatherRunManifest
@@ -129,6 +135,7 @@ def build_weather_landing() -> KmaLanding:
         source=KmaHttpAdapter(fetch_url),
         raw_store=raw_store,
         raw_prefix=raw_prefix(),
+        checkpoint_prefix=checkpoint_prefix(),
         clock=lambda: datetime.now(timezone.utc),
         request_id=lambda: str(uuid.uuid4()),
     )

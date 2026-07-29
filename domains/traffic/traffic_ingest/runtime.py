@@ -10,7 +10,12 @@ from typing import Callable, Protocol
 
 from common.http import HttpCore
 from common.http.seoul import SeoulOpenApiClient
-from traffic_ingest.common.runtime import raw_prefix, r2_env, trino_cursor
+from traffic_ingest.common.runtime import (
+    checkpoint_prefix,
+    raw_prefix,
+    r2_env,
+    trino_cursor,
+)
 from traffic_ingest.landing import TrafficLanding
 from traffic_ingest.incident_pipeline import (
     IncidentLandingLifecycle,
@@ -161,6 +166,7 @@ def build_traffic_landing() -> TrafficLanding:
         source=source,
         raw_store=raw_store,
         raw_prefix=raw_prefix(),
+        checkpoint_prefix=checkpoint_prefix(),
         clock=lambda: datetime.now(timezone.utc),
         request_id=lambda: str(uuid.uuid4()),
     )

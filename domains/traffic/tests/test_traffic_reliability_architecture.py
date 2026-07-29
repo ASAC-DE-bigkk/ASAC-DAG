@@ -58,6 +58,7 @@ OWNERS = {
         "_validated_snapshot",
         "compact_history_snapshot",
         "history_object_key",
+        "history_prefix",
         "load_recent_history",
         "write_history_snapshot",
     },

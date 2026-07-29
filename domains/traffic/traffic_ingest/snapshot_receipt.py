@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,6 +13,18 @@ from zoneinfo import ZoneInfo
 
 RECEIPT_VERSION = 1
 RECEIPT_PREFIX = "traffic-snapshot-receipts"
+
+
+def receipt_prefix() -> str:
+    """receipt 루트 — `TRAFFIC_SNAPSHOT_RECEIPT_PREFIX` 가 있으면 그 값(#60/#561).
+
+    pending receipt 는 "다음 실행의 동작을 바꾸는" 제어 상태라 ops/control 존이
+    목적지다(TTL 금지 — 지워지면 materialization 이 멈춘다). 미설정 시 구 위치라
+    dev 가동 중 배포해도 진행 중인 pending 이 고아가 되지 않는다.
+    (transit#549 · commerce#553 과 동일 컨벤션)
+    """
+    configured = os.environ.get("TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", "").strip()
+    return configured.rstrip("/") if configured else RECEIPT_PREFIX
 INCIDENT_SOURCE_ID = "seoul_traffic_incident"
 KST = ZoneInfo("Asia/Seoul")
 _MISSING_OBJECT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
@@ -220,7 +233,7 @@ class TrafficSnapshotReceipts:
         self._storage = storage
         self._source_id = source_id
         self._source_prefix = (
-            f"{RECEIPT_PREFIX}/source_id={_safe_segment(source_id)}"
+            f"{receipt_prefix()}/source_id={_safe_segment(source_id)}"
         )
 
     def pending_key(self, snapshot_run_id: str) -> str:
@@ -419,6 +432,7 @@ __all__ = [
     "LandedSnapshot",
     "MaterializedSnapshot",
     "RECEIPT_PREFIX",
+    "receipt_prefix",
     "SnapshotReceiptConflict",
     "SnapshotReceiptContractError",
     "TrafficSnapshotReceipts",

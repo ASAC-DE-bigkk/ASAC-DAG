@@ -47,6 +47,19 @@ def raw_prefix() -> str:
     return os.environ.get("ASK_SEOUL_RAW_PREFIX", "raw")
 
 
+def checkpoint_prefix() -> str:
+    """landing checkpoint 루트 — `TRAFFIC_CHECKPOINT_PREFIX` 우선(#60 약속②/#561).
+
+    checkpoint 는 다음 실행의 재개 지점을 바꾸는 가변 상태라, 불변 박제 구역인
+    raw 밖(ops/control)이 목적지다. 미설정 시 구 위치 `{raw_prefix}/_checkpoints`
+    폴백이라 dev 는 그대로 두고 prod 만 옮길 수 있다.
+    """
+    configured = os.environ.get("TRAFFIC_CHECKPOINT_PREFIX", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return f"{raw_prefix().rstrip('/')}/_checkpoints"
+
+
 def trino_catalog() -> str:
     if is_dev_target():
         return os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")

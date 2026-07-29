@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import timezone
 from typing import Any, Callable
@@ -26,6 +27,22 @@ from common.security import redact, refresh_env_secrets
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PREFIX = "errors"
+
+
+def errors_prefix(domain: str | None, env: dict[str, str] | None = None) -> str:
+    """도메인별 Problem 문서 prefix — `<DOMAIN>_ERROR_PREFIX` 가 있으면 그 값(#60/#561).
+
+    `errors/` 루트는 6개 도메인이 공유한다. 공유 기본값을 ops 존으로 바꾸면 오너
+    합의 없이 남의 도메인 경로까지 움직이므로, 도메인 스코프 env 만 본다. 설정한
+    도메인만 이동하고 나머지는 무변경 — 다른 오너는 env 한 줄로 합류하면 된다.
+    (transit#549 `TRANSIT_LOADER_PENDING_PREFIX`, commerce#553 `COMMERCE_*_LAYER` 와 동일 컨벤션)
+    """
+    values = os.environ if env is None else env
+    if domain:
+        configured = str(values.get(f"{str(domain).upper()}_ERROR_PREFIX", "")).strip()
+        if configured:
+            return configured.rstrip("/")
+    return DEFAULT_PREFIX
 
 # 오브젝트 키 세그먼트에 남길 문자 — 이 밖은 전부 '-' 로 치환.
 _UNSAFE_SEGMENT_CHARS = re.compile(r"[^A-Za-z0-9._=-]")

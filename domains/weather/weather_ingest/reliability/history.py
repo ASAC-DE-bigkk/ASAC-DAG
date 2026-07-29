@@ -33,9 +33,21 @@ class HistoryWriteError(RuntimeError):
         super().__init__(f"history_write_failed:{error_type}")
 
 
+def history_prefix() -> str:
+    """리포트 루트 — `WEATHER_RELIABILITY_HISTORY_PREFIX` 가 있으면 그 값(#60/#561).
+
+    지나간 실행의 기록이라 ops/reports 존(카테고리별 TTL 허용)이 목적지다.
+    미설정 시 구 위치 폴백 — dev 는 그대로 둔 채 prod 만 옮길 수 있다.
+    """
+    configured = os.environ.get(
+        f"{DOMAIN.upper()}_RELIABILITY_HISTORY_PREFIX", ""
+    ).strip()
+    return configured.rstrip("/") if configured else "reliability"
+
+
 def history_object_key(report_date: date) -> str:
     return (
-        f"reliability/date={report_date.isoformat()}/domain={DOMAIN}/"
+        f"{history_prefix()}/date={report_date.isoformat()}/domain={DOMAIN}/"
         f"{HISTORY_VERSION}.json"
     )
 
