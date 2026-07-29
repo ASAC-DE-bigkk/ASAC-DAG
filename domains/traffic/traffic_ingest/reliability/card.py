@@ -88,6 +88,7 @@ def build_traffic_discord_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         f"{STATUS_ICONS.get(status, '◻️')} **{status}**\n"
         f"Data {report.get('data_plane_status', 'UNKNOWN')} · "
         f"Control {report.get('control_plane_status', 'UNKNOWN')} · "
+        f"Contracts {(report.get('contract_audit') or {}).get('status', 'UNKNOWN')} · "
         f"Window {report.get('lookback_hours', 24)}h"
     )
     source_value = (

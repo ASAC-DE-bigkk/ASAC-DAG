@@ -42,6 +42,15 @@ from traffic_ingest.reliability.history import (  # noqa: E402
     write_history_snapshot,
 )
 from traffic_ingest.reliability.lineage import collect_pipeline_stages  # noqa: E402
+from traffic_ingest.daily_contract_audit import (  # noqa: E402
+    DAILY_ASSURANCE_SELECTOR,
+    build_daily_contract_variables,
+    run_daily_contract_audit,
+)
+from traffic_ingest.external_snapshot import (  # noqa: E402
+    resolve_admin_dong_crosswalk_snapshot_id,
+)
+from traffic_ingest.transform_admission import GOLD_SUCCESS_MARKER_KEY  # noqa: E402
 
 
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
@@ -109,6 +118,13 @@ def notification_fingerprint(report: dict) -> str:
         )
     if "control_plane_status" in report:
         identity["control_plane_status"] = report.get("control_plane_status")
+    contract_audit = report.get("contract_audit")
+    if isinstance(contract_audit, dict):
+        identity["contract_audit"] = {
+            "status": contract_audit.get("status"),
+            "selector": contract_audit.get("selector"),
+            "failure": contract_audit.get("failure"),
+        }
     payload = json.dumps(
         identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
@@ -223,6 +239,40 @@ def collect_pipeline_data_plane(**_context) -> dict:
     return collect_traffic_data_plane()
 
 
+def audit_traffic_dbt_contracts(**context) -> dict[str, object]:
+    target = os.environ.get("ASK_SEOUL_TARGET") or os.environ.get(
+        "DBT_TARGET", "dev"
+    )
+    if target not in {"dev", "prod"}:
+        return {
+            "status": "FAIL",
+            "selector": DAILY_ASSURANCE_SELECTOR,
+            "elapsed_seconds": 0.0,
+            "selected_count": 0,
+            "failure": "invalid_target",
+        }
+    try:
+        variables = build_daily_contract_variables(
+            Variable.get(GOLD_SUCCESS_MARKER_KEY, None),
+            admin_dong_crosswalk_snapshot_id=(
+                resolve_admin_dong_crosswalk_snapshot_id()
+            ),
+        )
+    except Exception as exc:
+        return {
+            "status": "FAIL",
+            "selector": DAILY_ASSURANCE_SELECTOR,
+            "elapsed_seconds": 0.0,
+            "selected_count": 0,
+            "failure": f"identity_{type(exc).__name__}",
+        }
+    return run_daily_contract_audit(
+        variables=variables,
+        target=target,
+        run_id=str(context.get("run_id") or "unknown"),
+    )
+
+
 def _task_input(explicit, context: dict, task_id: str) -> dict:
     if explicit is not None:
         if not isinstance(explicit, dict):
@@ -237,8 +287,17 @@ def _task_input(explicit, context: dict, task_id: str) -> dict:
     return value
 
 
-def compose_pipeline_reliability(data_plane=None, **context) -> dict:
+def compose_pipeline_reliability(
+    data_plane=None,
+    contract_audit=None,
+    **context,
+) -> dict:
     data_plane = _task_input(data_plane, context, "collect_traffic_data_plane")
+    contract_audit = _task_input(
+        contract_audit,
+        context,
+        "audit_traffic_dbt_contracts",
+    )
     detected_at = datetime.fromisoformat(
         str(data_plane["detected_at"]).replace("Z", "+00:00")
     )
@@ -267,6 +326,7 @@ def compose_pipeline_reliability(data_plane=None, **context) -> dict:
         stages=stages,
         history=history,
         detected_at=detected_at,
+        contract_audit=contract_audit,
     )
 
 
@@ -321,6 +381,13 @@ with DAG(
     default_args={"retries": 1, "retry_delay": timedelta(minutes=2)},
     tags=["ask_seoul", "traffic", "pipeline", "reliability", "discord"],
 ) as dag:
+    audit_contracts_task = PythonOperator(
+        task_id="audit_traffic_dbt_contracts",
+        python_callable=audit_traffic_dbt_contracts,
+        pool="trino_traffic_heavy",
+        pool_slots=1,
+        on_failure_callback=record_traffic_problem,
+    )
     collect_data_plane_task = PythonOperator(
         task_id="collect_traffic_data_plane",
         python_callable=collect_pipeline_data_plane,
@@ -338,7 +405,12 @@ with DAG(
         python_callable=deliver_pipeline_reliability,
         on_failure_callback=record_traffic_problem,
     )
-    collect_data_plane_task >> compose_report_task >> deliver_report_task
+    (
+        audit_contracts_task
+        >> collect_data_plane_task
+        >> compose_report_task
+        >> deliver_report_task
+    )
 
 
 enable_lineage_if_configured(dag)
