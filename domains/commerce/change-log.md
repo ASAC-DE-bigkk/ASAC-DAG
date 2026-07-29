@@ -7,6 +7,46 @@
 
 ## 2026-07-29
 
+### 83. 처리로그 ops/logs 존 일단위 적재 — commerce_ops_logship 신설(도커 볼륨 무잔존)
+
+request:
+- 각 과정 파생 처리로그를 도커(컨테이너/볼륨)에 두지 말고 #60 존(`ops/logs/<domain>/`)에
+  일단위로 적재, 적재 후 도커 볼륨에 남지 않게 하라는 지시.
+
+response:
+- 신규 DAG `commerce_ops_logship`(매일 01:30 KST): `dag_id=commerce_*` 의 **종결(success|failed)
+  run** 로그를 run 단위 tar.gz 로 `{COMMERCE_LOGS_LAYER}/load_date=<run 시작일 KST>/<dag_id>/
+  <run_id>.tar.gz` 에 업로드(존재 검증) 후 로컬 삭제. 실행 중/미기록 run 은 보존, 타 도메인
+  로그 무접촉. 순수 로직 `commerce_core/logship.py`(+tests/test_logship.py).
+- env: `COMMERCE_LOGS_LAYER=ops/logs/commerce`(루트 .env — #60 ops 존, 카테고리별 TTL 가능).
+- 실검증: 종결 run **206개 번들(13.2MB) 적재·검증·로컬 삭제, 실패 0** — 실행 중 2 run 만 보존.
+  security log_event 영수증(masked JSON) 반환.
+
+### 82. serving _catalog 를 타 도메인 형식과 동형화 — time_axis/freshness 채움 + prod 첫 서빙 실측 2건 처리
+
+request:
+- D1 적재 시 선행 이슈(#478/#77)의 카탈로그 등록이 시행됐는지 확인하고, 빠진 부분은 원격지
+  업데이트를 검토해 타 도메인과 같은 형식으로 정합하라는 지시. D1 100만행+ 제품은 제외 판정.
+
+response:
+- **행수 감사(제외 판정)**: SERVING_SPEC 22종 전수 실측 — 최대 181,435행(flow_monthly), 100만+
+  0건(290만 원장 flow_daily 는 기존 설계상 iceberg_api 제외 유지), 밴드 이탈 0건 → 전량 포함.
+- **첫 D1 적재**: 22종 스냅샷(총 261,802행) — D1 행수 = 감사치 22/22 일치, `_catalog` 22행
+  upsert(타 도메인 행 무손실 — 이후 30행 변화는 transit 자체 갱신 실측 확인), `d1_meta` 22행,
+  serve state 는 ops 존.
+- **동형화 갭**: 타 도메인은 시간축 보유 제품에 `time_axis`/`freshness` 를 채움(citydata 12/17,
+  weather·traffic 10/10) — commerce 는 #77 유보로 NULL. 원격(common/serving) 검토 결과 정본
+  `publisher._freshness`(= str(max(event_time))) 존재 → serving_export 에 `_freshness_of` 이식,
+  dbt meta.serving 에 `event_time` 선언(flow_monthly=ym·flow_yearly=y·churn_yearly=y — 순환·
+  코호트 축 제품은 미선언 관행 준수). 재export 실측: `2026-06`/`2025`/`2025` 채움, 스냅샷 19종
+  NULL 유지.
+- **prod 첫 gold 사건 기록**: (a) dbt seed 부재로 21모델 전멸(#567 로 구조 수리), (b) seed 직후
+  재실행 배치에서 4모델(cohort_survival/lifespan/address_succession/env_facility)이 **성공-0행**
+  — 입력·SQL 정상(직접 실행 7,502/2,867/99/51행)이라 신생 taxonomy 테이블에 대한 Trino 메타
+  캐시 정황(비결정, 17모델은 정상). 재실행으로 복구, gold 교차검증 22/22 정상(+6.59% = 복구분
+  전파). **후속 권고: gold 모델 최소행수 dbt test 부재**(0행 스냅샷이 test 통과) — 밴드 게이트가
+  D1 단에서 방어하나 gold 단 방어 없음.
+
 ### 81. dbt seed 부트스트랩 — silver DAG 에 매 run 멱등 재적재 태스크 신설 (#567, prod from-zero 실측 갭)
 
 request:
