@@ -386,13 +386,19 @@ with DAG(
     )
 
     # 2) fetch_raw: plan 결과를 동적 매핑, 데이터셋마다 raw 박제까지만(재현 불가 경계).
-    #    동시성 상한 4 = #201 완화 ①. KOPIS 400 은 런 시작 burst(15개 동시 첫 요청)를
-    #    따라오므로(03:00 이동 후에도 재발 4회로 확정) 동시 요청을 15→4 로 줄인다.
-    #    직렬화 비용 실측 +30s 이내(합 550s ÷ 4 ≈ 138s vs 병렬 최장 111s), 신선도 30h 무영향.
+    #    동시성 상한 2 = #201 완화 ②. 상한 4(완화 ①)는 효과가 없었는데, 이유는 상한이
+    #    **원천별이 아니라 런 전체**라 4슬롯이 통째로 KOPIS 로 채워졌기 때문이다
+    #    (7/25 는 정확히 4개가 동시에 400 — 슬롯 수와 같다). 이 상한은 "동시 KOPIS
+    #    호출 수"의 천장을 2 로 내리고, 그 2 칸마저 한 원천으로 안 몰리게 데이터셋
+    #    순서를 원천 라운드로빈으로 섞는다(datasets._interleave_by_source).
+    #    근거: 실패한 밤마다 같은 초에 발사된 것만 깨졌고, 1분 뒤 순차 200발(약 1.6 req/s)은
+    #    한 번도 안 깨졌다 — 통제 가능한 변수는 동시성 하나다.
+    #    비용: 합 550s ÷ 2 ≈ 275s (상한 4 의 138s 대비 +2.3분). 신선도 SLA 30h 라 무영향.
+    #    그래도 재발하면 다음 수는 상한 1(완전 직렬) 또는 KOPIS 전용 매핑 태스크 분리다.
     fetch_raw = PythonOperator.partial(
         task_id="fetch_raw",
         python_callable=_fetch_raw,
-        max_active_tis_per_dagrun=4,
+        max_active_tis_per_dagrun=2,
         on_failure_callback=record_culture_problem,
     ).expand(op_kwargs=plan.output)
 
