@@ -152,6 +152,22 @@ def test_unchanged_reuses_publication_id_and_keeps_written_at(monkeypatch):
     assert state_sql.count("'") >= 2                  # checked_at 은 현재 시각으로 갱신
 
 
+def test_handoff_meta_carries_publication_id(monkeypatch):
+    """핸드오프 메타가 게시본을 식별한다(#600) — `_catalog.publication_id` 와 대조 가능해야 한다.
+
+    무변경이면 publication_id 가 재사용되므로 메타도 같은 값을 실어, 소비 측이 캐시를 유지할 수
+    있다. 밴드 스킵 제품은 보존 경로가 직전 행을 그대로 옮기므로 옛 id 가 남는다(= 그 설명이
+    지금 서빙 중인 스냅샷 기준임을 나타낸다).
+    """
+    fake = _FakeD1(state=_prev(_fingerprint(), pid="pid-old"), counts={"d1_x": 2})
+    _run(monkeypatch, fake)
+    cols = fake.inserted["d1_catalog_columns"]
+    assert cols and all(r[-1] == "pid-old" for r in cols)     # 마지막 컬럼 = publication_id
+    assert all(r[-1] == "pid-old" for r in fake.inserted["d1_catalog_ext"])
+    # 용어사전은 제품 스코프가 아니라 조인 대상이 없다 → exported_at 을 직접 싣는다
+    assert se._HANDOFF_COLS["d1_catalog_glossary"][-1] == "exported_at"
+
+
 def test_changed_payload_rewrites_and_issues_new_publication_id(monkeypatch):
     fake = _FakeD1(state=_prev("deadbeef", pid="pid-old"), counts={"d1_x": 2})
     result = _run(monkeypatch, fake)

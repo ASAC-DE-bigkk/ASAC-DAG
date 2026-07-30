@@ -285,7 +285,7 @@ def _load_serving_meta() -> dict[str, dict]:
 
 
 # ── MCP/API 개발 핸드오프 보조 테이블(commerce 소유 d1_*) — 계보: dbt yml→manifest→여기→D1 ──
-def _handoff_rows(spec, m: dict, col_defs: list) -> tuple[list, list, list]:
+def _handoff_rows(spec, m: dict, col_defs: list, publication_id: str) -> tuple[list, list, list]:
     """(columns_rows, ext_row, pattern_rows) — d1_catalog_{columns,ext}/d1_usage_patterns 용.
 
     공유 `_catalog` 의 columns JSON 은 전 도메인이 name/type 관행이라 건드리지 않고(동형 유지),
@@ -295,20 +295,23 @@ def _handoff_rows(spec, m: dict, col_defs: list) -> tuple[list, list, list]:
     pid = "commerce_" + spec.d1_table[3:]
     sv = m.get("serving") or {}
     descs = m.get("columns") or {}
-    col_rows = [(pid, spec.d1_table, i, c, _sqlite_type(t), descs.get(c) or None)
+    col_rows = [(pid, spec.d1_table, i, c, _sqlite_type(t), descs.get(c) or None, publication_id)
                 for i, (c, t) in enumerate(col_defs)]
     ext_row = (pid, spec.d1_table, spec.source, spec.tier,
                sv.get("grain"), json.dumps(sv.get("primary_key") or [], ensure_ascii=False),
-               sv.get("d1_rollup"), sv.get("event_time"))
+               sv.get("d1_rollup"), sv.get("event_time"), publication_id)
+    # requires = 이 질의를 재현하려면 필요한 조회 기능(정렬·집계·조인 등). 소비 측이 SQL 을 파싱하지
+    # 않고 "우리 호출 경로로 되는가"를 판단하는 용도 — 미선언이면 빈 배열(#600 §2.5).
     pat_rows = [(pid, p.get("pattern_id"), p.get("question_ko"), p.get("sql"),
-                 p.get("axes"), p.get("verified_rows"), p.get("insight_sample_ko"))
+                 p.get("axes"), p.get("verified_rows"), p.get("insight_sample_ko"),
+                 json.dumps(p.get("requires") or [], ensure_ascii=False), publication_id)
                 for p in (sv.get("usage_patterns") or [])
                 # 한 모델→다제품(geo_grid overview/detail)용: d1_table 명시 시 해당 제품만.
                 if p.get("sql") and p.get("d1_table", spec.d1_table) == spec.d1_table]
     return col_rows, ext_row, pat_rows
 
 
-def _glossary_rows(cur, qschema: str) -> list:
+def _glossary_rows(cur, qschema: str, exported_at: str) -> list:
     """코드값 → 한국어 라벨 용어사전(d1_catalog_glossary) — 웨어하우스 실데이터에서 파생.
 
     D1 롤업엔 코드만 실리는 열거값(major/category/event_type/gu_code)의 한국어 의미를
@@ -329,31 +332,40 @@ def _glossary_rows(cur, qschema: str) -> list:
     for field, sql, src in specs:
         try:
             cur.execute(sql)  # security: allow-sql — qschema 는 _qualified() 검증 식별자, 상수 SELECT
-            rows.extend((field, str(r[0]), str(r[1]), src)
+            rows.extend((field, str(r[0]), str(r[1]), src, exported_at)
                         for r in cur.fetchall() if r[0] is not None and r[1] is not None)
         except Exception as exc:                       # 라벨 소스 부재 시 해당 필드만 생략
             log.warning("glossary %s 생략: %s", field, exc)
     return rows
 
 
+# 게시본 식별(#600 masondev1024 요청): 제품 스코프 3종은 그 제품의 `publication_id` 를 행에 싣는다.
+# `_catalog.publication_id` 와 대조하면 "이 설명이 지금 서빙 중인 데이터를 설명하는가"를 조인 신뢰
+# 없이 확인할 수 있고(스킵 제품은 보존 경로가 직전 행을 그대로 옮기므로 **옛 id 가 유지**된다),
+# #601 로 publication_id 가 내용이 바뀔 때만 갱신되므로 소비 측 캐시 키(ETag)로 그대로 쓸 수 있다.
+# `exported_at` 은 제품 스코프 3종에는 넣지 않는다 — product_id 로 `_catalog` 를 조인하면 같은 값이라
+# 두 번째 정본을 만들 뿐이다. 반대로 용어사전은 제품 스코프가 아니라 조인할 대상이 없어 여기만 싣는다.
 _HANDOFF_DDL = {
-    "d1_catalog_glossary": ('"field" TEXT, "code" TEXT, "label_ko" TEXT, "source" TEXT'),
+    "d1_catalog_glossary": ('"field" TEXT, "code" TEXT, "label_ko" TEXT, "source" TEXT, '
+                            '"exported_at" TEXT'),
     "d1_catalog_columns": ('"product_id" TEXT, "table_name" TEXT, "ordinal" INTEGER, '
-                           '"column_name" TEXT, "type" TEXT, "description_ko" TEXT'),
+                           '"column_name" TEXT, "type" TEXT, "description_ko" TEXT, '
+                           '"publication_id" TEXT'),
     "d1_catalog_ext": ('"product_id" TEXT, "table_name" TEXT, "source_model" TEXT, '
                        '"tier" TEXT, "grain" TEXT, "primary_key" TEXT, '
-                       '"rollup_rule" TEXT, "time_axis" TEXT'),
+                       '"rollup_rule" TEXT, "time_axis" TEXT, "publication_id" TEXT'),
     "d1_usage_patterns": ('"product_id" TEXT, "pattern_id" TEXT, "question_ko" TEXT, '
                           '"sql" TEXT, "axes" TEXT, "verified_rows" INTEGER, '
-                          '"insight_sample_ko" TEXT'),
+                          '"insight_sample_ko" TEXT, "requires" TEXT, "publication_id" TEXT'),
 }
 _HANDOFF_COLS = {
-    "d1_catalog_glossary": ["field", "code", "label_ko", "source"],
-    "d1_catalog_columns": ["product_id", "table_name", "ordinal", "column_name", "type", "description_ko"],
+    "d1_catalog_glossary": ["field", "code", "label_ko", "source", "exported_at"],
+    "d1_catalog_columns": ["product_id", "table_name", "ordinal", "column_name", "type",
+                           "description_ko", "publication_id"],
     "d1_catalog_ext": ["product_id", "table_name", "source_model", "tier", "grain",
-                       "primary_key", "rollup_rule", "time_axis"],
+                       "primary_key", "rollup_rule", "time_axis", "publication_id"],
     "d1_usage_patterns": ["product_id", "pattern_id", "question_ko", "sql", "axes",
-                          "verified_rows", "insight_sample_ko"],
+                          "verified_rows", "insight_sample_ko", "requires", "publication_id"],
 }
 
 
@@ -710,7 +722,8 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
             marker[spec.d1_table] = {
                 "snapshot_at": now, "source_table": spec.source, "tier": spec.tier,
                 "d1_row_count": n, "payload_hash": fingerprint, "rewritten": not reuse}
-            cr, er, pr = _handoff_rows(spec, m, col_defs)   # MCP/API 핸드오프 계보(게시 스냅샷 기준)
+            # MCP/API 핸드오프 계보(게시 스냅샷 기준) — publication_id 로 게시본을 식별한다
+            cr, er, pr = _handoff_rows(spec, m, col_defs, publication_id)
             handoff_cols.extend(cr); handoff_ext.append(er); handoff_pats.extend(pr)
             log.info("[serving export] %s ← %s: %d행(%s)%s", spec.d1_table, spec.source, n,
                      spec.tier, " — 무변경, 재기록 생략" if reuse else "")
@@ -719,7 +732,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
         _upsert_meta(meta_rows, token)
         _upsert_publish_state(state_rows, token)
         _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats,
-                         _glossary_rows(cur, qschema), skipped_pids)
+                         _glossary_rows(cur, qschema, now), skipped_pids)
     finally:
         conn.close()
 
