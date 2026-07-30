@@ -24,6 +24,7 @@ from traffic_ingest.silver_snapshot_fence import (
     SnapshotFenceTelemetryError,
     assert_safe_post_write,
     assert_snapshot_unchanged,
+    collect_silver_snapshot_baseline,
     collect_silver_snapshot_evidence,
 )
 from traffic_ingest.transform_dag_support import dbt_snapshot_variables
@@ -166,7 +167,7 @@ def run_dbt_phase(
     expected = None
     try:
         if silver_fence_mode == "write":
-            baseline = collect_silver_snapshot_evidence()
+            baseline = collect_silver_snapshot_baseline()
         elif silver_fence_mode == "verify":
             expected = expected_silver_write_evidence(ti)
             assert_snapshot_unchanged(expected, collect_silver_snapshot_evidence())
@@ -216,7 +217,6 @@ def run_dbt_phase(
         try:
             if silver_fence_mode == "write":
                 current = collect_silver_snapshot_evidence()
-                assert baseline is not None
                 assert_safe_post_write(baseline, current)
                 result["silver_snapshot_evidence"] = current.as_dict()
             elif silver_fence_mode == "verify":

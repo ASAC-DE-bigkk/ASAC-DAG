@@ -111,9 +111,11 @@ def _file_path(row: object) -> str:
     return path
 
 
-def collect_silver_snapshot_evidence(
+def _collect_silver_snapshot_evidence(
     connection_factory: Callable[[], Any] = _trino_connection,
-) -> SilverSnapshotEvidence:
+    *,
+    allow_missing_snapshot_relation: bool,
+) -> SilverSnapshotEvidence | None:
     """Read target-selected Traffic Silver metadata and close DB resources."""
     relation_namespace = f"{trino_catalog()}.{_RELATION_SCHEMA}"
     snapshots_relation = f'{relation_namespace}."{_RELATION_NAME}$snapshots"'
@@ -122,11 +124,19 @@ def collect_silver_snapshot_evidence(
     cursor = None
     try:
         cursor = connection.cursor()
-        cursor.execute(
-            "SELECT snapshot_id, committed_at, operation "
-            f"FROM {snapshots_relation} "
-            "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
-        )
+        try:
+            cursor.execute(
+                "SELECT snapshot_id, committed_at, operation "
+                f"FROM {snapshots_relation} "
+                "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
+            )
+        except Exception as exc:
+            if (
+                allow_missing_snapshot_relation
+                and getattr(exc, "error_name", None) == "TABLE_NOT_FOUND"
+            ):
+                return None
+            raise
         snapshot_id, committed_at, operation = _snapshot_fields(cursor.fetchone())
         if isinstance(committed_at, datetime):
             committed_at = str(committed_at)
@@ -155,10 +165,33 @@ def collect_silver_snapshot_evidence(
             connection.close()
 
 
+def collect_silver_snapshot_evidence(
+    connection_factory: Callable[[], Any] = _trino_connection,
+) -> SilverSnapshotEvidence:
+    evidence = _collect_silver_snapshot_evidence(
+        connection_factory,
+        allow_missing_snapshot_relation=False,
+    )
+    assert evidence is not None
+    return evidence
+
+
+def collect_silver_snapshot_baseline(
+    connection_factory: Callable[[], Any] = _trino_connection,
+) -> SilverSnapshotEvidence | None:
+    """Allow only the pre-write metadata relation to be absent on first creation."""
+    return _collect_silver_snapshot_evidence(
+        connection_factory,
+        allow_missing_snapshot_relation=True,
+    )
+
+
 def assert_safe_post_write(
-    baseline: SilverSnapshotEvidence,
+    baseline: SilverSnapshotEvidence | None,
     current: SilverSnapshotEvidence,
 ) -> None:
+    if baseline is None:
+        return
     new_compacted = set(current.compacted_files) - set(baseline.compacted_files)
     if new_compacted:
         raise ExternalCompactionRace("new managed-compaction file appeared")
