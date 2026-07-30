@@ -13,6 +13,32 @@ from traffic_reliability_test_support import RecordingCursor  # noqa: E402
 ORIGINAL_COLLECT_DAG_RUN_SUMMARY = repository.collect_dag_run_summary
 
 
+def test_traffic_product_profile_measures_latest_link_value_age_and_staleness(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(rows=[(100, 0.9, 5, 14, 2, 3, 0.1)])
+
+    result = repository.collect_traffic_product_profile(
+        cursor,
+        report.report_config(),
+        datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result == {
+        "observed_link_count": 100,
+        "available_value_ratio": 0.9,
+        "link_age_p50": 5,
+        "link_age_p95": 14,
+        "source_observation_delay": 2,
+        "collection_delay": 3,
+        "stale_link_ratio": 0.1,
+    }
+    statement = cursor.statements[0]
+    assert "gold_traffic_flow_link_latest" in statement
+    assert "flow_value_quality = 'available'" in statement
+    assert "approx_percentile" in statement
+    assert "> 90" in statement
+
+
 def test_traffic_dag_run_summary_uses_manifest_table(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv("ASK_SEOUL_SCHEMA", "weather_traffic_bronze")

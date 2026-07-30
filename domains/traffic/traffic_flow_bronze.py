@@ -22,6 +22,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.ops.product_observability import record_domain_stage_event  # noqa: E402
 from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_FLOW_MATERIALIZED_ALIAS,
     TRAFFIC_FLOW_BRONZE_ASSET_REF,
@@ -46,6 +47,14 @@ DAG_ID = "traffic_flow_bronze"
 LAND_TASK_ID = "land_traffic_flow_snapshot"
 record_traffic_problem = problem_failure_callback(
     domain="traffic", source_system="seoul_topis"
+)
+record_traffic_raw_product_event = record_domain_stage_event("traffic", "raw")
+record_traffic_bronze_product_event = record_domain_stage_event("traffic", "bronze")
+record_traffic_raw_product_failure = record_domain_stage_event(
+    "traffic", "raw", status="failed"
+)
+record_traffic_bronze_product_failure = record_domain_stage_event(
+    "traffic", "bronze", status="failed"
 )
 
 
@@ -122,7 +131,11 @@ with DAG(
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
-        on_failure_callback=record_traffic_flow_land_problem,
+        on_failure_callback=[
+            record_traffic_flow_land_problem,
+            record_traffic_raw_product_failure,
+        ],
+        on_success_callback=record_traffic_raw_product_event,
     )
     materialize_flow = PythonOperator(
         task_id=FLOW_MATERIALIZE_TASK_ID,
@@ -132,7 +145,11 @@ with DAG(
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
         outlets=[TRAFFIC_FLOW_MATERIALIZED_ALIAS],
-        on_failure_callback=record_traffic_problem,
+        on_failure_callback=[
+            record_traffic_problem,
+            record_traffic_bronze_product_failure,
+        ],
+        on_success_callback=record_traffic_bronze_product_event,
     )
     land_flow >> materialize_flow
 

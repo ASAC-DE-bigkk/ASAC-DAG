@@ -24,6 +24,7 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.ops.product_observability import record_domain_stage_event  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from weather_ingest.bronze import (  # noqa: E402
     append_kma_bronze_row_batches_pyiceberg,
@@ -94,6 +95,14 @@ record_weather_problem = problem_failure_callback(
     domain="weather", source_system=SOURCE_ID
 )
 WEATHER_BRONZE_ASSET_REF = Asset(WEATHER_BRONZE_ASSET)
+record_weather_raw_product_event = record_domain_stage_event("weather", "raw")
+record_weather_bronze_product_event = record_domain_stage_event("weather", "bronze")
+record_weather_raw_product_failure = record_domain_stage_event(
+    "weather", "raw", status="failed"
+)
+record_weather_bronze_product_failure = record_domain_stage_event(
+    "weather", "bronze", status="failed"
+)
 
 
 @fail_fast_weather_bronze
@@ -300,7 +309,9 @@ def build_kma_bronze_dag(
             on_failure_callback=[
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
+                record_weather_raw_product_failure,
             ],
+            on_success_callback=record_weather_raw_product_event,
         )
 
         load_bronze = PythonOperator(
@@ -326,7 +337,9 @@ def build_kma_bronze_dag(
             on_failure_callback=[
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
+                record_weather_bronze_product_failure,
             ],
+            on_success_callback=record_weather_bronze_product_event,
         )
         publish_bronze_asset = PythonOperator(
             task_id="publish_weather_bronze_asset",
@@ -375,7 +388,9 @@ def build_kma_bronze_backfill_dag():
             on_failure_callback=[
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
+                record_weather_raw_product_failure,
             ],
+            on_success_callback=record_weather_raw_product_event,
         )
 
         load_bronze = PythonOperator(
@@ -401,7 +416,9 @@ def build_kma_bronze_backfill_dag():
             on_failure_callback=[
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
+                record_weather_bronze_product_failure,
             ],
+            on_success_callback=record_weather_bronze_product_event,
         )
         publish_bronze_asset = PythonOperator(
             task_id="publish_weather_bronze_asset",

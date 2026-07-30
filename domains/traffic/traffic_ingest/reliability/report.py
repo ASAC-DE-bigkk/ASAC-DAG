@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from common.ops.product_observability import build_traffic_product_health
+
 from .config import (
     KST,
     TRAFFIC_AUDIT_TABLE,
@@ -25,6 +27,7 @@ from .lineage import collect_pipeline_stages
 from .trino_repository import (
     _qualified,
     collect_dag_run_summary,
+    collect_traffic_product_profile,
     collect_traffic_summary,
     trino_cursor,
 )
@@ -47,6 +50,11 @@ def collect_traffic_data_plane(
             "table": _qualified(config, TRAFFIC_TABLE),
             "audit_table": _qualified(config, TRAFFIC_AUDIT_TABLE),
         }
+    try:
+        product_profile = collect_traffic_product_profile(cursor, config, detected_at)
+    except Exception:
+        product_profile = None
+    product_health = build_traffic_product_health(profile=product_profile)
     try:
         dag_runs = collect_dag_run_summary(
             cursor, config, TRAFFIC_BRONZE_DAG_ID, detected_at
@@ -149,6 +157,7 @@ def collect_traffic_data_plane(
         "lookback_hours": config.lookback_hours,
         "status": status,
         "traffic": traffic,
+        "product_health": product_health,
         "dag_runs": dag_runs,
         "flow_dag_runs": flow_dag_runs,
         "scheduled_runs": scheduled_runs,

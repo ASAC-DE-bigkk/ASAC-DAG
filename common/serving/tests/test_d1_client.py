@@ -103,7 +103,7 @@ def test_catalog_upsert_does_not_alter_an_already_migrated_schema():
 
     d1.upsert_catalog([_catalog_row()])
     alter_count = sum(query.startswith("ALTER TABLE _catalog ADD COLUMN") for query in d1.queries)
-    assert alter_count == 8
+    assert alter_count == 10
     d1.upsert_catalog([_catalog_row()])
 
     assert sum(query.startswith("ALTER TABLE _catalog ADD COLUMN") for query in d1.queries) == alter_count

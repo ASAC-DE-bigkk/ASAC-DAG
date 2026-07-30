@@ -32,6 +32,8 @@ class ServingContract:
     description: str = ""
     product_question: str = ""
     tests: tuple[str, ...] = ()
+    public_gold: dict[str, Any] | None = None
+    mcp_projection: dict[str, Any] | None = None
 
 
 def _merged_meta(node: dict[str, Any]) -> dict[str, Any]:
@@ -72,7 +74,8 @@ def load_contracts(
     for uid, node in (manifest.get("nodes") or {}).items():
         if node.get("resource_type") != "model":
             continue
-        serving = _merged_meta(node).get("serving")
+        metadata = _merged_meta(node)
+        serving = metadata.get("serving")
         if not isinstance(serving, dict) or not serving:
             continue
         product_id = serving.get("product_id")
@@ -95,11 +98,21 @@ def load_contracts(
                 upsert_strategy=serving.get("upsert_strategy"),
                 partial_min_ratio=partial.get("min_publish_ratio") if isinstance(partial, dict) else None,
                 reliability=serving.get("reliability") if isinstance(serving.get("reliability"), dict) else None,
-                event_time=serving.get("event_time"),
-                description=str(node.get("description", "")),
-                product_question=str(serving.get("product_question", "")),
-                tests=tuple(gates.get(uid, [])),
-            )
+                  event_time=serving.get("event_time"),
+                  description=str(node.get("description", "")),
+                  product_question=str(serving.get("product_question", "")),
+                  tests=tuple(gates.get(uid, [])),
+                  public_gold=(
+                      dict(metadata["public_gold"])
+                      if isinstance(metadata.get("public_gold"), dict)
+                      else None
+                  ),
+                  mcp_projection=(
+                      dict(serving["mcp_projection"])
+                      if isinstance(serving.get("mcp_projection"), dict)
+                      else None
+                  ),
+              )
         )
     contracts.sort(key=lambda c: c.model_name)
     return contracts

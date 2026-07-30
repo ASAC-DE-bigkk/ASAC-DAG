@@ -31,6 +31,7 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.ops.product_observability import record_domain_stage_event  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import (  # noqa: E402
     TARGET_CHOICES,
@@ -108,6 +109,10 @@ record_weather_problem = problem_failure_callback(
     domain="weather",
     dbt_project_dir=DBT_PROJECT,
     dbt_run_results_xcom_key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
+)
+record_weather_gold_product_event = record_domain_stage_event("weather", "gold")
+record_weather_gold_product_failure = record_domain_stage_event(
+    "weather", "gold", status="failed"
 )
 
 
@@ -400,6 +405,12 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
     }
     if spec.workload is DbtWorkload.TRINO:
         operator_kwargs["pool"] = TRINO_HEAVY_POOL
+    if spec.task_id == DBT_PHASE_TASK_IDS[-1]:
+        operator_kwargs["on_success_callback"] = record_weather_gold_product_event
+        operator_kwargs["on_failure_callback"] = [
+            record_weather_problem,
+            record_weather_gold_product_failure,
+        ]
     return PythonOperator(**operator_kwargs)
 
 

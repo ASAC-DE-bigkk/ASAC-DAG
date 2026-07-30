@@ -18,10 +18,11 @@ for unit tests.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
-from common.serving.publisher import ProductRecord
+from common.ops.product_observability import record_product_event
+from common.serving.publisher import ProductRecord, PublicationError
 
 # dbt project that owns each domain's manifest (weather+traffic share the monoproject).
 _DBT_PROJECT = {"weather": "traffic_weather", "traffic": "traffic_weather"}
@@ -43,6 +44,54 @@ def publication_record_payload(record: ProductRecord) -> dict[str, object]:
         "stage": record.stage,
         "rollback_status": record.rollback_status,
     }
+
+
+def _publication_delay_quality(record: ProductRecord) -> dict[str, object]:
+    """Measure source-freshness to D1 publication only when both instants are absolute."""
+    delay_minutes: int | None = None
+    try:
+        published_at = datetime.fromisoformat(record.published_at.replace("Z", "+00:00"))
+        freshness = datetime.fromisoformat(str(record.freshness).replace("Z", "+00:00"))
+        if published_at.tzinfo is not None and freshness.tzinfo is not None:
+            delay_minutes = max(
+                0,
+                int(
+                    (published_at.astimezone(timezone.utc) - freshness.astimezone(timezone.utc)).total_seconds()
+                    // 60
+                ),
+            )
+    except (TypeError, ValueError):
+        pass
+    return {
+        "value": delay_minutes,
+        "unit": "minute",
+        "quality_state": "observed" if delay_minutes is not None else "unknown",
+        "null_meaning": None if delay_minutes is not None else "source_freshness_unavailable",
+    }
+
+
+def record_publication_events(
+    context: dict[str, object],
+    domain: str,
+    records: Sequence[ProductRecord],
+) -> None:
+    """Emit the D1 transition for every product, including retained and failed records."""
+    status_by_serving_status = {
+        "published": "success",
+        "degraded": "degraded",
+        "skipped_retained": "skipped",
+    }
+    for record in records:
+        record_product_event(
+            context,
+            domain=domain,
+            layer="d1",
+            product_ids=(record.product_id,),
+            status=status_by_serving_status.get(record.serving_status, "failed"),
+            row_count=record.published_row_count,
+            publication_id=record.publication_id,
+            quality={"publication_delay": _publication_delay_quality(record)},
+        )
 
 
 def _manifest_path(domain: str, dbt_project: str | None) -> str:
@@ -106,7 +155,12 @@ def build_serving_export_dag(
         d1 = build_d1_client_from_env()
         smoke = build_smoke_tester_from_env()
 
-        report = publish(contracts, source, d1, smoke, source_run_id=run_id)
+        try:
+            report = publish(contracts, source, d1, smoke, source_run_id=run_id)
+        except PublicationError as exc:
+            record_publication_events(context, domain, exc.report.records)
+            raise
+        record_publication_events(context, domain, report.records)
         published = sum(1 for r in report.records if r.serving_status in {"published", "degraded"})
         skipped = sum(1 for r in report.records if r.serving_status == "skipped_retained")
         print(f"[serving:{domain}] published={published} skipped={skipped} of {len(report.records)} products")

@@ -139,7 +139,8 @@ class D1Client(Protocol):
 
 CATALOG_COLUMN_TYPES = (
     ("name", "TEXT PRIMARY KEY"), ("product_id", "TEXT"), ("external", "INTEGER"),
-    ("description", "TEXT"), ("product_question", "TEXT"), ("tests", "TEXT"),
+    ("description", "TEXT"), ("product_question", "TEXT"),
+    ("public_gold", "TEXT"), ("mcp_projection", "TEXT"), ("tests", "TEXT"),
     ("time_axis", "TEXT"), ("columns", "TEXT"), ("row_count", "INTEGER"),
     ("serving_status", "TEXT"), ("publication_id", "TEXT"), ("source_run_id", "TEXT"),
     ("published_bytes", "INTEGER"), ("freshness", "TEXT"), ("exported_at", "TEXT"),

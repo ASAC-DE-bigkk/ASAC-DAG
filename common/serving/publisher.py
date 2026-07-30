@@ -105,6 +105,16 @@ def _catalog_row(contract: ServingContract, columns: Sequence[Column], record: P
         "external": 1 if contract.external else 0,
         "description": contract.description,
         "product_question": contract.product_question,
+        "public_gold": (
+            json.dumps(contract.public_gold, ensure_ascii=False, sort_keys=True)
+            if contract.public_gold is not None
+            else None
+        ),
+        "mcp_projection": (
+            json.dumps(contract.mcp_projection, ensure_ascii=False, sort_keys=True)
+            if contract.mcp_projection is not None
+            else None
+        ),
         "tests": json.dumps(list(contract.tests), ensure_ascii=False),
         "time_axis": contract.event_time,
         "columns": json.dumps([{"name": c, "type": t} for c, t in columns], ensure_ascii=False),

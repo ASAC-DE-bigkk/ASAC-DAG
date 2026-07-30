@@ -216,6 +216,49 @@ def collect_weather_summary(
     }
 
 
+def collect_weather_product_profile(
+    cursor, config: WeatherReportConfig, detected_at: datetime
+) -> dict[str, int | None] | None:
+    """Measure the latest KMA issue for product-health, independent of status."""
+    table = _qualified(config, WEATHER_TABLE)
+    cutoff, load_date_floor = _weather_cutoffs(config, detected_at)
+    row = _fetch_one(
+        cursor,
+        f"""
+        WITH latest_issue AS (
+            SELECT max(concat(base_date, lpad(base_time, 4, '0'))) AS issue_key
+            FROM {table}
+            WHERE source_id = 'kma_vilage_fcst'
+              AND load_date >= {_sql_string(load_date_floor)}
+              AND collected_at >= {_sql_timestamp_utc(cutoff)}
+        )
+        SELECT
+            count(DISTINCT CASE WHEN category IN ('TMP', 'POP', 'SKY', 'PTY') THEN category END),
+            count(DISTINCT place_id),
+            max(
+                date_diff(
+                    'hour',
+                    date_parse(concat(base_date, lpad(base_time, 4, '0')), '%Y%m%d%H%i'),
+                    date_parse(concat(fcst_date, lpad(fcst_time, 4, '0')), '%Y%m%d%H%i')
+                )
+            )
+        FROM {table}
+        CROSS JOIN latest_issue
+        WHERE source_id = 'kma_vilage_fcst'
+          AND load_date >= {_sql_string(load_date_floor)}
+          AND collected_at >= {_sql_timestamp_utc(cutoff)}
+          AND concat(base_date, lpad(base_time, 4, '0')) = latest_issue.issue_key
+        """,
+    )
+    if not row:
+        return None
+    return {
+        "core_category_count": int(row[0]) if row[0] is not None else None,
+        "mapped_place_count": int(row[1]) if row[1] is not None else None,
+        "forecast_horizon_hours": int(row[2]) if row[2] is not None else None,
+    }
+
+
 def collect_dag_run_summary(
     cursor,
     config: WeatherReportConfig,

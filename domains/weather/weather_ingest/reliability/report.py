@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from common.ops.product_observability import build_weather_product_health
+
 from .config import (
     KST,
     MARQUEZ_BASE_URL,
@@ -18,6 +20,7 @@ from .lineage import collect_pipeline_stages
 from .trino_repository import (
     _qualified,
     collect_dag_run_summary,
+    collect_weather_product_profile,
     collect_weather_summary,
     trino_cursor,
 )
@@ -38,6 +41,15 @@ def collect_weather_data_plane(
             "error_type": type(exc).__name__,
             "table": _qualified(config, WEATHER_TABLE),
         }
+    try:
+        product_profile = collect_weather_product_profile(cursor, config, detected_at)
+    except Exception:
+        product_profile = None
+    product_health = build_weather_product_health(
+        weather=weather,
+        profile=product_profile,
+        detected_at=detected_at,
+    )
     try:
         dag_runs = collect_dag_run_summary(
             cursor, config, WEATHER_BRONZE_DAG_ID, detected_at
@@ -73,6 +85,7 @@ def collect_weather_data_plane(
         "lookback_hours": config.lookback_hours,
         "status": status,
         "weather": weather,
+        "product_health": product_health,
         "dag_runs": dag_runs,
         "publishability_ok": publishability_ok,
         "late_publishability": late_publishability,
