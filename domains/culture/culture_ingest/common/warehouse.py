@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from culture_ingest.common.config import normalize_target
+from culture_ingest.common.config import normalize_target, uses_split_dev_keys
 
 # 안전한 SQL 식별자(카탈로그/스키마/테이블)만 허용 — 인젝션 방지.
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -53,10 +53,19 @@ class WarehouseSettings:
 
 
 def build_warehouse_settings(target: str = "dev", env: dict | None = None) -> WarehouseSettings:
-    """target에 맞는 Trino/Iceberg 접속 설정. 값은 환경변수에서."""
+    """target에 맞는 Trino/Iceberg 접속 설정. 값은 환경변수에서.
+
+    카탈로그 논리명은 env 규약에 따라 갈린다(ASK-Seoul#66, :func:`uses_split_dev_keys`):
+    구 규약 dev 는 ``TRINO_DEV_ICEBERG_CATALOG``(기본 ``iceberg_dev``), 신 규약은
+    파일 하나가 한 환경이므로 dev·prod 모두 ``TRINO_ICEBERG_CATALOG``(기본 ``iceberg``).
+
+    ⚠️ 신 규약 판별 없이 dev 에서 ``TRINO_ICEBERG_CATALOG`` 로 폴백하면 안 된다 —
+    구 규약 박스에는 ``iceberg``(prod 창고)와 ``iceberg_dev``(dev 창고)가 함께 살아
+    있어서, dev 런이 조용히 prod 창고에 쓰게 된다(실측 확인).
+    """
     target = normalize_target(target)
     env = env if env is not None else os.environ
-    dev = target == "dev"
+    dev = target == "dev" and uses_split_dev_keys(env)
     catalog = (
         env.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
         if dev

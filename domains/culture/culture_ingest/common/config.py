@@ -52,9 +52,47 @@ class R2Settings:
     access_key_id: str
     secret_access_key: str
     bucket: str
+    # 값을 실제로 읽어온 env 접두어 — 누락 에러가 "어느 키를 채워야 하는지"를 정확히
+    # 가리키게 하려면, 해석 시점의 접두어를 그대로 들고 있어야 한다(아래 env 규약 2종).
+    prefix: str = "R2_"
 
 
 VALID_TARGETS = ("dev", "prod")
+
+# ── env 규약 2종 (ASK-Seoul#66) ────────────────────────────────────────────────
+# 구 규약(`sample/.env`): 한 파일에 dev·prod 를 함께 담고 접두어로 갈랐다.
+#   dev  -> ``R2_DEV_*`` / ``R2_DEV_DATA_CATALOG_*`` / ``TRINO_DEV_ICEBERG_CATALOG``
+#   prod -> ``R2_*``     / ``R2_DATA_CATALOG_*``     / ``TRINO_ICEBERG_CATALOG``
+# 신 규약(`sample/.env.dev`, `sample/.env.prod`): **파일 하나가 한 환경**이라
+#   접두어 없는 한 벌(``R2_*`` 등)만 두고, 그 값이 dev 창고냐 prod 창고냐를 가른다.
+#   즉 `_DEV_` 계열 키가 아예 없다.
+#
+# 그래서 접두어를 target 만으로 정하면 안 된다 — 신 규약 dev 에서 `R2_DEV_*` 를 찾다가
+# 자격증명이 통째로 비어 적재가 죽는다(실측: 4키 누락). 어느 규약인지는 `_DEV_` 키
+# 세트의 존재로 판별한다. 이 한 규칙을 R2·Data Catalog·Trino 카탈로그에 같이 적용한다.
+SPLIT_DEV_PROBE = "R2_DEV_BUCKET_NAME"
+
+
+def uses_split_dev_keys(env: dict[str, str] | None = None) -> bool:
+    """구 규약(`_DEV_` 접두어로 dev/prod 를 가르는 env)인지 여부.
+
+    신 규약에서 `_DEV_` 로 폴백하지 않게 하고, 반대로 구 규약에서 접두어 없는 키
+    (=prod 창고)로 새지 않게 하는 게 목적이다. 후자를 놓치면 dev 런이 조용히
+    prod 버킷·카탈로그에 쓴다 — 되돌리기 어려운 종류의 사고다.
+    """
+    return bool(pick(SPLIT_DEV_PROBE, env or {}))
+
+
+def r2_prefix(target: str, env: dict[str, str] | None = None) -> str:
+    """R2 자격증명 env 접두어."""
+    return "R2_DEV_" if target == "dev" and uses_split_dev_keys(env) else "R2_"
+
+
+def catalog_prefix(target: str, env: dict[str, str] | None = None) -> str:
+    """R2 Data Catalog env 접두어."""
+    if target == "dev" and uses_split_dev_keys(env):
+        return "R2_DEV_DATA_CATALOG_"
+    return "R2_DATA_CATALOG_"
 
 
 def normalize_target(target: str) -> str:
@@ -69,23 +107,25 @@ def normalize_target(target: str) -> str:
 def build_r2_settings(target: str = "dev", env_file: str | None = None) -> R2Settings:
     """``target``에 맞는 R2 설정을 해석.
 
-    dev -> ``R2_DEV_*`` (버킷 ``seoul-dev``), prod -> ``R2_*`` (버킷 ``seoul``).
+    구 규약: dev -> ``R2_DEV_*`` (버킷 ``seoul-dev``), prod -> ``R2_*`` (버킷 ``seoul``).
+    신 규약(`_DEV_` 키 없음): 양쪽 모두 ``R2_*`` — 값이 환경을 가른다. :func:`r2_prefix` 참고.
     """
     target = normalize_target(target)
     env = load_env_file(env_file)
-    prefix = "R2_DEV_" if target == "dev" else "R2_"
+    prefix = r2_prefix(target, env)
     return R2Settings(
         target=target,
         endpoint=pick(prefix + "ENDPOINT", env),
         access_key_id=pick(prefix + "ACCESS_KEY_ID", env),
         secret_access_key=pick(prefix + "SECRET_ACCESS_KEY", env),
         bucket=pick(prefix + "BUCKET_NAME", env),
+        prefix=prefix,
     )
 
 
 def missing_r2(settings: R2Settings) -> list[str]:
     """필수인데 비어 있는 R2 필드 이름 목록 (사전 점검 에러 메시지용)."""
-    prefix = "R2_DEV_" if settings.target == "dev" else "R2_"
+    prefix = settings.prefix
     pairs = (
         ("ENDPOINT", settings.endpoint),
         ("ACCESS_KEY_ID", settings.access_key_id),
@@ -145,15 +185,16 @@ class CatalogSettings:
 def build_catalog_settings(target: str = "dev", env_file: str | None = None) -> CatalogSettings:
     """``target``에 맞는 R2 Data Catalog 설정을 해석하고 시크릿을 redactor에 등록.
 
-    dev -> ``R2_DEV_DATA_CATALOG_*``, prod -> ``R2_DATA_CATALOG_*``. s3 자격은
-    ``build_r2_settings``와 동일 원천을 재사용한다. 필수값이 비면 이름을 적어
+    구 규약: dev -> ``R2_DEV_DATA_CATALOG_*``, prod -> ``R2_DATA_CATALOG_*``.
+    신 규약(`_DEV_` 키 없음): 양쪽 모두 ``R2_DATA_CATALOG_*`` (:func:`catalog_prefix`).
+    s3 자격은 ``build_r2_settings``와 동일 원천을 재사용한다. 필수값이 비면 이름을 적어
     RuntimeError — 자정런이 원인 불명으로 죽지 않게 사전 점검이 즉시 말해준다.
     """
     from common.security.redaction import register_secret
 
     target = normalize_target(target)
     env = load_env_file(env_file)
-    prefix = "R2_DEV_DATA_CATALOG_" if target == "dev" else "R2_DATA_CATALOG_"
+    prefix = catalog_prefix(target, env)
     r2 = build_r2_settings(target, env_file)
     settings = CatalogSettings(
         target=target,
