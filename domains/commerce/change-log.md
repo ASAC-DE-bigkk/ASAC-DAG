@@ -7,6 +7,25 @@
 
 ## 2026-07-29
 
+### 84. MCP/API 핸드오프 계보 — D1 보조 테이블 3종 게시 (#593)
+
+request:
+- MCP/API 를 직접 개발하는 게 아니라, 개발담당자가 **D1 정보만으로** MCP description·각 key
+  역할을 처리할 수 있게 처리 체계/계보를 이어달라는 지시.
+
+response:
+- 실측: 타 도메인 `_catalog.columns` 는 name/type 관행(공유 필드 확장 배제), dbt yml 컬럼 설명
+  271/271 완비(계보 정본 존재) → **운반 자동화**로 해결.
+- serving_export 확장 — 계보 `dbt yml → manifest → export → D1(commerce 소유)`:
+  `d1_catalog_columns`(ordinal·타입·description_ko) · `d1_catalog_ext`(source_model·tier·
+  grain·primary_key·rollup_rule·time_axis) · `d1_usage_patterns`(meta.serving.usage_patterns
+  선언분, 다제품 모델은 d1_table 필터). 매 export 전량 교체(멱등), 공유 메타 무접촉.
+- 검증: export 실기록 — columns **222행(설명 221/222)**, ext 22행(grain/PK 정확).
+  usage_patterns 는 22제품 패턴 채굴(D1 실행 검증 — 진행분 8제품 77패턴) 후 dbt 선언→재export.
+- 추가(용어 한국어 정리 지시): `d1_catalog_glossary`(field·code·label_ko·source) — D1 롤업에
+  코드만 실리는 열거값(major/category/event_type/gu_code)의 한국어 라벨을 웨어하우스 실데이터
+  (gold `*_ko` 컬럼·행정동 참조)에서 파생해 게시. 하드코딩 없음.
+
 ### 83. 처리로그 ops/logs 존 일단위 적재 — commerce_ops_logship 신설(도커 볼륨 무잔존)
 
 request:
