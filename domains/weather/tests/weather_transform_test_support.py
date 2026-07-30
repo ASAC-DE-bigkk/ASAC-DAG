@@ -228,13 +228,13 @@ EXPECTED_DBT_PHASES = (
     (
         "dbt_run_gold",
         "run",
-        "ask_seoul_weather_transform_gold_without_commerce",
+        "ask_seoul_weather_transform_gold",
         True,
     ),
     (
         "dbt_test_gold",
         "test",
-        "ask_seoul_weather_transform_gold_without_commerce",
+        "ask_seoul_weather_transform_gold",
         True,
     ),
 )
