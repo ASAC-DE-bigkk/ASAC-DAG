@@ -31,11 +31,14 @@ if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.runtime_guard import default_target  # noqa: E402
 
 from citydata_ingest.common.trino import build_trino_settings, connect  # noqa: E402
 
 KST = pendulum.timezone("Asia/Seoul")
-CITYDATA_SCHEMA = os.environ.get("CITYDATA_SCHEMA", "seoul_citydata")
+_TARGET = default_target()
+# 스키마: prod=citydata, dev=seoul_citydata (serving_export·dbt profiles 와 정렬). CITYDATA_SCHEMA 로 dev 오버라이드.
+CITYDATA_SCHEMA = "citydata" if _TARGET == "prod" else os.environ.get("CITYDATA_SCHEMA", "seoul_citydata")
 
 # 신선도 두 지표 임계 (#517 과 동일 값 이관).
 PUBLISH_DELAY_ALERT_MIN = 60   # (a) collected_at−event_at 중앙값 이 넘으면 발표지연 경보
