@@ -190,6 +190,45 @@ def test_state_query_failure_is_fail_open(monkeypatch):
     assert _run(monkeypatch, fake)["exported"] == 1
 
 
+def test_state_is_invalidated_before_destructive_write(monkeypatch):
+    """지문 커밋이 파괴적 쓰기를 감싸는지 — 불변식: 커밋된 지문 ⊆ D1 실물.
+
+    루프 밖에서 한 번만 커밋하면, 데이터를 이미 쓴 뒤 공유 `_catalog` upsert 등에서 죽었을 때
+    D1 은 새 내용·상태는 옛 지문이 된다. 이후 원천이 옛 내용으로 되돌아오면(운영자 full-refresh
+    복구가 정확히 이 형태) 지문이 일치해 영구히 스킵되고, 행수가 같은 채 값만 바뀌는 정상 변경
+    형태라 `_d1_row_count` 도 못 잡는다. 그래서 순서를 단언한다.
+    """
+    fake = _FakeD1(state=_prev("deadbeef"), counts={"d1_x": 2})
+    _run(monkeypatch, fake)
+
+    def idx(pred):
+        return next(i for i, s in enumerate(fake.sqls) if pred(s))
+
+    invalidate = idx(lambda s: "INSERT OR REPLACE INTO d1_publish_state" in s and "''" in s)
+    drop = idx(lambda s: 'DROP TABLE IF EXISTS "d1_x"' in s)
+    commit = idx(lambda s: "INSERT OR REPLACE INTO d1_publish_state" in s
+                 and _fingerprint() in s)
+    assert invalidate < drop < commit           # 무효화 → 쓰기 → 실제 지문 커밋
+    assert fake.inserted["d1_x"]                 # INSERT 는 커밋 전에 끝나 있다
+    assert fake.sqls.index(fake.sqls[commit]) > drop
+
+
+def test_write_failure_leaves_no_matching_fingerprint(monkeypatch):
+    """쓰기가 중간에 죽으면 커밋된 지문이 실물과 일치하지 않아야 한다(다음 run 이 재기록)."""
+    class _Failing(_FakeD1):
+        def insert(self, table, colnames, rows, token):
+            if table == "d1_x":
+                raise RuntimeError("D1 write limit")
+            return super().insert(table, colnames, rows, token)
+
+    fake = _Failing(state=_prev("deadbeef"), counts={"d1_x": 2})
+    with pytest.raises(RuntimeError):
+        _run(monkeypatch, fake)
+    state_sqls = fake.state_upserts()
+    assert state_sqls and "''" in state_sqls[-1]        # 마지막 커밋은 무효화된 지문
+    assert not any(_fingerprint() in s for s in state_sqls)   # 실제 지문은 커밋되지 않았다
+
+
 def test_band_skip_keeps_stale_path_and_no_state_row(monkeypatch):
     """밴드 밖 스킵은 기존 경로 그대로 — 'stale' + 경보, 지문 상태는 갱신하지 않는다."""
     fake = _FakeD1(state=_prev(_fingerprint()), counts={"d1_x": 2})

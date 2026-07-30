@@ -54,6 +54,19 @@ response:
 - 테스트: `tests/test_serving_unchanged_gate.py` 11건(지문 순서 무관·값/스키마/행수 민감,
   무변경 스킵 시 메타 갱신·publication_id 재사용, 행수 불일치·상태 부재·조회 실패 fail-open,
   밴드 스킵 경로 불변). 전 스위트 398 통과 · `python -m security` PASS.
+- **적대 검증에서 잡힌 자체 회귀(같은 PR 에서 수정)**: 지문 커밋(`_upsert_publish_state`)을 루프
+  밖에 한 번만 두면, 데이터를 이미 쓴 뒤 공유 `_catalog` upsert 등에서 죽었을 때 **D1 은 새 내용 ·
+  상태는 옛 지문**이 된다. 이후 원천이 옛 내용으로 되돌아오면(운영자 full-refresh 복구가 정확히
+  이 형태) 지문이 일치해 **영구히 스킵**된다 — 행수가 같은 채 값만 바뀌는 건 이 제품군의 정상
+  변경 형태라 `_d1_row_count` 도 못 잡고, `exported_at` 은 매 run 전진하므로 26h 감시축·리포트가
+  오히려 '정상 최신'으로 읽는다. 패치 이전 코드는 매 run 무조건 재기록이라 다음 성공 run 이
+  자가치유했으므로 **이 변경이 만든 회귀**다.
+  수정: 파괴적 쓰기 **전에** 지문을 무효화(`payload_hash=''`)하고 INSERT 성공 직후 실제 지문을
+  커밋한다 → 불변식 **커밋된 지문 ⊆ D1 실물**. 무효화가 실패하면 DROP 이전이라 D1 무손상(fail-open
+  방향 유지). 비용은 재기록 테이블당 쓰기 2회(하루 최대 44행).
+  실증: sqlite 백엔드로 `export_to_d1` 을 실제 구동해 예산 컷오프 3~12 스윕 — 수정 전 3·4·5 에서
+  영구 고착 재현, 수정 후 전 구간 무손상. 순서 회귀 테스트 2건 추가(총 13건).
+  지문 계산 실측 비용: 181,440행 **0.412s**(태스크 타임아웃 60분의 0.011%).
 - **별건으로 남긴 결함**(이 변경과 독립): `flow_monthly/yearly/daily` 모델 주석은 소급 도착을
   "정기 full-refresh 스윕(`commerce_load_gold_refresh`)"이 흡수한다고 서술하지만 그 DAG 는
   `schedule=None` 이고 `GOLD_READY_ASSET` outlet 도 없다. 실측상 D1 `d1_flow_monthly` 는 이미

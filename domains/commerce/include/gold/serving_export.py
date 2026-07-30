@@ -584,7 +584,11 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     - 행수 밴드 밖(0행/2배 초과)이면 **스왑 스킵 + d1_meta.build_status='stale'**(직전 유지).
     - payload 지문이 직전 게시와 같으면 **행 재기록만 생략**(무변경 스킵) — 메타는 그대로 갱신.
     - commerce 소유 d1_* 만 DROP+CREATE, 공유 `_catalog`/`_request_log`/`d1_meta` 는 upsert.
-    - 테이블 단위 부분 전진 안전(조인 없음) — 실패분만 다음 run/재시도가 이어받는다.
+    - 데이터 정합은 테이블 단위로 안전하다: 지문 커밋이 파괴적 쓰기를 감싸므로 어느 지점에서
+      죽어도 **커밋된 지문 ⊆ D1 실물**이 유지되고, 다음 run 이 미완료분을 반드시 재기록한다.
+      단 **메타 게시는 부분 전진하지 않는다** — `_upsert_catalog`/`_upsert_meta`/`_publish_handoff`
+      는 루프 밖 일괄이라 루프 중간 예외 시 이미 쓴 테이블 몫까지 함께 버려진다(다음 run 이
+      메타를 다시 쓴다). per-spec try/except 도입은 후속.
     """
     from bronze.warehouse import _connect, _qualified
 
@@ -659,12 +663,21 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                 state_rows.append((spec.d1_table, fingerprint, n, publication_id,
                                    prev.get("written_at") or now, now))
             else:
+                # 지문 커밋을 **파괴적 쓰기 기준으로** 감싼다 — 불변식: 커밋된 지문 ⊆ D1 실물.
+                # 루프 밖에서 한 번만 커밋하면, 데이터를 이미 쓴 뒤 공유 `_catalog` upsert 등에서
+                # 죽었을 때 D1 은 새 내용 · 상태는 옛 지문이 된다. 그 뒤 원천이 옛 내용으로
+                # 되돌아오면(운영자 full-refresh 복구가 정확히 이 형태다) 지문이 일치해 **영구히
+                # 스킵**된다 — 행수가 같은 채 값만 바뀌는 건 이 제품군의 정상 변경 형태라
+                # `_d1_row_count` 도 못 잡는다. 그래서 쓰기 **전에** 무효화한다(무효화가 실패하면
+                # DROP 이전이라 D1 무손상 — fail-open 방향 유지).
+                _upsert_publish_state([(spec.d1_table, "", 0, publication_id, now, now)], token)
                 # 전량 교체 스냅샷 — commerce 소유 테이블만 DROP+CREATE(공유 메타는 건드리지 않음).
                 _d1(f'DROP TABLE IF EXISTS "{spec.d1_table}"; '  # security: allow-sql — 식별자 상수 DDL
                     f'CREATE TABLE "{spec.d1_table}" ({ddl});', token)
                 _insert_rows(spec.d1_table, colnames, rows, token)
+                _upsert_publish_state(
+                    [(spec.d1_table, fingerprint, n, publication_id, now, now)], token)
                 exported.append((spec.d1_table, n))
-                state_rows.append((spec.d1_table, fingerprint, n, publication_id, now, now))
 
             m = meta.get(spec.source, {})
             sv = m.get("serving") or {}   # dbt meta.serving(#478 확정 필드 + commerce 확장)
