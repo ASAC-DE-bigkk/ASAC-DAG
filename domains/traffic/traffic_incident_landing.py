@@ -51,11 +51,18 @@ record_traffic_raw_product_failure = record_domain_stage_event(
 
 @fail_fast_traffic_bronze
 def land_traffic_incident_snapshot(**context) -> dict[str, object]:
+    conf = dag_run_conf(context)
     start_index, end_index, page_size = resolve_acc_info_page_window(
-        dag_run_conf(context)
+        conf
     )
     outcome = build_incident_landing_lifecycle().run(
-        run=RunIdentity(DAG_ID, str(context["run_id"])),
+        run=RunIdentity(
+            DAG_ID,
+            str(context["run_id"]),
+            landing_load_date=(
+                str(conf["load_date"]) if conf.get("load_date") is not None else None
+            ),
+        ),
         logical_date=context.get("logical_date") or datetime.now(KST),
         request=TrafficLandingRequest(
             start_index,

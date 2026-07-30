@@ -157,6 +157,53 @@ def test_flow_landing_preserves_raw_json_and_is_stable_for_same_run_link():
     }
 
 
+def test_flow_landing_keeps_raw_and_manifest_in_run_start_partition_across_midnight():
+    class Store:
+        def __init__(self):
+            self.objects = {}
+
+        def write_bytes(self, key, payload, content_type):
+            self.objects[key] = (payload, content_type)
+
+    clock_values = iter(
+        (
+            datetime(2026, 7, 30, 14, 59, 59, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 2, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 3, tzinfo=timezone.utc),
+        )
+    )
+    store = Store()
+    result = TrafficFlowLanding(
+        raw_store=store,
+        fetch_page=lambda link_id: (200, _payload(rows=[{"LINK_ID": link_id}])),
+        clock=lambda: next(clock_values),
+    ).collect(link_ids=["1220003800", "1220003900"], dag_run_id="scheduled__midnight")
+
+    assert all("/load_date=2026-07-30/" in key for key in result["raw_object_keys"])
+    assert "/load_date=2026-07-30/" in result["manifest_key"]
+    assert result["landing_load_date"] == "2026-07-30"
+    assert json.loads(store.objects[result["manifest_key"]][0])["load_date"] == "2026-07-30"
+
+
+def test_flow_landing_rejects_invalid_explicit_partition_before_api_call():
+    calls: list[str] = []
+    landing = TrafficFlowLanding(
+        raw_store=object(),
+        fetch_page=lambda link_id: calls.append(link_id) or (200, _payload()),
+        clock=lambda: datetime(2026, 7, 30, 14, 59, 59, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(TrafficBronzeConfigurationError, match="landing_load_date"):
+        landing.collect(
+            link_ids=["1220003800"],
+            dag_run_id="manual__flow-backfill",
+            landing_load_date="not-a-date",
+        )
+
+    assert calls == []
+
+
 def test_flow_link_resolution_is_pinned_to_exact_incident_snapshot():
     class Cursor:
         def __init__(self):

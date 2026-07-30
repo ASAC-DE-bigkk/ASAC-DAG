@@ -28,8 +28,8 @@ def _pipeline(events, *, latest_incident="incident-1"):
             events.append(("flow_fail", run.run_id, metrics))
 
     class Landing:
-        def collect(self, *, link_ids, dag_run_id):
-            events.append(("land", tuple(link_ids), dag_run_id))
+        def collect(self, *, link_ids, dag_run_id, landing_load_date=None):
+            events.append(("land", tuple(link_ids), dag_run_id, landing_load_date))
             return {
                 "source_id": "seoul_traffic_flow",
                 "raw_objects": [
@@ -94,6 +94,19 @@ def test_flow_pipeline_preserves_exact_incident_parent_from_landing_to_asset():
         "is_publishable": True,
     }
     assert any(event[0:2] == ("flow_publish", "asset__flow-1") for event in events)
+
+
+def test_flow_pipeline_uses_explicit_load_date_for_backfill_partition():
+    events = []
+    pipeline = _pipeline(events)
+
+    pipeline.land(
+        parent_incident_run_id="incident-1",
+        flow_run_id="manual__flow-backfill",
+        conf={"load_date": "2026-07-10"},
+    )
+
+    assert ("land", ("1220003800",), "manual__flow-backfill", "2026-07-10") in events
 
 
 def test_flow_pipeline_keeps_success_bronze_but_suppresses_stale_parent_asset():

@@ -61,6 +61,24 @@ def default_target(env: Mapping[str, str] | None = None) -> str:
     return "dev"
 
 
+def resolve_runtime_target(env: Mapping[str, str] | None = None) -> str:
+    """Resolve the authoritative runtime target for execution-time side effects.
+
+    DAG parsing keeps :func:`default_target` permissive so a malformed local
+    environment does not hide every DAG.  A write path must instead have an
+    explicit target: ``DBT_TARGET`` is authoritative and a legacy alias may
+    only be present when it agrees.
+    """
+    values = os.environ if env is None else env
+    target = str(values.get("DBT_TARGET", "")).strip().lower()
+    if target not in TARGET_CHOICES:
+        raise RuntimeTargetError("DBT_TARGET must be explicitly set to dev or prod")
+    alias = str(values.get("ASK_SEOUL_TARGET", "")).strip().lower()
+    if alias and alias != target:
+        raise RuntimeTargetError("runtime target aliases disagree")
+    return target
+
+
 def validate_dev_runtime(
     domain: str,
     env: Mapping[str, str] | None = None,

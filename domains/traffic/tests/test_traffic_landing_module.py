@@ -18,6 +18,7 @@ from traffic_ingest.landing import (  # noqa: E402
     TrafficLandingIncompleteError,
     TrafficLandingRequest,
 )
+from traffic_ingest.errors import TrafficSourceSchemaError  # noqa: E402
 
 
 def acc_info_payload(*, total_count: int, incident_ids: tuple[str, ...]) -> bytes:
@@ -68,6 +69,65 @@ class MemoryRawObjectStore:
     def write_bytes(self, key: str, payload: bytes, content_type: str) -> None:
         self.objects[key] = (payload, content_type)
         self.write_order.append(key)
+
+
+def test_collect_keeps_raw_and_manifest_in_run_start_partition_across_midnight():
+    clock_values = iter(
+        (
+            datetime(2026, 7, 30, 14, 59, 59, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 2, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 3, tzinfo=timezone.utc),
+        )
+    )
+    raw_store = MemoryRawObjectStore()
+    batch = TrafficLanding(
+        source=ScriptedTopisSource(
+            {
+                (1, 1): acc_info_payload(total_count=2, incident_ids=("A1",)),
+                (2, 2): acc_info_payload(total_count=2, incident_ids=("A2",)),
+            }
+        ),
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: next(clock_values),
+        request_id=iter(("request-1", "request-2")).__next__,
+    ).collect(
+        RunIdentity(dag_id="traffic_incident_landing", run_id="scheduled__midnight"),
+        TrafficLandingRequest(start_index=1, end_index=1, page_size=1),
+    )
+
+    assert all("/load_date=2026-07-30/" in item.raw_object_key for item in batch.raw_objects)
+    assert "/load_date=2026-07-30/" in str(batch.manifest_key)
+    assert batch.to_xcom()["landing_load_date"] == "2026-07-30"
+    assert json.loads(raw_store.read_bytes(str(batch.manifest_key)))["load_date"] == "2026-07-30"
+
+
+def test_replay_rejects_raw_objects_from_multiple_load_date_partitions():
+    raw_store = MemoryRawObjectStore()
+    first_key = (
+        "raw/traffic_incident/seoul_traffic_incident/load_date=2026-07-30/"
+        "20260730T235959KST_AccInfo-1-1_request-1.xml"
+    )
+    second_key = (
+        "raw/traffic_incident/seoul_traffic_incident/load_date=2026-07-31/"
+        "20260731T000001KST_AccInfo-2-2_request-2.xml"
+    )
+    raw_store.write_bytes(first_key, acc_info_payload(total_count=2, incident_ids=("A1",)), "application/xml")
+    raw_store.write_bytes(second_key, acc_info_payload(total_count=2, incident_ids=("A2",)), "application/xml")
+    landing = TrafficLanding(
+        source=ScriptedTopisSource({}),
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 31, tzinfo=timezone.utc),
+        request_id=lambda: "unused",
+    )
+
+    with pytest.raises(TrafficSourceSchemaError, match="one landing_load_date"):
+        landing.replay(
+            [first_key, second_key],
+            run=RunIdentity("traffic_incident_backfill", "manual__mixed"),
+        )
 
 
 def test_collect_preserves_raw_lineage_for_one_successful_page():

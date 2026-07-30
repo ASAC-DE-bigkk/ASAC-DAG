@@ -18,6 +18,7 @@ class TrafficCollectionMode(str, Enum):
 class RunIdentity:
     dag_id: str
     run_id: str
+    landing_load_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class TrafficLandingBatch:
     collection_mode: TrafficCollectionMode = TrafficCollectionMode.FULL_SNAPSHOT
     is_publishable: bool = True
     manifest_key: str | None = None
+    landing_load_date: str | None = None
 
     def to_xcom(self) -> dict:
         raw_objects = [
@@ -126,6 +128,7 @@ class TrafficLandingBatch:
                 for item in self.raw_objects
             ],
             "manifest_key": self.manifest_key,
+            "landing_load_date": self.landing_load_date,
         }
 
     @classmethod
@@ -165,4 +168,9 @@ class TrafficLandingBatch:
             ),
             is_publishable=bool(document.get("is_publishable", True)),
             manifest_key=(str(document["manifest_key"]) if document.get("manifest_key") else None),
+            landing_load_date=(
+                str(document["landing_load_date"])
+                if document.get("landing_load_date")
+                else None
+            ),
         )

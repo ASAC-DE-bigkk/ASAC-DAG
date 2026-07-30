@@ -67,7 +67,13 @@ def land_seoul_traffic_raw(**context) -> dict:
             "dag_run.conf.collection_mode must be full_snapshot or window"
         )
     batch = build_traffic_landing().collect(
-        RunIdentity(current_dag_id(context), context["run_id"]),
+        RunIdentity(
+            current_dag_id(context),
+            context["run_id"],
+            landing_load_date=(
+                str(conf["load_date"]) if conf.get("load_date") is not None else None
+            ),
+        ),
         TrafficLandingRequest(
             start_index,
             end_index,
@@ -80,10 +86,17 @@ def land_seoul_traffic_raw(**context) -> dict:
 
 @fail_fast_traffic_bronze
 def land_seoul_traffic_raw_object_keys(**context) -> dict:
+    conf = dag_run_conf(context)
     raw_object_keys = raw_object_keys_from_conf(context)
     return build_traffic_landing().replay(
         raw_object_keys,
-        run=RunIdentity(current_dag_id(context), context["run_id"]),
+        run=RunIdentity(
+            current_dag_id(context),
+            context["run_id"],
+            landing_load_date=(
+                str(conf["load_date"]) if conf.get("load_date") is not None else None
+            ),
+        ),
     ).to_xcom()
 
 

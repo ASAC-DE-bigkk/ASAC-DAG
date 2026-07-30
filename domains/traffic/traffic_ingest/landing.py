@@ -63,6 +63,7 @@ def verify_raw_payload_hash(
 class _TrafficLandingCheckpoint:
     batch: TrafficLandingBatch
     complete: bool
+    landing_load_date: str | None
 
 
 class TopisPageSource(Protocol):
@@ -112,27 +113,64 @@ class TrafficLanding:
             f"run_id={self._safe_key_segment(run.run_id)}/landing.json"
         )
 
-    def _manifest_key(self, run: RunIdentity, raw_objects: list[TrafficRawObject]) -> str:
-        load_date = datetime.fromisoformat(
-            raw_objects[0].collected_at.replace("Z", "+00:00")
-        ).astimezone(KST).date().isoformat()
+    @staticmethod
+    def _validate_load_date(load_date: str) -> str:
+        try:
+            return datetime.strptime(load_date, "%Y-%m-%d").date().isoformat()
+        except (TypeError, ValueError) as exc:
+            raise TrafficSourceSchemaError(
+                "Traffic landing_load_date must be YYYY-MM-DD"
+            ) from exc
+
+    @staticmethod
+    def _raw_object_load_dates(raw_objects: list[TrafficRawObject]) -> set[str]:
+        return {
+            match.group("load_date")
+            for item in raw_objects
+            if (match := _RAW_OBJECT_KEY.search(item.raw_object_key)) is not None
+        }
+
+    def _resolve_landing_load_date(
+        self,
+        run: RunIdentity,
+        checkpoint_load_date: str | None,
+        raw_objects: list[TrafficRawObject],
+    ) -> str:
+        candidates = {
+            self._validate_load_date(value)
+            for value in (
+                run.landing_load_date,
+                checkpoint_load_date,
+                *self._raw_object_load_dates(raw_objects),
+            )
+            if value
+        }
+        if len(candidates) > 1:
+            raise TrafficSourceSchemaError(
+                "Traffic landing run must use one landing_load_date"
+            )
+        if candidates:
+            return candidates.pop()
+        return self._clock().astimezone(KST).date().isoformat()
+
+    def _manifest_key(self, run: RunIdentity, landing_load_date: str) -> str:
         return (
             f"{self._raw_prefix}/traffic_incident/seoul_traffic_incident/"
-            f"load_date={load_date}/run_id={self._safe_key_segment(run.run_id)}"
+            f"load_date={landing_load_date}/run_id={self._safe_key_segment(run.run_id)}"
             "/_manifest.json"
         )
 
     def _write_manifest(
-        self, run: RunIdentity, raw_objects: list[TrafficRawObject]
+        self,
+        run: RunIdentity,
+        raw_objects: list[TrafficRawObject],
+        landing_load_date: str,
     ) -> str:
-        load_date = datetime.fromisoformat(
-            raw_objects[0].collected_at.replace("Z", "+00:00")
-        ).astimezone(KST).date().isoformat()
-        key = self._manifest_key(run, raw_objects)
+        key = self._manifest_key(run, landing_load_date)
         document = build_raw_manifest(
             run_id=run.run_id,
             dataset="seoul_traffic_incident",
-            load_date=load_date,
+            load_date=landing_load_date,
             object_keys=[item.raw_object_key for item in raw_objects],
             expected_count=len(raw_objects),
             actual_count=len(raw_objects),
@@ -182,8 +220,18 @@ class TrafficLanding:
                         or TrafficCollectionMode.FULL_SNAPSHOT
                     ),
                     is_publishable=bool(document.get("is_publishable", True)),
+                    landing_load_date=(
+                        str(document["landing_load_date"])
+                        if document.get("landing_load_date")
+                        else None
+                    ),
                 ),
                 complete=bool(document.get("complete", False)),
+                landing_load_date=(
+                    self._validate_load_date(str(document["landing_load_date"]))
+                    if document.get("landing_load_date")
+                    else None
+                ),
             )
         except (
             UnicodeError,
@@ -203,12 +251,14 @@ class TrafficLanding:
         batch: TrafficLandingBatch,
         *,
         complete: bool,
+        landing_load_date: str,
     ) -> None:
         document = {
             "source_id": "seoul_traffic_incident",
             "dag_id": run.dag_id,
             "dag_run_id": run.run_id,
             "request": asdict(request),
+            "landing_load_date": landing_load_date,
             "raw_objects": [asdict(item) for item in batch.raw_objects],
             "result_code": batch.result_code,
             "total_count": batch.total_count,
@@ -235,11 +285,12 @@ class TrafficLanding:
         request_id: str,
         start_index: int,
         end_index: int,
+        landing_load_date: str,
     ) -> str:
         collected_kst = collected_at.astimezone(KST)
         return (
             f"{self._raw_prefix}/traffic_incident/seoul_traffic_incident/"
-            f"load_date={collected_kst:%Y-%m-%d}/"
+            f"load_date={landing_load_date}/"
             f"{collected_kst:%Y%m%dT%H%M%S}KST_AccInfo-"
             f"{start_index}-{end_index}_{request_id}.xml"
         )
@@ -267,6 +318,11 @@ class TrafficLanding:
             else self._load_checkpoint(run, request)
         )
         checkpoint_objects = checkpoint.batch.raw_objects if checkpoint else ()
+        landing_load_date = self._resolve_landing_load_date(
+            run,
+            checkpoint.landing_load_date if checkpoint else None,
+            list(checkpoint_objects),
+        )
         trustworthy_objects = tuple(
             item
             for item in checkpoint_objects
@@ -277,12 +333,16 @@ class TrafficLanding:
             and checkpoint.complete
             and len(trustworthy_objects) == len(checkpoint_objects)
         ):
-            manifest_key = self._manifest_key(run, list(checkpoint.batch.raw_objects))
+            manifest_key = self._manifest_key(run, landing_load_date)
             if not self._raw_store.exists(manifest_key):
                 manifest_key = self._write_manifest(
-                    run, list(checkpoint.batch.raw_objects)
+                    run, list(checkpoint.batch.raw_objects), landing_load_date
                 )
-            return replace(checkpoint.batch, manifest_key=manifest_key)
+            return replace(
+                checkpoint.batch,
+                manifest_key=manifest_key,
+                landing_load_date=landing_load_date,
+            )
         checkpoint_pages = {
             (item.start_index, item.end_index): item for item in trustworthy_objects
         }
@@ -292,6 +352,20 @@ class TrafficLanding:
         parsed_rows = 0
         page_ranges = [(request.start_index, request.end_index)]
         page_index = 0
+        if checkpoint is None:
+            self._save_checkpoint(
+                run,
+                request,
+                TrafficLandingBatch(
+                    raw_objects=(),
+                    result_code="",
+                    total_count=0,
+                    parsed_rows=0,
+                    landing_load_date=landing_load_date,
+                ),
+                complete=False,
+                landing_load_date=landing_load_date,
+            )
         while page_index < len(page_ranges):
             start_index, end_index = page_ranges[page_index]
             page_index += 1
@@ -307,6 +381,7 @@ class TrafficLanding:
                     request_id=request_id,
                     start_index=start_index,
                     end_index=end_index,
+                    landing_load_date=landing_load_date,
                 )
                 self._raw_store.write_bytes(
                     raw_object_key,
@@ -339,8 +414,15 @@ class TrafficLanding:
                 ),
                 collection_mode=mode,
                 is_publishable=mode is TrafficCollectionMode.FULL_SNAPSHOT,
+                landing_load_date=landing_load_date,
             )
-            self._save_checkpoint(run, request, partial_batch, complete=False)
+            self._save_checkpoint(
+                run,
+                request,
+                partial_batch,
+                complete=False,
+                landing_load_date=landing_load_date,
+            )
             if page_index == 1 and mode is TrafficCollectionMode.FULL_SNAPSHOT:
                 page_ranges.extend(
                     next_acc_info_page_ranges(
@@ -361,7 +443,7 @@ class TrafficLanding:
                 and _fresh_retry_remaining > 0
             ):
                 return self.collect(
-                    run,
+                    replace(run, landing_load_date=landing_load_date),
                     request,
                     _fresh_retry_remaining=_fresh_retry_remaining - 1,
                     _ignore_incomplete_checkpoint=True,
@@ -379,9 +461,19 @@ class TrafficLanding:
             expected_rows=expected_rows,
             collection_mode=mode,
             is_publishable=mode is TrafficCollectionMode.FULL_SNAPSHOT,
+            landing_load_date=landing_load_date,
         )
-        self._save_checkpoint(run, request, batch, complete=True)
-        return replace(batch, manifest_key=self._write_manifest(run, raw_objects))
+        self._save_checkpoint(
+            run,
+            request,
+            batch,
+            complete=True,
+            landing_load_date=landing_load_date,
+        )
+        return replace(
+            batch,
+            manifest_key=self._write_manifest(run, raw_objects, landing_load_date),
+        )
 
     def _checkpoint_object_is_trustworthy(self, item: TrafficRawObject) -> bool:
         if not self._raw_store.exists(item.raw_object_key):
@@ -459,7 +551,8 @@ class TrafficLanding:
                 f"total_count={total_count}, parsed_rows={parsed_rows}, "
                 f"covered_end_index={raw_objects[-1].end_index}"
             )
-        manifest_key = self._write_manifest(run, raw_objects)
+        landing_load_date = self._resolve_landing_load_date(run, None, raw_objects)
+        manifest_key = self._write_manifest(run, raw_objects, landing_load_date)
         return TrafficLandingBatch(
             raw_objects=tuple(raw_objects),
             result_code=result_code,
@@ -469,4 +562,5 @@ class TrafficLanding:
             collection_mode=TrafficCollectionMode.BACKFILL,
             is_publishable=True,
             manifest_key=manifest_key,
+            landing_load_date=landing_load_date,
         )
