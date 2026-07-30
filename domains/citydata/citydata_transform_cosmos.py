@@ -52,6 +52,18 @@ KST_TZ = ZoneInfo("Asia/Seoul")
 # 바꿀 수 없다(Cosmos 가 렌더한 태스크 커맨드에 이미 박혀있음). 그래서 여기만 env 로 읽는다.
 _TARGET = os.environ.get("DBT_TARGET", "prod")
 
+# 공유 축 마스터(asac_axes 의 axes_bronze source)는 dbt jinja(target.database)로는 target 별
+# 카탈로그 해석이 안 된다 — --target prod 에서도 iceberg_dev 로 새어(dbt-trino 특성) prod 가
+# dev 카탈로그(iceberg_dev)에 묶인다. R2_DEV_* 없는 prod(.env.prod)에선 그 카탈로그가 안 떠
+# transform 이 죽는다. Python 에서 target 별 카탈로그를 계산해 --vars 로 넘겨, prod→iceberg /
+# dev→iceberg_dev 를 읽게 한다(ASK-Seoul#66 커플링 해소). source default(env_var/target.database)
+# 로는 재현이 안 돼 명시 --vars 로 못 박는다.
+_AXES_CATALOG = (
+    os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
+    if _TARGET == "prod"
+    else os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+)
+
 # 단독 citydata dbt 프로젝트 (모노 루트 아님).
 DBT_PROJECT = "/opt/airflow/dbt/domains/citydata"
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
@@ -125,7 +137,8 @@ def _tier_group(group_id: str, select: list[str]) -> DbtTaskGroup:
         ),
         # cosmos 는 모델 실행 시 프로젝트를 tmp 로 복사하는데 dbt_packages(asac_axes)를 안
         # 가져온다 → 각 태스크가 dbt deps 를 먼저 돌려 패키지를 설치하게 한다.
-        operator_args={"install_deps": True},
+        # vars: 공유 축 source(axes_bronze)가 target 별 카탈로그를 읽게 --vars 로 못 박음(위 _AXES_CATALOG).
+        operator_args={"install_deps": True, "vars": {"axes_bronze_catalog": _AXES_CATALOG}},
         # retries=0 — silver 는 incremental delete+insert(table 은 전체 재빌드가 5분 예산 초과라
         # 불가)라 재시도가 R2 비원자성으로 이중삽입 중복을 유발한다. 재시도 대신 다음 5분 run 의
         # 룩백이 실패 window 를 재계산해 self-heal 한다. gold 는 table 이라 재시도 무관.
