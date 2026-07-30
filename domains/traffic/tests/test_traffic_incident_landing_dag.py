@@ -62,7 +62,7 @@ def test_incident_landing_wrapper_maps_context_and_sets_raw_asset_metadata(monke
 
     result = module.land_traffic_incident_snapshot(
         dag=type("Dag", (), {"dag_id": "traffic_incident_landing"})(),
-        dag_run=type("DagRun", (), {"conf": {}})(),
+        dag_run=type("DagRun", (), {"conf": {"load_date": "2026-07-10"}})(),
         run_id="scheduled__snapshot-1",
         logical_date="2026-07-16T00:05:00+00:00",
         outlet_events={module.TRAFFIC_INCIDENT_RAW_ASSET_REF: event},
@@ -74,5 +74,6 @@ def test_incident_landing_wrapper_maps_context_and_sets_raw_asset_metadata(monke
         "snapshot_run_id": "scheduled__snapshot-1",
     }
     assert captured["run"].dag_id == "traffic_incident_landing"
+    assert captured["run"].landing_load_date == "2026-07-10"
     assert captured["request"].start_index == 1
     assert event.extra == Outcome.asset_metadata

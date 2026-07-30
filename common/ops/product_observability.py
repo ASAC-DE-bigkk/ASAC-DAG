@@ -7,12 +7,22 @@ queryable without changing the business path when R2 observability is down.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from common.ops.run_sink import _put_r2, _safe
+from common.runtime_guard import resolve_runtime_target
+
+try:
+    from airflow.stats import Stats
+except ImportError:  # pragma: no cover - Airflow supplies Stats in production.
+    class Stats:  # type: ignore[no-redef]
+        @staticmethod
+        def incr(_name: str, **_kwargs: Any) -> None:
+            return None
 
 
 LOGGER = logging.getLogger(__name__)
@@ -67,6 +77,15 @@ def _unknown_metric(*, unit: str, reason: str) -> dict[str, Any]:
     return _metric(None, unit=unit, null_meaning=reason)
 
 
+def _record_write_failure(*, kind: str) -> None:
+    """Expose fail-open observability loss to the metrics reconciler."""
+    try:
+        Stats.incr("product_observability.write_failed", tags={"kind": kind})
+    except Exception:  # noqa: BLE001 - metrics must not mask application success
+        pass
+    LOGGER.warning("[ops.product-observability] write failed (ignored): %s", kind)
+
+
 def build_product_event(
     context: Mapping[str, Any],
     *,
@@ -86,11 +105,31 @@ def build_product_event(
     observed_at = _observed_at(context)
     dag_id, task_id, run_id, try_number = _context_identity(context)
     observed_date = observed_at.astimezone(_KST).date().isoformat()
+    normalized_product_ids = sorted({str(product_id) for product_id in product_ids})
+    product_id = (
+        normalized_product_ids[0]
+        if len(normalized_product_ids) == 1
+        else "|".join(normalized_product_ids) or "__domain_stage__"
+    )
+    identity = {
+        "domain": domain,
+        "layer": layer,
+        "product_id": product_id,
+        "dag_id": dag_id,
+        "run_id": run_id,
+        "task_id": task_id,
+        "try_number": try_number,
+        "publication_id": publication_id,
+    }
+    event_id = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
     key = (
         f"ops/product-events/observed_date={observed_date}"
         f"/domain={_safe(domain)}/layer={_safe(layer)}"
-        f"/{_safe(dag_id)}__{_safe(run_id)}__{_safe(task_id)}"
-        f"__try{try_number}.json"
+        f"/event_id={event_id}.json"
     )
     event = {
         "schema_version": SCHEMA_VERSION,
@@ -98,7 +137,9 @@ def build_product_event(
         "domain": domain,
         "layer": layer,
         "status": status,
-        "product_ids": sorted({str(product_id) for product_id in product_ids}),
+        "event_id": event_id,
+        "product_id": product_id,
+        "product_ids": normalized_product_ids,
         "dag_id": dag_id,
         "task_id": task_id,
         "run_id": run_id,
@@ -116,7 +157,11 @@ def record_product_event(
 ) -> dict[str, Any]:
     """Persist one product transition without turning an application success into failure."""
     key, event = build_product_event(context, **kwargs)
-    target = str((context.get("params") or {}).get("target") or "dev")
+    try:
+        target = resolve_runtime_target()
+    except Exception:  # noqa: BLE001 -- target failure must remain fail-open
+        _record_write_failure(kind="target_resolution")
+        return event
     try:
         _put_r2(
             key,
@@ -125,7 +170,7 @@ def record_product_event(
         )
         LOGGER.info("[ops.product-events] %s", key)
     except Exception as exc:  # noqa: BLE001 -- observability must be fail-open
-        LOGGER.warning("[ops.product-events] write failed (ignored): %s", type(exc).__name__)
+        _record_write_failure(kind=type(exc).__name__)
     return event
 
 
@@ -260,7 +305,11 @@ def build_product_health_snapshot(
 def record_product_health(context: Mapping[str, Any], health: Mapping[str, Any]) -> dict[str, Any]:
     """Persist a health snapshot with the same fail-open boundary as product events."""
     key, snapshot = build_product_health_snapshot(context, health)
-    target = str((context.get("params") or {}).get("target") or "dev")
+    try:
+        target = resolve_runtime_target()
+    except Exception:  # noqa: BLE001 -- target failure must remain fail-open
+        _record_write_failure(kind="target_resolution")
+        return snapshot
     try:
         _put_r2(
             key,
@@ -269,5 +318,5 @@ def record_product_health(context: Mapping[str, Any], health: Mapping[str, Any])
         )
         LOGGER.info("[ops.product-health] %s", key)
     except Exception as exc:  # noqa: BLE001 -- observability must be fail-open
-        LOGGER.warning("[ops.product-health] write failed (ignored): %s", type(exc).__name__)
+        _record_write_failure(kind=type(exc).__name__)
     return snapshot

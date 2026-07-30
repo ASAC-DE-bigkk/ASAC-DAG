@@ -4,6 +4,7 @@ from common.runtime_guard import (
     TARGET_CHOICES,
     RuntimeTargetError,
     default_target,
+    resolve_runtime_target,
     validate_dev_runtime,
 )
 
@@ -166,6 +167,16 @@ def test_rejects_prod_namespace_in_dev_source_schema():
 
 def test_target_choices_are_dev_and_prod():
     assert TARGET_CHOICES == ("dev", "prod")
+
+
+def test_resolve_runtime_target_uses_dbt_target_and_rejects_ambiguous_aliases():
+    assert resolve_runtime_target({"DBT_TARGET": "prod"}) == "prod"
+
+    with pytest.raises(RuntimeTargetError, match="DBT_TARGET"):
+        resolve_runtime_target({})
+
+    with pytest.raises(RuntimeTargetError, match="aliases disagree"):
+        resolve_runtime_target({"DBT_TARGET": "prod", "ASK_SEOUL_TARGET": "dev"})
 
 
 def test_default_target_prefers_ask_seoul_target():

@@ -174,13 +174,24 @@ def build_raw_object_key(
     collected_at: datetime,
     dag_run_id: str,
     link_id: str,
+    *,
+    landing_load_date: str | None = None,
 ) -> str:
     collected_kst = collected_at.astimezone(KST)
+    if landing_load_date is None:
+        load_date = collected_kst.date().isoformat()
+    else:
+        try:
+            load_date = datetime.strptime(landing_load_date, "%Y-%m-%d").date().isoformat()
+        except (TypeError, ValueError) as exc:
+            raise TrafficBronzeConfigurationError(
+                "TrafficInfo landing_load_date must be YYYY-MM-DD"
+            ) from exc
     safe_run_id = re.sub(r"[^A-Za-z0-9_.=-]", "_", dag_run_id)
     safe_link_id = _safe_link_id(link_id)
     return (
         f"{raw_prefix().rstrip('/')}/{SOURCE_DOMAIN}/{SOURCE_ID}/"
-        f"load_date={collected_kst:%Y-%m-%d}/dag_run_id={safe_run_id}/"
+        f"load_date={load_date}/dag_run_id={safe_run_id}/"
         f"{collected_kst:%Y%m%dT%H%M%SKST}_TrafficInfo-link_id={safe_link_id}.xml"
     )
 

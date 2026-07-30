@@ -107,8 +107,9 @@ record_weather_bronze_product_failure = record_domain_stage_event(
 
 @fail_fast_weather_bronze
 def land_kma_raw(**context) -> dict:
+    conf = dag_run_conf(context)
     base_date, base_time = (
-        kma_base_datetime_from_conf(dag_run_conf(context))
+        kma_base_datetime_from_conf(conf)
         or resolve_kma_base_datetime()
     )
     request = KmaLandingRequest(
@@ -121,7 +122,13 @@ def land_kma_raw(**context) -> dict:
         num_of_rows=kma_num_of_rows(),
     )
     batch = build_weather_landing().collect(
-        RunIdentity(current_dag_id(context), context["run_id"]),
+        RunIdentity(
+            current_dag_id(context),
+            context["run_id"],
+            landing_load_date=(
+                str(conf["load_date"]) if conf.get("load_date") is not None else None
+            ),
+        ),
         request,
     )
     return batch.to_xcom()
@@ -129,6 +136,7 @@ def land_kma_raw(**context) -> dict:
 
 @fail_fast_weather_bronze
 def land_kma_raw_object_keys(**context) -> dict:
+    conf = dag_run_conf(context)
     grids = tuple(
         KmaGrid(str(grid["place_id"]), int(grid["nx"]), int(grid["ny"]))
         for grid in load_kma_grids()
@@ -138,7 +146,15 @@ def land_kma_raw_object_keys(**context) -> dict:
         .replay(
             raw_object_keys_from_conf(context),
             grids=grids,
-            run=RunIdentity(current_dag_id(context), context["run_id"]),
+            run=RunIdentity(
+                current_dag_id(context),
+                context["run_id"],
+                landing_load_date=(
+                    str(conf["load_date"])
+                    if conf.get("load_date") is not None
+                    else None
+                ),
+            ),
         )
         .to_xcom()
     )

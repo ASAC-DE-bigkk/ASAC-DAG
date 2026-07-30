@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
+import common.ops.product_observability as product_observability
 from common.ops.product_observability import (
     build_product_event,
     build_traffic_product_health,
     build_weather_product_health,
     record_domain_stage_event,
+    record_product_event,
 )
 
 
@@ -37,17 +41,101 @@ def test_product_event_keeps_product_ids_runtime_publication_and_quality_togethe
         quality={"coverage": {"value": 1.0, "quality_state": "observed"}},
     )
 
-    assert key == (
+    assert key.startswith(
         "ops/product-events/observed_date=2026-07-30/domain=weather/"
-        "layer=bronze/weather_vilage_fcst_bronze__"
-        "scheduled__2026-07-30T00_00_00_00_00__"
-        "verify_kma_bronze_runtime__try2.json"
+        "layer=bronze/event_id="
     )
+    assert key.endswith(".json")
     assert event["schema_version"] == "product-observability/v1"
+    assert len(event["event_id"]) == 64
+    assert event["product_id"] == "weather_place_current_outlook"
     assert event["product_ids"] == ["weather_place_current_outlook"]
     assert event["publication_id"] is None
     assert event["row_count"] == 427
     assert event["quality"]["coverage"]["quality_state"] == "observed"
+
+
+def test_product_event_uses_distinct_idempotent_keys_per_product_publication():
+    first_key, first = build_product_event(
+        _context(),
+        domain="weather",
+        layer="d1",
+        product_ids=("weather_place_current_outlook",),
+        publication_id="publication-a",
+    )
+    retry_key, retry = build_product_event(
+        _context(),
+        domain="weather",
+        layer="d1",
+        product_ids=("weather_place_current_outlook",),
+        publication_id="publication-a",
+    )
+    second_key, second = build_product_event(
+        _context(),
+        domain="weather",
+        layer="d1",
+        product_ids=("weather_place_risk_window",),
+        publication_id="publication-b",
+    )
+
+    assert first_key == retry_key
+    assert first["event_id"] == retry["event_id"]
+    assert first_key != second_key
+    assert first["event_id"] != second["event_id"]
+
+
+def test_product_event_uses_runtime_target_when_callback_has_no_target_param(monkeypatch):
+    writes = []
+    monkeypatch.setattr(
+        product_observability,
+        "resolve_runtime_target",
+        lambda: "prod",
+    )
+    monkeypatch.setattr(
+        product_observability,
+        "_put_r2",
+        lambda key, payload, *, target: writes.append((key, payload, target)),
+    )
+
+    record_product_event(
+        _context(params={}),
+        domain="traffic",
+        layer="raw",
+        product_ids=("seoul_traffic_incident",),
+    )
+
+    assert len(writes) == 1
+    assert writes[0][2] == "prod"
+
+
+def test_product_event_counts_target_resolution_failure_without_dev_fallback(monkeypatch):
+    counters = []
+    monkeypatch.setattr(
+        product_observability,
+        "resolve_runtime_target",
+        lambda: (_ for _ in ()).throw(RuntimeError("target is not configured")),
+    )
+    monkeypatch.setattr(
+        product_observability.Stats,
+        "incr",
+        lambda name, **kwargs: counters.append((name, kwargs)),
+    )
+    monkeypatch.setattr(
+        product_observability,
+        "_put_r2",
+        lambda *_args, **_kwargs: pytest.fail("must not select dev by default"),
+    )
+
+    record_product_event(
+        _context(params={}),
+        domain="traffic",
+        layer="raw",
+        product_ids=("seoul_traffic_incident",),
+    )
+
+    assert counters == [
+        ("product_observability.write_failed", {"tags": {"kind": "target_resolution"}})
+    ]
 
 
 def test_weather_health_distinguishes_observed_zero_from_unknown_metric():

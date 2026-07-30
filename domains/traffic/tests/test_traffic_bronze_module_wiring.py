@@ -28,7 +28,7 @@ class Dag:
 
 
 class DagRun:
-    conf = {"collection_mode": "window"}
+    conf = {"collection_mode": "window", "load_date": "2026-07-10"}
 
 
 class Result:
@@ -76,7 +76,11 @@ def test_live_landing_wrapper_only_maps_airflow_context_to_domain_module(monkeyp
     )
 
     assert result == {"raw_object_keys": ["raw/traffic/page.xml"]}
-    assert captured["run"] == RunIdentity(Dag.dag_id, "manual__traffic")
+    assert captured["run"] == RunIdentity(
+        Dag.dag_id,
+        "manual__traffic",
+        landing_load_date="2026-07-10",
+    )
     assert captured["request"] == TrafficLandingRequest(
         11,
         20,
@@ -96,7 +100,7 @@ def test_replay_wrapper_delegates_raw_keys_to_domain_module(monkeypatch):
             return Result({"raw_object_keys": keys})
 
     class BackfillDagRun:
-        conf = {"raw_object_keys": raw_keys}
+        conf = {"raw_object_keys": raw_keys, "load_date": "2026-07-10"}
 
     monkeypatch.setattr(dag_module, "build_traffic_landing", lambda: Landing())
 
@@ -107,7 +111,11 @@ def test_replay_wrapper_delegates_raw_keys_to_domain_module(monkeypatch):
     )
 
     assert captured["keys"] == raw_keys
-    assert captured["run"] == RunIdentity(Dag.dag_id, "manual__backfill")
+    assert captured["run"] == RunIdentity(
+        Dag.dag_id,
+        "manual__backfill",
+        landing_load_date="2026-07-10",
+    )
     assert result == {"raw_object_keys": raw_keys}
 
 
