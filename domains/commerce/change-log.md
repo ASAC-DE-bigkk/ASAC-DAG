@@ -5,6 +5,64 @@
 
 ---
 
+## 2026-07-30
+
+### 85. 서빙 게시 — 무변경 스킵 게이트(payload 지문) (#601)
+
+request:
+- "일단위 집계가 아니라 주, 월 등등 단위 집계들이면 gold와 d1의 테이블을 drop할 필요가 없을 것
+  같은데. 해당되는 부분 검토하고 수정 적용해줘."
+- 이어서 "gold를 통해서 재적재 할 때 해당 정보(핸드오프 메타)도 다 지우고 다시 생성해야 하는지",
+  "dbt 전체 도메인 규정에서 벗어나거나 위반되는 게 없는지 재확인" 요청.
+
+response:
+- **전제 검증 결과 사용자 전제를 그대로 쓰면 오답이 된다**(실측). 그레인 표기는 변경 여부와
+  일치하지 않는다 — 연 그레인 `churn_yearly` 는 행수 5,700 고정인데 매일 212행(3.7%) 변하고
+  `dong_summary` 는 417행 중 153행(36.7%) 변한다. 반대로 `flow_monthly`/`flow_yearly` 는
+  append-only 증분(`ym > max(ym)`)이라 월/연 경계와 full-refresh 외에는 물리 변경이 0이다
+  (dev 6일 연속 일일 run 동안 스냅샷 생성 0회, prod 도 동일). 따라서 판정축을 그레인·달력이
+  아니라 **게시 payload 지문**으로 두었다.
+- 스냅샷 id 게이트도 기각: 일일 `maintain_silver_gold_tables` 의 OPTIMIZE 가 내용 불변인 채로
+  `replace` 스냅샷을 만든다(2026-07-29 20:38Z flow_monthly, added=deleted=total=1,338,717,
+  체크섬 2821BCF4E001A158 동일) → 절감이 사라진다.
+- 구현(`include/gold/serving_export.py`):
+  - `_payload_fingerprint(ddl, colnames, rows)` — `_lit()` 직렬화(=D1 로 보낼 표현 그대로) 기반
+    행 지문을 정렬해 합친 순서 무관 해시. DDL·컬럼명·행수 포함(스키마만 바뀐 경우도 잡는다).
+  - `d1_publish_state`(commerce 소유, upsert 전용·DROP 금지) — table_name/payload_hash/
+    row_count/publication_id/written_at/checked_at. 공유 `d1_meta` 는 positional
+    `INSERT OR REPLACE ... VALUES` 라 컬럼을 늘리지 않는다.
+  - 게이트: 지문 동일 **and** 상태 행수 일치 **and** `SELECT count(*)` 실측 일치일 때만 스킵.
+    지문 부재·조회 실패·행수 불일치는 전부 재기록(fail-open) — 배치 INSERT 중도 실패로 잘린
+    테이블을 스킵이 고착시키지 않는다.
+  - 스킵해도 **메타는 매 run 갱신**: `_catalog` upsert(`exported_at`·`source_run_id` 전진,
+    `serving_status='published'`), `d1_meta`(`snapshot_at`=now, `build_status='ready'`),
+    핸드오프 보조 4종 정상 재생성 → 26h 미게시 감시축(`publication_trigger.
+    max_interval_minutes: 1560`)이 계속 유효해 **dbt 계약 수정이 필요 없다.**
+  - `publication_id` 는 내용이 바뀔 때만 새로 발급(같은 게시가 계속 서빙 중임을 표현).
+  - 밴드 게이트 스킵과 **경로·상태 분리**: `stale`·`serve.d1_rowcount_alert`·Discord 경고
+    아이콘은 밴드 스킵 전용. 무변경은 리포트 별 줄("무변경 — 행 재기록 생략")과
+    `result.status='ok'` 로 처리(정상 스킵이 매일 DAG 를 경고 상태로 만들지 않게).
+  - `_write_serve_state` 수리: 이번 run 미게시분의 직전 마커 항목을 이어 싣는다(전량 덮어써서
+    서빙 중 스냅샷 기록이 사라지던 문제).
+- 규정 점검: 공유 `publication_mode` enum(snapshot/upsert/append)·`gate.py` 상태값 계약 위반
+  없음 — 데이터 테이블 무접촉이라 `zero_policy: retain_last_good` 이 그대로 충족되고,
+  `serving_status='skipped_retained'` 는 **쓰지 않는다**(내용이 실제로 최신인데 소비 측에 불신
+  신호가 되므로). 공유 스키마 변경 0.
+- 절감 실측(2026-07-30 D1): 일 261,807행 → 58,813행(**−77.5%**), INSERT 요청 약 2,628 → 597.
+  대상은 `d1_flow_monthly`(181,435) · `d1_flow_yearly`(21,559) 2종이며, 하드코딩 명단이 아니라
+  22제품 균일 적용으로 자동 판정된다(materialization 이 바뀌면 절감도 자동으로 따라온다).
+- 테스트: `tests/test_serving_unchanged_gate.py` 11건(지문 순서 무관·값/스키마/행수 민감,
+  무변경 스킵 시 메타 갱신·publication_id 재사용, 행수 불일치·상태 부재·조회 실패 fail-open,
+  밴드 스킵 경로 불변). 전 스위트 398 통과 · `python -m security` PASS.
+- **별건으로 남긴 결함**(이 변경과 독립): `flow_monthly/yearly/daily` 모델 주석은 소급 도착을
+  "정기 full-refresh 스윕(`commerce_load_gold_refresh`)"이 흡수한다고 서술하지만 그 DAG 는
+  `schedule=None` 이고 `GOLD_READY_ASSET` outlet 도 없다. 실측상 D1 `d1_flow_monthly` 는 이미
+  181,435행 중 72행이 최신 silver 재계산과 다르고(합계 4,616,291 vs 4,616,354) 이 부채는 수동
+  트리거까지 누적된다. **매일 재게시해도 1행도 고쳐지지 않는다**(append-only 라 gold 자체가
+  과거 구간을 다시 쓰지 않음) → 게시 빈도와 무관한 별도 이슈로 제기.
+
+---
+
 ## 2026-07-29
 
 ### 84. MCP/API 핸드오프 계보 — D1 보조 테이블 3종 게시 (#593)
