@@ -93,6 +93,7 @@ def _freshness(contract: ServingContract, rows: Sequence[dict[str, Any]]) -> str
 
 
 def _catalog_row(contract: ServingContract, columns: Sequence[Column], record: ProductRecord) -> dict[str, Any]:
+    _desc = dict(contract.column_descriptions)  # name → dbt 컬럼 설명
     return {
         "name": contract.model_name,
         "product_id": contract.product_id,
@@ -101,7 +102,10 @@ def _catalog_row(contract: ServingContract, columns: Sequence[Column], record: P
         "product_question": contract.product_question,
         "tests": json.dumps(list(contract.tests), ensure_ascii=False),
         "time_axis": contract.event_time,
-        "columns": json.dumps([{"name": c, "type": t} for c, t in columns], ensure_ascii=False),
+        "columns": json.dumps(
+            [{"name": c, "type": t, "description": _desc.get(c, "")} for c, t in columns],
+            ensure_ascii=False,
+        ),
         "row_count": record.published_row_count,
         "serving_status": record.serving_status,
         "publication_id": record.publication_id,

@@ -31,6 +31,9 @@ class ServingContract:
     description: str = ""
     product_question: str = ""
     tests: tuple[str, ...] = ()
+    # 컬럼별 설명(name→description) — dbt manifest 의 columns 에서 캡처. _catalog.columns JSON 에
+    # 실어 Agent/MCP 가 필드 의미를 알게 한다(설명은 dbt 에 있었으나 publisher 가 드롭하던 갭 해소).
+    column_descriptions: tuple[tuple[str, str], ...] = ()
 
 
 def _merged_meta(node: dict[str, Any]) -> dict[str, Any]:
@@ -97,6 +100,10 @@ def load_contracts(
                 description=str(node.get("description", "")),
                 product_question=str(serving.get("product_question", "")),
                 tests=tuple(gates.get(uid, [])),
+                column_descriptions=tuple(
+                    (cn, str((cv or {}).get("description", "")))
+                    for cn, cv in (node.get("columns") or {}).items()
+                ),
             )
         )
     contracts.sort(key=lambda c: c.model_name)
