@@ -109,8 +109,11 @@ def purge_r2_raw() -> dict:
         summary[dataset] = delete_keys(expired)
 
     # 만료 pending 마커 — raw 가 지워져 영원히 적재 불가 = loader 실패 방치 신호.
+    # 구경로(#547 이사 전)도 함께 스윕 — 이사 후 고립 마커의 무알림 잔존 방지.
     stale = [
-        k for k in list_keys(config.LOADER_PENDING_PREFIX)
+        k
+        for prefix in (*config.LOADER_PENDING_LEGACY_PREFIXES, config.LOADER_PENDING_PREFIX)
+        for k in list_keys(prefix)
         if maintenance.is_stale_pending(k, cutoff)
     ]
     if stale:

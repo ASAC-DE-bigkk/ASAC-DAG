@@ -120,6 +120,8 @@ def land(stage, domain, source, dataset, pages, *, title="", endpoint="", kind="
         object_keys.append(key)
         total += len(body)
 
+    # 완결 확인서(ASK-Seoul#60 약속③) — 전 페이지 업로드 후 마지막에 쓴다(R1).
+    # completed_at 은 업로드 완료 시각이라 now 를 재측정한다.
     manifest = {
         "dataset": dataset, "title": title, "source": source, "endpoint": endpoint,
         "kind": kind or dataset, "load_pattern": load_pattern,
@@ -127,6 +129,8 @@ def land(stage, domain, source, dataset, pages, *, title="", endpoint="", kind="
         "request_params": request_params or {},
         "pages": len(object_keys), "rows": rows, "bytes": total,
         "object_keys": object_keys,
+        "status": "ok",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     manifest_key = f"{base}/_manifest.json"
     client.put_object(
