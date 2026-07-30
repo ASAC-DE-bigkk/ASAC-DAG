@@ -15,19 +15,30 @@ import pendulum
 from airflow import DAG
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import Param
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 _DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
 
 KST = "Asia/Seoul"
 record_culture_problem = problem_failure_callback(domain="culture")
 
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/culture"
-DEFAULT_PARAMS = {"target": "dev"}
+# target 기본값은 배포 env 를 따른다(ASK-Seoul#66) — 하드코딩 "dev" 였으면 prod 에서
+# dev 버킷의 run_report 를 읽으려다 매일 05:00 런이 실패한다.
+DEFAULT_PARAMS = {
+    "target": Param(
+        default=default_target(),
+        type="string",
+        enum=list(TARGET_CHOICES),
+        description="run_report·dag_runs 를 읽을 환경. 기본값은 런타임 env(ASK_SEOUL_TARGET/DBT_TARGET).",
+    )
+}
 
 
 def _dbt(args: str) -> str:

@@ -11,7 +11,7 @@ culture_bronze 를 시설 목록+상세 전수(max_detail=2000)로 트리거한�
     (베이스라인은 다중 리포트 병합이라 이 부분 run 이 자정런 HWM 을 안 가림)
 
 파라미터 (트리거 시 덮어쓰기 가능):
-  target   "dev" | "prod"   (기본 dev — culture_bronze 로 전달)
+  target   "dev" | "prod"   (기본 = 런타임 env — culture_bronze 로 전달)
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import pendulum
 
 from airflow import DAG
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.sdk import Param
 
 # 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,6 +34,7 @@ if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
 
 from culture_ingest.source.datasets import WEEKLY_FACILITY_REFRESH_CONF  # noqa: E402
 
@@ -48,7 +50,16 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=5)},
-    params={"target": "dev"},
+    # 배포 env 를 따른다(ASK-Seoul#66). 이 값은 아래 conf 로 culture_bronze 에 그대로 전달되므로
+    # 하드코딩 "dev" 였으면 prod 스택에서 주간 전수 재크롤이 dev 버킷에 쓰려다 실패한다.
+    params={
+        "target": Param(
+            default=default_target(),
+            type="string",
+            enum=list(TARGET_CHOICES),
+            description="culture_bronze 로 전달할 환경. 기본값은 런타임 env(ASK_SEOUL_TARGET/DBT_TARGET).",
+        )
+    },
     tags=["ingestion", "culture", "kopis", "weekly"],
 ) as dag:
     trigger_full_crawl = TriggerDagRunOperator(
