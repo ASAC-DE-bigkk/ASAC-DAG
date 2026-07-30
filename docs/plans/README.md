@@ -40,3 +40,4 @@
 | 2026-07-02 | [공통 에러 모듈 — RFC 9457 + R2 적재](2026-07-02-feat-common-error-module.md) | 진행 중 (#77) |
 | 2026-07-03 | [Weather/Traffic Bronze 재수집 DAG](2026-07-03-feat-114-weather-traffic-recollect.md) | 진행 중 (#114) |
 | 2026-07-02 | [공통 HTTP 클라이언트 — 소스 API 호출 통합](2026-07-02-feat-common-http-client.md) | 진행 중 (#78) |
+| 2026-07-30 | [파이프라인 표준 실행로그 통합 — ops 존 단일 스트림 + D1 집계](2026-07-30-feat-619-ops-standard-run-log.md) | 초안 (#619) |
