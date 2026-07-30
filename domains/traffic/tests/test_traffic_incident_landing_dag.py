@@ -24,6 +24,15 @@ def test_incident_landing_dag_has_one_non_trino_task_and_five_minute_cadence(
     assert "TRINO_HEAVY_POOL" not in source
 
 
+def test_incident_landing_defaults_to_five_minute_cadence_in_prod(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    monkeypatch.delenv("ASK_SEOUL_TRAFFIC_DAG_SCHEDULE", raising=False)
+
+    from traffic_ingest.bronze_dag_support import traffic_dag_schedule
+
+    assert traffic_dag_schedule() == "*/5 * * * *"
+
+
 def test_incident_landing_wrapper_maps_context_and_sets_raw_asset_metadata(monkeypatch):
     import traffic_incident_landing as module
 

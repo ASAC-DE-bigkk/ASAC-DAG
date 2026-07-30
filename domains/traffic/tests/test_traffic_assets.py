@@ -333,10 +333,13 @@ def test_materializer_schedule_allows_explicit_canonical_prod_cron():
     assert schedule == "*/15 * * * *"
 
 
-def test_materializer_schedule_keeps_prod_dormant_without_canonical_cron():
+def test_materializer_schedule_defaults_to_dev_cadence_in_prod():
     from traffic_ingest import assets
 
-    assert assets.materializer_schedule(env={"ASK_SEOUL_TARGET": "prod"}) is None
+    assert (
+        assets.materializer_schedule(env={"ASK_SEOUL_TARGET": "prod"})
+        == "*/15 * * * *"
+    )
     assert (
         assets.materializer_schedule(
             env={
@@ -344,7 +347,7 @@ def test_materializer_schedule_keeps_prod_dormant_without_canonical_cron():
                 "ASK_SEOUL_TRAFFIC_MATERIALIZER_FALLBACK_SCHEDULE": "*/10 * * * *",
             }
         )
-        is None
+        == "*/15 * * * *"
     )
 
 

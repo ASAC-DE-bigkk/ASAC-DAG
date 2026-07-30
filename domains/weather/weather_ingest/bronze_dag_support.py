@@ -13,7 +13,6 @@ from typing import ParamSpec, TypeVar
 
 from airflow.sdk.exceptions import AirflowFailException
 
-from weather_ingest.common.runtime import is_dev_target
 from weather_ingest.errors import (
     WeatherBronzeConfigurationError,
     WeatherBronzeDeterministicError,
@@ -216,4 +215,4 @@ def notify_weather_bronze_failure(context) -> None:
 def kma_dag_schedule() -> str | None:
     if "ASK_SEOUL_KMA_DAG_SCHEDULE" in os.environ:
         return os.environ["ASK_SEOUL_KMA_DAG_SCHEDULE"] or None
-    return KMA_PUBLISH_CRON_KST if is_dev_target() else None
+    return KMA_PUBLISH_CRON_KST
