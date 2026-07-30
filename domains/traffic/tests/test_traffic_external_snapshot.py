@@ -41,6 +41,39 @@ def test_resolve_citydata_crowding_snapshot_id_reads_latest_iceberg_snapshot():
     assert cursor.sql.rstrip().endswith("LIMIT 1")
 
 
+@pytest.mark.parametrize(
+    ("env", "expected_schema"),
+    [
+        ({"ASK_SEOUL_TARGET": "prod"}, "citydata"),
+        ({"DBT_TARGET": "prod"}, "citydata"),
+        ({"ASK_SEOUL_TARGET": "dev"}, "seoul_citydata"),
+        ({"DBT_TARGET": "dev"}, "seoul_citydata"),
+        (
+            {
+                "ASK_SEOUL_TARGET": "prod",
+                "SEOUL_CITYDATA_SCHEMA": "citydata_override",
+            },
+            "citydata_override",
+        ),
+    ],
+)
+def test_citydata_snapshot_schema_follows_the_runtime_target_by_default(
+    env,
+    expected_schema,
+):
+    cursor = FakeCursor(rows=[(8738321387624398062,)])
+
+    resolve_citydata_crowding_snapshot_id(
+        cursor_factory=lambda: (cursor, "iceberg", "weather_traffic_bronze"),
+        env=env,
+    )
+
+    assert (
+        f'iceberg.{expected_schema}."gold_citydata_ppltn_by_time$snapshots"'
+        in cursor.sql
+    )
+
+
 @pytest.mark.parametrize("row", [None, (None,), (0,), (-1,), ("not-a-number",)])
 def test_resolve_citydata_crowding_snapshot_id_fails_closed(row):
     cursor = FakeCursor(rows=[] if row is None else [row])

@@ -13,7 +13,9 @@ def resolve_citydata_crowding_snapshot_id(
     env: Mapping[str, str] = os.environ,
 ) -> int:
     cursor, catalog, _ = cursor_factory()
-    schema = sql_identifier(env.get("SEOUL_CITYDATA_SCHEMA", "seoul_citydata"))
+    target = env.get("ASK_SEOUL_TARGET", env.get("DBT_TARGET", "prod"))
+    default_schema = "seoul_citydata" if target == "dev" else "citydata"
+    schema = sql_identifier(env.get("SEOUL_CITYDATA_SCHEMA", default_schema))
     table = sql_identifier("gold_citydata_ppltn_by_time")
     cursor.execute(
         "SELECT snapshot_id "
