@@ -18,6 +18,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.ops.product_observability import record_product_health  # noqa: E402
 from common.runmetrics import track  # noqa: E402
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 
@@ -197,7 +198,7 @@ def record_delivered_fingerprint(
         return False
 
 
-@track(layer="bronze", domain="traffic")
+@track(layer="ops", domain="traffic")
 def collect_and_notify(**context) -> dict:
     report = build_traffic_reliability_report()
     notification = notification_fingerprint(report)
@@ -234,9 +235,11 @@ def collect_and_notify(**context) -> dict:
     return report
 
 
-@track(layer="bronze", domain="traffic")
-def collect_pipeline_data_plane(**_context) -> dict:
-    return collect_traffic_data_plane()
+@track(layer="ops", domain="traffic")
+def collect_pipeline_data_plane(**context) -> dict:
+    data_plane = collect_traffic_data_plane()
+    record_product_health(context, data_plane["product_health"])
+    return data_plane
 
 
 def audit_traffic_dbt_contracts(**context) -> dict[str, object]:

@@ -21,6 +21,7 @@ for path in (DIR, os.path.dirname(DIR), os.path.dirname(os.path.dirname(DIR))):
 from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa: E402
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
+from common.ops.product_observability import record_domain_stage_event  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import (  # noqa: E402
     TARGET_CHOICES,
@@ -114,6 +115,10 @@ DEFAULT_PARAMS = {
     )
 }
 record_traffic_problem = problem_failure_callback(domain="traffic")
+record_traffic_gold_product_event = record_domain_stage_event("traffic", "gold")
+record_traffic_gold_product_failure = record_domain_stage_event(
+    "traffic", "gold", status="failed"
+)
 
 
 def resolve_traffic_gold_snapshot_run(**context) -> str:
@@ -311,7 +316,11 @@ with DAG(
         pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
-        on_failure_callback=record_traffic_problem,
+        on_failure_callback=[
+            record_traffic_problem,
+            record_traffic_gold_product_failure,
+        ],
+        on_success_callback=record_traffic_gold_product_event,
     )
     admit_snapshot = PythonOperator(
         task_id="admit_traffic_gold_snapshot",

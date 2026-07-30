@@ -27,6 +27,7 @@ OWNERS = {
         "_sql_timestamp_utc",
         "_weather_cutoffs",
         "collect_dag_run_summary",
+        "collect_weather_product_profile",
         "collect_weather_summary",
         "freshness_status",
         "trino_cursor",

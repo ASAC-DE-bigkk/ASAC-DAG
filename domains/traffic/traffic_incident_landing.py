@@ -21,6 +21,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.ops.product_observability import record_domain_stage_event  # noqa: E402
 from traffic_ingest.acc_info import KST, resolve_acc_info_page_window  # noqa: E402
 from traffic_ingest.assets import TRAFFIC_INCIDENT_RAW_ASSET_REF  # noqa: E402
 from traffic_ingest.bronze_dag_support import (  # noqa: E402
@@ -41,6 +42,10 @@ from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 DAG_ID = "traffic_incident_landing"
 record_traffic_problem = problem_failure_callback(
     domain="traffic", source_system="seoul_topis"
+)
+record_traffic_raw_product_event = record_domain_stage_event("traffic", "raw")
+record_traffic_raw_product_failure = record_domain_stage_event(
+    "traffic", "raw", status="failed"
 )
 
 
@@ -86,7 +91,11 @@ with DAG(
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
         outlets=[TRAFFIC_INCIDENT_RAW_ASSET_REF],
-        on_failure_callback=record_traffic_problem,
+        on_success_callback=record_traffic_raw_product_event,
+        on_failure_callback=[
+            record_traffic_problem,
+            record_traffic_raw_product_failure,
+        ],
     )
 
 

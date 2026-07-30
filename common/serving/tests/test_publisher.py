@@ -6,6 +6,7 @@ against in-memory fakes: no Trino, no Cloudflare, no Airflow, no prod D1.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -181,6 +182,30 @@ def test_snapshot_publish_success_records_metadata():
     cat = d1.catalog_row(contract.model_name)
     assert cat["product_id"] == "weather_place_current_outlook" and cat["serving_status"] == STATUS_PUBLISHED
     assert smoke.checked == [contract.model_name]  # external => smoke ran
+
+
+def test_snapshot_catalog_carries_static_contract_and_runtime_publication_id():
+    contract = _contract(
+        public_gold={
+            "quality": {"coverage_explanation": "부분 커버리지입니다."},
+            "time": {"canonical_timezone": "Asia/Seoul"},
+        },
+        mcp_projection={
+            "operation": {"id": "weather.get_current_outlook"},
+            "question_examples": ["가", "나", "다"],
+        },
+    )
+    d1 = FakeD1()
+    source = FakeSource(
+        {contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(1))}
+    )
+
+    publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="run-rich")
+
+    catalog = d1.catalog[contract.model_name]
+    assert json.loads(catalog["public_gold"])["time"]["canonical_timezone"] == "Asia/Seoul"
+    assert json.loads(catalog["mcp_projection"])["operation"]["id"] == "weather.get_current_outlook"
+    assert catalog["publication_id"]
 
 
 def test_zero_rows_retain_last_good_keeps_previous():

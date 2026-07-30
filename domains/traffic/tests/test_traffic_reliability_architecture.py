@@ -27,6 +27,7 @@ OWNERS = {
         "_sql_timestamp_utc",
         "_traffic_cutoffs",
         "collect_dag_run_summary",
+        "collect_traffic_product_profile",
         "collect_traffic_summary",
         "freshness_status",
         "trino_cursor",
