@@ -93,10 +93,10 @@ def _maintain(**context) -> None:
     params = context["params"]
     target = params["target"]
     retention = params.get("retention", "3d")
-    # 단일 스키마(seoul_citydata) 유지보수 — 인구 마트도 통합(#87/#233).
+    # 단일 스키마 유지보수(target 별: prod=citydata, dev=seoul_citydata — #612) — 인구 마트 통합(#87/#233).
     results: dict[str, str] = {}
     results.update(run_maintenance(
-        target, tables=CITYDATA_TABLES, retention=retention, schema=citydata_schema()))
+        target, tables=CITYDATA_TABLES, retention=retention, schema=citydata_schema(target)))
     for tbl, status in results.items():
         print(f"[citydata maintenance] {tbl}: {status}")
     failed = [t for t, s in results.items() if not s == "ok"]
@@ -109,8 +109,9 @@ def _storage_cleanup(**context) -> None:
     params = context["params"]
     target = params["target"]
     hours = int(params.get("cleanup_hours", 6))
-    # 단일 스키마(seoul_citydata) 정리 — 스키마 UUID 프리픽스로 스코프됨(타 도메인 불가침).
-    for label, schema in (("seoul_citydata", citydata_schema()),):
+    # 단일 스키마 정리(target 별 해석 — #612) — 스키마 UUID 프리픽스로 스코프됨(타 도메인 불가침).
+    schema_name = citydata_schema(target)
+    for label, schema in ((schema_name, schema_name),):
         tally = run_storage_cleanup(target, retention_hours=hours, schema=schema)
         print(
             f"[citydata storage_cleanup:{label}] "
