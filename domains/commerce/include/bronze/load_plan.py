@@ -1,6 +1,6 @@
 """bronze 적재 계획 — raw run 목록 + 상태(워터마크/pending)로 '무엇을 적재할지' 해석.
 
-핵심 통찰(무손실 skip): raw 증분은 `_diff_target`(직전 **완료** 수집 기준)과의 diff 다. diff-target 은
+핵심 통찰(무손실 skip): raw 증분은 diff-target(직전 **완료** 수집 기준, ops 존 레이어)과의 diff 다. diff-target 은
 **status=ok(완료) run 에서만** 전진하므로, incomplete run 을 건너뛰어도 데이터가 유실되지 않는다 —
 다음 완료 run 의 증분이 그사이 변경분을 모두 포함한다. 따라서:
 - 워터마크(데이터셋별 마지막 적재 run_id) 이후의 **완료 run 증분만** 순서대로 적재한다.

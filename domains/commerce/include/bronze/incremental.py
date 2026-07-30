@@ -271,7 +271,7 @@ _DATE_TAG_RE = re.compile(r"\.(\d{4}-\d{2}-\d{2})\.jsonl$")
 
 
 def find_diff_target(storage, *, dir_prefix: str) -> tuple[str | None, str | None]:
-    """`_diff_target/<short>.` 접두로 최신 diff-target(.jsonl)과 검증키(.key)를 발견.
+    """diff-target 레이어의 `<short>.` 접두로 최신 diff-target(.jsonl)과 검증키(.key)를 발견.
 
     파일명 수집일 태깅(`<short>.<YYYY-MM-DD>.jsonl`) 기준 최신 1개.
     구형(무날짜 `<short>.jsonl`)도 인식하되 가장 오래된 것으로 취급(마이그레이션 허용).

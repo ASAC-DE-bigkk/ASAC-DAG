@@ -7,6 +7,76 @@
 
 ## 2026-07-28
 
+### 80. run 마커를 control 존으로 재배치(#60 오너 해석) + 재감사 확정 갭 5건 수리
+
+request:
+- 사용자 재검토 지시: `raw/…/run_id=…/_markers/` 도 control 레이어로 옮겨야 할 것으로 보임 — 파일
+  이동 누락과 로직 누락을 재검토 후 작업. **오너 해석 확정**: #60 약속③은 마커의 '내용' 규약일 뿐,
+  요지는 "수집 등 중간 과정이 읽는 **지시 파일**은 control 하위로 모은다" → run 마커도 이동 대상.
+- 부가 명시: 행정동 코드 원천은 `raw/common` 유지(#60 부록의 reference/ 이사 초안 미적용) —
+  commerce 는 이미 `raw/common/admin_dong/…` 를 읽으므로(enrich_tasks) 코드 무변경.
+
+response:
+- **마커 존 신설**: `COMMERCE_MARKERS_LAYER`(prod `ops/control/state/commerce/markers`, 미설정 시
+  구 위치 폴백). 경로는 run 폴더와 `load_date=/run_id=` 1:1 미러. paths(markers_run_dir/
+  run_index_root/markers_date_prefix) · markers(list_run_ids 가 마커 존 스캔 — identical run 은
+  마커만 남기므로 단일 소스) · watchdog(_RUN 탐지 파일명 기준) 정합. 기존 마커 3,667개를
+  `scripts/relocate_run_markers.py`(dry-run/--apply, 복사→크기검증→원본삭제)로 seoul 내 재배치.
+- **멀티에이전트 재감사(14 에이전트, 적대 검증)**: 파일 이동 누락 **0건** 재확인(5,075개 키·바이트
+  집합차 대조 — 초과 1건은 스모크 마커, receipts/silver state/_backup/watchdog 구 마커 skip 은
+  전부 정당 판정). 로직 갭 5건 확정·수리:
+  - **F5**: `_full/` 고아 랜딩(랜딩~diff 사이 중단 시 영구 잔존) — cleanup_incomplete 가 동일자
+    성공 시 랜딩까지 정리 + 마커 없는 중단 run 을 raw 일자 파티션에서도 발견(_same_day_run_ids).
+  - **F7**: 같은 run 재시도로 completed·incomplete 공존 가능 — completed 기록 **후** 잔존
+    incomplete 삭제(상호배타 계약 유지, 역방향 금지).
+  - **B2**: purge_v2 의 purge_raw 가 ops 존 diff_target/마커를 못 찾음 — 존 스캔 추가
+    (classify_zone_keys, stem 정확 일치).
+  - **B3**: purge_v2 purge_gold 가 폐사한 `gold.pg` import 로 런북 전체 크래시 — fail-soft skip
+    (gold=Iceberg, silver purge 후 다음 gold run 반영)으로 교체.
+  - **B9**: cleanup_orphan_warehouse_dirs 가 무조건 dev 카탈로그를 감사 — COMMERCE_DBT_TARGET
+    우선 해석으로 정합(프로드 감사 시 orphan 오분류 방지).
+  - (B7) 구 위치를 서술하던 독스트링(seed_diff_target/incremental/resort/load_plan) 정정.
+- migrate 스크립트 매핑에 run_marker 분기 추가(재실행 시에도 마커는 존으로). 테스트 381→
+  스위트 전체 통과(신 존 왕복·고아 GC·배타·매핑 케이스 추가), security PASS.
+- 문서: storage.md(마커 존 절·prod R2 블록)·common_info·data-model·README·configuration.md 정합.
+
+### 79. R2 저장 위치 개편 — #60 규약(load_date= 파티션·ops 존) + seoul(프로드) 버킷·iceberg 카탈로그 전환 + 이력 이관 (ASK-Seoul#60)
+
+request:
+- ASK-Seoul#60(경로 규약 — 약속 3개 + 존 정리)을 토대로 저장 위치 변경. 단 목적지는 dev 가 아니라
+  **`seoul/`(프로드 버킷)**. 다른 properties 는 필요 시에만 명시·허가 후 변경, commerce 저장경로는 변경 OK,
+  하드픽스 지양(env 조합). seoul-dev 의 기존 raw 를 새 구조로 seoul 에 적재 가능하게 이관.
+- Q&A 확정: **Iceberg 카탈로그도 seoul(prod `iceberg`)로 전환** · 공유 `TRINO_ICEBERG_CATALOG` 는
+  `iceberg_dev` 덮어쓰기(멘티 안전망)를 **진짜 prod(`iceberg`)로 복원 승인** · bronze 적재 실행은 **보류**
+  (적재 전 생성물·위치 프리뷰 확인까지 완료, 실행만 대기).
+
+response:
+- **약속① (`load_date=` key=value 날짜)**: `paths._run_date_dir` 가 `YYYY/MM/DD` → `load_date=YYYY-MM-DD`
+  파티션 생성. 리더(markers/load_plan/incremental)는 `run_id=` 부분문자열·run_id 문자열 기반이라 무변경 —
+  신·구 공존 판독. watchdog 의 일자 스캔은 신설 `paths.raw_date_prefix()` 사용.
+- **약속② (가변 상태 raw 밖 → ops 존)**: diff-target 를 `COMMERCE_DIFF_TARGET_LAYER`(신설 env, 미설정 시
+  구 위치 폴백)로, watchdog 가드를 `COMMERCE_WATCHDOG_STATE_LAYER`(신설, 구 `state/commerce/watchdog`
+  하드코딩 제거)로. 기존 env 3종(BRONZE/SILVER/SERVE_STATE_LAYER)은 **값만** `ops/control/state/commerce/
+  {bronze,silver,serve}` 로. 약속③(완결성 마커)은 기존 준수.
+- **prod 전환(env 조합, 코드 하드픽스 없음)**: `.env.commerce` `R2_BUCKET=${R2_BUCKET_NAME:-seoul}`
+  (R2 자격증명은 루트 동일 이름 직접 상속으로 단순화). `warehouse._is_dev()` 가 `COMMERCE_DBT_TARGET`
+  우선(공유 `DBT_TARGET=dev` 무변경 — silver/gold DAG 와 동일 규약, gold/serving 은 `_qualified()` 경유
+  전파). 루트 `.env`: `COMMERCE_DBT_TARGET=prod` + 레이어 5종 + `TRINO_ICEBERG_CATALOG=iceberg` 복원(승인).
+- **이력 이관**: 신규 `scripts/migrate_raw_to_prod_bucket.py`(purge_v2 패턴 — dry-run 기본/`--apply`,
+  서버사이드 copy, 멱등, 소스 무삭제). 실측: dated run 4,771개(2.67GB)→`load_date=` 파티션,
+  diff-target 304개(2.74GB)→ops 존, `_backup` 78개·테스트 잔재 2개 제외 — **5,075개 복사, 실패 0·불일치 0**.
+  상태(워터마크/영수증)는 **이관 안 함**(prod 는 from-zero 적재 예정이라 dev 워터마크 이관 금지 — 리셋).
+- **검증**: pytest 372 passed(레이아웃·ops 존·매핑 신규 테스트 포함) · `python -m security` PASS ·
+  컨테이너 실측 ALL GREEN(`r2_bucket=seoul`·`_qualified()=iceberg.commerce`·워터마크 키 ops 존·공유
+  `DBT_TARGET=dev` 유지) · Trino `SHOW CATALOGS`/PyIceberg REST 로 prod 카탈로그 접근 확인(기존 토큰 충분) ·
+  수집 스모크(resort_complex) → `raw/commerce/load_date=2026-07-28/run_id=…` + ops 존 diff-target 실기록.
+- **적재(보류 상태)**: 적재 계획 프리뷰 실측 — base 152건/2,631MB(PyIceberg)+증분 954건/18MB(Trino),
+  run 35개(6/30~7/28), 152/152종 base 확보. **실행은 사용자 보류** — 실행 시
+  `COMMERCE_LOAD_LOOKBACK_DAYS=0` 1회 오버라이드로 `commerce_load_bronze` 트리거(기본 3 창은 base 를
+  배제해 오적재 위험). 그때까지 **load 3종(bronze/silver/gold)+watchdog pause 유지**(빈 워터마크에서
+  기본 창 실행 방지), `commerce_collect_raw` 만 재개(신규 수집은 신 레이아웃으로 정상 기록).
+- 호스트측: 루트 `.env.example` 에 신규 키 반영(별도 PR). seoul-dev 는 완전 보존(롤백 = env 되돌림).
+
 ### 78. commerce env 를 루트 `.env` `commerce 전용값` 블록 단일 소스로 이관 + `.env.commerce` 매핑 레이어화 (호스트 env 계약 변경)
 
 request:

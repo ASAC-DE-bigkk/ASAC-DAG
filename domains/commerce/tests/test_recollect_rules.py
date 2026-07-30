@@ -74,3 +74,41 @@ def test_cleanup_incomplete_does_not_touch_other_days():
     assert removed == []                              # 다른 일자는 정리 안 함
     assert fs.exists(paths.bronze_marker_key(run_id="2026-07-01_090000_000", short="b",
                                              status=paths.MARKER_INCOMPLETE))
+
+
+def test_cleanup_incomplete_removes_orphan_full_landing():
+    """#60 감사 F5: 랜딩~diff 사이 중단 run 의 `_full/` 고아 랜딩도 동일자 성공 시 정리."""
+    fs = _FS()
+    crashed = "2026-07-02_090000_000"                 # 마커 기록 전 중단(랜딩만 잔존)
+    fs.write_bytes(paths.bronze_full_landing_key(run_id=crashed, short="b"), b"landing")
+    _completed(fs, "2026-07-02_120000_000", "b")      # 이후 성공 run
+    removed = M.cleanup_incomplete(fs, "", "b", keep_run_id="2026-07-02_120000_000")
+    assert paths.bronze_full_landing_key(run_id=crashed, short="b") in removed
+    assert not fs.exists(paths.bronze_full_landing_key(run_id=crashed, short="b"))
+
+
+def test_cleanup_finds_crashed_run_via_raw_partition(monkeypatch):
+    """마커 존 분리 후에도 '마커 0개(중단) run' 을 raw 일자 파티션에서 발견해 정리한다."""
+    monkeypatch.setattr(paths, "MARKERS_LAYER", "ops/control/state/commerce/markers")
+    fs = _FS()
+    crashed = "2026-07-02_090000_000"                 # 마커 없음 → 마커 존 스캔으론 안 보임
+    fs.write_bytes(paths.bronze_full_landing_key(run_id=crashed, short="b"), b"landing")
+    _completed(fs, "2026-07-02_120000_000", "b")      # 성공 run(마커는 마커 존에 기록됨)
+    removed = M.cleanup_incomplete(fs, "", "b", keep_run_id="2026-07-02_120000_000")
+    assert paths.bronze_full_landing_key(run_id=crashed, short="b") in removed
+
+
+def test_markers_zone_roundtrip(monkeypatch):
+    """마커 존 설정 시 기록·조회·재수집 판정이 신 위치에서 일관 동작(#60 오너 해석)."""
+    monkeypatch.setattr(paths, "MARKERS_LAYER", "ops/control/state/commerce/markers")
+    fs = _FS()
+    rid = "2026-07-02_090000_000"
+    _completed(fs, rid, "a")
+    _incomplete(fs, rid, "b")
+    mkey = paths.bronze_marker_key(run_id=rid, short="a", status=paths.MARKER_COMPLETED)
+    assert mkey == ("ops/control/state/commerce/markers/load_date=2026-07-02/"
+                    f"run_id={rid}/a.completed")
+    assert M.list_run_ids(fs, "") == [rid]            # run 발견 = 마커 존 스캔
+    assert M.completed_shorts(fs, "", rid) == {"a"}
+    assert M.recollect_targets_same_day(fs, "", ["a", "b"], "2026-07-02") == ["b"]
+    assert M.plan_excluding_same_day_completed(fs, "", "2026-07-02", ["a", "b"]) == ["b"]

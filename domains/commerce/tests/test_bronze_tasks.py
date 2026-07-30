@@ -55,9 +55,60 @@ def test_completeness_empty_dataset_ok():
 
 # ── 저장 경로(run_id 폴더) ──
 def test_bronze_object_key_one_file_per_api():
-    # run_id 날짜(YYYY-MM-DD)가 YYYY/MM/DD 파티션으로 펼쳐진다.
+    # run_id 날짜(YYYY-MM-DD)가 load_date=YYYY-MM-DD 파티션으로 펼쳐진다(#60 약속① key=value).
     assert paths.bronze_object_key(run_id="2026-06-29_103045_123", short="general_restaurant") == (
-        "raw/commerce/2026/06/29/run_id=2026-06-29_103045_123/general_restaurant.jsonl")
+        "raw/commerce/load_date=2026-06-29/run_id=2026-06-29_103045_123/general_restaurant.jsonl")
+
+
+def test_raw_date_prefix_partition_scan():
+    # 일자 스캔 접두(watchdog 등) — load_date= 파티션과 정합.
+    assert paths.raw_date_prefix(date="2026-06-29") == "raw/commerce/load_date=2026-06-29/"
+    assert paths.raw_date_prefix(prefix="dev/exi", date="2026-06-29") == (
+        "dev/exi/raw/commerce/load_date=2026-06-29/")
+
+
+def test_markers_layer_env_override(monkeypatch):
+    # COMMERCE_MARKERS_LAYER 설정 시 마커는 control 존(run 폴더와 load_date=/run_id= 1:1 미러).
+    monkeypatch.setattr(paths, "MARKERS_LAYER", "ops/control/state/commerce/markers")
+    rid = "2026-06-29_103045_123"
+    assert paths.bronze_marker_key(run_id=rid, short="clinic", status="completed") == (
+        f"ops/control/state/commerce/markers/load_date=2026-06-29/run_id={rid}/clinic.completed")
+    assert paths.bronze_run_marker_key(run_id=rid, status="incomplete") == (
+        f"ops/control/state/commerce/markers/load_date=2026-06-29/run_id={rid}/_RUN.incomplete")
+    assert paths.run_index_root() == "ops/control/state/commerce/markers"
+    assert paths.markers_date_prefix(date="2026-06-29") == (
+        "ops/control/state/commerce/markers/load_date=2026-06-29/")
+    # 미설정 폴백 = 구 위치(run 폴더 안 _markers/) — 하위호환
+    monkeypatch.setattr(paths, "MARKERS_LAYER", "")
+    assert paths.bronze_marker_key(run_id=rid, short="clinic", status="completed") == (
+        f"raw/commerce/load_date=2026-06-29/run_id={rid}/_markers/clinic.completed")
+    assert paths.run_index_root() == "raw/commerce"
+
+
+def test_write_bronze_completed_clears_same_run_incomplete():
+    """#60 감사 F7: 같은 run 재시도 잔존 incomplete 는 completed 기록 후 정리(상호배타 유지)."""
+    st = FakeStorage()
+    stale = paths.bronze_marker_key(run_id="R", short="clinic", status=paths.MARKER_INCOMPLETE)
+    st.data[stale] = b"{}"                             # 1차 시도 잔존 마커 시뮬
+    _write(st, [_page([{"MGTNO": "A", "UPDATEDT": "2026-06-29 09:00:00"}])],
+           status="ok", complete=True)
+    assert not st.exists(stale)                        # completed 기록 후 삭제됨
+    assert st.exists(paths.bronze_marker_key(run_id="R", short="clinic",
+                                             status=paths.MARKER_COMPLETED))
+
+
+def test_diff_target_layer_env_override(monkeypatch):
+    # COMMERCE_DIFF_TARGET_LAYER 설정 시 raw 밖 ops 존으로(#60 약속②) — 미설정 폴백은
+    # test_write_bronze_first_run_sorts_rows_and_seeds_diff_target 가 검증.
+    monkeypatch.setattr(paths, "DIFF_TARGET_LAYER", "ops/control/state/commerce/diff_target")
+    assert paths.bronze_diff_target_key(short="clinic", collect_date="2026-06-29") == (
+        "ops/control/state/commerce/diff_target/clinic.2026-06-29.jsonl")
+    assert paths.bronze_diff_target_keyfile(short="clinic", collect_date="2026-06-29") == (
+        "ops/control/state/commerce/diff_target/clinic.2026-06-29.key")
+    assert paths.diff_target_prefix(short="clinic") == (
+        "ops/control/state/commerce/diff_target/clinic.")
+    assert paths.diff_target_prefix(prefix="dev/exi", short="clinic") == (
+        "dev/exi/ops/control/state/commerce/diff_target/clinic.")
 
 
 def test_keys_honor_storage_prefix():

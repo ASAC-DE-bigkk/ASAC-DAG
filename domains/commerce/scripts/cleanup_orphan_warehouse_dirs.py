@@ -69,8 +69,15 @@ def _all_table_names(schema: str) -> list[str]:
             host=os.environ.get("TRINO_HOST", "trino"),
             port=int(os.environ.get("TRINO_PORT", "8080")),
             user=os.environ.get("TRINO_USER", "airflow"),
-            catalog=os.environ.get("TRINO_DEV_ICEBERG_CATALOG")
-            or os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg_dev"),
+            # 타깃 정합(#60 감사 B9): 적재와 같은 카탈로그를 감사 — COMMERCE_DBT_TARGET 우선
+            # (warehouse._is_dev 와 동일 규약). 구 코드는 무조건 dev 를 우선해 prod 감사 시
+            # 목록(dev)과 로드(prod)가 어긋나 라이브 디렉터리를 orphan 으로 오분류했다.
+            catalog=(
+                os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+                if (os.environ.get("COMMERCE_DBT_TARGET")
+                    or os.environ.get("DBT_TARGET", "dev")).strip().lower() == "dev"
+                else os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
+            ),
         )
         cur = conn.cursor()
         cur.execute(
