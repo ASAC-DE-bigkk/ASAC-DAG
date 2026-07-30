@@ -32,8 +32,13 @@ import pendulum
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+_DAGS_ROOT = os.path.dirname(os.path.dirname(_HERE))  # dags/ 루트 — common 임포트용
+if _DAGS_ROOT not in sys.path:
+    sys.path.insert(0, _DAGS_ROOT)
 
+from common.runtime_guard import default_target  # noqa: E402
 from citydata_ingest.source.maintenance import (  # noqa: E402
     CITYDATA_TABLES,
     citydata_schema,
@@ -43,7 +48,7 @@ from citydata_ingest.source.maintenance import (  # noqa: E402
 
 KST = "Asia/Seoul"
 
-DEFAULT_PARAMS = {"target": "dev", "retention": "3d", "cleanup_hours": 6, "drain_seconds": 300}
+DEFAULT_PARAMS = {"target": default_target(), "retention": "3d", "cleanup_hours": 6, "drain_seconds": 300}
 
 # maintenance 의 optimize 가 silver/gold 데이터파일을 재작성하는 동안 transform 의
 # delete+insert 가 같은 행을 지우면 Iceberg 커밋 충돌 → 중복 발생. 그래서 maintenance
