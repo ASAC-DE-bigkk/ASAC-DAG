@@ -5,6 +5,29 @@
 
 ---
 
+## 2026-07-29
+
+### 81. dbt seed 부트스트랩 — silver DAG 에 매 run 멱등 재적재 태스크 신설 (#567, prod from-zero 실측 갭)
+
+request:
+- prod from-zero 적재 중 gold 21/22 모델이 `commerce_dataset_taxonomy` 부재로 동시 실패(실측).
+  향후 환경 변경/이관 재적재에서도 같은 에러가 나지 않게, 적합한 레이어를 검토해 seed 가
+  자동 적재되도록 조치하라는 지시.
+
+response:
+- 원인: 분류 체계 참조가 dbt seed 인데 어떤 DAG 에도 seed 단계가 없어 dev 의 과거 수동 1회
+  시드에 잠재 의존. 소비자 = gold 22종 중 21종 + silver `silver_license_detail_health`(파킹).
+- 레이어 판단: dbt 진입 레이어인 **silver DAG** 가 정위치(사용자 판단 일치) — silver 에서
+  적재되면 gold 는 파이프라인 순서상 구조적으로 보장.
+- 구현: `commerce_load_silver.dbt_seed_taxonomy` 태스크 — 매 run `dbt seed
+  --target {COMMERCE_DBT_TARGET or DBT_TARGET}` 멱등 실행(존재 시 전량 교체·152행·수 초).
+  배선 `[dbt_seed_taxonomy, enrich_admin_dong_ref, enrich_fill_jibun, ensure_silver_marker]
+  >> seed_silver_if_empty >> dbt_silver`.
+- 검증: `airflow tasks test` 실실행 `{'seeds_loaded': 1, 'target': 'prod'}` success ·
+  DAG import 무에러. 운영 선조치로 prod 수동 seed(152행=dev 일치) 후 gold run 재개 정상.
+- 동류 갭 기록: `raw/common/admin_dong` 원천 부재 → silver enrich 실패(운영 조치: dev 스냅샷
+  138개 복사, 리더는 max(load_date) 자동 선택이라 원천 오너 정기 적재 시작 시 자연 대체).
+
 ## 2026-07-28
 
 ### 80. run 마커를 control 존으로 재배치(#60 오너 해석) + 재감사 확정 갭 5건 수리
