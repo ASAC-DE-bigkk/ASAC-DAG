@@ -48,6 +48,7 @@ from traffic_ingest.common.resources import TRINO_TRANSFORM_POOL  # noqa: E402
 from traffic_ingest.external_snapshot import (  # noqa: E402
     resolve_admin_dong_crosswalk_snapshot_id,
     resolve_citydata_crowding_snapshot_id,
+    traffic_gold_anchor_exists,
 )
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
@@ -92,6 +93,17 @@ SNAPSHOT_TASK_ID = "resolve_traffic_gold_snapshot_run"
 FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
 CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY = "traffic_citydata_crowding_snapshot_id"
 ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY = "admin_dong_crosswalk_pin_snapshot_id"
+GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY = "traffic_gold_bootstrap_required"
+GOLD_HOT_SELECTOR = "ask_seoul_traffic_transform_gold_hot_build"
+GOLD_INCIDENT_HOT_SELECTOR = (
+    "ask_seoul_traffic_transform_gold_incident_hot_build"
+)
+GOLD_BOOTSTRAP_HOT_SELECTOR = (
+    "ask_seoul_traffic_transform_gold_bootstrap_hot_build"
+)
+GOLD_INCIDENT_BOOTSTRAP_HOT_SELECTOR = (
+    "ask_seoul_traffic_transform_gold_incident_bootstrap_hot_build"
+)
 # Gold validation must win the next slot after its priority-1 build. Silver
 # writers remain priority 10, preserving their precedence before Gold starts.
 PIN_CRITICAL_PRIORITY = 20
@@ -105,7 +117,7 @@ record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
 def resolve_traffic_gold_snapshot_run(**context) -> str:
-    return _resolve_traffic_gold_snapshot_run(
+    incident_run_id = _resolve_traffic_gold_snapshot_run(
         context=context,
         variable=Variable,
         incident_manifest_factory=build_traffic_manifest,
@@ -117,6 +129,13 @@ def resolve_traffic_gold_snapshot_run(**context) -> str:
         citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
         admin_dong_crosswalk_xcom_key=ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
     )
+    task_instance = context.get("ti") or context.get("task_instance")
+    if task_instance is not None:
+        task_instance.xcom_push(
+            key=GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY,
+            value=not traffic_gold_anchor_exists(),
+        )
+    return incident_run_id
 
 
 def resolve_gold_citydata_snapshot_id(*, ti):
@@ -180,6 +199,19 @@ def run_dbt_phase(
     selector_by_test_tier_when_flow_missing=None,
     **context,
 ) -> dict[str, object]:
+    if dbt_command == "build" and selector == GOLD_HOT_SELECTOR:
+        bootstrap_required = context["ti"].xcom_pull(
+            task_ids=SNAPSHOT_TASK_ID,
+            key=GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY,
+        )
+        if not isinstance(bootstrap_required, bool):
+            raise AirflowFailException(
+                "Traffic Gold bootstrap requirement is unavailable"
+            )
+        if bootstrap_required:
+            selector = GOLD_BOOTSTRAP_HOT_SELECTOR
+            selector_when_flow_missing = GOLD_INCIDENT_BOOTSTRAP_HOT_SELECTOR
+
     def guard_current_silver_output() -> None:
         mismatch_action = "skip" if dbt_command in {"run", "build"} else "fail"
         expected_evidence = silver_output_evidence_from_resolver(

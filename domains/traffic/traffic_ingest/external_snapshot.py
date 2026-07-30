@@ -8,6 +8,32 @@ class ExternalSnapshotUnavailableError(RuntimeError):
     """An external Iceberg table has no usable snapshot to pin."""
 
 
+def traffic_gold_anchor_exists(cursor_factory=trino_cursor) -> bool:
+    cursor, catalog, _ = cursor_factory()
+    cursor.execute(
+        "SELECT count(*) "
+        f"FROM {catalog}.information_schema.tables "
+        "WHERE table_schema = 'traffic' "
+        "AND table_name = 'gold_traffic_incident_current_by_admin_dong_hourly'"
+    )
+    row = cursor.fetchone()
+    try:
+        relation_count = row[0]
+    except (TypeError, IndexError) as exc:
+        raise ExternalSnapshotUnavailableError(
+            "Traffic Gold anchor telemetry is unavailable"
+        ) from exc
+    if (
+        isinstance(relation_count, bool)
+        or not isinstance(relation_count, int)
+        or relation_count not in {0, 1}
+    ):
+        raise ExternalSnapshotUnavailableError(
+            "Traffic Gold anchor telemetry must be zero or one"
+        )
+    return relation_count == 1
+
+
 def resolve_citydata_crowding_snapshot_id(
     cursor_factory=trino_cursor,
     env: Mapping[str, str] = os.environ,

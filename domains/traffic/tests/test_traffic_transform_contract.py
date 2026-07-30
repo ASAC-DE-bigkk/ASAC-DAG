@@ -925,6 +925,7 @@ def _set_current_silver_evidence(monkeypatch, module):
         "current_silver_output_evidence",
         lambda: module.SilverOutputEvidence(42, "a" * 64),
     )
+    monkeypatch.setattr(module, "traffic_gold_anchor_exists", lambda: True)
 
     class Manifest:
         def require_publishable(self, run_id):
