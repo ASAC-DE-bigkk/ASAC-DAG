@@ -277,12 +277,15 @@ def materializer_schedule(
     airflow_version: str | None = None,
     schedule_factory: Callable[..., object] | None = None,
 ):
-    """Return one cron-only drain schedule in dev.
+    """Return one cron-only drain schedule from explicit opt-in or the dev default.
 
     Raw Asset events are deliberately not a second scheduling path: the 5-minute
     landing cadence is drained in bounded groups by this 15-minute materializer.
     """
 
+    canonical_schedule_env = "ASK_SEOUL_TRAFFIC_MATERIALIZER_DAG_SCHEDULE"
+    if canonical_schedule_env in env:
+        return env[canonical_schedule_env] or None
     if env.get("ASK_SEOUL_TARGET", env.get("DBT_TARGET", "prod")) != "dev":
         return None
     del airflow_version, schedule_factory

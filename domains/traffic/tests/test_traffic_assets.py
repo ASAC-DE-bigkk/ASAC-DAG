@@ -320,6 +320,48 @@ def test_materializer_schedule_is_cron_only_in_dev():
     assert schedule == "*/15 * * * *"
 
 
+def test_materializer_schedule_allows_explicit_canonical_prod_cron():
+    from traffic_ingest import assets
+
+    schedule = assets.materializer_schedule(
+        env={
+            "ASK_SEOUL_TARGET": "prod",
+            "ASK_SEOUL_TRAFFIC_MATERIALIZER_DAG_SCHEDULE": "*/15 * * * *",
+        }
+    )
+
+    assert schedule == "*/15 * * * *"
+
+
+def test_materializer_schedule_keeps_prod_dormant_without_canonical_cron():
+    from traffic_ingest import assets
+
+    assert assets.materializer_schedule(env={"ASK_SEOUL_TARGET": "prod"}) is None
+    assert (
+        assets.materializer_schedule(
+            env={
+                "ASK_SEOUL_TARGET": "prod",
+                "ASK_SEOUL_TRAFFIC_MATERIALIZER_FALLBACK_SCHEDULE": "*/10 * * * *",
+            }
+        )
+        is None
+    )
+
+
+def test_materializer_schedule_canonical_key_precedes_dev_legacy_key():
+    from traffic_ingest import assets
+
+    schedule = assets.materializer_schedule(
+        env={
+            "ASK_SEOUL_TARGET": "dev",
+            "ASK_SEOUL_TRAFFIC_MATERIALIZER_DAG_SCHEDULE": "7,22,37,52 * * * *",
+            "ASK_SEOUL_TRAFFIC_MATERIALIZER_FALLBACK_SCHEDULE": "*/10 * * * *",
+        }
+    )
+
+    assert schedule == "7,22,37,52 * * * *"
+
+
 def test_materializer_schedule_override_remains_cron_only():
     from traffic_ingest import assets
 
