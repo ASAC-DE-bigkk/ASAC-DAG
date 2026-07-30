@@ -19,6 +19,16 @@ PROJECT.md §4(서빙 = D1 선별 export) · docs/DB/gold/opus-serving-build-ins
 건드리지 않는다(직전 published 행이 서빙 중인 스냅샷을 정확히 서술) — 스킵 상태는
 `d1_meta.build_status='stale'` 가 담당.
 
+**스킵은 성질이 다른 두 종류다(섞지 않는다).**
+① 밴드 게이트 스킵 = 원천이 의심스러워 직전 스냅샷을 유지(`build_status='stale'`, 경보 대상).
+② 무변경 스킵 = payload 지문이 직전 게시와 같아 **행 재기록만 생략**(#600 후속, ASAC-DAG#601).
+   ②는 정상 상태다 — `_catalog`/`d1_meta`/핸드오프 메타는 그대로 매 run 갱신하고
+   (`exported_at`·`snapshot_at` 전진 → 26h 미게시 감시축 `publication_trigger.
+   max_interval_minutes` 가 계속 유효), `build_status` 는 `'ready'` 를 유지한다. 소비 계약이
+   `stale`=경고 배지 / `building`=503 으로 굳어 있어 공유 `d1_meta` 에 새 값을 넣지 않고,
+   "언제 실제로 썼는지"는 commerce 소유 `d1_publish_state`(written_at ↔ checked_at)가 담는다.
+   `publication_id` 는 내용이 바뀔 때만 새로 발급한다(같은 게시가 계속 서빙 중임을 표현).
+
 설계 원칙(PROJECT.md §4.2): 소형만 · 전량 교체(증분 upsert 아님) · 자연키 · 조회형 사전집계·
 평탄화 · 타입 정규화. 대형 `gold_license_flow_daily`(원장 290만행)는 iceberg_api = D1 금지.
 `flow_monthly/yearly`·`churn_yearly`·`geo_grid`·`stock_age_band`·`uptae_mix` 는 화면 축으로
@@ -30,6 +40,7 @@ PROJECT.md §4(서빙 = D1 선별 export) · docs/DB/gold/opus-serving-build-ins
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -209,6 +220,28 @@ def _insert_rows(d1_table: str, colnames: list[str], rows: list, token: str) -> 
         _d1(head + values + ";", token)   # security: allow-sql — 식별자 상수, 값은 _lit 이스케이프
 
 
+def _payload_fingerprint(ddl: str, colnames: list[str], rows: list) -> str:
+    """게시 payload(스키마 + 전 행)의 **순서 무관** 지문 — 재기록 필요 여부 판정용.
+
+    `_lit()` 로 직렬화해 **D1 에 실제로 보낼 표현 그대로** 해싱한다(타입 정규화·이스케이프까지
+    반영되므로 "지문 같음 = 보낼 바이트 같음"이 성립). 행 지문을 정렬해 합치므로 Trino 반환
+    순서가 흔들려도(Iceberg 파일 재작성·OPTIMIZE 컴팩션) 오탐하지 않는다 — 실측: 2026-07-29
+    20:38Z `gold_license_flow_monthly` replace 는 total-records 불변이라 스냅샷 id 는 바뀌었지만
+    내용은 동일했다. 그래서 판정축을 스냅샷 id·집계 그레인·달력이 아니라 지문으로 둔다.
+    DDL 도 함께 넣어 값이 같고 컬럼/타입만 바뀐 경우를 놓치지 않는다.
+    """
+    digests = sorted(
+        hashlib.blake2b("\x1f".join(_lit(v) for v in r).encode("utf-8"),
+                        digest_size=16).digest()
+        for r in rows)
+    h = hashlib.blake2b(ddl.encode("utf-8"), digest_size=16)
+    h.update("\x1e".join(colnames).encode("utf-8"))
+    h.update(str(len(rows)).encode("ascii"))
+    for d in digests:
+        h.update(d)
+    return h.hexdigest()
+
+
 # ── dbt manifest 의 서빙 계약(선언·검증 소스) ────────────────────────────────
 def _load_serving_meta() -> dict[str, dict]:
     """dbt manifest → {model: {description, serving(계약 전체), tests}}. 부재 시 {}(경고).
@@ -324,19 +357,60 @@ _HANDOFF_COLS = {
 }
 
 
+_PID_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def _preserve_skipped_handoff(token: str, skipped_pids: list[str]) -> dict[str, list]:
+    """스왑 스킵 제품의 **직전 메타 행을 보존**해 반환(`_catalog` upsert 와 동일 semantics).
+
+    보조 테이블은 DROP+CREATE 라, 성공분만 다시 넣으면 스킵 제품의 컬럼 설명·질의 예시가
+    사라진다. 그런데 그 제품의 D1 데이터 테이블은 직전 스냅샷을 그대로 유지하고(`zero_policy:
+    retain_last_good`) `_catalog` 행도 남는다 — 메타만 없어지면 소비 측에서 '데이터는 있는데
+    설명이 없는' 상태가 된다. 따라서 스킵 제품은 직전 행을 그대로 옮겨 싣는다(현재 gold 스키마로
+    새로 만들지 않는다 — 게시되지 않은 스키마를 설명하면 데이터와 어긋나므로).
+    """
+    keep: dict[str, list] = {}
+    pids = [p for p in skipped_pids if _PID_RE.match(p)]
+    if not pids:
+        return keep
+    inlist = ", ".join(f"'{p}'" for p in pids)   # 상수 파생 + 화이트리스트 통과분만
+    for table in ("d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns"):
+        cols = _HANDOFF_COLS[table]
+        try:
+            rows = _d1(  # security: allow-sql — 테이블/컬럼은 상수, pid 는 ^[a-z0-9_]+$ 검증
+                f'SELECT {", ".join(cols)} FROM "{table}" WHERE product_id IN ({inlist});', token)
+            keep[table] = [tuple(r.get(c) for c in cols) for r in rows]
+        except Exception as exc:  # 첫 실행 등 테이블 부재 — 보존할 것이 없다
+            log.info("핸드오프 보존 스킵(%s): %s", table, type(exc).__name__)
+            keep[table] = []
+    total = sum(len(v) for v in keep.values())
+    if total:
+        log.info("[serving export] 스킵 제품 %d종 메타 %d행 보존", len(pids), total)
+    return keep
+
+
 def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_rows: list,
-                     glossary_rows: list) -> None:
-    """보조 테이블 4종 전량 교체 게시(commerce 소유 — 공유 메타 무접촉, 멱등)."""
+                     glossary_rows: list, skipped_pids: list[str] | None = None) -> None:
+    """보조 테이블 4종 전량 교체 게시(commerce 소유 — 공유 메타 무접촉, 멱등).
+
+    스왑 스킵 제품은 직전 메타를 이어 싣는다(`_preserve_skipped_handoff`). 용어사전은
+    제품 스코프가 아니라 웨어하우스 파생이므로 항상 전량 재생성한다.
+    """
+    keep = _preserve_skipped_handoff(token, skipped_pids or [])
     for table, rows in (("d1_catalog_glossary", glossary_rows),
                         ("d1_catalog_columns", columns_rows),
                         ("d1_catalog_ext", ext_rows),
                         ("d1_usage_patterns", pattern_rows)):
+        merged = list(rows) + keep.get(table, [])
         _d1(f'DROP TABLE IF EXISTS "{table}"; '            # security: allow-sql — 상수 DDL
             f'CREATE TABLE "{table}" ({_HANDOFF_DDL[table]});', token)
-        if rows:
-            _insert_rows(table, _HANDOFF_COLS[table], rows, token)
-    log.info("[serving export] 핸드오프 메타 게시: columns=%d ext=%d patterns=%d glossary=%d",
-             len(columns_rows), len(ext_rows), len(pattern_rows), len(glossary_rows))
+        if merged:
+            _insert_rows(table, _HANDOFF_COLS[table], merged, token)
+    log.info("[serving export] 핸드오프 메타 게시: columns=%d ext=%d patterns=%d glossary=%d "
+             "(스킵 보존 %d행)", len(columns_rows) + len(keep.get("d1_catalog_columns", [])),
+             len(ext_rows) + len(keep.get("d1_catalog_ext", [])),
+             len(pattern_rows) + len(keep.get("d1_usage_patterns", [])),
+             len(glossary_rows), sum(len(v) for v in keep.values()))
 
 
 def _check_contract_drift(meta: dict[str, dict]) -> None:
@@ -371,11 +445,52 @@ def _catalog_schema() -> tuple[tuple[str, ...], str]:
 
 
 def _ensure_shared_tables(token: str, catalog_ddl: str) -> None:
-    _d1(  # security: allow-sql — 상수 DDL(공유 테이블, IF NOT EXISTS)
+    # d1_publish_state 만 commerce 소유(그 외는 공유) — 다만 **DROP 금지**다. 게시 지문 상태를
+    # 잃으면 다음 run 이 전량 재기록한다(fail-open 이라 안전하되 절감이 사라진다).
+    # 공유 `d1_meta` 는 positional `INSERT OR REPLACE ... VALUES` 로 쓰므로 컬럼을 늘리지 않는다.
+    _d1(  # security: allow-sql — 상수 DDL(IF NOT EXISTS)
         catalog_ddl + ' '
         'CREATE TABLE IF NOT EXISTS _request_log (ts TEXT, path TEXT, query TEXT); '
         'CREATE TABLE IF NOT EXISTS d1_meta (source_table TEXT PRIMARY KEY, snapshot_at TEXT, '
-        'row_count INTEGER, build_status TEXT, source_max_event_date TEXT);', token)
+        'row_count INTEGER, build_status TEXT, source_max_event_date TEXT); '
+        'CREATE TABLE IF NOT EXISTS d1_publish_state (table_name TEXT PRIMARY KEY, '
+        'payload_hash TEXT, row_count INTEGER, publication_id TEXT, written_at TEXT, '
+        'checked_at TEXT);', token)
+
+
+def _read_publish_state(token: str) -> dict[str, dict]:
+    """직전 게시 지문 조회 — 실패/부재는 {} (fail-open: 전량 재기록)."""
+    try:
+        rows = _d1(  # security: allow-sql — 상수 SELECT
+            'SELECT table_name, payload_hash, row_count, publication_id, written_at '
+            'FROM d1_publish_state;', token)
+    except Exception as exc:  # noqa: BLE001 — 최초 실행·테이블 부재 등
+        log.info("게시 지문 조회 실패 — 전량 재기록으로 진행: %s", type(exc).__name__)
+        return {}
+    return {str(r.get("table_name")): r for r in rows if r.get("table_name")}
+
+
+def _upsert_publish_state(state_rows: list[tuple], token: str) -> None:
+    if not state_rows:
+        return
+    head = ('INSERT OR REPLACE INTO d1_publish_state ("table_name", "payload_hash", '
+            '"row_count", "publication_id", "written_at", "checked_at") VALUES ')
+    sql = "\n".join(  # security: allow-sql — 식별자 상수, 값은 _lit 이스케이프
+        head + "(" + ", ".join(_lit(v) for v in r) + ");" for r in state_rows)
+    _d1(sql, token)
+
+
+def _d1_row_count(d1_table: str, token: str) -> int | None:
+    """D1 실측 행수(무변경 스킵 직전 확인용) — 조회 실패는 None(재기록으로 진행).
+
+    배치 INSERT 가 중도 실패해 잘린 테이블이 있으면 지문만 보고 스킵해 그 상태를 고착시킬 수
+    있다. 스킵 전에 실제 행수를 1회 확인해 불일치면 강제로 재기록한다."""
+    try:
+        rows = _d1(f'SELECT count(*) AS n FROM "{d1_table}";', token)  # security: allow-sql — 식별자 상수
+        return int(rows[0]["n"]) if rows else None
+    except Exception as exc:  # noqa: BLE001
+        log.info("D1 행수 확인 실패(%s) — 재기록으로 진행: %s", d1_table, type(exc).__name__)
+        return None
 
 
 def _upsert_catalog(catalog_rows: list[dict], token: str, columns: tuple[str, ...]) -> None:
@@ -403,38 +518,57 @@ def _write_serve_state(marker: dict, now: str) -> None:
     """테이블별 export 완료 기록을 R2 상태 레이어에 남긴다(best-effort — 실패는 경고).
 
     silver/bronze 의 `_watermark.json`/`receipt` 와 대칭. 파일이 뒤처져도 다음 run 이
-    전량 재export 할 뿐이라 안전(fail-open)."""
+    전량 재export 할 뿐이라 안전(fail-open).
+
+    이번 run 이 게시하지 않은 테이블(밴드 게이트 스킵)은 **직전 기록을 이어 싣는다** —
+    전량 덮어쓰면 서빙 중인 스냅샷이 감사 기록에서 사라진다(`_preserve_skipped_handoff` 와
+    동일 semantics)."""
     try:
         from commerce_core.settings import get_settings
         from commerce_core.storage import get_storage
 
         prefix = (get_settings().storage_prefix or "").strip("/")
         root = f"{prefix}/{SERVE_STATE_LAYER}" if prefix else SERVE_STATE_LAYER
-        get_storage().write_json(f"{root}/_export_state.json",
-                                 {"tables": marker, "updated_at": now})
+        key = f"{root}/_export_state.json"
+        storage = get_storage()
+        merged = dict(marker)
+        try:
+            for table, entry in ((storage.read_json(key) or {}).get("tables") or {}).items():
+                merged.setdefault(table, entry)
+        except Exception:  # noqa: BLE001 — 최초 실행(파일 부재)·파손이면 이번 run 분만 기록
+            pass
+        storage.write_json(key, {"tables": merged, "updated_at": now})
     except Exception as exc:  # noqa: BLE001 — 마커 기록 실패가 export 판정을 가리지 않게
         log.warning("serve-state 마커 기록 실패(무시): %s", type(exc).__name__)
 
 
 # ── 리포트(Discord) ──────────────────────────────────────────────────────────
-def _report(exported: list[tuple], skipped: list[str], issues: list[str],
-            elapsed: float | None) -> None:
+def _report(exported: list[tuple], unchanged: list[tuple], skipped: list[str],
+            issues: list[str], elapsed: float | None) -> None:
+    """무변경 스킵은 정상 상태라 경고 아이콘·COLOR_FAIL 을 타지 않는다(밴드 스킵과 분리)."""
     try:
         from commerce_core.run_report import _fmt_elapsed, _num
         from common.discord import COLOR_FAIL, COLOR_OK, send_embed
     except Exception:  # noqa: BLE001
         return
-    total_rows = sum(n for _, n in exported)
+    total_rows = sum(n for _, n in exported) + sum(n for _, n in unchanged)
     lines = [f"　◦ `{t}` · {_num(n)}행" for t, n in exported]
+    for t, n in unchanged:
+        lines.append(f"　◦ `{t}` · {_num(n)}행 · 무변경(원천 동일 — 행 재기록 생략)")
     for t in skipped:
         lines.append(f"　◦ `{t}` · **스킵(밴드 밖 — 직전 스냅샷 유지)**")
-    head = f"**D1 서빙 export** — {len(exported)}/{len(SERVING_SPEC)} 테이블 · {_num(total_rows)}행"
+    served = len(exported) + len(unchanged)
+    head = f"**D1 서빙 export** — {served}/{len(SERVING_SPEC)} 테이블 · {_num(total_rows)}행"
+    if unchanged:
+        head += (f" · 무변경 {len(unchanged)}종 "
+                 f"{_num(sum(n for _, n in unchanged))}행 재기록 생략")
     if elapsed is not None:
         head += f" · ⏱ {_fmt_elapsed(elapsed)}"
     if issues:
         head += "\n　⚠️ " + " / ".join(issues[:6])
     icon, color = ("⚠️", COLOR_FAIL) if (skipped or issues) else ("✅", COLOR_OK)
-    title = f"{icon} [commerce] commerce_serving_export — D1 갱신 {len(exported)}종"
+    title = (f"{icon} [commerce] commerce_serving_export — D1 갱신 {len(exported)}종"
+             + (f" · 무변경 {len(unchanged)}종" if unchanged else ""))
     try:
         send_embed(title, head + "\n" + "\n".join(lines), color=color, domain="commerce")
     except Exception as exc:  # noqa: BLE001
@@ -448,8 +582,13 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     - direct: `SELECT *` 스냅샷(DDL 은 결과 컬럼 타입에서 파생).
     - rollup: 화면 축 GROUP BY 파생(§1.3) 스냅샷.
     - 행수 밴드 밖(0행/2배 초과)이면 **스왑 스킵 + d1_meta.build_status='stale'**(직전 유지).
+    - payload 지문이 직전 게시와 같으면 **행 재기록만 생략**(무변경 스킵) — 메타는 그대로 갱신.
     - commerce 소유 d1_* 만 DROP+CREATE, 공유 `_catalog`/`_request_log`/`d1_meta` 는 upsert.
-    - 테이블 단위 부분 전진 안전(조인 없음) — 실패분만 다음 run/재시도가 이어받는다.
+    - 데이터 정합은 테이블 단위로 안전하다: 지문 커밋이 파괴적 쓰기를 감싸므로 어느 지점에서
+      죽어도 **커밋된 지문 ⊆ D1 실물**이 유지되고, 다음 run 이 미완료분을 반드시 재기록한다.
+      단 **메타 게시는 부분 전진하지 않는다** — `_upsert_catalog`/`_upsert_meta`/`_publish_handoff`
+      는 루프 밖 일괄이라 루프 중간 예외 시 이미 쓴 테이블 몫까지 함께 버려진다(다음 run 이
+      메타를 다시 쓴다). per-spec try/except 도입은 후속.
     """
     from bronze.warehouse import _connect, _qualified
 
@@ -468,14 +607,19 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     cat_columns, cat_ddl = _catalog_schema()   # 공유 _catalog 15컬럼 정본(common/serving)
     _ensure_shared_tables(token, cat_ddl)
 
+    prev_state = _read_publish_state(token)   # 직전 게시 지문(무변경 판정) — 부재 시 전량 재기록
+
     conn = _connect(catalog, schema)
     exported: list[tuple[str, int]] = []
+    unchanged: list[tuple[str, int]] = []     # 지문 동일 — 행 재기록만 생략(정상 상태)
     skipped: list[str] = []
     issues: list[str] = []
     catalog_rows: list[dict] = []
     meta_rows: list[tuple] = []
+    state_rows: list[tuple] = []     # d1_publish_state upsert 대상
     marker: dict[str, dict] = {}
-    handoff_cols: list = []          # MCP/API 핸드오프 보조 테이블 행(성공 스왑분만)
+    skipped_pids: list[str] = []     # 스왑 스킵 제품 — 직전 메타를 보존한다
+    handoff_cols: list = []          # MCP/API 핸드오프 보조 테이블 행(성공 스왑분)
     handoff_ext: list = []
     handoff_pats: list = []
     try:
@@ -496,14 +640,44 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                           source=spec.source, rows=n, band=[lo, hi])
                 meta_rows.append((spec.d1_table, now, n, "stale", None))
                 skipped.append(spec.d1_table)
+                skipped_pids.append("commerce_" + spec.d1_table[3:])   # 메타 보존 대상
                 continue
 
             colnames = [c for c, _ in col_defs]
             ddl = ", ".join(f'"{c}" {_sqlite_type(t)}' for c, t in col_defs)
-            # 전량 교체 스냅샷 — commerce 소유 테이블만 DROP+CREATE(공유 메타는 건드리지 않음).
-            _d1(f'DROP TABLE IF EXISTS "{spec.d1_table}"; '  # security: allow-sql — 식별자 상수 DDL
-                f'CREATE TABLE "{spec.d1_table}" ({ddl});', token)
-            _insert_rows(spec.d1_table, colnames, rows, token)
+
+            # 무변경 게이트 — 직전 게시와 payload 지문이 같으면 행 재기록을 생략한다.
+            # 스킵해도 잃는 정확성이 0인 이유: 지문이 같다는 건 보낼 바이트가 같다는 뜻이다.
+            # 게이트는 fail-open — 지문 부재/조회 실패/행수 불일치는 전부 재기록으로 떨어진다.
+            fingerprint = _payload_fingerprint(ddl, colnames, rows)
+            prev = prev_state.get(spec.d1_table) or {}
+            reuse = bool(prev) and str(prev.get("payload_hash") or "") == fingerprint \
+                and str(prev.get("row_count")) == str(n) \
+                and _d1_row_count(spec.d1_table, token) == n
+            # publication_id 는 **내용이 바뀔 때만** 새로 발급 — 같은 게시가 계속 서빙 중임을 표현.
+            publication_id = (str(prev.get("publication_id") or "") if reuse else "") \
+                or uuid.uuid4().hex
+
+            if reuse:
+                unchanged.append((spec.d1_table, n))
+                state_rows.append((spec.d1_table, fingerprint, n, publication_id,
+                                   prev.get("written_at") or now, now))
+            else:
+                # 지문 커밋을 **파괴적 쓰기 기준으로** 감싼다 — 불변식: 커밋된 지문 ⊆ D1 실물.
+                # 루프 밖에서 한 번만 커밋하면, 데이터를 이미 쓴 뒤 공유 `_catalog` upsert 등에서
+                # 죽었을 때 D1 은 새 내용 · 상태는 옛 지문이 된다. 그 뒤 원천이 옛 내용으로
+                # 되돌아오면(운영자 full-refresh 복구가 정확히 이 형태다) 지문이 일치해 **영구히
+                # 스킵**된다 — 행수가 같은 채 값만 바뀌는 건 이 제품군의 정상 변경 형태라
+                # `_d1_row_count` 도 못 잡는다. 그래서 쓰기 **전에** 무효화한다(무효화가 실패하면
+                # DROP 이전이라 D1 무손상 — fail-open 방향 유지).
+                _upsert_publish_state([(spec.d1_table, "", 0, publication_id, now, now)], token)
+                # 전량 교체 스냅샷 — commerce 소유 테이블만 DROP+CREATE(공유 메타는 건드리지 않음).
+                _d1(f'DROP TABLE IF EXISTS "{spec.d1_table}"; '  # security: allow-sql — 식별자 상수 DDL
+                    f'CREATE TABLE "{spec.d1_table}" ({ddl});', token)
+                _insert_rows(spec.d1_table, colnames, rows, token)
+                _upsert_publish_state(
+                    [(spec.d1_table, fingerprint, n, publication_id, now, now)], token)
+                exported.append((spec.d1_table, n))
 
             m = meta.get(spec.source, {})
             sv = m.get("serving") or {}   # dbt meta.serving(#478 확정 필드 + commerce 확장)
@@ -524,34 +698,40 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                                       ensure_ascii=False),
                 "row_count": n,
                 "serving_status": "published",
-                "publication_id": uuid.uuid4().hex,
+                "publication_id": publication_id,
                 "source_run_id": source_run_id,
                 "published_bytes": len(json.dumps(rows, ensure_ascii=False,
                                                   default=str).encode("utf-8")),
                 "freshness": _freshness_of(rows, colnames, sv.get("event_time")),
                 "exported_at": now,
             })
+            # 무변경도 게시로 취급 — snapshot_at 전진(26h 감시축 유지), build_status 는 ready.
             meta_rows.append((spec.d1_table, now, n, "ready", None))
             marker[spec.d1_table] = {
                 "snapshot_at": now, "source_table": spec.source, "tier": spec.tier,
-                "d1_row_count": n}
-            exported.append((spec.d1_table, n))
-            cr, er, pr = _handoff_rows(spec, m, col_defs)   # MCP/API 핸드오프 계보(성공 스왑분만)
+                "d1_row_count": n, "payload_hash": fingerprint, "rewritten": not reuse}
+            cr, er, pr = _handoff_rows(spec, m, col_defs)   # MCP/API 핸드오프 계보(게시 스냅샷 기준)
             handoff_cols.extend(cr); handoff_ext.append(er); handoff_pats.extend(pr)
-            log.info("[serving export] %s ← %s: %d행(%s)", spec.d1_table, spec.source, n, spec.tier)
+            log.info("[serving export] %s ← %s: %d행(%s)%s", spec.d1_table, spec.source, n,
+                     spec.tier, " — 무변경, 재기록 생략" if reuse else "")
 
         _upsert_catalog(catalog_rows, token, cat_columns)   # 공유 _catalog(성공분만 upsert — 타 도메인·스킵분 행 보존)
         _upsert_meta(meta_rows, token)
+        _upsert_publish_state(state_rows, token)
         _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats,
-                         _glossary_rows(cur, qschema))
+                         _glossary_rows(cur, qschema), skipped_pids)
     finally:
         conn.close()
 
     _write_serve_state(marker, now)
-    _report(exported, skipped, issues, elapsed_seconds)
+    _report(exported, unchanged, skipped, issues, elapsed_seconds)
 
+    # status 는 밴드 스킵·issue 만 반영 — 무변경 스킵은 정상이라 DAG 를 경고 상태로 만들지 않는다.
     result = {"status": "stale" if (skipped or issues) else "ok",
-              "exported": len(exported), "skipped": len(skipped),
-              "rows": sum(n for _, n in exported), "tables": dict(exported)}
+              "exported": len(exported), "unchanged": len(unchanged),
+              "skipped": len(skipped),
+              "rows": sum(n for _, n in exported),           # 실제로 기록한 행수
+              "rows_served": sum(n for _, n in exported) + sum(n for _, n in unchanged),
+              "tables": dict(exported), "unchanged_tables": dict(unchanged)}
     log.info("[serving export] DONE: %s", result)
     return result
