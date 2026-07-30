@@ -211,7 +211,7 @@ def test_snapshot_required_phase_skips_before_dbt_when_pin_is_superseded(
     )
     monkeypatch.setattr(
         module.transform_runtime,
-        "collect_silver_snapshot_evidence",
+        "collect_silver_snapshot_baseline",
         lambda: _silver_evidence(10),
     )
     monkeypatch.setattr(
@@ -265,9 +265,11 @@ def test_preflight_phase_does_not_query_latest_publishable_manifest(monkeypatch)
 
 def test_silver_write_captures_baseline_and_returns_post_write_evidence(monkeypatch):
     runtime = _load_transform_runtime()
-    evidence = iter((_silver_evidence(10), _silver_evidence(11)))
     monkeypatch.setattr(
-        runtime, "collect_silver_snapshot_evidence", lambda: next(evidence)
+        runtime, "collect_silver_snapshot_baseline", lambda: _silver_evidence(10)
+    )
+    monkeypatch.setattr(
+        runtime, "collect_silver_snapshot_evidence", lambda: _silver_evidence(11)
     )
     monkeypatch.setattr(
         runtime.traffic_dbt,
@@ -287,6 +289,37 @@ def test_silver_write_captures_baseline_and_returns_post_write_evidence(monkeypa
         ti=_runtime_ti(),
         run_id="manual__silver_fence",
         params={"target": "dev"},
+    )
+
+    assert result["silver_snapshot_evidence"] == _silver_evidence(11).as_dict()
+
+
+def test_silver_write_allows_empty_baseline_but_requires_post_write_evidence(
+    monkeypatch,
+):
+    runtime = _load_transform_runtime()
+    monkeypatch.setattr(runtime, "collect_silver_snapshot_baseline", lambda: None)
+    monkeypatch.setattr(
+        runtime, "collect_silver_snapshot_evidence", lambda: _silver_evidence(11)
+    )
+    monkeypatch.setattr(
+        runtime.traffic_dbt,
+        "execute_dbt_phase",
+        lambda **_kwargs: _successful_runtime_execution(),
+    )
+
+    result = runtime.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_silver",
+        snapshot_task_id="resolve_traffic_snapshot_run",
+        silver_persisted=False,
+        snapshot_required=True,
+        citydata_snapshot_required=False,
+        silver_fence_mode="write",
+        threads=2,
+        ti=_runtime_ti(),
+        run_id="manual__silver_bootstrap",
+        params={"target": "prod"},
     )
 
     assert result["silver_snapshot_evidence"] == _silver_evidence(11).as_dict()

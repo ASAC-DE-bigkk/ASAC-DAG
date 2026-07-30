@@ -43,6 +43,11 @@ def test_external_compaction_race_is_not_classified_as_a_generic_dbt_failure(
     monkeypatch.setattr(module, "build_traffic_manifest", CurrentManifest)
     monkeypatch.setattr(
         transform_runtime,
+        "collect_silver_snapshot_baseline",
+        lambda: next(evidence),
+    )
+    monkeypatch.setattr(
+        transform_runtime,
         "collect_silver_snapshot_evidence",
         lambda: next(evidence),
     )
