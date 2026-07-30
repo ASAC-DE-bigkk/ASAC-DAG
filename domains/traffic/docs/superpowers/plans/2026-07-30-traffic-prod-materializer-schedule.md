@@ -1,5 +1,11 @@
 # Traffic prod materializer schedule Implementation Plan
 
+> **HISTORICAL / NON-EXECUTABLE — superseded by #615:** 아래 #606 실행 계획은 prod root
+> schedule env opt-in이라는 폐기된 계약을 기록한 과거 문서다. 작업 지시로 사용하지 않는다.
+> 현재 정본은 Weather/Traffic root 3개가 dev/prod 공통 코드 기본 cadence를 사용하고
+> schedule env는 선택적 override/비활성화 용도로만 유지하는
+> `prod-weather-traffic-schedule-handoff.md`와 #615다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** prod에서 명시한 Traffic materializer cron만 허용하고 맥미니 Weather/Traffic 정규 DAG schedule 설정을 운영자가 그대로 적용할 수 있게 한다.

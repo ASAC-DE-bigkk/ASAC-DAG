@@ -14,7 +14,6 @@ from typing import ParamSpec, TypeVar
 from airflow.sdk.exceptions import AirflowFailException
 
 from traffic_ingest.acc_info import KST
-from traffic_ingest.common.runtime import is_dev_target
 from traffic_ingest.errors import TrafficBronzeDeterministicError
 from traffic_ingest.errors import TrafficBronzeConfigurationError
 from traffic_ingest.run_ledger import (
@@ -191,7 +190,7 @@ def notify_traffic_bronze_failure(context: dict) -> None:
 def traffic_dag_schedule() -> str | None:
     if "ASK_SEOUL_TRAFFIC_DAG_SCHEDULE" in os.environ:
         return os.environ["ASK_SEOUL_TRAFFIC_DAG_SCHEDULE"] or None
-    return "*/5 * * * *" if is_dev_target() else None
+    return "*/5 * * * *"
 
 
 def start_traffic_run(context: dict, *, manifest_factory: Callable) -> str:
