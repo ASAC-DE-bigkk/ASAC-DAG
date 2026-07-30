@@ -324,19 +324,60 @@ _HANDOFF_COLS = {
 }
 
 
+_PID_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def _preserve_skipped_handoff(token: str, skipped_pids: list[str]) -> dict[str, list]:
+    """스왑 스킵 제품의 **직전 메타 행을 보존**해 반환(`_catalog` upsert 와 동일 semantics).
+
+    보조 테이블은 DROP+CREATE 라, 성공분만 다시 넣으면 스킵 제품의 컬럼 설명·질의 예시가
+    사라진다. 그런데 그 제품의 D1 데이터 테이블은 직전 스냅샷을 그대로 유지하고(`zero_policy:
+    retain_last_good`) `_catalog` 행도 남는다 — 메타만 없어지면 소비 측에서 '데이터는 있는데
+    설명이 없는' 상태가 된다. 따라서 스킵 제품은 직전 행을 그대로 옮겨 싣는다(현재 gold 스키마로
+    새로 만들지 않는다 — 게시되지 않은 스키마를 설명하면 데이터와 어긋나므로).
+    """
+    keep: dict[str, list] = {}
+    pids = [p for p in skipped_pids if _PID_RE.match(p)]
+    if not pids:
+        return keep
+    inlist = ", ".join(f"'{p}'" for p in pids)   # 상수 파생 + 화이트리스트 통과분만
+    for table in ("d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns"):
+        cols = _HANDOFF_COLS[table]
+        try:
+            rows = _d1(  # security: allow-sql — 테이블/컬럼은 상수, pid 는 ^[a-z0-9_]+$ 검증
+                f'SELECT {", ".join(cols)} FROM "{table}" WHERE product_id IN ({inlist});', token)
+            keep[table] = [tuple(r.get(c) for c in cols) for r in rows]
+        except Exception as exc:  # 첫 실행 등 테이블 부재 — 보존할 것이 없다
+            log.info("핸드오프 보존 스킵(%s): %s", table, type(exc).__name__)
+            keep[table] = []
+    total = sum(len(v) for v in keep.values())
+    if total:
+        log.info("[serving export] 스킵 제품 %d종 메타 %d행 보존", len(pids), total)
+    return keep
+
+
 def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_rows: list,
-                     glossary_rows: list) -> None:
-    """보조 테이블 4종 전량 교체 게시(commerce 소유 — 공유 메타 무접촉, 멱등)."""
+                     glossary_rows: list, skipped_pids: list[str] | None = None) -> None:
+    """보조 테이블 4종 전량 교체 게시(commerce 소유 — 공유 메타 무접촉, 멱등).
+
+    스왑 스킵 제품은 직전 메타를 이어 싣는다(`_preserve_skipped_handoff`). 용어사전은
+    제품 스코프가 아니라 웨어하우스 파생이므로 항상 전량 재생성한다.
+    """
+    keep = _preserve_skipped_handoff(token, skipped_pids or [])
     for table, rows in (("d1_catalog_glossary", glossary_rows),
                         ("d1_catalog_columns", columns_rows),
                         ("d1_catalog_ext", ext_rows),
                         ("d1_usage_patterns", pattern_rows)):
+        merged = list(rows) + keep.get(table, [])
         _d1(f'DROP TABLE IF EXISTS "{table}"; '            # security: allow-sql — 상수 DDL
             f'CREATE TABLE "{table}" ({_HANDOFF_DDL[table]});', token)
-        if rows:
-            _insert_rows(table, _HANDOFF_COLS[table], rows, token)
-    log.info("[serving export] 핸드오프 메타 게시: columns=%d ext=%d patterns=%d glossary=%d",
-             len(columns_rows), len(ext_rows), len(pattern_rows), len(glossary_rows))
+        if merged:
+            _insert_rows(table, _HANDOFF_COLS[table], merged, token)
+    log.info("[serving export] 핸드오프 메타 게시: columns=%d ext=%d patterns=%d glossary=%d "
+             "(스킵 보존 %d행)", len(columns_rows) + len(keep.get("d1_catalog_columns", [])),
+             len(ext_rows) + len(keep.get("d1_catalog_ext", [])),
+             len(pattern_rows) + len(keep.get("d1_usage_patterns", [])),
+             len(glossary_rows), sum(len(v) for v in keep.values()))
 
 
 def _check_contract_drift(meta: dict[str, dict]) -> None:
@@ -475,7 +516,8 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     catalog_rows: list[dict] = []
     meta_rows: list[tuple] = []
     marker: dict[str, dict] = {}
-    handoff_cols: list = []          # MCP/API 핸드오프 보조 테이블 행(성공 스왑분만)
+    skipped_pids: list[str] = []     # 스왑 스킵 제품 — 직전 메타를 보존한다
+    handoff_cols: list = []          # MCP/API 핸드오프 보조 테이블 행(성공 스왑분)
     handoff_ext: list = []
     handoff_pats: list = []
     try:
@@ -496,6 +538,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                           source=spec.source, rows=n, band=[lo, hi])
                 meta_rows.append((spec.d1_table, now, n, "stale", None))
                 skipped.append(spec.d1_table)
+                skipped_pids.append("commerce_" + spec.d1_table[3:])   # 메타 보존 대상
                 continue
 
             colnames = [c for c, _ in col_defs]
@@ -543,7 +586,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
         _upsert_catalog(catalog_rows, token, cat_columns)   # 공유 _catalog(성공분만 upsert — 타 도메인·스킵분 행 보존)
         _upsert_meta(meta_rows, token)
         _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats,
-                         _glossary_rows(cur, qschema))
+                         _glossary_rows(cur, qschema), skipped_pids)
     finally:
         conn.close()
 

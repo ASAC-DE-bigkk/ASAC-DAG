@@ -20,6 +20,12 @@ response:
   `d1_catalog_columns`(ordinal·타입·description_ko) · `d1_catalog_ext`(source_model·tier·
   grain·primary_key·rollup_rule·time_axis) · `d1_usage_patterns`(meta.serving.usage_patterns
   선언분, 다제품 모델은 d1_table 필터). 매 export 전량 교체(멱등), 공유 메타 무접촉.
+- 스왑 스킵 제품 메타 보존(후속 수리): 보조 테이블은 DROP+CREATE 라 성공분만 재삽입하면
+  밴드 게이트로 스킵된 제품의 컬럼 설명·질의 예시가 사라진다. 그 제품의 D1 데이터와 `_catalog`
+  행은 retain_last_good 로 남으므로 메타만 없어지면 '데이터는 있는데 설명이 없는' 상태가 된다.
+  `_preserve_skipped_handoff()` 로 직전 행을 이어 싣는다(현재 gold 스키마로 재생성하지 않는다 —
+  미게시 스키마를 설명하면 데이터와 어긋남). 용어사전은 제품 스코프가 아니라 전량 재생성.
+  회귀 테스트 4건 추가(tests/test_serving_handoff.py).
 - 검증: export 실기록 — columns **222행(설명 221/222)**, ext 22행(grain/PK 정확).
   usage_patterns 는 22제품 패턴 채굴(D1 실행 검증 — 진행분 8제품 77패턴) 후 dbt 선언→재export.
 - 추가(용어 한국어 정리 지시): `d1_catalog_glossary`(field·code·label_ko·source) — D1 롤업에
