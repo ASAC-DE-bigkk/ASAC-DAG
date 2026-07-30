@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from traffic_ingest import reliability_report as report  # noqa: E402
 
 
-def test_traffic_report_schedule_requires_dev_target_and_webhook(monkeypatch):
+def test_traffic_report_schedule_requires_webhook_in_dev_and_prod(monkeypatch):
     monkeypatch.delenv("ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE", raising=False)
     monkeypatch.delenv("ASK_SEOUL_REPORT_DAG_SCHEDULE", raising=False)
     monkeypatch.delenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", raising=False)
@@ -22,15 +22,19 @@ def test_traffic_report_schedule_requires_dev_target_and_webhook(monkeypatch):
 
     monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
     monkeypatch.setenv("ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE", "*/5 * * * *")
+    assert report.report_dag_schedule() == "0 9 * * *"
+
+    monkeypatch.delenv("ASK_SEOUL_DISCORD_WEBHOOK_URL")
     assert report.report_dag_schedule() is None
 
 
 def test_traffic_report_schedule_ignores_legacy_high_frequency_overrides(monkeypatch):
-    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv(
         "ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://discord.example/webhook"
     )
     monkeypatch.setenv("ASK_SEOUL_TRAFFIC_REPORT_DAG_SCHEDULE", "*/15 * * * *")
     monkeypatch.setenv("ASK_SEOUL_REPORT_DAG_SCHEDULE", "*/15 * * * *")
 
-    assert report.report_dag_schedule() == "0 9 * * *"
+    for target in ("dev", "prod"):
+        monkeypatch.setenv("ASK_SEOUL_TARGET", target)
+        assert report.report_dag_schedule() == "0 9 * * *"

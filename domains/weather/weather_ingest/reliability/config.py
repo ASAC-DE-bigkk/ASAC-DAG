@@ -73,8 +73,6 @@ def discord_webhook_url(env: Mapping[str, str] = os.environ) -> str | None:
 
 
 def report_dag_schedule(env: Mapping[str, str] = os.environ) -> str | None:
-    if not is_dev_target(env):
-        return None
     if not discord_webhook_url(env):
         return None
     return DAILY_REPORT_SCHEDULE
