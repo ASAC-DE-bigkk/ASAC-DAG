@@ -165,6 +165,19 @@ def _d1(sql: str, token: str) -> list[dict]:
     return (result[-1].get("results") or []) if result else []
 
 
+def _freshness_of(rows, colnames, event_time):
+    """_catalog.freshness — 공용 publisher._freshness 와 동일 시맨틱(#478 v1, 타 도메인 동형).
+
+    dbt meta.serving.event_time 이 선언된 제품만: 스냅샷 rows 에서 해당 컬럼 max 를 str 로.
+    미선언/컬럼 부재/빈 rows = None (순환·코호트 축 제품은 선언하지 않는 것이 관행).
+    """
+    if not event_time or not rows or event_time not in colnames:
+        return None
+    i = colnames.index(event_time)
+    vals = [r[i] for r in rows if r[i] is not None]
+    return str(max(vals)) if vals else None
+
+
 def _sqlite_type(trino_type: str) -> str:
     base = str(trino_type).split("(")[0].strip().lower()
     return "REAL" if base == "decimal" else _SQLITE_TYPE.get(base, "TEXT")
@@ -408,7 +421,10 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                 "description": m.get("description", ""),
                 "product_question": sv.get("product_question"),
                 "tests": json.dumps(m.get("tests", []), ensure_ascii=False),
-                "time_axis": sv.get("event_time"),   # v1 미선언 → NULL(신선도 감시는 trigger 축)
+                # 시간축/신선도(#478 v1): dbt meta.serving.event_time 선언 제품만 채움 —
+                # citydata/weather 관행 동형(순환·코호트 축은 미선언=NULL). 값 시맨틱은
+                # 공용 publisher._freshness 와 동일(str(max(event_time 컬럼))).
+                "time_axis": sv.get("event_time"),
                 "columns": json.dumps([{"name": c, "type": t} for c, t in col_defs],
                                       ensure_ascii=False),
                 "row_count": n,
@@ -417,7 +433,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                 "source_run_id": source_run_id,
                 "published_bytes": len(json.dumps(rows, ensure_ascii=False,
                                                   default=str).encode("utf-8")),
-                "freshness": None,   # event_time 미선언(v1) — d1_meta.snapshot_at 이 게시 시각 담당
+                "freshness": _freshness_of(rows, colnames, sv.get("event_time")),
                 "exported_at": now,
             })
             meta_rows.append((spec.d1_table, now, n, "ready", None))
