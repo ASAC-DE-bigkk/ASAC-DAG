@@ -13,7 +13,7 @@ raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 
 (하나라도 없으면 전 적재 실패).
 
 파라미터 (트리거 시 덮어쓰기 가능):
-  target          "dev" | "prod"            (기본 dev -> 버킷 seoul-dev)
+  target          "dev" | "prod"            (기본 = 런타임 env, dev -> 버킷 seoul-dev)
   datasets        적재할 데이터셋 슬러그; 빈 값 -> 활성 전체 중 daily 만
                   (kopis_facility_detail 은 야간 missing top-up(#466),
                   전수 재크롤은 culture_facility_refresh 일요일 05:30 KST, #206)
@@ -38,7 +38,7 @@ from airflow import DAG
 from airflow.exceptions import AirflowException
 from airflow.sdk.exceptions import AirflowFailException
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk import Asset
+from airflow.sdk import Asset, Param
 from airflow.sdk.definitions.deadline import DeadlineAlert, DeadlineReference, SyncCallback
 
 # 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
@@ -56,6 +56,7 @@ if _PLUGINS_DIR not in sys.path:
     sys.path.insert(0, _PLUGINS_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
 from culture_deadline import on_deadline_missed  # noqa: E402
 
 from culture_ingest.common.config import (  # noqa: E402
@@ -86,7 +87,15 @@ KST = "Asia/Seoul"
 record_culture_problem = problem_failure_callback(domain="culture")
 
 DEFAULT_PARAMS = {
-    "target": "dev",
+    # 배포 env 를 따른다(ASK-Seoul#66) — 하드코딩 "dev" 는 prod 스택에서 dev 키(R2_DEV_*·
+    # iceberg_dev)를 찾다가 스케줄 런마다 실패한다. dev 박스에선 env 가 dev 라 기존과 동일.
+    # traffic·weather #561 · transit #575 와 같은 패턴.
+    "target": Param(
+        default=default_target(),
+        type="string",
+        enum=list(TARGET_CHOICES),
+        description="R2 버킷·Iceberg 카탈로그를 가른다. 기본값은 런타임 env(ASK_SEOUL_TARGET/DBT_TARGET).",
+    ),
     "datasets": [],  # 데이터셋 슬러그 일부; 빈 값 = 활성 전체
     "date_from": "",
     "date_to": "",

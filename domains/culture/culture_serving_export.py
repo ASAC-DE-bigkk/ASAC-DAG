@@ -10,11 +10,16 @@
   이 docstring 의 "Airflow" 표기는 DAG 파일 탐지 safe mode("dag"+"airflow" 문자열
   동시 요구)의 스캔 조건이기도 하다 — 지우면 dag-processor 가 이 파일을 건너뛴다.
 - 7종 전량 스냅샷(A안) — 설계: docs/design/2026-07-27-culture-serving-export-d1.md
+- target 은 배포 env 를 따른다(ASK-Seoul#66). factory 기본값이 "dev" 라서 그냥 두면
+  prod 스택에서 dev 카탈로그를 읽으려다 매 런 실패하고, 그 실패가 **prod D1 의 발행 원장에
+  failed 로 기록**된다(실패 흔적이 운영 지표를 오염시킨다). 그래서 여기서 명시적으로 넘긴다.
 """
+from common.runtime_guard import default_target
 from common.serving.dag_factory import build_serving_export_dag
 
 dag = build_serving_export_dag(
     domain="culture",
+    target=default_target(),
     product_ids=[
         "culture_activity_by_dong",
         "culture_calendar_density",

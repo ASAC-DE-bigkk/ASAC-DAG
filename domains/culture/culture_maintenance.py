@@ -18,7 +18,7 @@ delete-then-insert 로 스냅샷·옛 metadata 를 쌓고, silver/gold(재설계
 죽은 파일/옛 버전/버려진 디렉터리만 정리한다.
 
 파라미터 (트리거 시 덮어쓰기):
-  target         "dev" | "prod"   (기본 dev)
+  target         "dev" | "prod"   (기본 = 런타임 env)
   retention      스냅샷/고아 보존 기간 (기본 7d — Trino min-retention 기본값 대응)
   cleanup_hours  storage_cleanup 최근 파일 보호 시간 (기본 6h; 진행 중 커밋 보호)
   dry_run        true 면 storage_cleanup 이 삭제 없이 집계만 (기본 false)
@@ -34,6 +34,7 @@ import pendulum
 
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import Param
 
 # 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,6 +44,7 @@ if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
 
 from culture_ingest.common.maintenance import (  # noqa: E402
     MAINTAINED_TABLES,
@@ -54,7 +56,19 @@ KST = "Asia/Seoul"
 
 record_culture_problem = problem_failure_callback(domain="culture")
 
-DEFAULT_PARAMS = {"target": "dev", "retention": "7d", "cleanup_hours": 6, "dry_run": False}
+DEFAULT_PARAMS = {
+    # 배포 env 를 따른다(ASK-Seoul#66) — citydata maintenance 가 같은 하드코딩으로 매주
+    # 실패하고 있었다. 유지관리는 대상 카탈로그를 잘못 잡으면 조용히 아무것도 정리하지 않는다.
+    "target": Param(
+        default=default_target(),
+        type="string",
+        enum=list(TARGET_CHOICES),
+        description="유지관리 대상 환경. 기본값은 런타임 env(ASK_SEOUL_TARGET/DBT_TARGET).",
+    ),
+    "retention": "7d",
+    "cleanup_hours": 6,
+    "dry_run": False,
+}
 
 
 def _maintain(**context) -> None:
