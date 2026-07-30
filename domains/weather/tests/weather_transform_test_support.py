@@ -87,6 +87,9 @@ class FakeAsset:
     def __eq__(self, other):
         return isinstance(other, FakeAsset) and self.uri == other.uri
 
+    def __hash__(self):
+        return hash(self.uri)
+
 
 class FakeAirflowException(Exception):
     pass

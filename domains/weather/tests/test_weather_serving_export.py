@@ -3,10 +3,16 @@ import sys
 import types
 from pathlib import Path
 
-from common.serving.d1_client import CATALOG_COLUMNS
-
 
 DAG_PATH = Path(__file__).resolve().parents[1] / "weather_serving_export.py"
+
+
+class FakeAsset:
+    def __init__(self, uri):
+        self.uri = uri
+
+    def __eq__(self, other):
+        return isinstance(other, FakeAsset) and self.uri == other.uri
 
 
 def test_weather_serving_export_is_a_thin_common_publisher_wrapper(monkeypatch):
@@ -20,6 +26,9 @@ def test_weather_serving_export_is_a_thin_common_publisher_wrapper(monkeypatch):
 
     factory_module.build_serving_export_dag = build_serving_export_dag
     monkeypatch.setitem(sys.modules, "common.serving.dag_factory", factory_module)
+    airflow_sdk = types.ModuleType("airflow.sdk")
+    airflow_sdk.Asset = FakeAsset
+    monkeypatch.setitem(sys.modules, "airflow.sdk", airflow_sdk)
 
     spec = importlib.util.spec_from_file_location(
         "weather_serving_export_under_test",
@@ -39,16 +48,18 @@ def test_weather_serving_export_is_a_thin_common_publisher_wrapper(monkeypatch):
             "weather_place_forecast_change_daily",
         ],
         "exact_domain_contracts": True,
-        "schedule": None,
+        "schedule": FakeAsset("iceberg://weather/gold/publication-ready"),
         "dag_id": "weather_serving_export",
         "target": "dev",
         "schema": "weather",
     }
 
 
-def test_weather_export_stays_manual_while_legacy_worker_catalog_field_is_missing():
-    assert "serving_tier" not in CATALOG_COLUMNS
-    assert "schedule=None" in DAG_PATH.read_text(encoding="utf-8")
+def test_weather_export_subscribes_only_to_the_validated_gold_terminal_asset():
+    source = DAG_PATH.read_text(encoding="utf-8")
+
+    assert "WEATHER_GOLD_PUBLICATION_READY_ASSET" in source
+    assert "schedule=Asset(WEATHER_GOLD_PUBLICATION_READY_ASSET)" in source
 
 
 def test_weather_export_is_visible_to_airflow_safe_mode():

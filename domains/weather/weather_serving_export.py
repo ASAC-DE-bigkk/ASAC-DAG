@@ -4,6 +4,9 @@ The ``Airflow`` token keeps this thin factory wrapper visible to DAG safe-mode
 discovery even though Airflow imports live inside the common factory.
 """
 
+from airflow.sdk import Asset
+
+from common.assets import WEATHER_GOLD_PUBLICATION_READY_ASSET
 from common.runtime_guard import default_target
 from common.serving.dag_factory import build_serving_export_dag
 
@@ -17,10 +20,8 @@ dag = build_serving_export_dag(
         "weather_place_forecast_change_daily",
     ],
     exact_domain_contracts=True,
-    # Publish activation gate: keep manual-only until recovery, Worker/_catalog
-    # compatibility, and explicit user approval all pass. The intended contract
-    # cron is declared in dbt meta.serving.
-    schedule=None,
+    # Only the terminal marker runs after Gold write and contract test success.
+    schedule=Asset(WEATHER_GOLD_PUBLICATION_READY_ASSET),
     dag_id="weather_serving_export",
     target=default_target(),
     schema="weather",
