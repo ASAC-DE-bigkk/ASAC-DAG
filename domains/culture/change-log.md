@@ -3,6 +3,46 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-31 — run 리포트를 #619 확정안 규격에 맞춤 (event_id · 행 수 출처 · NULL≠0)
+
+- **왜 지금** — #619 확정안(2026-07-31)이 도메인 기록에 요구한 것 중 culture 코드에
+  직접 걸리는 세 가지를 먼저 맞춘다. 1단계 착수는 남은 결정 둘(보관 기간 승인 ASK-Seoul#70 ·
+  기대 주기 오너 확인)이 닫힌 뒤지만, 아래는 culture 소유 기록이라 게이트와 무관하다.
+- **기록 고유키(정정 ③)** — 점검 기준이 "저장소 파일 수 vs DB 행 수"에서 `event_id` 로
+  바뀌었다. 1파일에 여러 건을 묶는 순간 파일 수 비교는 성립하지 않기 때문. 리포트가
+  `event_id`·`record_count` 를 직접 신고한다. **identity 에 `try_number` 를 넣지 않는다** —
+  공통 모듈(`common/ops/product_observability.py`)은 넣지만, culture 리포트는 run 1건=기록
+  1건이고 행 수는 적재 후 1회 실측이라 재시도가 기록을 늘리면 같은 적재가 여러 번 세어진다
+  (#201 은 7일 중 4일이 재시도 런). 리포트 태스크 재시도는 같은 키로 덮어쓴다.
+  → `culture_ingest/ops/record_spec.py`(신규)
+- **행 수 출처 — 어휘는 공통 계약을 따랐다** — 한 리포트가 행 수를 둘 싣는다(수집이 센 값 /
+  적재가 실측한 값). 정본 짝은 공통 계약(`product-observability/v2`, Weather·Traffic 이
+  확정)의 필드명·값 그대로 `row_count`/`rows_source` 로 싣고, 리포트가 싣는 각 수치의
+  출처는 `row_count_source` 에 따로 남긴다. **culture 가 이름을 새로 짓지 않은 게 요점** —
+  같은 뜻에 도메인마다 다른 이름을 쓰면 조회 DB 합류에 매핑 표가 하나 더 생기고, 그게
+  #619 가 없애려는 "제각각"이 이름 층위로 옮겨 앉는 것이다.
+  culture 의 우선순위 선언(`ROW_COUNT_PRIORITY`)도 같은 모듈에 둔다 — 실측이 태스크
+  자기보고보다 앞선다.
+- **다만 계약 준수 방식은 다르다(유도 vs 검증)** — 공통 모듈은 "NULL 이면 not_observed"를
+  `raise ValueError` 로 지킨다. culture 는 `rows_source_for()` 로 **값에서 출처를 유도**해
+  어긋난 조합이 만들어지지 않게 했다. 검증은 호출자가 틀릴 자리를 남기고, 그 예외가
+  fail-open 경계 밖이면 관측 코드가 본 작업을 죽인다(#619 착수 전 1로 올린 건).
+- **NULL≠0 — 실제 결함이었다** — `iceberg_rows` 기본값이 0 이라, load 태스크가 죽은 run 이
+  "14개 데이터셋 전부 0행 적재"라는 **측정한 적 없는 사실**로 기록됐다. 미측정은 None 으로
+  바꾸고, 합계는 측정된 것만 더하며(`iceberg_rows_measured` 로 분자 노출), `expected=0` 인
+  run 의 `coverage_pct` 도 0.0 대신 None. 알림은 "Iceberg 0" 대신 "미측정"으로 적는다.
+  → `common/landing.py` · `common/notify.py` · `source/ingest.py` · `culture_bronze.py`
+- **기대 주기 등록** — 확정안 표가 culture 를 "주 1회"로 적었던 건 주간 정비 DAG 만 보고
+  쓴 값이다. 등록값을 코드에 선언하고 **테스트가 실제 DAG 스케줄과 대조**해, 스케줄을
+  바꾸면서 등록값을 안 고치면 깨지게 했다. `culture_transform` 은 고정 주기가 아니라
+  "트리거 방식 + 상류 + 최대 허용 지연"으로 등록. → `culture_ingest/ops/schedule_registry.py`(신규)
+- **읽는 쪽(ASAC-DBT)** — silver 가 새 필드를 그대로 통과시키고, gold 에 재시도 축
+  (`retried_runs`/`retry_observed_runs`/`max_try_peak`)과 관측 커버리지
+  (`min_iceberg_measure_pct`)를 얹었다. 7/31 이전 이력은 전부 NULL 로 남는다 —
+  "그때는 안 남겼다"이지 "0건"이 아니다.
+- **테스트** — `tests/test_ops_record_spec.py`(+16) · `tests/test_schedule_registry.py`(+8) ·
+  `tests/test_notify.py` 미측정/실측 0 분기 갱신. culture 220 passed.
+
 ## 2026-07-29 — 첫 volume_hwm 쓰기를 레거시 리포트로 부트스트랩 (#582)
 
 - **결함** — `write_volume_hwm` 의 첫 쓰기는 `previous={}` 라 **이번 run 에 rows>0 인

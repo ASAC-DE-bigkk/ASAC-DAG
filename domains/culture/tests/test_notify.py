@@ -31,22 +31,22 @@ def test_discord_send_swallows_failure(monkeypatch):
 
 def _sample_report(pass_case=True):
     ds_ok = {"name": "kopis_performance", "rows": 1204, "pages": 13, "error": "",
-             "checks": {"passed": True, "violations": []}, "iceberg_rows": 0,
+             "checks": {"passed": True, "violations": []}, "iceberg_rows": None,
              "duration_sec": 4.1, "finished_ts": "20260701T000012Z"}
     if pass_case:
         return {"load_date": "2026-07-02", "ingest_ts": "20260701T000007Z",
                 "run_id": "scheduled__x", "slo_passed": True,
                 "coverage": {"expected": 1, "landed": 1, "skipped": 0, "failed": 0, "coverage_pct": 100.0},
-                "total_rows": 1204, "total_iceberg_rows": 0,
+                "total_rows": 1204, "total_iceberg_rows": None,
                 "freshness": {"max_age_hours": 0.3}, "violations": [], "failed_datasets": [],
                 "datasets": [ds_ok]}
     ds_fail = {"name": "seoul_sejong", "rows": 0, "pages": 0,
-               "error": "RuntimeError: HTTP 500", "checks": {}, "iceberg_rows": 0,
+               "error": "RuntimeError: HTTP 500", "checks": {}, "iceberg_rows": None,
                "duration_sec": 0.0, "finished_ts": ""}
     return {"load_date": "2026-07-02", "ingest_ts": "20260701T000007Z",
             "run_id": "scheduled__x", "slo_passed": False,
             "coverage": {"expected": 2, "landed": 1, "skipped": 0, "failed": 1, "coverage_pct": 50.0},
-            "total_rows": 1204, "total_iceberg_rows": 0,
+            "total_rows": 1204, "total_iceberg_rows": None,
             "freshness": {"max_age_hours": 0.3},
             "violations": [], "failed_datasets": [{"dataset": "seoul_sejong", "error": "RuntimeError: HTTP 500"}],
             "datasets": [ds_ok, ds_fail]}
@@ -72,14 +72,29 @@ def test_payload_fail_case_is_red_with_issue_lines():
     assert len(emb["description"]) <= 4096
 
 
-def test_payload_hides_iceberg_when_zero():
-    p = notify.build_report_payload(_sample_report(True))
-    assert "Iceberg" not in p["embeds"][0]["description"]
+def test_payload_says_unmeasured_instead_of_zero():
+    """적재를 안 잰 run 은 'Iceberg 0' 이 아니라 '미측정' 이다 (#619 NULL≠0).
+
+    예전엔 미측정을 0 으로 싣고 그 줄을 통째로 숨겼다. 숨기면 읽는 사람이 "적재 얘기가
+    없네 = 문제 없나 보다"로 읽고, 0 으로 적으면 "쟀는데 0행"이 된다 — 둘 다 거짓이다.
+    """
+    desc = notify.build_report_payload(_sample_report(True))["embeds"][0]["description"]
+    assert "Iceberg 적재: 미측정" in desc
+    assert "Iceberg 0" not in desc
+
+
+def test_payload_shows_a_real_zero_as_zero():
+    # 반대 방향도 잠근다 — 쟀는데 0행이면 0 으로 적어야 한다.
+    report = _sample_report(True)
+    report["total_iceberg_rows"] = 0
+    desc = notify.build_report_payload(report)["embeds"][0]["description"]
+    assert "Iceberg 0" in desc
+    assert "미측정" not in desc
 
 
 def test_payload_load_failed_shows_iceberg_fail():
-    # load_bronze 실패 시 total_iceberg_rows=0 이라 `if ib_total:` 경로로는 Iceberg
-    # 줄이 통째로 사라진다 — load_failed면 항상 FAIL 표기가 있어야 한다.
+    # load_bronze 실패면 적재 행 수가 통째로 미측정이라 일반 분기로는 실패 사실이
+    # 드러나지 않는다 — load_failed면 항상 FAIL 표기가 있어야 한다.
     report = _sample_report(True)
     report["load_failed"] = True
     report["slo_passed"] = False  # build_run_report(load_failed=True)가 내리는 판정과 동일
@@ -101,11 +116,11 @@ def test_dataset_line_has_korean_name_slug_and_rows():
 def test_warn_line_includes_violation_reason():
     ds_warn = {"name": "seoul_sema_exhibition", "rows": 18, "pages": 1, "error": "",
                "checks": {"passed": False, "violations": ["completeness"]},
-               "iceberg_rows": 0, "duration_sec": 0.4, "finished_ts": "20260701T000010Z"}
+               "iceberg_rows": None, "duration_sec": 0.4, "finished_ts": "20260701T000010Z"}
     report = {"load_date": "2026-07-02", "ingest_ts": "20260701T000007Z", "run_id": "x",
               "slo_passed": False,
               "coverage": {"expected": 1, "landed": 1, "skipped": 0, "failed": 0, "coverage_pct": 100.0},
-              "total_rows": 18, "total_iceberg_rows": 0, "freshness": {"max_age_hours": 0.3},
+              "total_rows": 18, "total_iceberg_rows": None, "freshness": {"max_age_hours": 0.3},
               "violations": [{"dataset": "seoul_sema_exhibition", "violation": "완전성 미달(<20)"}],
               "failed_datasets": [], "datasets": [ds_warn]}
     line = next(l for l in notify.build_report_payload(report)["embeds"][0]["description"].split("\n")

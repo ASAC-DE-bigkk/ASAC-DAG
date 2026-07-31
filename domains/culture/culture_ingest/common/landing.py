@@ -115,7 +115,10 @@ class DatasetResult:
     object_keys: list[str] = field(default_factory=list)
     error: str = ""
     checks: dict = field(default_factory=dict)  # 수집 검증 결과 (common.checks.evaluate_landing)
-    iceberg_rows: int = 0  # bronze Iceberg 테이블에 적재된 행 수 (load_bronze 실행 시)
+    # bronze Iceberg 에 적재된 행 수. 기본값이 None 인 건 fetch 시점엔 **아직 재지
+    # 않았기** 때문이다(#619 확정안 NULL≠0). 0 으로 두면 적재가 돌기도 전의 요약이
+    # "0행 적재"를 주장하고, load 태스크가 죽은 run 은 전 데이터셋이 그 주장을 단다.
+    iceberg_rows: int | None = None
     duration_sec: float = 0.0  # 이 데이터셋 적재 소요(초)
     finished_ts: str = ""  # 이 데이터셋 적재 완료 시각 (UTC YYYYMMDDTHHMMSSZ)
 

@@ -35,6 +35,14 @@ from culture_ingest.common.warehouse import (
     PyicebergBronzeWarehouse,
     build_warehouse_settings,
 )
+from culture_ingest.ops.record_spec import (
+    SOURCE_BRONZE_RUN_MANIFEST,
+    SOURCE_RAW_MANIFEST,
+    build_event_id,
+    measured_total,
+    ratio_pct,
+    rows_source_for,
+)
 
 from common.http.errors import HttpProblemError  # noqa: E402  (security 가 루트 보장 후)
 
@@ -426,6 +434,17 @@ def build_run_report(
     "깨지면 얼마나 빨리 알고, 무엇이 영향인지 숫자로" — bronze v0의 SLO 측정점.
     ``load_failed`` = bronze Iceberg 적재(load) 단계 실패 — fetch가 전부 성공해도
     bronze가 미갱신이면 SLO 실패로 드러낸다(초록 리포트 뒤 침묵 방지).
+
+    #619 확정안(2026-07-31)이 얹은 세 가지는 ``ops.record_spec`` 에 있다:
+
+    * ``event_id``/``record_count`` — 점검 기준이 파일 수에서 기록 고유키로 바뀌었다.
+      이 리포트는 1파일 1기록이라 ``record_count`` 가 항상 1 이지만, 필드를 지금
+      싣는 이유는 나중에 묶음 파일로 바꿔도 대조 쿼리를 안 고치기 위해서다.
+    * ``row_count_source`` — 이 리포트는 행 수를 둘 싣는다(수집이 센 값과 적재가
+      실측한 값). 조회 모델이 둘을 섞지 않게 각각의 출처를 이름으로 남긴다.
+      datasets[] 안의 ``rows``/``iceberg_rows`` 도 같은 출처를 따른다.
+    * NULL≠0 — 측정이 없었던 자리는 0 이 아니라 None. 특히 적재 태스크가 죽은 run 을
+      "전 데이터셋 0행 적재"로 신고하던 것이 확정안이 금지한 바로 그 모양이었다.
     """
     # object_keys는 태스크 간 전달용 — 리포트 JSON에는 싣지 않는다(리니지는 _manifest.json).
     rows = [{k: v for k, v in s.items() if k != "object_keys"} for s in summaries if s]
@@ -446,10 +465,23 @@ def build_run_report(
     # expected=0(plan 전멸)은 분모가 없어 "실패 0"이 공허하게 참이 된다 — 7/7 사고(#182)
     # 리포트가 slo_passed=true 로 나온 구멍. 기대가 없으면 통과도 없다(#185).
     slo_passed = expected_total > 0 and not failed and not violations and not load_failed
+    # 적재 행 수는 "측정된 것만" 더한다 — 하나도 측정 안 됐으면 합계는 0 이 아니라 None.
+    # ``iceberg_rows_measured`` 는 그 합계가 몇 개의 데이터셋을 근거로 하는지(관측
+    # 커버리지의 분자). 분모는 coverage.landed 다.
+    total_iceberg_rows, iceberg_measured = measured_total(
+        s.get("iceberg_rows") for s in landed
+    )
     # 리포트는 R2·XCom·알림으로 퍼진다 — error 문자열 등에 시크릿이 남지 않게 통째 마스킹(#144).
     return redact({
         "domain": "culture",
         "layer": "bronze",
+        # 기록 고유키·기록 수(#619 정정 ③). identity 에 재시도 횟수를 넣지 않는 이유는
+        # ops.record_spec 모듈 docstring 참조 — 재시도가 기록을 늘리면 이중 집계가 된다.
+        "event_id": build_event_id(
+            domain="culture", layer="bronze", record_kind="run_report",
+            load_date=ctx.load_date, ingest_ts=ctx.ingest_ts, run_id=ctx.run_id,
+        ),
+        "record_count": 1,
         "load_date": ctx.load_date,
         "ingest_ts": ctx.ingest_ts,
         "run_id": ctx.run_id,
@@ -458,10 +490,25 @@ def build_run_report(
             "landed": len(landed),
             "skipped": len(skipped),
             "failed": len(failed),
-            "coverage_pct": round(100.0 * len(landed) / expected_total, 1) if expected_total else 0.0,
+            # expected=0 은 분모가 없어 달성률이 정의되지 않는다 — 0.0 으로 적으면
+            # "0% 달성"이라는 측정 결과처럼 보인다(#185 와 같은 자리).
+            "coverage_pct": ratio_pct(len(landed), expected_total),
         },
         "total_rows": sum(s["rows"] for s in landed),
-        "total_iceberg_rows": sum(s.get("iceberg_rows", 0) for s in landed),
+        "total_iceberg_rows": total_iceberg_rows,
+        "iceberg_rows_measured": iceberg_measured,
+        # 이 기록의 **정본 행 수와 그 출처** — 공통 계약(product-observability/v2)이 쓰는
+        # 필드명 그대로다. 도메인마다 다른 이름을 쓰면 조회 DB 가 합류할 때 매핑 표를
+        # 하나 더 만들어야 하고, 그게 #619 가 없애려는 "제각각"이다. 값은
+        # total_iceberg_rows 를 다시 적은 것 — bronze 단계의 정본은 적재 실측값이다.
+        "row_count": total_iceberg_rows,
+        "rows_source": rows_source_for(total_iceberg_rows, SOURCE_BRONZE_RUN_MANIFEST),
+        # 리포트는 행 수를 둘 싣기 때문에(수집이 센 값 / 적재가 실측한 값) 각각의 출처도
+        # 남긴다. 정본 하나만으로는 "수집 1204행인데 적재 1200행"을 대조할 수 없다.
+        "row_count_source": {
+            "total_rows": SOURCE_RAW_MANIFEST,
+            "total_iceberg_rows": rows_source_for(total_iceberg_rows, SOURCE_BRONZE_RUN_MANIFEST),
+        },
         "load_failed": load_failed,
         "freshness": {"max_age_hours": max(ages) if ages else None},
         "violation_count": len(violations),

@@ -100,8 +100,10 @@ def _status(s: dict) -> str:
     if "skipped" in err:
         return "skip"
     checks = s.get("checks") or {}
-    ib = s.get("iceberg_rows", 0)
-    mismatch = bool(ib) and ib != s.get("rows", 0)
+    # iceberg_rows 가 None 이면 **적재를 재지 않은 것**이라 불일치를 주장할 수 없다
+    # (#619 NULL≠0). 0 은 "쟀는데 0행"이라 불일치 판정 대상이다.
+    ib = s.get("iceberg_rows")
+    mismatch = ib is not None and ib != s.get("rows", 0)
     if checks.get("passed") is False or mismatch:
         return "WARN"
     return "ok"
@@ -130,9 +132,9 @@ def _dataset_line(s: dict, viol_by_ds: dict, err_by_ds: dict) -> str:
         return f"{head} — 건너뜀"
     line = f"{head} · {_fmt_int(s.get('rows'))}행"
     if st == "WARN":
-        ib = s.get("iceberg_rows", 0)
+        ib = s.get("iceberg_rows")
         reason = viol_by_ds.get(name)
-        if not reason and ib and ib != s.get("rows", 0):
+        if not reason and ib is not None and ib != s.get("rows", 0):
             reason = f"Iceberg 불일치 {_fmt_int(s.get('rows'))} ≠ {_fmt_int(ib)}"
         line += f" — {reason or '경고'}"
     return line
@@ -153,12 +155,15 @@ def build_report_payload(report: dict) -> dict:
         f"{int(report.get('total_rows', 0)):,}행",
         f"소요 {dur}",
     ]
-    ib_total = report.get("total_iceberg_rows", 0)
+    ib_total = report.get("total_iceberg_rows")
     if report.get("load_failed"):
-        # load 실패면 iceberg_rows=0 이라 아래 `if ib_total:` 로는 줄이 통째로 사라진다 —
+        # load 실패면 적재 행 수가 통째로 미측정(None)이라 아래 분기로는 줄이 사라진다 —
         # bronze 미갱신은 항상 명시적으로 표기(침묵 방지).
         parts.append("Iceberg 적재: ❌ FAIL (bronze 미갱신)")
-    elif ib_total:
+    elif ib_total is None:
+        # load 실패는 아닌데 잰 게 없는 run(적재 대상 0건 등). "0행"으로 적으면 거짓이다.
+        parts.append("Iceberg 적재: 미측정")
+    else:
         parts.append(f"Iceberg {int(ib_total):,}")
     fresh = (report.get("freshness") or {}).get("max_age_hours")
     if fresh is not None:
