@@ -174,6 +174,54 @@ def collect_traffic_summary(
     }
 
 
+def collect_traffic_product_profile(
+    cursor, config: TrafficReportConfig, detected_at: datetime
+) -> dict[str, int | float | None] | None:
+    """Measure current link-product health without changing Incident reliability."""
+    table = _qualified(config, "gold_traffic_flow_link_latest")
+    detected_at_kst = detected_at.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S.%f")
+    detected_at_sql = "TIMESTAMP " + _sql_string(detected_at_kst)
+    row = _fetch_one(
+        cursor,
+        f"""
+        SELECT
+            count(*) AS observed_link_count,
+            avg(CASE WHEN flow_value_quality = 'available' THEN 1.0 ELSE 0.0 END)
+                AS available_value_ratio,
+            approx_percentile(
+                greatest(0, date_diff('minute', observed_at_kst, {detected_at_sql})), 0.5
+            ) AS link_age_p50,
+            approx_percentile(
+                greatest(0, date_diff('minute', observed_at_kst, {detected_at_sql})), 0.95
+            ) AS link_age_p95,
+            approx_percentile(
+                greatest(0, date_diff('minute', observed_at_kst, collected_at_kst)), 0.5
+            ) AS source_observation_delay,
+            approx_percentile(
+                greatest(0, date_diff('minute', collected_at_kst, {detected_at_sql})), 0.5
+            ) AS collection_delay,
+            avg(
+                CASE
+                    WHEN date_diff('minute', observed_at_kst, {detected_at_sql}) > 90 THEN 1.0
+                    ELSE 0.0
+                END
+            ) AS stale_link_ratio
+        FROM {table}
+        """,
+    )
+    if not row:
+        return None
+    return {
+        "observed_link_count": int(row[0]) if row[0] is not None else None,
+        "available_value_ratio": float(row[1]) if row[1] is not None else None,
+        "link_age_p50": int(row[2]) if row[2] is not None else None,
+        "link_age_p95": int(row[3]) if row[3] is not None else None,
+        "source_observation_delay": int(row[4]) if row[4] is not None else None,
+        "collection_delay": int(row[5]) if row[5] is not None else None,
+        "stale_link_ratio": float(row[6]) if row[6] is not None else None,
+    }
+
+
 def collect_dag_run_summary(
     cursor,
     config: TrafficReportConfig,

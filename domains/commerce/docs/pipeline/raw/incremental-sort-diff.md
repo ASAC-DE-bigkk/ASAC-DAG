@@ -13,7 +13,7 @@
 |---|---|---|
 | **landing(임시)** | `…/run_id=<ts>/_full/<short>.jsonl` | 오늘 정렬 full 의 랜딩 — 비교/이동 **전에 먼저 저장**(중단돼도 수집분 보존). 완료 시 diff 로 **이동**되어 사라짐(잔존 = 그 run 중단의 증거) |
 | **save(증분 영구)** | `…/run_id=<ts>/<short>.jsonl` (run 폴더) | 첫 수집=전체, 이후=신규/변경분만. **삭제 안 함**(이력 보존) |
-| **diff-target(최신 full)** | `raw/commerce/_diff_target/<short>.<수집일>.jsonl` (+ 같은 이름 `.key`) | 다음 수집의 비교 기준(정렬 full). landing 에서 **이동**해 옴. **파일명 수집일(YYYY-MM-DD)로 완료/중단 구분** — 교체 시 구 날짜 파일 삭제 |
+| **diff-target(최신 full)** | `ops/control/state/commerce/diff_target/<short>.<수집일>.jsonl` (+ 같은 이름 `.key`) | 다음 수집의 비교 기준(정렬 full). landing 에서 **이동**해 옴. **파일명 수집일(YYYY-MM-DD)로 완료/중단 구분** — 교체 시 구 날짜 파일 삭제 |
 
 - 첫 수집: landing → save(run 폴더, full)와 diff-target 에 **같은 내용(전체 정렬본)** 반영.
 - 이후 매 수집: ① landing 저장 → ② diff-target 과 비교(§3) → ③ **다른 내용만 save 로 증분 저장**

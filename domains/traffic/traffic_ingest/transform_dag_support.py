@@ -23,7 +23,7 @@ from traffic_ingest.assets import (
     incident_bronze_events,
     schedule_asset,
 )
-from traffic_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL
+from traffic_ingest.common.resources import DbtWorkload, TRINO_TRANSFORM_POOL
 from traffic_ingest.external_snapshot import ExternalSnapshotUnavailableError
 from traffic_ingest.run_manifest import RunNotPublishableError
 from traffic_ingest.silver_snapshot_fence import (
@@ -31,6 +31,8 @@ from traffic_ingest.silver_snapshot_fence import (
     collect_silver_snapshot_evidence,
 )
 from traffic_ingest.transform_admission import (
+    GOLD_SUCCESS_MARKER_KEY,
+    SILVER_SUCCESS_MARKER_KEY,
     TransformAdmissionError,
     TransformIdentity,
     TransformSuccessMarker,
@@ -40,8 +42,6 @@ from traffic_ingest.transform_specs import DbtPhaseSpec
 
 
 TRAFFIC_TRANSFORM_CRON_KST = "12 * * * *"
-SILVER_SUCCESS_MARKER_KEY = "ask_seoul.traffic.silver_transform.last_success.v1"
-GOLD_SUCCESS_MARKER_KEY = "ask_seoul.traffic.gold_transform.last_success.v1"
 SILVER_OUTPUT_EVIDENCE_XCOM_KEY = "traffic_silver_output_evidence"
 STALE_INCIDENT_RUN_IDS_XCOM_KEY = "traffic_stale_incident_run_ids"
 SILVER_ASSET_CONTRACT = "traffic_incident_silver.v1"
@@ -451,9 +451,11 @@ def coalesce_deferred_incident_runs(
     snapshot_task_id: str,
     incident_manifest_factory: Callable[[], Any],
     stale_xcom_key: str = STALE_INCIDENT_RUN_IDS_XCOM_KEY,
+    replacement_run_id: str | None = None,
 ) -> tuple[str, ...]:
     """Invalidate superseded Bronze inputs only after replacement Silver is durable."""
-    replacement_run_id = task_instance.xcom_pull(task_ids=snapshot_task_id)
+    if replacement_run_id is None:
+        replacement_run_id = task_instance.xcom_pull(task_ids=snapshot_task_id)
     if not isinstance(replacement_run_id, str) or not replacement_run_id.strip():
         raise AirflowFailException("Traffic replacement Silver snapshot is invalid")
     raw_stale_run_ids = task_instance.xcom_pull(
@@ -554,7 +556,7 @@ def resolve_traffic_flow_silver_snapshot_run(
         raise AirflowFailException(
             "Traffic Flow Silver requires an Incident Silver asset event"
         )
-    incident_run_id, _, _ = max(
+    incident_run_id, _, incident_event_at = max(
         (_silver_materialization_from_event(event) for event in silver_events),
         key=lambda item: (item[2], item[0]),
     )
@@ -568,6 +570,18 @@ def resolve_traffic_flow_silver_snapshot_run(
         if str(event["parent_incident_run_id"]) == incident_run_id
     ]
     if not compatible_flow_events:
+        latest_flow_event_at = datetime.fromisoformat(
+            str(flow_events[-1]["event_at"]).replace("Z", "+00:00")
+        )
+        # Asset runs can coalesce a Flow event that waited behind
+        # max_active_runs/pool pressure with a newer Incident Silver event.
+        # No pair is safe to write in that case; skip so the next matching
+        # Flow Bronze event converges naturally. A newer mismatched Flow is
+        # still a lineage violation and remains fail-closed below.
+        if latest_flow_event_at < incident_event_at:
+            raise AirflowSkipException(
+                "Traffic Flow Silver awaiting Flow Bronze for newer Incident parent"
+            )
         raise AirflowFailException(
             "Traffic Flow Silver requires a matching Incident parent"
         )
@@ -801,7 +815,7 @@ def build_dbt_phase_task(
         "on_failure_callback": failure_callback,
     }
     if spec.workload is DbtWorkload.TRINO and spec.heavy_pool:
-        operator_kwargs["pool"] = TRINO_HEAVY_POOL
+        operator_kwargs["pool"] = TRINO_TRANSFORM_POOL
     return PythonOperator(**operator_kwargs)
 
 

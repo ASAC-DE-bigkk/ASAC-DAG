@@ -19,6 +19,7 @@ from weather_ingest.landing import (  # noqa: E402
     KmaLandingRequest,
     RunIdentity,
 )
+from weather_ingest.errors import WeatherSourceSchemaError  # noqa: E402
 
 
 def kma_payload(
@@ -82,6 +83,7 @@ class ScriptedKmaSource:
 class MemoryRawObjectStore:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, str]] = {}
+        self.write_order: list[str] = []
 
     def exists(self, key: str) -> bool:
         return key in self.objects
@@ -91,6 +93,75 @@ class MemoryRawObjectStore:
 
     def write_bytes(self, key: str, payload: bytes, content_type: str) -> None:
         self.objects[key] = (payload, content_type)
+        self.write_order.append(key)
+
+
+def test_collect_keeps_raw_and_manifest_in_run_start_partition_across_midnight():
+    clock_values = iter(
+        (
+            datetime(2026, 7, 30, 14, 59, 59, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 2, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 3, tzinfo=timezone.utc),
+        )
+    )
+    raw_store = MemoryRawObjectStore()
+    batch = KmaLanding(
+        source=ScriptedKmaSource(
+            {
+                (60, 127, 1): kma_payload(total_count=1, item_count=1),
+                (61, 127, 1): kma_payload(total_count=1, item_count=1),
+            }
+        ),
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: next(clock_values),
+        request_id=iter(("request-1", "request-2")).__next__,
+    ).collect(
+        RunIdentity(dag_id="weather_vilage_fcst_bronze", run_id="scheduled__midnight"),
+        KmaLandingRequest(
+            base_date="20260730",
+            base_time="2300",
+            grids=(
+                KmaGrid(place_id="first", nx=60, ny=127),
+                KmaGrid(place_id="second", nx=61, ny=127),
+            ),
+            num_of_rows=1000,
+        ),
+    )
+
+    assert all("/load_date=2026-07-30/" in item.raw_object_key for item in batch.raw_objects)
+    assert "/load_date=2026-07-30/" in str(batch.manifest_key)
+    assert batch.to_xcom()["landing_load_date"] == "2026-07-30"
+    assert json.loads(raw_store.read_bytes(str(batch.manifest_key)))["load_date"] == "2026-07-30"
+
+
+def test_replay_rejects_raw_objects_from_multiple_load_date_partitions():
+    raw_store = MemoryRawObjectStore()
+    first_key = (
+        "raw/weather_forecast/kma_vilage_fcst/load_date=2026-07-30/nx=60/ny=127/"
+        "20260730T235959KST_base-202607300800_request-1.json"
+    )
+    second_key = (
+        "raw/weather_forecast/kma_vilage_fcst/load_date=2026-07-31/nx=61/ny=127/"
+        "20260731T000001KST_base-202607300800_request-2.json"
+    )
+    raw_store.write_bytes(first_key, kma_payload(total_count=1, item_count=1), "application/json")
+    raw_store.write_bytes(second_key, kma_payload(total_count=1, item_count=1), "application/json")
+    landing = KmaLanding(
+        source=ScriptedKmaSource({}),
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 31, tzinfo=timezone.utc),
+        request_id=lambda: "unused",
+    )
+
+    with pytest.raises(WeatherSourceSchemaError, match="one landing_load_date"):
+        landing.replay(
+            [first_key, second_key],
+            grids=(KmaGrid("first", 60, 127), KmaGrid("second", 61, 127)),
+            run=RunIdentity("weather_vilage_fcst_backfill", "manual__mixed"),
+        )
 
 
 def test_collect_preserves_kma_raw_lineage_for_one_grid_page():
@@ -134,6 +205,18 @@ def test_collect_preserves_kma_raw_lineage_for_one_grid_page():
         == "application/json; charset=utf-8"
     )
     assert "KMA_SERVICE_KEY" not in raw_object.raw_object_key
+    assert batch.manifest_key is not None
+    assert raw_store.write_order[-1] == batch.manifest_key
+    assert json.loads(raw_store.read_bytes(batch.manifest_key)) == {
+        "run_id": "scheduled__weather",
+        "dataset": "kma_vilage_fcst",
+        "load_date": "2026-07-14",
+        "object_keys": [raw_object.raw_object_key],
+        "expected_count": 1,
+        "actual_count": 1,
+        "completed_at": "2026-07-14T09:20:00+09:00",
+        "status": "SUCCESS",
+    }
 
 
 def test_collect_fetches_all_pages_for_every_configured_grid():

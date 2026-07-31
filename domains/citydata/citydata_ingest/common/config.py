@@ -56,6 +56,28 @@ def normalize_target(target: str) -> str:
     return target
 
 
+# ── env 규약 2종 (ASK-Seoul#66) ────────────────────────────────────────────────
+# 구 규약(`sample/.env`): 한 파일에 dev·prod 를 함께 담고 접두어로 갈랐다.
+#   dev  -> ``R2_DEV_*`` (버킷 seoul-dev) / prod -> ``R2_*`` (버킷 seoul)
+# 신 규약(`sample/.env.dev`, `sample/.env.prod`): 파일 하나가 한 환경이라 접두어 없는
+#   한 벌(``R2_*``)만 두고, 그 값이 dev 창고냐 prod 창고냐를 가른다. ``_DEV_`` 키가 없다.
+#
+# 접두어를 target 만으로 정하면 안 된다 — 신 규약 dev 에서 ``R2_DEV_*`` 를 찾다가
+# 자격증명이 통째로 비어 적재가 죽고, 반대로 구 규약 dev 에서 접두어 없는 키(=prod 창고)
+# 로 새면 dev 런이 조용히 prod 버킷에 쓴다. 어느 규약인지는 ``_DEV_`` 키 존재로 판별한다.
+SPLIT_DEV_PROBE = "R2_DEV_BUCKET_NAME"
+
+
+def uses_split_dev_keys(env: dict[str, str] | None = None) -> bool:
+    """구 규약(``_DEV_`` 접두어로 dev/prod 를 가르는 env)인지 여부."""
+    return bool(pick(SPLIT_DEV_PROBE, env or {}))
+
+
+def r2_prefix(target: str, env: dict[str, str] | None = None) -> str:
+    """R2 자격증명 env 접두어. 구 규약 dev 만 ``R2_DEV_``, 그 외(prod·신 규약) ``R2_``."""
+    return "R2_DEV_" if target == "dev" and uses_split_dev_keys(env) else "R2_"
+
+
 def redact_secret(text: str, *secrets: str) -> str:
     """``text``에서 주어진 시크릿들을 raw/percent-encoded 형태 모두 마스킹한다.
 
@@ -80,25 +102,31 @@ class R2Settings:
     access_key_id: str
     secret_access_key: str
     bucket: str
+    prefix: str = "R2_"  # 해석에 쓴 env 접두어 (missing_r2 누락 메시지가 정확한 키를 가리키게)
 
 
 def build_r2_settings(target: str = "dev", env_file: str | None = None) -> R2Settings:
-    """``target``에 맞는 R2 설정 해석. dev -> ``R2_DEV_*``(seoul-dev), prod -> ``R2_*``(seoul)."""
+    """``target``에 맞는 R2 설정 해석.
+
+    구 규약: dev -> ``R2_DEV_*``(seoul-dev), prod -> ``R2_*``(seoul).
+    신 규약(``_DEV_`` 키 없음): 양쪽 모두 ``R2_*`` — 값이 환경을 가른다. :func:`r2_prefix` 참고.
+    """
     target = normalize_target(target)
     env = load_env_file(env_file)
-    prefix = "R2_DEV_" if target == "dev" else "R2_"
+    prefix = r2_prefix(target, env)
     return R2Settings(
         target=target,
         endpoint=pick(prefix + "ENDPOINT", env),
         access_key_id=pick(prefix + "ACCESS_KEY_ID", env),
         secret_access_key=pick(prefix + "SECRET_ACCESS_KEY", env),
         bucket=pick(prefix + "BUCKET_NAME", env),
+        prefix=prefix,
     )
 
 
 def missing_r2(settings: R2Settings) -> list[str]:
     """필수인데 비어 있는 R2 필드 이름 목록 (사전 점검 에러 메시지용)."""
-    prefix = "R2_DEV_" if settings.target == "dev" else "R2_"
+    prefix = settings.prefix
     pairs = (
         ("ENDPOINT", settings.endpoint),
         ("ACCESS_KEY_ID", settings.access_key_id),

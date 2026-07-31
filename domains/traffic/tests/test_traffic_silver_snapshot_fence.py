@@ -15,6 +15,7 @@ from traffic_ingest.silver_snapshot_fence import (
     SnapshotFenceTelemetryError,
     assert_safe_post_write,
     assert_snapshot_unchanged,
+    collect_silver_snapshot_baseline,
     collect_silver_snapshot_evidence,
 )
 
@@ -40,16 +41,29 @@ def evidence_dict(**overrides):
 
 
 class FakeCursor:
-    def __init__(self, snapshot_row, file_rows, close_error=None):
+    def __init__(
+        self,
+        snapshot_row,
+        file_rows,
+        close_error=None,
+        snapshot_execute_error=None,
+        files_execute_error=None,
+    ):
         self.snapshot_row = snapshot_row
         self.file_rows = file_rows
         self.close_error = close_error
+        self.snapshot_execute_error = snapshot_execute_error
+        self.files_execute_error = files_execute_error
         self.statements = []
         self.closed = False
         self.close_calls = 0
 
     def execute(self, statement):
         self.statements.append(statement)
+        if len(self.statements) == 1 and self.snapshot_execute_error is not None:
+            raise self.snapshot_execute_error
+        if len(self.statements) == 2 and self.files_execute_error is not None:
+            raise self.files_execute_error
 
     def fetchone(self):
         return self.snapshot_row
@@ -84,6 +98,12 @@ class FakeConnection:
             raise self.close_error
 
 
+class FakeTrinoQueryError(RuntimeError):
+    def __init__(self, error_name):
+        super().__init__(error_name)
+        self.error_name = error_name
+
+
 def test_post_write_allows_existing_compacted_files_but_rejects_new_ones():
     baseline = evidence(10, "append", ("s3://dev/data/compacted-old.parquet",))
     safe = evidence(11, "overwrite", ("s3://dev/data/compacted-old.parquet",))
@@ -103,6 +123,10 @@ def test_post_write_allows_existing_compacted_files_but_rejects_new_ones():
 def test_post_write_rejects_an_unexpected_replace_without_new_compacted_files():
     with pytest.raises(ExternalCompactionRace, match="unexpected replace"):
         assert_safe_post_write(evidence(10, "append", ()), evidence(11, "replace", ()))
+
+
+def test_post_write_accepts_the_first_real_snapshot_after_an_empty_baseline():
+    assert_safe_post_write(None, evidence(11, "replace", ()))
 
 
 def test_test_fence_requires_exact_post_write_snapshot():
@@ -195,7 +219,11 @@ def test_evidence_parser_rejects_whitespace_and_unknown_operations(operation):
         SilverSnapshotEvidence.from_dict(evidence_dict(operation=operation))
 
 
-def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources():
+def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources(
+    monkeypatch,
+):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
     cursor = FakeCursor(
         snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
         file_rows=[
@@ -240,6 +268,8 @@ def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources()
 def test_trino_connection_uses_the_exact_silver_relation_namespace(monkeypatch):
     captured = {}
     connection = object()
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
 
     monkeypatch.setattr(
         "trino.dbapi.connect",
@@ -248,6 +278,38 @@ def test_trino_connection_uses_the_exact_silver_relation_namespace(monkeypatch):
 
     assert snapshot_fence._trino_connection() is connection
     assert captured["catalog"] == "iceberg_dev"
+    assert captured["schema"] == "traffic"
+
+
+def test_prod_snapshot_fence_uses_only_the_prod_catalog(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg")
+    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    cursor = FakeCursor(
+        snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
+        file_rows=[],
+    )
+    connection = FakeConnection(cursor)
+
+    collect_silver_snapshot_evidence(connection_factory=lambda: connection)
+
+    assert all("iceberg.traffic." in statement for statement in cursor.statements)
+    assert all("iceberg_dev" not in statement for statement in cursor.statements)
+
+
+def test_prod_trino_connection_uses_the_prod_catalog(monkeypatch):
+    captured = {}
+    connection = object()
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg")
+    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    monkeypatch.setattr(
+        "trino.dbapi.connect",
+        lambda **kwargs: captured.update(kwargs) or connection,
+    )
+
+    assert snapshot_fence._trino_connection() is connection
+    assert captured["catalog"] == "iceberg"
     assert captured["schema"] == "traffic"
 
 
@@ -273,6 +335,59 @@ def test_collect_evidence_fails_closed_and_closes_resources_for_malformed_snapsh
 
     assert cursor.closed
     assert connection.closed
+
+
+def test_collect_baseline_allows_only_a_missing_snapshot_relation_and_closes_resources():
+    cursor = FakeCursor(
+        snapshot_row=None,
+        file_rows=[],
+        snapshot_execute_error=FakeTrinoQueryError("TABLE_NOT_FOUND"),
+    )
+    connection = FakeConnection(cursor)
+
+    assert (
+        collect_silver_snapshot_baseline(connection_factory=lambda: connection) is None
+    )
+    assert len(cursor.statements) == 1
+    assert cursor.closed
+    assert connection.closed
+
+
+def test_collect_evidence_still_fails_closed_for_a_missing_snapshot_relation():
+    cursor = FakeCursor(
+        snapshot_row=None,
+        file_rows=[],
+        snapshot_execute_error=FakeTrinoQueryError("TABLE_NOT_FOUND"),
+    )
+
+    with pytest.raises(FakeTrinoQueryError, match="TABLE_NOT_FOUND"):
+        collect_silver_snapshot_evidence(
+            connection_factory=lambda: FakeConnection(cursor)
+        )
+
+
+@pytest.mark.parametrize(
+    ("snapshot_error", "files_error"),
+    [
+        (FakeTrinoQueryError("PERMISSION_DENIED"), None),
+        (None, FakeTrinoQueryError("TABLE_NOT_FOUND")),
+    ],
+)
+def test_collect_baseline_fails_closed_for_non_bootstrap_query_errors(
+    snapshot_error,
+    files_error,
+):
+    cursor = FakeCursor(
+        snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
+        file_rows=[],
+        snapshot_execute_error=snapshot_error,
+        files_execute_error=files_error,
+    )
+
+    with pytest.raises(FakeTrinoQueryError):
+        collect_silver_snapshot_baseline(
+            connection_factory=lambda: FakeConnection(cursor)
+        )
 
 
 def test_collect_closes_connection_when_cursor_construction_fails():

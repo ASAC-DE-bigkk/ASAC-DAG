@@ -19,14 +19,21 @@ CLAUDE.md §2의 비협상 데이터 규칙을 구현. 동일한 `key`가 백엔
 
 ## 경로 규칙 (결정적)
 
-bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **연/월/일 디렉터리 아래**에 둔다
-(연/월/일은 run_id 날짜에서 파생). silver 는 **논리일** 파티션. `{prefix}`(=`COMMERCE_STORAGE_PREFIX`,
-비우면 없음)·bucket 접두는 스토리지 백엔드가 붙인다([paths.py](../../include/commerce_core/paths.py)):
+bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **`load_date=YYYY-MM-DD` 파티션 아래**에
+둔다(날짜는 run_id 에서 파생 — ASK-Seoul#60 약속① key=value 날짜 표기, 2026-07-28 전환). silver 는
+**논리일** 파티션. `{prefix}`(=`COMMERCE_STORAGE_PREFIX`, 비우면 없음)·bucket 접두는 스토리지
+백엔드가 붙인다([paths.py](../../include/commerce_core/paths.py)):
+
+> **가변 상태는 raw 밖**(#60 약속②): diff-target·적재 워터마크/영수증·watchdog 가드는
+> `ops/control/state/commerce/{diff_target,bronze,silver,serve,watchdog}` (루트 .env 의
+> `COMMERCE_*_LAYER` 값). raw 에는 불변 랜딩(run 폴더)만 남는다. 버킷은 **seoul(프로드)** —
+> 루트 `R2_BUCKET_NAME` 을 `.env.commerce` 가 `R2_BUCKET` 으로 매핑. 구(`YYYY/MM/DD`) 레이아웃
+> 이력은 seoul-dev 에 보존, seoul 에는 신 레이아웃으로 이관됨(scripts/migrate_raw_to_prod_bucket.py).
 
 ```text
-{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
-{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커(JSON, 리니지 포함)
-{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
+{prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
+{prefix}/ops/control/state/commerce/markers/load_date=<YYYY-MM-DD>/run_id=<...>/<short>.completed | .incomplete  # API별 수집 결과 마커(JSON, 리니지 포함)
+{prefix}/ops/control/state/commerce/markers/load_date=<YYYY-MM-DD>/run_id=<...>/_RUN.completed | .incomplete      # 실행 전체 마커
 {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet                       # [DEPRECATED] 구 R2 parquet silver(152종 공통=v1 공통 14 + v2 별칭 통합) — 현행 silver 는 dbt/Iceberg 테이블
 ```
 
@@ -37,29 +44,33 @@ bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **연/월/�
 예시(2026-06-30 14:30:25.123 KST 실행):
 
 ```text
-raw/commerce/2026/06/30/run_id=2026-06-30_143025_123/general_restaurant.jsonl
-raw/commerce/2026/06/30/run_id=2026-06-30_143025_123/_markers/general_restaurant.completed
-raw/commerce/2026/06/30/run_id=2026-06-30_143025_123/_markers/_RUN.completed
+raw/commerce/load_date=2026-06-30/run_id=2026-06-30_143025_123/general_restaurant.jsonl
+ops/control/state/commerce/markers/load_date=2026-06-30/run_id=2026-06-30_143025_123/general_restaurant.completed
+ops/control/state/commerce/markers/load_date=2026-06-30/run_id=2026-06-30_143025_123/_RUN.completed
 silver/commerce/general_restaurant/observed_date=2026-06-30/part-000.parquet
 ```
 
 ### bronze: API당 1파일(NDJSON) + 마커
 
 - `<short>.jsonl` = 그 API 의 **모든 페이지를 줄단위 NDJSON**(줄 1개 = 원본 응답 1페이지, 가공 없음).
-- **bronze 는 이 `run_id` 폴더 안에서만** 파일을 만든다 — 외부 경로(예전 `commerce/_manifest/`)에
-  상태 파일을 두지 않는다.
+- **데이터는 이 `run_id` 폴더 안에서만** 만든다. 마커(지시 파일)는 #60 오너 해석에 따라
+  마커 존(`COMMERCE_MARKERS_LAYER`, run 폴더와 `load_date=/run_id=` 1:1 미러)에 둔다.
 - 중복 제어: bronze 는 매 실행 전체 수집(스킵 없음), **중복 제거는 silver 가 `MGTNO` 로**.
 
 ### 마커 (수집 상태 = 외부 매니페스트 대체)
 
-상태/이력은 `run_id` 폴더의 마커가 전부(DB·외부 매니페스트 없음). **API당 마커 1개**(상호배타):
+상태/이력은 마커 존(run 미러)의 마커가 전부(DB·외부 매니페스트 없음). **API당 마커 1개**(상호배타):
 
 | 마커 | 의미 | 다음 실행 |
 |---|---|---|
-| `_markers/<short>.completed` | cap 없이 끝까지 + 건수 일치(status=ok) | — |
-| `_markers/<short>.incomplete` | 건수 불일치/부분(cap)/오류(status=partial\|failed) | 재수집 |
+| `<short>.completed` | cap 없이 끝까지 + 건수 일치(status=ok) | — |
+| `<short>.incomplete` | 건수 불일치/부분(cap)/오류(status=partial\|failed) | 재수집 |
 | (마커 없음) | 이번 실행 미시도 | — |
-| `_markers/_RUN.completed\|.incomplete` | 실행 전체 요약(metrics) | — |
+| `_RUN.completed\|.incomplete` | 실행 전체 요약(metrics) | — |
+
+> 위치: `{COMMERCE_MARKERS_LAYER}/load_date=<d>/run_id=<rid>/` (prod `ops/control/state/commerce/markers`).
+> 재시도로 completed·incomplete 가 공존하면 **completed 가 우선**하며, completed 기록 시 같은 run 의
+> 잔존 incomplete 를 정리한다(#60 감사 F7).
 
 > '완료'와 '미완료'를 **동시에** 두면 중복·불일치 위험이라, API당 1개만 둔다(타입이 곧 상태).
 
@@ -80,7 +91,7 @@ silver/commerce/general_restaurant/observed_date=2026-06-30/part-000.parquet
   "run_id": "<airflow_run_id>", "bronze_run_id": "2026-06-30_143025_123",
   "schema_version": "v1",
   "pages_written": 535, "rows_total": 534680, "list_total_count": 534680, "complete": true,
-  "bronze_key": "raw/commerce/2026/06/30/run_id=2026-06-30_143025_123/general_restaurant.jsonl",
+  "bronze_key": "raw/commerce/load_date=2026-06-30/run_id=2026-06-30_143025_123/general_restaurant.jsonl",
   "pages": [{"page": 1, "start": 1, "end": 1000, "rows": 1000, "content_hash": "9f2a...c4"}]
 }
 ```
@@ -94,19 +105,26 @@ silver/commerce/general_restaurant/observed_date=2026-06-30/part-000.parquet
 R2 는 S3 호환 — **boto3** S3 클라이언트에 커스텀 엔드포인트(path-style·SigV4·region `auto`)를 준다
 ([storage.py](../../include/commerce_core/storage.py)의 `R2Storage`). s3fs 가 아니라 boto3 를 쓰는 이유는
 호스트 이미지에 boto3 만 있고 s3fs 는 없기 때문(번들 안에서 자립 해결).
-값은 `.env.commerce` 로 공급([configuration.md](../configuration/configuration.md) §2.3):
+값은 **루트 `.env`** 에서 관리하고, `.env.commerce` 가 코드 이름으로 매핑한다
+([configuration.md](../configuration/configuration.md) §1·§3):
 
 ```bash
-STORAGE_BACKEND=r2
+# 루트 .env — 스토리지 백엔드는 commerce 전용값 블록(COMMERCE_ 네임스페이스)
+COMMERCE_STORAGE_BACKEND=r2
+# 오브젝트 버킷 = seoul(프로드, 2026-07-28 전환). 자격증명/엔드포인트는 루트 동일 이름 직접 상속:
+R2_BUCKET_NAME=seoul
 R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-R2_BUCKET=seoul-dev          # prod 는 seoul-prod  (※ 루트 .env 의 R2_BUCKET_NAME 과 다른 키)
 R2_ACCESS_KEY_ID=<R2 API 토큰 Access Key ID>
 R2_SECRET_ACCESS_KEY=<R2 API 토큰 Secret>
-R2_REGION=auto
+
+# .env.commerce 매핑(수정 불필요) — 코드가 읽는 이름으로 되돌림
+#   STORAGE_BACKEND=${COMMERCE_STORAGE_BACKEND:-local}
+#   R2_BUCKET=${R2_BUCKET_NAME:-seoul}           # dev 복귀 시 ${R2_DEV_BUCKET_NAME:-seoul-dev}
+#   R2_REGION=${COMMERCE_R2_REGION:-auto}
 ```
 
 - R2 대시보드 → **R2 → Manage R2 API Tokens**에서 Access Key/Secret 발급, 버킷 최소 권한.
-- 버킷은 dev/prod 분리(`seoul-dev`/`seoul-prod`), 토큰도 환경별 분리.
+- 버킷은 dev/prod 분리(`seoul-dev`/`seoul`) — dev 복귀는 R2_BUCKET 매핑 한 줄.
 - 자격증명은 bronze 페이로드/로그/경로/커밋에 **절대 저장 금지**(CLAUDE.md §2.5).
 - R2 백엔드는 `boto3` 만 필요하며 호스트 이미지에 **이미 포함**(추가 설치 불필요) — [requirements.txt](../../requirements.txt).
 

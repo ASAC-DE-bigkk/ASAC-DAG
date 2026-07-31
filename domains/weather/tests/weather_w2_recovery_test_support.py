@@ -3,6 +3,10 @@ import sys
 import types
 from pathlib import Path
 
+# 가드 자체는 스텁으로 무력화하지만, 순수 함수인 타깃 해석은 실물을 그대로 쓴다.
+# 여기서 값을 베껴두면 실물과 조용히 어긋나 DAG 파싱 회귀를 놓친다.
+from common.runtime_guard import TARGET_CHOICES, default_target
+
 
 MODULE_NAMES = (
     "airflow",
@@ -98,6 +102,8 @@ def install_airflow_fakes():
     errors_airflow.problem_failure_callback = lambda *, domain: ("problem", domain)
     runtime_guard = types.ModuleType("common.runtime_guard")
     runtime_guard.validate_dev_runtime = lambda **_kwargs: None
+    runtime_guard.TARGET_CHOICES = TARGET_CHOICES
+    runtime_guard.default_target = default_target
     resources = types.ModuleType("weather_ingest.common.resources")
     resources.TRINO_HEAVY_POOL = "trino_weather_heavy"
     runtime = types.ModuleType("weather_ingest.common.runtime")

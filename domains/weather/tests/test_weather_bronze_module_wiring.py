@@ -22,7 +22,7 @@ class Dag:
 
 
 class DagRun:
-    conf = {}
+    conf = {"load_date": "2026-07-10"}
 
 
 class Result:
@@ -86,7 +86,11 @@ def test_live_landing_wrapper_only_maps_airflow_context_to_domain_module(monkeyp
     )
 
     assert result == {"raw_object_keys": ["raw/weather/page.json"]}
-    assert captured["run"] == RunIdentity(Dag.dag_id, "manual__weather")
+    assert captured["run"] == RunIdentity(
+        Dag.dag_id,
+        "manual__weather",
+        landing_load_date="2026-07-10",
+    )
     assert captured["request"] == KmaLandingRequest(
         base_date="20260714",
         base_time="0800",
@@ -100,12 +104,12 @@ def test_replay_wrapper_delegates_raw_keys_and_grid_identity(monkeypatch):
     captured: dict[str, object] = {}
 
     class Landing:
-        def replay(self, keys, *, grids):
-            captured.update(keys=keys, grids=grids)
+        def replay(self, keys, *, grids, run):
+            captured.update(keys=keys, grids=grids, run=run)
             return Result({"raw_object_keys": keys})
 
     class BackfillDagRun:
-        conf = {"raw_object_keys": raw_keys}
+        conf = {"raw_object_keys": raw_keys, "load_date": "2026-07-10"}
 
     monkeypatch.setattr(dag_module, "build_weather_landing", lambda: Landing())
     monkeypatch.setattr(
@@ -123,6 +127,11 @@ def test_replay_wrapper_delegates_raw_keys_and_grid_identity(monkeypatch):
     assert captured == {
         "keys": raw_keys,
         "grids": (KmaGrid("jongno", 60, 127),),
+        "run": RunIdentity(
+            Dag.dag_id,
+            "manual__backfill",
+            landing_load_date="2026-07-10",
+        ),
     }
     assert result == {"raw_object_keys": raw_keys}
 

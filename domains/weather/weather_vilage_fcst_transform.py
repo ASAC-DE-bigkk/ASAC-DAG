@@ -35,9 +35,16 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
+from common.assets import (  # noqa: E402
+    WEATHER_BRONZE_ASSET,
+    WEATHER_GOLD_PUBLICATION_READY_ASSET,
+)
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
-from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from common.runtime_guard import (  # noqa: E402
+    TARGET_CHOICES,
+    default_target,
+    validate_dev_runtime,
+)
 from weather_ingest.common.resources import DbtWorkload  # noqa: E402
 from weather_ingest.runtime import build_weather_manifest  # noqa: E402
 import weather_dbt_execution as weather_dbt  # noqa: E402
@@ -53,6 +60,9 @@ WEATHER_DBT_CONTRACT_VARS = {"weather_w2_canonical_revision_date": "2025-04-01"}
 WEATHER_DBT_RUN_RESULTS_XCOM_KEY = "weather_dbt_run_results_path"
 SNAPSHOT_TASK_ID = "resolve_weather_snapshot_run"
 WEATHER_SNAPSHOT_VAR = "weather_snapshot_dag_run_id"
+WEATHER_GOLD_PUBLICATION_READY_ASSET_REF = Asset(
+    WEATHER_GOLD_PUBLICATION_READY_ASSET
+)
 # Dedicated lane (#512): this DAG's own 12-step chain used to share
 # trino_weather_heavy with weather_w2_canonical_transform and
 # weather_vilage_fcst_bronze, so a single run (observed ~50min) starved both
@@ -135,12 +145,12 @@ DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_run_gold",
         "run",
-        "ask_seoul_weather_transform_gold_without_commerce",
+        "ask_seoul_weather_transform_gold",
     ),
     DbtPhaseSpec(
         "dbt_test_gold",
         "test",
-        "ask_seoul_weather_transform_gold_without_commerce",
+        "ask_seoul_weather_transform_gold",
     ),
 )
 DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
@@ -150,10 +160,10 @@ WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
 DISCORD_RED = 15158332
 DEFAULT_PARAMS = {
     "target": Param(
-        default="dev",
+        default=default_target(),
         type="string",
-        enum=["dev"],
-        description="dbt target profile name (dev only until production rollout).",
+        enum=list(TARGET_CHOICES),
+        description="dbt target profile name; defaults to the runtime env (#561).",
     )
 }
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
@@ -498,6 +508,28 @@ def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> d
     return {"rows": len(records), "skipped": False}
 
 
+def mark_weather_gold_publication_ready(**context) -> dict[str, str]:
+    """Emit the D1 trigger only after Weather Gold write and tests succeed."""
+    bronze_run_id = str(
+        context["ti"].xcom_pull(task_ids=SNAPSHOT_TASK_ID) or ""
+    )
+    if not bronze_run_id:
+        raise AirflowFailException(
+            "weather Gold publication marker requires a Bronze snapshot"
+        )
+    outlet_events = context.get("outlet_events")
+    if outlet_events is None:
+        raise AirflowFailException(
+            "weather Gold publication outlet event is unavailable"
+        )
+    metadata = {
+        "gold_dag_run_id": str(context.get("run_id") or ""),
+        "bronze_dag_run_id": bronze_run_id,
+    }
+    outlet_events[WEATHER_GOLD_PUBLICATION_READY_ASSET_REF].extra = metadata
+    return metadata
+
+
 with DAG(
     dag_id="weather_vilage_fcst_transform",
     description="Transform weather bronze -> silver/gold via dbt.",
@@ -531,10 +563,18 @@ with DAG(
         on_failure_callback=record_weather_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
+    mark_gold_publication_ready = PythonOperator(
+        task_id="mark_weather_gold_publication_ready",
+        python_callable=mark_weather_gold_publication_ready,
+        outlets=[WEATHER_GOLD_PUBLICATION_READY_ASSET_REF],
+        on_failure_callback=record_weather_problem,
+    )
+
     pipeline_tasks = [
         validate_runtime,
         resolve_snapshot,
         *dbt_tasks_in_order,
+        mark_gold_publication_ready,
         publish_dbt_metrics,
     ]
     for upstream, downstream in zip(pipeline_tasks, pipeline_tasks[1:]):

@@ -20,7 +20,10 @@ class MemoryStorage:
         self.objects[key] = value
 
     def read_json(self, key: str) -> object:
-        return self.objects[key]
+        try:
+            return self.objects[key]
+        except KeyError as exc:
+            raise FileNotFoundError(key) from exc
 
     def exists(self, key: str) -> bool:
         return key in self.objects
@@ -75,6 +78,7 @@ def test_landed_receipt_is_written_before_pending_marker_and_round_trips():
         ("write", key),
         ("write", receipts.pending_key(receipt.snapshot_run_id)),
     ]
+    assert receipts.is_pending(receipt.snapshot_run_id) is True
     assert receipts.pending() == [receipt]
     assert "secret" not in repr(storage.objects)
 
@@ -91,6 +95,24 @@ def test_pending_receipts_are_oldest_first_and_limit_is_applied_after_sorting():
         receipts.record_landed(receipt)
 
     assert receipts.pending(limit=2) == [oldest, middle]
+
+
+def test_pending_check_raises_for_storage_failure_instead_of_treating_it_as_acknowledged():
+    from traffic_ingest.snapshot_receipt import TrafficSnapshotReceipts
+
+    class DeniedStorage(MemoryStorage):
+        def exists(self, _key: str) -> bool:
+            return False
+
+        def read_json(self, _key: str) -> object:
+            error = RuntimeError("R2 access denied")
+            error.response = {"Error": {"Code": "AccessDenied"}}
+            raise error
+
+    receipts = TrafficSnapshotReceipts(DeniedStorage())
+
+    with pytest.raises(RuntimeError, match="access denied"):
+        receipts.is_pending("snapshot-1")
 
 
 def test_landed_retry_is_idempotent_but_divergent_payload_is_rejected():
@@ -145,6 +167,7 @@ def test_materialized_receipt_is_written_before_pending_ack_and_retry_is_safe():
     key = receipts.record_materialized(materialized)
 
     assert storage.operations == [("write", key)]
+    assert receipts.is_pending(landed.snapshot_run_id) is True
     assert receipts.pending() == [landed]
 
     receipts.acknowledge_materialized(landed.snapshot_run_id)
@@ -153,6 +176,7 @@ def test_materialized_receipt_is_written_before_pending_ack_and_retry_is_safe():
         "delete",
         receipts.pending_key(landed.snapshot_run_id),
     )
+    assert receipts.is_pending(landed.snapshot_run_id) is False
     assert receipts.pending() == []
     storage.operations.clear()
     receipts.record_materialized(materialized)

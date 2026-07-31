@@ -54,8 +54,8 @@ def test_is_expired_key_by_ingest_ts_and_untouchables():
 
 def test_stale_pending_uses_same_week_boundary():
     cut = maintenance.cutoff_ingest_ts(_THU)
-    old_marker = "state/transit/loader_pending/parking/20260711T090001Z__run.json"
-    fresh_marker = "state/transit/loader_pending/parking/20260715T090001Z__run.json"
+    old_marker = "ops/control/state/transit/loader_pending/parking/20260711T090001Z__run.json"
+    fresh_marker = "ops/control/state/transit/loader_pending/parking/20260715T090001Z__run.json"
     assert maintenance.is_stale_pending(old_marker, cut)
     assert not maintenance.is_stale_pending(fresh_marker, cut)
 

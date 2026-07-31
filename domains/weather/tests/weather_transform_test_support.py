@@ -87,6 +87,9 @@ class FakeAsset:
     def __eq__(self, other):
         return isinstance(other, FakeAsset) and self.uri == other.uri
 
+    def __hash__(self):
+        return hash(self.uri)
+
 
 class FakeAirflowException(Exception):
     pass
@@ -228,13 +231,13 @@ EXPECTED_DBT_PHASES = (
     (
         "dbt_run_gold",
         "run",
-        "ask_seoul_weather_transform_gold_without_commerce",
+        "ask_seoul_weather_transform_gold",
         True,
     ),
     (
         "dbt_test_gold",
         "test",
-        "ask_seoul_weather_transform_gold_without_commerce",
+        "ask_seoul_weather_transform_gold",
         True,
     ),
 )

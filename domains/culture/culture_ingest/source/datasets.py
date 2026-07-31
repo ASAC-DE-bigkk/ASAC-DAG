@@ -281,6 +281,29 @@ def select(names: list[str] | None) -> list[Dataset]:
     return chosen
 
 
+def _interleave_by_source(datasets: list[Dataset]) -> list[Dataset]:
+    """같은 원천이 연달아 오지 않게 라운드로빈으로 섞는다(#201).
+
+    매핑 태스크는 이 순서대로 슬롯에 들어가므로, 원천별로 묶여 있으면 **첫 웨이브가
+    한 원천에 몰린다.** 실제로 ``ALL_DATASETS`` 가 원천별 묶음이라 매 런 첫 슬롯이
+    KOPIS 로만 채워졌고, 그 동시 발사가 밤 400 의 필요조건이었다(7/25·7/29·7/30 실측 —
+    같은 초에 발사된 것들만 깨지고, 1분 뒤 순차 200발은 한 번도 안 깨졌다).
+
+    섞기는 **완화이지 보장이 아니다** — 태스크가 끝나는 시각이 제각각이라 뒤로 갈수록
+    같은 원천이 다시 겹칠 수 있다. 보장은 동시성 상한(culture_bronze) 쪽 몫이고,
+    이건 그 상한 안에서 첫 웨이브의 원천 쏠림을 없앤다.
+    """
+    buckets: dict[str, list[Dataset]] = {}
+    for ds in datasets:
+        buckets.setdefault(ds.source, []).append(ds)
+    ordered: list[Dataset] = []
+    while any(buckets.values()):
+        for queue in buckets.values():
+            if queue:
+                ordered.append(queue.pop(0))
+    return ordered
+
+
 def plan_dataset_names(wanted: list[str] | None, *, include_detail: bool) -> list[str]:
     """DAG plan 용 적재 대상 이름 선택.
 
@@ -289,14 +312,20 @@ def plan_dataset_names(wanted: list[str] | None, *, include_detail: bool) -> lis
     run — refresh="weekly" 데이터셋은 제외한다(시설 상세는 #466 부터 daily 편입,
     야간은 missing top-up 모드). 주간 트리거·수동 run 은 이름을 명시하므로 그대로
     포함된다.
+
+    목록끼리는 원천 라운드로빈으로 섞는다(#201) — detail 후순위 규칙은 그대로 유지되고,
+    섞는 대상은 목록 구간뿐이다.
     """
     chosen = set(wanted or [])
-    return [
-        ds.name
-        for ds in sorted(enabled_datasets(), key=lambda d: d.kind == "kopis_detail")
+    selected = [
+        ds
+        for ds in enabled_datasets()
         if (include_detail or ds.kind != "kopis_detail")
         and (ds.name in chosen if chosen else ds.refresh == "daily")
     ]
+    lists = [ds for ds in selected if ds.kind != "kopis_detail"]
+    details = [ds for ds in selected if ds.kind == "kopis_detail"]
+    return [ds.name for ds in _interleave_by_source(lists) + details]
 
 
 # 주간 facility refresh(#206) 트리거 conf — culture_facility_refresh DAG 가 사용.

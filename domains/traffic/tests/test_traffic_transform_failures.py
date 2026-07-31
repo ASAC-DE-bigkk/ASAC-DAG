@@ -43,6 +43,11 @@ def test_external_compaction_race_is_not_classified_as_a_generic_dbt_failure(
     monkeypatch.setattr(module, "build_traffic_manifest", CurrentManifest)
     monkeypatch.setattr(
         transform_runtime,
+        "collect_silver_snapshot_baseline",
+        lambda: next(evidence),
+    )
+    monkeypatch.setattr(
+        transform_runtime,
         "collect_silver_snapshot_evidence",
         lambda: next(evidence),
     )
@@ -90,20 +95,11 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
     classified_task_ids = {
         silver: [
             "dbt_deps",
-            "dbt_source_freshness",
-            "dbt_test_traffic_incident_availability",
-            "dbt_test_traffic_bronze_source_contract",
             "dbt_run_silver",
-            "dbt_test_silver",
         ],
         gold: [
             "dbt_deps_gold",
-            "dbt_seed_asac_axes",
-            "dbt_run_common_admin_dong_dimension",
-            "dbt_test_common_admin_dong_dimension",
-            "dbt_test_asac_axes_seed_contract",
             "dbt_run_gold",
-            "dbt_test_gold",
         ],
     }
 
@@ -115,16 +111,13 @@ def test_traffic_dbt_tasks_classify_failures_before_airflow_retries():
             if task_id in {
                 "dbt_deps",
                 "dbt_deps_gold",
-                "dbt_source_freshness",
-                "dbt_test_traffic_incident_availability",
-                "dbt_test_traffic_bronze_source_contract",
             }:
                 assert "pool" not in task.kwargs or task.kwargs["pool"] in (
                     None,
                     "default_pool",
                 )
             else:
-                assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+                assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
             assert task.kwargs["retries"] == 1
             assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
             assert (

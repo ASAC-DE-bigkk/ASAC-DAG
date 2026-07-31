@@ -129,6 +129,7 @@ def test_weather_transform_runs_place_mart_before_full_gold_and_metrics():
         "dbt_test_place_mart",
         "dbt_run_gold",
         "dbt_test_gold",
+        "mark_weather_gold_publication_ready",
         "publish_dbt_run_metrics",
     )
 
@@ -140,12 +141,64 @@ def test_weather_transform_runs_place_mart_before_full_gold_and_metrics():
         }
     assert (
         dag.task_dict["dbt_run_gold"].kwargs["op_kwargs"]["selector"]
-        == "ask_seoul_weather_transform_gold_without_commerce"
+        == "ask_seoul_weather_transform_gold"
     )
     assert (
         dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["selector"]
-        == "ask_seoul_weather_transform_gold_without_commerce"
+        == "ask_seoul_weather_transform_gold"
     )
+
+
+def test_weather_gold_terminal_asset_is_emitted_only_after_gold_contracts():
+    module = load_transform_module()
+    dag = module.dag
+    marker = dag.task_dict["mark_weather_gold_publication_ready"]
+
+    assert dag.task_dict["dbt_test_gold"].downstream_task_ids == {
+        "mark_weather_gold_publication_ready"
+    }
+    assert marker.kwargs["outlets"] == [
+        module.WEATHER_GOLD_PUBLICATION_READY_ASSET_REF
+    ]
+    assert marker.downstream_task_ids == {"publish_dbt_run_metrics"}
+    assert "outlets" not in dag.task_dict["publish_dbt_run_metrics"].kwargs
+
+
+def test_weather_gold_terminal_asset_records_gold_and_bronze_run_identity():
+    module = load_transform_module()
+    outlet_event = types.SimpleNamespace(extra=None)
+    ti = FakeTaskInstance(
+        pulls={(module.SNAPSHOT_TASK_ID, None): "asset__weather-bronze-42"}
+    )
+
+    result = module.mark_weather_gold_publication_ready(
+        ti=ti,
+        run_id="asset_triggered__weather-gold-42",
+        outlet_events={
+            module.WEATHER_GOLD_PUBLICATION_READY_ASSET_REF: outlet_event
+        },
+    )
+
+    assert result == {
+        "gold_dag_run_id": "asset_triggered__weather-gold-42",
+        "bronze_dag_run_id": "asset__weather-bronze-42",
+    }
+    assert outlet_event.extra == result
+
+
+def test_weather_gold_terminal_asset_rejects_missing_bronze_identity():
+    module = load_transform_module()
+
+    with pytest.raises(module.AirflowFailException, match="Bronze snapshot"):
+        module.mark_weather_gold_publication_ready(
+            ti=FakeTaskInstance(),
+            run_id="asset_triggered__weather-gold-42",
+            outlet_events={
+                module.WEATHER_GOLD_PUBLICATION_READY_ASSET_REF: (
+                    types.SimpleNamespace(extra=None)
+                )
+            },
+        )
 
 
 def test_weather_transform_passes_w2_canonical_revision_to_model_commands():
@@ -289,8 +342,26 @@ def test_weather_transform_limits_target_param_to_dev_or_prod():
 
     target_param = module.DEFAULT_PARAMS["target"]
 
-    assert target_param.value == "dev"
-    assert target_param.schema["enum"] == ["dev"]
+    assert target_param.schema["enum"] == ["dev", "prod"]
+    assert target_param.value in {"dev", "prod"}
+
+
+def test_weather_transform_target_param_default_follows_runtime_env(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    monkeypatch.setenv("DBT_TARGET", "prod")
+
+    module = load_transform_module()
+
+    assert module.DEFAULT_PARAMS["target"].value == "prod"
+
+
+def test_weather_transform_target_param_defaults_to_dev_without_runtime_env(monkeypatch):
+    monkeypatch.delenv("ASK_SEOUL_TARGET", raising=False)
+    monkeypatch.delenv("DBT_TARGET", raising=False)
+
+    module = load_transform_module()
+
+    assert module.DEFAULT_PARAMS["target"].value == "dev"
 
 
 def test_weather_transform_publishes_dbt_run_metrics_as_non_gating_teardown():
@@ -305,7 +376,7 @@ def test_weather_transform_publishes_dbt_run_metrics_as_non_gating_teardown():
     assert metrics.on_failure_fail_dagrun is False
     assert metrics.kwargs["trigger_rule"] == "all_done_setup_success"
     assert metrics.kwargs["on_failure_callback"] is module.record_weather_problem
-    assert dag.task_dict["dbt_test_gold"].downstream_task_ids == {
+    assert dag.task_dict["mark_weather_gold_publication_ready"].downstream_task_ids == {
         "publish_dbt_run_metrics"
     }
     assert metrics.downstream_task_ids == set()

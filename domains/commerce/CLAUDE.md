@@ -12,8 +12,12 @@ This file governs the **commerce** category bundle at `dags/domains/commerce/`.
   `Share.md`), and runtime args (`.env.commerce`) are all self-contained in this folder.
 - **Do not touch outside the bundle**: `dags/` is a git submodule (ASAC-DAG). The root `.env`,
   `docker-compose.yml`, `Dockerfile.airflow`, and root `.gitignore` belong to the **host project
-  (outside the bundle)**, so do not modify them ad hoc. Supply commerce env vars not by adding them
-  to the root `.env` but via **this bundle's `.env.commerce`** (injection: [docs/configuration.md](docs/configuration/configuration.md)).
+  (outside the bundle)**, so do not modify `docker-compose.yml` / `Dockerfile.airflow` ad hoc.
+  **Env values are the exception (2026-07-28 개편)**: commerce runtime values now live in the root
+  `.env` under a `commerce 전용값` block (single source), and this bundle's `.env.commerce` only
+  **maps** them to the names the code reads (`${...}`). Generic names are namespaced `COMMERCE_*` in
+  root to avoid polluting other domains' shared process env. To change a value, edit the root `.env`
+  block — not `.env.commerce`. Injection details: [docs/configuration.md](docs/configuration/configuration.md).
 - If a host image/compose change is truly required (e.g., installing a new Python package or adding a
   data volume), **announce and agree first**, then proceed — it is outside the bundle. (R2=boto3 and
   silver=pandas/pyarrow are already included, so no extra install is needed; that is why R2 is
@@ -932,8 +936,10 @@ Rules to follow when adding or editing pipeline code:
   `commerce_core.storage`): `sys.path.insert(0, str(Path(__file__).resolve().parents[2]))`.
 - Right after the bootstrap, load the bundle env file: `from commerce_core.env import
   load_commerce_env; load_commerce_env()`. It fills `os.environ` from `.env.commerce`
-  (setdefault — process/compose env wins). **Do not add commerce vars to the host root
-  `.env`**; put them in `.env.commerce`. Details: [docs/configuration.md](docs/configuration/configuration.md).
+  (setdefault — process/compose env wins), resolving `${...}` refs against the process env.
+  **(2026-07-28 개편)** commerce values are managed in the root `.env` `commerce 전용값` block
+  (generic names namespaced `COMMERCE_*`); `.env.commerce` only maps them to the code-facing names.
+  Details: [docs/configuration.md](docs/configuration/configuration.md).
 - Imports are top-level: `from commerce_core... import`, `from bronze... import`, `from silver... import`.
   Generic storage lives in the repo-wide `dags/common` (`from common.storage import ...`);
   commerce consumes it via the `commerce_core.storage` adapter (settings/env contract unchanged).

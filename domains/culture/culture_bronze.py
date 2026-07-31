@@ -13,7 +13,7 @@ raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 
 (하나라도 없으면 전 적재 실패).
 
 파라미터 (트리거 시 덮어쓰기 가능):
-  target          "dev" | "prod"            (기본 dev -> 버킷 seoul-dev)
+  target          "dev" | "prod"            (기본 = 런타임 env, dev -> 버킷 seoul-dev)
   datasets        적재할 데이터셋 슬러그; 빈 값 -> 활성 전체 중 daily 만
                   (kopis_facility_detail 은 야간 missing top-up(#466),
                   전수 재크롤은 culture_facility_refresh 일요일 05:30 KST, #206)
@@ -38,7 +38,7 @@ from airflow import DAG
 from airflow.exceptions import AirflowException
 from airflow.sdk.exceptions import AirflowFailException
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk import Asset
+from airflow.sdk import Asset, Param
 from airflow.sdk.definitions.deadline import DeadlineAlert, DeadlineReference, SyncCallback
 
 # 이 파일의 디렉토리(domains/culture)를 sys.path에 넣어 `culture_ingest.*`를 import.
@@ -56,6 +56,7 @@ if _PLUGINS_DIR not in sys.path:
     sys.path.insert(0, _PLUGINS_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
 from culture_deadline import on_deadline_missed  # noqa: E402
 
 from culture_ingest.common.config import (  # noqa: E402
@@ -74,6 +75,7 @@ from culture_ingest.source.ingest import (  # noqa: E402
     load_known_detail_ids,
     normalize_mapped_results,
     write_run_report,
+    write_volume_hwm,
 )
 from culture_ingest.common.notify import build_report_payload, notifier_from_env  # noqa: E402
 
@@ -85,7 +87,15 @@ KST = "Asia/Seoul"
 record_culture_problem = problem_failure_callback(domain="culture")
 
 DEFAULT_PARAMS = {
-    "target": "dev",
+    # 배포 env 를 따른다(ASK-Seoul#66) — 하드코딩 "dev" 는 prod 스택에서 dev 키(R2_DEV_*·
+    # iceberg_dev)를 찾다가 스케줄 런마다 실패한다. dev 박스에선 env 가 dev 라 기존과 동일.
+    # traffic·weather #561 · transit #575 와 같은 패턴.
+    "target": Param(
+        default=default_target(),
+        type="string",
+        enum=list(TARGET_CHOICES),
+        description="R2 버킷·Iceberg 카탈로그를 가른다. 기본값은 런타임 env(ASK_SEOUL_TARGET/DBT_TARGET).",
+    ),
     "datasets": [],  # 데이터셋 슬러그 일부; 빈 값 = 활성 전체
     "date_from": "",
     "date_to": "",
@@ -313,6 +323,16 @@ def _report(**context) -> None:
     except Exception as exc:  # noqa: BLE001 -- 리포트 적재 실패가 run 판정을 가리지 않게
         print(f"[culture bronze] run report 적재 실패(무시): {exc}")
 
+    # 볼륨 HWM(#147 기준선)은 리포트와 **별도 존**에 쓴다(#60 약속 ②) — 리포트는 TTL
+    # 대상 구역이라, 거기서만 기준선을 읽으면 lifecycle 이 걸리는 순간 볼륨 가드가
+    # 조용히 꺼진다. 여기도 실패는 삼킨다: 기준선은 보조 신호이므로 못 써도 수집 판정을
+    # 가리면 안 된다(다음 run 이 볼륨 검사를 생략할 뿐 — load_baselines 와 같은 fail-open).
+    try:
+        hwm_key = write_volume_hwm(report, ctx=ctx, target=params["target"])
+        print(f"[culture bronze] volume hwm -> {hwm_key}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[culture bronze] volume hwm 적재 실패(무시): {type(exc).__name__}")
+
     # Discord 완료 알림(best-effort) — URL 없으면 no-op. 알림 실패는 삼킨다(파이프라인 보호).
     try:
         notifier_from_env().send(build_report_payload(report))
@@ -366,13 +386,19 @@ with DAG(
     )
 
     # 2) fetch_raw: plan 결과를 동적 매핑, 데이터셋마다 raw 박제까지만(재현 불가 경계).
-    #    동시성 상한 4 = #201 완화 ①. KOPIS 400 은 런 시작 burst(15개 동시 첫 요청)를
-    #    따라오므로(03:00 이동 후에도 재발 4회로 확정) 동시 요청을 15→4 로 줄인다.
-    #    직렬화 비용 실측 +30s 이내(합 550s ÷ 4 ≈ 138s vs 병렬 최장 111s), 신선도 30h 무영향.
+    #    동시성 상한 2 = #201 완화 ②. 상한 4(완화 ①)는 효과가 없었는데, 이유는 상한이
+    #    **원천별이 아니라 런 전체**라 4슬롯이 통째로 KOPIS 로 채워졌기 때문이다
+    #    (7/25 는 정확히 4개가 동시에 400 — 슬롯 수와 같다). 이 상한은 "동시 KOPIS
+    #    호출 수"의 천장을 2 로 내리고, 그 2 칸마저 한 원천으로 안 몰리게 데이터셋
+    #    순서를 원천 라운드로빈으로 섞는다(datasets._interleave_by_source).
+    #    근거: 실패한 밤마다 같은 초에 발사된 것만 깨졌고, 1분 뒤 순차 200발(약 1.6 req/s)은
+    #    한 번도 안 깨졌다 — 통제 가능한 변수는 동시성 하나다.
+    #    비용: 합 550s ÷ 2 ≈ 275s (상한 4 의 138s 대비 +2.3분). 신선도 SLA 30h 라 무영향.
+    #    그래도 재발하면 다음 수는 상한 1(완전 직렬) 또는 KOPIS 전용 매핑 태스크 분리다.
     fetch_raw = PythonOperator.partial(
         task_id="fetch_raw",
         python_callable=_fetch_raw,
-        max_active_tis_per_dagrun=4,
+        max_active_tis_per_dagrun=2,
         on_failure_callback=record_culture_problem,
     ).expand(op_kwargs=plan.output)
 

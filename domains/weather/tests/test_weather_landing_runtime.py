@@ -142,6 +142,12 @@ def test_runtime_factory_lazily_composes_domain_landing(monkeypatch):
     assert raw_store._client is sentinel_s3
     assert raw_store._bucket == "seoul-dev"
     assert captured["landing"]["raw_prefix"] == "dev/raw"
+    # 프로덕션 경로는 항상 빌더가 주입한다 — KmaLanding 의 생성자 폴백
+    # (`{raw_prefix}/_checkpoints`)은 직접 생성하는 테스트 편의일 뿐이다.
+    # 새 caller 가 주입을 빠뜨리면 구 위치로 새므로 여기서 고정한다(#60 약속②).
+    assert (
+        captured["landing"]["checkpoint_prefix"] == "ops/control/checkpoints/weather"
+    )
 
 
 def test_manifest_factory_keeps_trino_wiring_out_of_the_dag(monkeypatch):

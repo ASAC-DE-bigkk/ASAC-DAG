@@ -48,8 +48,8 @@ def test_overshoot_400_after_full_pages_ends_list():
                             3: _resp(400)})
     pages = list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
     assert [p.row_count for p in pages] == [2, 2]
-    # #146: 400 은 1회 재시도로 '지속' 확인 후 목록 끝 판정 → 3페이지 2회 조회
-    assert transport.calls == [1, 2, 3, 3]
+    # #146: 400 은 1회 재시도로 '지속' 확인 → #201: cpage=1 이 살아있는지 확인 후 끝 판정
+    assert transport.calls == [1, 2, 3, 3, 1]
 
 
 def test_first_page_400_still_raises():

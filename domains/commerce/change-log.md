@@ -5,6 +5,348 @@
 
 ---
 
+## 2026-07-30
+
+### 85. 서빙 게시 — 무변경 스킵 게이트(payload 지문) (#601)
+
+request:
+- "일단위 집계가 아니라 주, 월 등등 단위 집계들이면 gold와 d1의 테이블을 drop할 필요가 없을 것
+  같은데. 해당되는 부분 검토하고 수정 적용해줘."
+- 이어서 "gold를 통해서 재적재 할 때 해당 정보(핸드오프 메타)도 다 지우고 다시 생성해야 하는지",
+  "dbt 전체 도메인 규정에서 벗어나거나 위반되는 게 없는지 재확인" 요청.
+
+response:
+- **전제 검증 결과 사용자 전제를 그대로 쓰면 오답이 된다**(실측). 그레인 표기는 변경 여부와
+  일치하지 않는다 — 연 그레인 `churn_yearly` 는 행수 5,700 고정인데 매일 212행(3.7%) 변하고
+  `dong_summary` 는 417행 중 153행(36.7%) 변한다. 반대로 `flow_monthly`/`flow_yearly` 는
+  append-only 증분(`ym > max(ym)`)이라 월/연 경계와 full-refresh 외에는 물리 변경이 0이다
+  (dev 6일 연속 일일 run 동안 스냅샷 생성 0회, prod 도 동일). 따라서 판정축을 그레인·달력이
+  아니라 **게시 payload 지문**으로 두었다.
+- 스냅샷 id 게이트도 기각: 일일 `maintain_silver_gold_tables` 의 OPTIMIZE 가 내용 불변인 채로
+  `replace` 스냅샷을 만든다(2026-07-29 20:38Z flow_monthly, added=deleted=total=1,338,717,
+  체크섬 2821BCF4E001A158 동일) → 절감이 사라진다.
+- 구현(`include/gold/serving_export.py`):
+  - `_payload_fingerprint(ddl, colnames, rows)` — `_lit()` 직렬화(=D1 로 보낼 표현 그대로) 기반
+    행 지문을 정렬해 합친 순서 무관 해시. DDL·컬럼명·행수 포함(스키마만 바뀐 경우도 잡는다).
+  - `d1_publish_state`(commerce 소유, upsert 전용·DROP 금지) — table_name/payload_hash/
+    row_count/publication_id/written_at/checked_at. 공유 `d1_meta` 는 positional
+    `INSERT OR REPLACE ... VALUES` 라 컬럼을 늘리지 않는다.
+  - 게이트: 지문 동일 **and** 상태 행수 일치 **and** `SELECT count(*)` 실측 일치일 때만 스킵.
+    지문 부재·조회 실패·행수 불일치는 전부 재기록(fail-open) — 배치 INSERT 중도 실패로 잘린
+    테이블을 스킵이 고착시키지 않는다.
+  - 스킵해도 **메타는 매 run 갱신**: `_catalog` upsert(`exported_at`·`source_run_id` 전진,
+    `serving_status='published'`), `d1_meta`(`snapshot_at`=now, `build_status='ready'`),
+    핸드오프 보조 4종 정상 재생성 → 26h 미게시 감시축(`publication_trigger.
+    max_interval_minutes: 1560`)이 계속 유효해 **dbt 계약 수정이 필요 없다.**
+  - `publication_id` 는 내용이 바뀔 때만 새로 발급(같은 게시가 계속 서빙 중임을 표현).
+  - 밴드 게이트 스킵과 **경로·상태 분리**: `stale`·`serve.d1_rowcount_alert`·Discord 경고
+    아이콘은 밴드 스킵 전용. 무변경은 리포트 별 줄("무변경 — 행 재기록 생략")과
+    `result.status='ok'` 로 처리(정상 스킵이 매일 DAG 를 경고 상태로 만들지 않게).
+  - `_write_serve_state` 수리: 이번 run 미게시분의 직전 마커 항목을 이어 싣는다(전량 덮어써서
+    서빙 중 스냅샷 기록이 사라지던 문제).
+- 규정 점검: 공유 `publication_mode` enum(snapshot/upsert/append)·`gate.py` 상태값 계약 위반
+  없음 — 데이터 테이블 무접촉이라 `zero_policy: retain_last_good` 이 그대로 충족되고,
+  `serving_status='skipped_retained'` 는 **쓰지 않는다**(내용이 실제로 최신인데 소비 측에 불신
+  신호가 되므로). 공유 스키마 변경 0.
+- 절감 실측(2026-07-30 D1): 일 261,807행 → 58,813행(**−77.5%**), INSERT 요청 약 2,628 → 597.
+  대상은 `d1_flow_monthly`(181,435) · `d1_flow_yearly`(21,559) 2종이며, 하드코딩 명단이 아니라
+  22제품 균일 적용으로 자동 판정된다(materialization 이 바뀌면 절감도 자동으로 따라온다).
+- 테스트: `tests/test_serving_unchanged_gate.py` 11건(지문 순서 무관·값/스키마/행수 민감,
+  무변경 스킵 시 메타 갱신·publication_id 재사용, 행수 불일치·상태 부재·조회 실패 fail-open,
+  밴드 스킵 경로 불변). 전 스위트 398 통과 · `python -m security` PASS.
+- **적대 검증에서 잡힌 자체 회귀(같은 PR 에서 수정)**: 지문 커밋(`_upsert_publish_state`)을 루프
+  밖에 한 번만 두면, 데이터를 이미 쓴 뒤 공유 `_catalog` upsert 등에서 죽었을 때 **D1 은 새 내용 ·
+  상태는 옛 지문**이 된다. 이후 원천이 옛 내용으로 되돌아오면(운영자 full-refresh 복구가 정확히
+  이 형태) 지문이 일치해 **영구히 스킵**된다 — 행수가 같은 채 값만 바뀌는 건 이 제품군의 정상
+  변경 형태라 `_d1_row_count` 도 못 잡고, `exported_at` 은 매 run 전진하므로 26h 감시축·리포트가
+  오히려 '정상 최신'으로 읽는다. 패치 이전 코드는 매 run 무조건 재기록이라 다음 성공 run 이
+  자가치유했으므로 **이 변경이 만든 회귀**다.
+  수정: 파괴적 쓰기 **전에** 지문을 무효화(`payload_hash=''`)하고 INSERT 성공 직후 실제 지문을
+  커밋한다 → 불변식 **커밋된 지문 ⊆ D1 실물**. 무효화가 실패하면 DROP 이전이라 D1 무손상(fail-open
+  방향 유지). 비용은 재기록 테이블당 쓰기 2회(하루 최대 44행).
+  실증: sqlite 백엔드로 `export_to_d1` 을 실제 구동해 예산 컷오프 3~12 스윕 — 수정 전 3·4·5 에서
+  영구 고착 재현, 수정 후 전 구간 무손상. 순서 회귀 테스트 2건 추가(총 13건).
+  지문 계산 실측 비용: 181,440행 **0.412s**(태스크 타임아웃 60분의 0.011%).
+- **별건으로 남긴 결함**(이 변경과 독립): `flow_monthly/yearly/daily` 모델 주석은 소급 도착을
+  "정기 full-refresh 스윕(`commerce_load_gold_refresh`)"이 흡수한다고 서술하지만 그 DAG 는
+  `schedule=None` 이고 `GOLD_READY_ASSET` outlet 도 없다. 실측상 D1 `d1_flow_monthly` 는 이미
+  181,435행 중 72행이 최신 silver 재계산과 다르고(합계 4,616,291 vs 4,616,354) 이 부채는 수동
+  트리거까지 누적된다. **매일 재게시해도 1행도 고쳐지지 않는다**(append-only 라 gold 자체가
+  과거 구간을 다시 쓰지 않음) → 게시 빈도와 무관한 별도 이슈로 제기.
+
+---
+
+## 2026-07-29
+
+### 84. MCP/API 핸드오프 계보 — D1 보조 테이블 3종 게시 (#593)
+
+request:
+- MCP/API 를 직접 개발하는 게 아니라, 개발담당자가 **D1 정보만으로** MCP description·각 key
+  역할을 처리할 수 있게 처리 체계/계보를 이어달라는 지시.
+
+response:
+- 실측: 타 도메인 `_catalog.columns` 는 name/type 관행(공유 필드 확장 배제), dbt yml 컬럼 설명
+  271/271 완비(계보 정본 존재) → **운반 자동화**로 해결.
+- serving_export 확장 — 계보 `dbt yml → manifest → export → D1(commerce 소유)`:
+  `d1_catalog_columns`(ordinal·타입·description_ko) · `d1_catalog_ext`(source_model·tier·
+  grain·primary_key·rollup_rule·time_axis) · `d1_usage_patterns`(meta.serving.usage_patterns
+  선언분, 다제품 모델은 d1_table 필터). 매 export 전량 교체(멱등), 공유 메타 무접촉.
+- 스왑 스킵 제품 메타 보존(후속 수리): 보조 테이블은 DROP+CREATE 라 성공분만 재삽입하면
+  밴드 게이트로 스킵된 제품의 컬럼 설명·질의 예시가 사라진다. 그 제품의 D1 데이터와 `_catalog`
+  행은 retain_last_good 로 남으므로 메타만 없어지면 '데이터는 있는데 설명이 없는' 상태가 된다.
+  `_preserve_skipped_handoff()` 로 직전 행을 이어 싣는다(현재 gold 스키마로 재생성하지 않는다 —
+  미게시 스키마를 설명하면 데이터와 어긋남). 용어사전은 제품 스코프가 아니라 전량 재생성.
+  회귀 테스트 4건 추가(tests/test_serving_handoff.py).
+- 검증: export 실기록 — columns **222행(설명 221/222)**, ext 22행(grain/PK 정확).
+  usage_patterns 는 22제품 패턴 채굴(D1 실행 검증 — 진행분 8제품 77패턴) 후 dbt 선언→재export.
+- 추가(용어 한국어 정리 지시): `d1_catalog_glossary`(field·code·label_ko·source) — D1 롤업에
+  코드만 실리는 열거값(major/category/event_type/gu_code)의 한국어 라벨을 웨어하우스 실데이터
+  (gold `*_ko` 컬럼·행정동 참조)에서 파생해 게시. 하드코딩 없음.
+
+### 83. 처리로그 ops/logs 존 일단위 적재 — commerce_ops_logship 신설(도커 볼륨 무잔존)
+
+request:
+- 각 과정 파생 처리로그를 도커(컨테이너/볼륨)에 두지 말고 #60 존(`ops/logs/<domain>/`)에
+  일단위로 적재, 적재 후 도커 볼륨에 남지 않게 하라는 지시.
+
+response:
+- 신규 DAG `commerce_ops_logship`(매일 01:30 KST): `dag_id=commerce_*` 의 **종결(success|failed)
+  run** 로그를 run 단위 tar.gz 로 `{COMMERCE_LOGS_LAYER}/load_date=<run 시작일 KST>/<dag_id>/
+  <run_id>.tar.gz` 에 업로드(존재 검증) 후 로컬 삭제. 실행 중/미기록 run 은 보존, 타 도메인
+  로그 무접촉. 순수 로직 `commerce_core/logship.py`(+tests/test_logship.py).
+- env: `COMMERCE_LOGS_LAYER=ops/logs/commerce`(루트 .env — #60 ops 존, 카테고리별 TTL 가능).
+- 실검증: 종결 run **206개 번들(13.2MB) 적재·검증·로컬 삭제, 실패 0** — 실행 중 2 run 만 보존.
+  security log_event 영수증(masked JSON) 반환.
+
+### 82. serving _catalog 를 타 도메인 형식과 동형화 — time_axis/freshness 채움 + prod 첫 서빙 실측 2건 처리
+
+request:
+- D1 적재 시 선행 이슈(#478/#77)의 카탈로그 등록이 시행됐는지 확인하고, 빠진 부분은 원격지
+  업데이트를 검토해 타 도메인과 같은 형식으로 정합하라는 지시. D1 100만행+ 제품은 제외 판정.
+
+response:
+- **행수 감사(제외 판정)**: SERVING_SPEC 22종 전수 실측 — 최대 181,435행(flow_monthly), 100만+
+  0건(290만 원장 flow_daily 는 기존 설계상 iceberg_api 제외 유지), 밴드 이탈 0건 → 전량 포함.
+- **첫 D1 적재**: 22종 스냅샷(총 261,802행) — D1 행수 = 감사치 22/22 일치, `_catalog` 22행
+  upsert(타 도메인 행 무손실 — 이후 30행 변화는 transit 자체 갱신 실측 확인), `d1_meta` 22행,
+  serve state 는 ops 존.
+- **동형화 갭**: 타 도메인은 시간축 보유 제품에 `time_axis`/`freshness` 를 채움(citydata 12/17,
+  weather·traffic 10/10) — commerce 는 #77 유보로 NULL. 원격(common/serving) 검토 결과 정본
+  `publisher._freshness`(= str(max(event_time))) 존재 → serving_export 에 `_freshness_of` 이식,
+  dbt meta.serving 에 `event_time` 선언(flow_monthly=ym·flow_yearly=y·churn_yearly=y — 순환·
+  코호트 축 제품은 미선언 관행 준수). 재export 실측: `2026-06`/`2025`/`2025` 채움, 스냅샷 19종
+  NULL 유지.
+- **prod 첫 gold 사건 기록**: (a) dbt seed 부재로 21모델 전멸(#567 로 구조 수리), (b) seed 직후
+  재실행 배치에서 4모델(cohort_survival/lifespan/address_succession/env_facility)이 **성공-0행**
+  — 입력·SQL 정상(직접 실행 7,502/2,867/99/51행)이라 신생 taxonomy 테이블에 대한 Trino 메타
+  캐시 정황(비결정, 17모델은 정상). 재실행으로 복구, gold 교차검증 22/22 정상(+6.59% = 복구분
+  전파). **후속 권고: gold 모델 최소행수 dbt test 부재**(0행 스냅샷이 test 통과) — 밴드 게이트가
+  D1 단에서 방어하나 gold 단 방어 없음.
+
+### 81. dbt seed 부트스트랩 — silver DAG 에 매 run 멱등 재적재 태스크 신설 (#567, prod from-zero 실측 갭)
+
+request:
+- prod from-zero 적재 중 gold 21/22 모델이 `commerce_dataset_taxonomy` 부재로 동시 실패(실측).
+  향후 환경 변경/이관 재적재에서도 같은 에러가 나지 않게, 적합한 레이어를 검토해 seed 가
+  자동 적재되도록 조치하라는 지시.
+
+response:
+- 원인: 분류 체계 참조가 dbt seed 인데 어떤 DAG 에도 seed 단계가 없어 dev 의 과거 수동 1회
+  시드에 잠재 의존. 소비자 = gold 22종 중 21종 + silver `silver_license_detail_health`(파킹).
+- 레이어 판단: dbt 진입 레이어인 **silver DAG** 가 정위치(사용자 판단 일치) — silver 에서
+  적재되면 gold 는 파이프라인 순서상 구조적으로 보장.
+- 구현: `commerce_load_silver.dbt_seed_taxonomy` 태스크 — 매 run `dbt seed
+  --target {COMMERCE_DBT_TARGET or DBT_TARGET}` 멱등 실행(존재 시 전량 교체·152행·수 초).
+  배선 `[dbt_seed_taxonomy, enrich_admin_dong_ref, enrich_fill_jibun, ensure_silver_marker]
+  >> seed_silver_if_empty >> dbt_silver`.
+- 검증: `airflow tasks test` 실실행 `{'seeds_loaded': 1, 'target': 'prod'}` success ·
+  DAG import 무에러. 운영 선조치로 prod 수동 seed(152행=dev 일치) 후 gold run 재개 정상.
+- 동류 갭 기록: `raw/common/admin_dong` 원천 부재 → silver enrich 실패(운영 조치: dev 스냅샷
+  138개 복사, 리더는 max(load_date) 자동 선택이라 원천 오너 정기 적재 시작 시 자연 대체).
+
+## 2026-07-28
+
+### 80. run 마커를 control 존으로 재배치(#60 오너 해석) + 재감사 확정 갭 5건 수리
+
+request:
+- 사용자 재검토 지시: `raw/…/run_id=…/_markers/` 도 control 레이어로 옮겨야 할 것으로 보임 — 파일
+  이동 누락과 로직 누락을 재검토 후 작업. **오너 해석 확정**: #60 약속③은 마커의 '내용' 규약일 뿐,
+  요지는 "수집 등 중간 과정이 읽는 **지시 파일**은 control 하위로 모은다" → run 마커도 이동 대상.
+- 부가 명시: 행정동 코드 원천은 `raw/common` 유지(#60 부록의 reference/ 이사 초안 미적용) —
+  commerce 는 이미 `raw/common/admin_dong/…` 를 읽으므로(enrich_tasks) 코드 무변경.
+
+response:
+- **마커 존 신설**: `COMMERCE_MARKERS_LAYER`(prod `ops/control/state/commerce/markers`, 미설정 시
+  구 위치 폴백). 경로는 run 폴더와 `load_date=/run_id=` 1:1 미러. paths(markers_run_dir/
+  run_index_root/markers_date_prefix) · markers(list_run_ids 가 마커 존 스캔 — identical run 은
+  마커만 남기므로 단일 소스) · watchdog(_RUN 탐지 파일명 기준) 정합. 기존 마커 3,667개를
+  `scripts/relocate_run_markers.py`(dry-run/--apply, 복사→크기검증→원본삭제)로 seoul 내 재배치.
+- **멀티에이전트 재감사(14 에이전트, 적대 검증)**: 파일 이동 누락 **0건** 재확인(5,075개 키·바이트
+  집합차 대조 — 초과 1건은 스모크 마커, receipts/silver state/_backup/watchdog 구 마커 skip 은
+  전부 정당 판정). 로직 갭 5건 확정·수리:
+  - **F5**: `_full/` 고아 랜딩(랜딩~diff 사이 중단 시 영구 잔존) — cleanup_incomplete 가 동일자
+    성공 시 랜딩까지 정리 + 마커 없는 중단 run 을 raw 일자 파티션에서도 발견(_same_day_run_ids).
+  - **F7**: 같은 run 재시도로 completed·incomplete 공존 가능 — completed 기록 **후** 잔존
+    incomplete 삭제(상호배타 계약 유지, 역방향 금지).
+  - **B2**: purge_v2 의 purge_raw 가 ops 존 diff_target/마커를 못 찾음 — 존 스캔 추가
+    (classify_zone_keys, stem 정확 일치).
+  - **B3**: purge_v2 purge_gold 가 폐사한 `gold.pg` import 로 런북 전체 크래시 — fail-soft skip
+    (gold=Iceberg, silver purge 후 다음 gold run 반영)으로 교체.
+  - **B9**: cleanup_orphan_warehouse_dirs 가 무조건 dev 카탈로그를 감사 — COMMERCE_DBT_TARGET
+    우선 해석으로 정합(프로드 감사 시 orphan 오분류 방지).
+  - (B7) 구 위치를 서술하던 독스트링(seed_diff_target/incremental/resort/load_plan) 정정.
+- migrate 스크립트 매핑에 run_marker 분기 추가(재실행 시에도 마커는 존으로). 테스트 381→
+  스위트 전체 통과(신 존 왕복·고아 GC·배타·매핑 케이스 추가), security PASS.
+- 문서: storage.md(마커 존 절·prod R2 블록)·common_info·data-model·README·configuration.md 정합.
+
+### 79. R2 저장 위치 개편 — #60 규약(load_date= 파티션·ops 존) + seoul(프로드) 버킷·iceberg 카탈로그 전환 + 이력 이관 (ASK-Seoul#60)
+
+request:
+- ASK-Seoul#60(경로 규약 — 약속 3개 + 존 정리)을 토대로 저장 위치 변경. 단 목적지는 dev 가 아니라
+  **`seoul/`(프로드 버킷)**. 다른 properties 는 필요 시에만 명시·허가 후 변경, commerce 저장경로는 변경 OK,
+  하드픽스 지양(env 조합). seoul-dev 의 기존 raw 를 새 구조로 seoul 에 적재 가능하게 이관.
+- Q&A 확정: **Iceberg 카탈로그도 seoul(prod `iceberg`)로 전환** · 공유 `TRINO_ICEBERG_CATALOG` 는
+  `iceberg_dev` 덮어쓰기(멘티 안전망)를 **진짜 prod(`iceberg`)로 복원 승인** · bronze 적재 실행은 **보류**
+  (적재 전 생성물·위치 프리뷰 확인까지 완료, 실행만 대기).
+
+response:
+- **약속① (`load_date=` key=value 날짜)**: `paths._run_date_dir` 가 `YYYY/MM/DD` → `load_date=YYYY-MM-DD`
+  파티션 생성. 리더(markers/load_plan/incremental)는 `run_id=` 부분문자열·run_id 문자열 기반이라 무변경 —
+  신·구 공존 판독. watchdog 의 일자 스캔은 신설 `paths.raw_date_prefix()` 사용.
+- **약속② (가변 상태 raw 밖 → ops 존)**: diff-target 를 `COMMERCE_DIFF_TARGET_LAYER`(신설 env, 미설정 시
+  구 위치 폴백)로, watchdog 가드를 `COMMERCE_WATCHDOG_STATE_LAYER`(신설, 구 `state/commerce/watchdog`
+  하드코딩 제거)로. 기존 env 3종(BRONZE/SILVER/SERVE_STATE_LAYER)은 **값만** `ops/control/state/commerce/
+  {bronze,silver,serve}` 로. 약속③(완결성 마커)은 기존 준수.
+- **prod 전환(env 조합, 코드 하드픽스 없음)**: `.env.commerce` `R2_BUCKET=${R2_BUCKET_NAME:-seoul}`
+  (R2 자격증명은 루트 동일 이름 직접 상속으로 단순화). `warehouse._is_dev()` 가 `COMMERCE_DBT_TARGET`
+  우선(공유 `DBT_TARGET=dev` 무변경 — silver/gold DAG 와 동일 규약, gold/serving 은 `_qualified()` 경유
+  전파). 루트 `.env`: `COMMERCE_DBT_TARGET=prod` + 레이어 5종 + `TRINO_ICEBERG_CATALOG=iceberg` 복원(승인).
+- **이력 이관**: 신규 `scripts/migrate_raw_to_prod_bucket.py`(purge_v2 패턴 — dry-run 기본/`--apply`,
+  서버사이드 copy, 멱등, 소스 무삭제). 실측: dated run 4,771개(2.67GB)→`load_date=` 파티션,
+  diff-target 304개(2.74GB)→ops 존, `_backup` 78개·테스트 잔재 2개 제외 — **5,075개 복사, 실패 0·불일치 0**.
+  상태(워터마크/영수증)는 **이관 안 함**(prod 는 from-zero 적재 예정이라 dev 워터마크 이관 금지 — 리셋).
+- **검증**: pytest 372 passed(레이아웃·ops 존·매핑 신규 테스트 포함) · `python -m security` PASS ·
+  컨테이너 실측 ALL GREEN(`r2_bucket=seoul`·`_qualified()=iceberg.commerce`·워터마크 키 ops 존·공유
+  `DBT_TARGET=dev` 유지) · Trino `SHOW CATALOGS`/PyIceberg REST 로 prod 카탈로그 접근 확인(기존 토큰 충분) ·
+  수집 스모크(resort_complex) → `raw/commerce/load_date=2026-07-28/run_id=…` + ops 존 diff-target 실기록.
+- **적재(보류 상태)**: 적재 계획 프리뷰 실측 — base 152건/2,631MB(PyIceberg)+증분 954건/18MB(Trino),
+  run 35개(6/30~7/28), 152/152종 base 확보. **실행은 사용자 보류** — 실행 시
+  `COMMERCE_LOAD_LOOKBACK_DAYS=0` 1회 오버라이드로 `commerce_load_bronze` 트리거(기본 3 창은 base 를
+  배제해 오적재 위험). 그때까지 **load 3종(bronze/silver/gold)+watchdog pause 유지**(빈 워터마크에서
+  기본 창 실행 방지), `commerce_collect_raw` 만 재개(신규 수집은 신 레이아웃으로 정상 기록).
+- 호스트측: 루트 `.env.example` 에 신규 키 반영(별도 PR). seoul-dev 는 완전 보존(롤백 = env 되돌림).
+
+### 78. commerce env 를 루트 `.env` `commerce 전용값` 블록 단일 소스로 이관 + `.env.commerce` 매핑 레이어화 (호스트 env 계약 변경)
+
+request:
+- 호스트 프로젝트 오너 지시: commerce 의 env 값 중 루트 `.env` 를 상속하지 않던 것을 모두 루트 `.env`
+  기준으로 상속하도록 바꾸고, commerce 에만 관리되던 값은 루트 `.env` 에 `commerce 전용값` 블록으로 묶어 추가.
+- generic 이름 네임스페이스 방식 Q&A → **`COMMERCE_` 접두(옵션 B)** 채택(타 도메인 공유 env 오염 방지).
+
+response:
+- **계약 반전**: 기존 규약("commerce 변수는 루트 `.env` 에 넣지 않고 `.env.commerce` 로 공급, 번들 자립")을
+  뒤집어 **루트 `.env` 의 `commerce 전용값` 블록**을 단일 소스로 삼는다. `dags/` 는 서브모듈, 루트
+  `.env`/`.env.example` 는 호스트 프로젝트 파일이라 변경이 두 리포로 나뉜다(호스트 인프라 파일
+  `docker-compose.yml`/`Dockerfile.airflow` 무접촉 규약은 유지, env 값만 예외).
+- **루트 `.env`/`.env.example`**: `commerce 전용값` 블록 신설. generic 이름(`SEOUL_PAGE_SIZE`·
+  `STORAGE_BACKEND`·`LOCAL_DATA_ROOT`·`SCHEMA_VERSION`·`R2_REGION`·`SEOUL_MAX_PAGES`·
+  `SEOUL_REQUEST_DELAY_SECONDS`)은 `COMMERCE_` 접두로 네임스페이스, 이미 안전한 `COMMERCE_*`/`JUSO_*` 는
+  동일 이름. `JUSO_CONFM_KEY` 시크릿도 루트로 이관(루트 `.env` 는 gitignore).
+- **`.env.commerce`(실파일)/`.env.commerce.example`**: 얇은 매핑 레이어로 재작성 — generic 이름은
+  `${COMMERCE_<KEY>:-기본}` 으로 코드 이름 복원, R2 는 기존대로 `${R2_DEV_*}` 매핑. `:-기본` 은 루트
+  `.env` 없이 단독 실행 시 settings.py 기본값과 동일(빈문자열 footgun 방지). `.env.commerce` 에서 시크릿 제거.
+- **코드 무변경**: settings.py 는 여전히 generic 이름을 읽고 `.env.commerce` 가 되돌리므로 include/ 코드
+  무변경. 충돌 실측 — 루트 승격 대상 generic 이름의 타 도메인 사용처는 상수/독스트링/동일 기본값
+  (`R2_REGION=auto`)뿐이라 무해.
+- **검증**: 실제 `commerce_core.env` 로더로 (1) compose 시나리오(루트 `.env` 주입) → `settings` 8/8 값
+  변경 전과 동일, (2) 단독 실행 시나리오 → generic 키가 코드 기본값으로 fallback(`SCHEMA_VERSION` 공백
+  footgun 없음) 확인.
+- **문서 정합**: CLAUDE.md(Working Scope·부트스트랩), configuration.md(§1 주입·§3 대응표),
+  environments.md, configuration/README.md, README.md, project_setting.md(포팅 체크리스트 포함)를 새 모델로 갱신.
+- **트레이드오프**: 번들 자립/이식성이 낮아짐 — 포팅 시 대상 호스트 `.env` 에 `commerce 전용값` 블록을
+  함께 옮겨야 한다(project_setting.md 이식성 체크리스트에 명시).
+
+### 77. D1 서빙을 도메인 공통 Serving Contract v1(#478) 규격에 정합 — `_catalog` 8→15컬럼 + dbt 확정 필드 (#493 보강 · ASAC-DBT#334 보강)
+
+request:
+- 현재 D1 적재가 ASAC-DAG **#478 확정 필드(`meta.serving.*`)** 와 **`_catalog` 공통 규약
+  (8→15컬럼)** 을 따르는지 확인하고, 다른 부분을 규격에 맞게 수정.
+
+response:
+- **`_catalog` 15컬럼 정합(export)**: 자체 8컬럼 스키마(`serving_tier` 포함, 정본에 없는 컬럼)를
+  버리고 **`common/serving/d1_client.py` 의 `CATALOG_COLUMNS`/`CATALOG_DDL`(15컬럼, #478 §3.4)** 를
+  lazy import 로 단일 소스 소비. 상호운용 버그 해소 — 정본 15컬럼 `_catalog` 가 이미 있으면 8-value
+  bare `INSERT` 는 즉시 실패하고, commerce 가 먼저 돌면 8컬럼 테이블을 만들어 타 도메인을 깨뜨렸음.
+  upsert 는 **명시 컬럼 리스트**로 전환(컬럼 순서 드리프트 안전). 신규 기록값: `product_id`
+  (`commerce_*` = d1\_\* 1:1 파생) · `external`(dbt 계약) · `product_question` · `serving_status=
+  'published'` · `publication_id`(uuid4) · `source_run_id`(export dag_run_id) · `published_bytes`
+  (json bytes, 정본 산식) · `freshness`/`time_axis`(v1 은 event_time 미선언 → NULL). 밴드 게이트
+  스킵분은 `_catalog` 무접촉(직전 published 행 = 서빙 중 스냅샷 서술 유지, 스킵 상태는
+  `d1_meta.build_status='stale'` 담당).
+- **dbt 계약 #478 확정 필드 정합(ASAC-DBT, 짝 커밋)**: 22 gold `meta.serving` 을 재작성 —
+  `enabled`/`external` 추가(flow_daily 는 둘 다 false — iceberg_api 직조회, D1 미게시),
+  `contract_version: v1`, `publication_mode: snapshot`(구 iceberg/rollup 은 enum 위반 — 실제 메커니즘이
+  전량 교체 스냅샷), `zero_policy: retain_last_good`(구 keep_prior 동의어), `partial_policy:
+  {min_publish_ratio: 0.5}`(행수 밴드 ±50% 하한의 계약 표현), `refresh` → `publication_trigger:
+  {trigger_type: asset, max_interval_minutes: 1560}`(gold Asset 트리거·26h stale 감시축),
+  `product_id` → `commerce_*` 도메인 접두(전역 유일), `shape` 추가. commerce 확장(`serving_tier`/
+  `d1_table`/`d1_rollup`)은 추가 필드로 유지(Validator 는 미지 필드 허용). **PK 근거** — 복합키 21종에
+  자체 매크로 `unique_combination_of_columns`(dbt_utils 무의존) 모델 테스트 + grain 축 `not_null`
+  보강(선언 PK 22종 전부 모델 SQL `GROUP BY` 실측과 일치 확인).
+- 검증: #478 Validator 규칙 로컬 재현 → **22모델 0 findings**(serving-contract-gate 통과 형상) ·
+  export import + 15컬럼 upsert SQL 렌더 검증 · `py_compile` OK · `python -m security` PASS(차단 0).
+  D1 실적재 재검증(행수 밴드 재보정)은 배포 후 후속 그대로.
+- **구 적재 잔재 삭제(2026-07-28 실측·실행)**: 공유 D1 에 남아 있던 commerce 구 반복 잔재
+  `gold_license_dong_summary` 테이블 + `_catalog` 행 1개를 삭제(신규 규약은 `d1_dong_summary` 라
+  새 export 가 지우지 않는 고아). 삭제 후 검증 — commerce 잔재 0 · `_catalog` 타 도메인 23행
+  (transit 6·citydata 17) 무손실. `d1_meta`·`d1_*` 는 애초 미존재(PR 미배포).
+- **⚠ 배포 블로커(팀 이슈 필요)**: 실측 결과 공유 `_catalog` 는 아직 **구 8컬럼 스키마**
+  (`serving_tier` 포함)로 transit·citydata 가 서빙 중 — 15컬럼 정본(`CATALOG_DDL`)은
+  `IF NOT EXISTS` 라 기존 테이블을 못 바꾸므로, **8→15 마이그레이션(정본 컬럼 순서로 재생성) 전에는**
+  commerce 신규 export 의 `_catalog` upsert 도, 공통 Publisher 의 bare 15-value INSERT 도 실패한다.
+  마이그레이션은 타 도메인 행·Worker 소비(`serving_tier` 의존 가능)에 영향 → 도메인 공통 결정
+  (#478 계열 이슈)로 제안할 것. commerce 단독 수행 금지.
+
+---
+
+## 2026-07-23
+
+### 76. gold→D1 서빙 export 분리 DAG(commerce_serving_export) + dbt serving_tier 계약 (#493 · ASAC-DBT#334)
+
+request:
+- dags 에서 SQLite(=D1) 적재를 **기존 gold 라인에서 분리**해 신규 DAG 로 올린다. 기존 gold 에서
+  **지정한 품목만** D1 에 갱신되도록 구성. 위 변경에 맞춰 dbt 계약도 함께 반영. 구현 깊이=**코어
+  서빙셋**(direct 15 + rollup 7 + d1_meta + 행수 게이트 + _catalog/R2 마커, dim·current-period 후속),
+  기동=**gold 완료 Asset 자동 트리거**(사용자 확정).
+
+response:
+- **분리 DAG `commerce_serving_export`**: gold 빌드 라인(`commerce_load_gold`)과 서빙 export 를
+  분리(spec §1.4 의 "gold DAG 내 편입" 대신). `commerce_load_gold` 에 `mark_gold_ready`
+  (outlet Asset `iceberg://commerce/gold`, 기본 all_success — **dbt_gold 성공 시에만** 발행) 추가 →
+  export DAG 는 `schedule=[Asset(...)]` 로 자동 기동(분리 유지 + 신선도). Asset 상수는 번들 자립
+  `include/gold/assets.py`(공유 `common.assets` 미변경).
+- **export 모듈 `include/gold/serving_export.py`**: 지정 품목(dbt `meta.serving.serving_tier ≠
+  iceberg_api`)을 공유 D1(`ask-seoul-dev-d1`, citydata·transit 와 동일 DB)에 **전량 교체 스냅샷**.
+  direct 15(SELECT * + 동적 DDL) + rollup 7(§1.3 GROUP BY 파생 — flow_m/y·churn 비율 재산출·
+  geo overview/detail·age_band·uptae share). commerce 소유 `d1_*` 만 DROP+CREATE, 공유
+  `_catalog`/`_request_log`/`d1_meta` 는 **upsert(DROP 금지 — transit 규약 승계)**. 스왑 전 **행수
+  밴드 게이트**(0행/2배 가드 — 밖이면 스킵 + `build_status='stale'` 직전 유지). R2 export 마커
+  `commerce_serve_state/_export_state.json`(재개·감사 정본, silver/bronze state 대칭). D1 HTTP API 는
+  `security.http_post`(timeout·TLS·예외 마스킹), 토큰 `CLOUDFLARE_API_TOKEN`(자동 마스킹), Trino 는
+  `bronze.warehouse`(번들 자립).
+- **dbt 계약(ASAC-DBT#334)**: `_commerce_gold__models.yml` 22모델 `meta.serving` 재정리 — 행수캡
+  `enabled` → `serving_tier`(d1_direct 15 / d1_rollup 6 / iceberg_api 1) + `d1_table` + rollup 축.
+  `gold_license_flow_daily`(원장 290만행)=iceberg_api(D1 금지, Trino 직조회). export `SERVING_SPEC`
+  (22 D1 테이블)과 1:1 대조.
+- **env**: `.env.commerce.example` 에 `CLOUDFLARE_API_TOKEN`·서빙 account/DB id·`COMMERCE_SERVE_STATE_LAYER` 추가.
+- **검증**: py_compile 4파일 OK · `python -m security` PASS(차단 0) · export 모듈 import·SERVING_SPEC 22
+  (중복 0)·롤업 SELECT 포맷 OK · dbt yml YAML 파싱 22모델(로컬 `dbt-trino` 어댑터 부재로 `dbt parse` 는
+  컨테이너/CI 이관). D1 실적재는 컨테이너(Trino·D1 토큰) 필요 — 배포 후 행수 밴드 실측 재보정.
+- 후속(별도 이슈): dim 4종 · current-period 2종(`agg_license_daily/monthly`) · 행수 밴드 실측 보정 ·
+  D1 스왑 원자성(`*_next` 스테이징).
+
+---
+
 ## 2026-07-20
 
 ### 75. from-zero 재빌드 드릴 — bronze/silver/gold 결함 3건 수정 + 태스크 개명 (#458·#459·#460)

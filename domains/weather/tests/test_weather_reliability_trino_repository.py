@@ -13,6 +13,27 @@ from weather_reliability_test_support import RecordingCursor  # noqa: E402
 ORIGINAL_COLLECT_DAG_RUN_SUMMARY = repository.collect_dag_run_summary
 
 
+def test_weather_product_profile_measures_latest_issue_categories_places_and_horizon(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    cursor = RecordingCursor(rows=[(4, 80, 72)])
+
+    result = repository.collect_weather_product_profile(
+        cursor,
+        report.report_config(),
+        datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result == {
+        "core_category_count": 4,
+        "mapped_place_count": 80,
+        "forecast_horizon_hours": 72,
+    }
+    statement = cursor.statements[0]
+    assert "category IN ('TMP', 'POP', 'SKY', 'PTY')" in statement
+    assert "count(DISTINCT place_id)" in statement
+    assert "date_diff(" in statement and "'hour'" in statement
+
+
 def test_weather_dag_run_summary_uses_manifest_table(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     monkeypatch.setenv("ASK_SEOUL_SCHEMA", "weather_traffic_bronze")

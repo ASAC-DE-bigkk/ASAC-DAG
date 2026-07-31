@@ -98,8 +98,15 @@ class TrafficFlowPipeline:
         if str(verified_parent) != parent_incident_run_id:
             raise ValueError("Traffic Flow Incident parent identity mismatch")
         link_ids = self._resolve_links(conf, parent_incident_run_id)
+        landing_load_date = conf.get("load_date")
         raw_result = dict(
-            self._landing.collect(link_ids=link_ids, dag_run_id=flow_run_id)
+            self._landing.collect(
+                link_ids=link_ids,
+                dag_run_id=flow_run_id,
+                landing_load_date=(
+                    str(landing_load_date) if landing_load_date is not None else None
+                ),
+            )
         )
         raw_result["parent_incident_run_id"] = parent_incident_run_id
         return raw_result

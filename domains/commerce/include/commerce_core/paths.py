@@ -1,17 +1,23 @@
-"""결정적 저장 경로 — raw(연/월/일 + run_id 스냅샷) · silver(논리일 파티션).
+"""결정적 저장 경로 — raw(load_date 파티션 + run_id 스냅샷) · silver(논리일 파티션).
 
 원천(raw) 레이어는 **DAG 실행 1회 = run_id 폴더 1개**, 그 안에 API당 1파일 + 완료/미완료 마커.
-run_id 의 날짜(`YYYY-MM-DD`)를 `YYYY/MM/DD` 디렉터리로 펼쳐 run_id 폴더 위에 둔다.
-    {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
-    {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/<short>.completed|.incomplete  # API별 수집 결과 마커(JSON, 리니지 포함)
-    {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/_RUN.completed|.incomplete      # 실행 전체 마커
-    {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet                    # 공통 19컬럼 정규화
+run_id 의 날짜(`YYYY-MM-DD`)를 `load_date=YYYY-MM-DD` 파티션으로 펼쳐 run_id 폴더 위에 둔다
+(ASK-Seoul#60 약속① — key=value 날짜 표기, 도구가 파티션을 기계적으로 인식).
+    {prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl    # API당 1파일(원본 페이지 NDJSON)
+    {prefix}/<MARKERS_LAYER>/load_date=<...>/run_id=<...>/<short>.completed|.incomplete          # API별 수집 결과 마커(JSON, 리니지 포함)
+    {prefix}/<MARKERS_LAYER>/load_date=<...>/run_id=<...>/_RUN.completed|.incomplete             # 실행 전체 마커
+    {prefix}/silver/commerce/<short>/observed_date=YYYY-MM-DD/part-000.parquet                   # 공통 19컬럼 정규화
 
 - **레이어 접두는 .env 로 관리**: COMMERCE_RAW_LAYER(기본 `raw/commerce`) · COMMERCE_SILVER_LAYER
   (기본 `silver/commerce`). bronze→raw 리네임으로 데이터가 raw/commerce 로 이관됨(코드도 정합).
+- **마커는 control 존**(#60 오너 해석: 수집·재수집·적재가 읽는 지시 파일): COMMERCE_MARKERS_LAYER
+  로 지정(prod `ops/control/state/commerce/markers`). 미설정 시 구 위치(run 폴더 안 `_markers/`)
+  폴백. run 폴더와 `load_date=/run_id=` 구조 1:1 미러라 run↔마커 대응이 경로만으로 성립.
+- **diff-target(가변 상태)은 raw 밖**: COMMERCE_DIFF_TARGET_LAYER 로 지정(#60 약속② — raw 는
+  불변 박제만). 미설정 시 구 위치 `{RAW_LAYER}/_diff_target` 폴백(하위호환).
 - {prefix} = COMMERCE_STORAGE_PREFIX(비우면 없음). bucket 접두는 스토리지 백엔드가 붙인다.
-- 연/월/일은 **run_id 에서 파생**(별도 인자 불필요) → 같은 날 실행은 같은 날짜 폴더 아래 모인다.
-- raw 산출물은 **이 run_id 폴더 안에서만** 만든다(외부 경로에 상태 파일을 두지 않는다).
+- load_date 는 **run_id 에서 파생**(별도 인자 불필요) → 같은 날 실행은 같은 날짜 파티션 아래 모인다.
+- raw 산출물은 **이 run_id 폴더 안에서만** 만든다(상태는 COMMERCE_*_LAYER 가 가리키는 ops 존으로).
 """
 from __future__ import annotations
 
@@ -21,8 +27,13 @@ import re
 # 레이어 접두 — .env 로 관리(bronze→raw 리네임, 데이터가 raw/commerce 로 이관됨). 기본값 = 목표 경로.
 RAW_LAYER = os.getenv("COMMERCE_RAW_LAYER", "raw/commerce")
 SILVER_LAYER = os.getenv("COMMERCE_SILVER_LAYER", "silver/commerce")
+# diff-target 레이어(#60 약속② — 가변 상태는 raw 밖 ops 존). 비우면 구 위치 폴백(하위호환).
+DIFF_TARGET_LAYER = os.getenv("COMMERCE_DIFF_TARGET_LAYER", "")
+# 마커 레이어(#60 오너 해석: 마커=수집·재수집·적재가 읽는 **지시 파일** → control 존).
+# 비우면 구 위치(run 폴더 안 _markers/) 폴백(하위호환). prod: ops/control/state/commerce/markers.
+MARKERS_LAYER = os.getenv("COMMERCE_MARKERS_LAYER", "")
 MARKERS_DIR = "_markers"
-DIFF_TARGET_DIR = "_diff_target"   # API별 롤링 diff-target(최신 정렬 전체본) — run_id 무관, 매일 교체
+DIFF_TARGET_DIR = "_diff_target"   # (구 위치 폴백용) raw 루트 아래 디렉터리명
 FULL_LANDING_DIR = "_full"         # 오늘 수집 full 의 임시 랜딩(run 폴더 안) — diff 완료 후 diff 로 이동
 # 마커 타입(API당 1개, 상호배타): 완료 / 미완료(부분·실패)
 MARKER_COMPLETED = "completed"
@@ -39,16 +50,22 @@ def bronze_root(*, prefix: str = "") -> str:
     return _root(prefix, RAW_LAYER)
 
 
+def raw_date_prefix(*, prefix: str = "", date: str) -> str:
+    """해당 수집일의 raw 파티션 접두(`load_date=<YYYY-MM-DD>/`). 일자 단위 스캔용(watchdog 등)."""
+    return f"{_root(prefix, RAW_LAYER)}/load_date={date}/"
+
+
 _RUN_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})_")
 
 
 def _run_date_dir(run_id: str) -> str:
-    """run_id(`YYYY-MM-DD_HHMMSS_mmm`)의 날짜를 `YYYY/MM/DD` 파티션 경로로.
+    """run_id(`YYYY-MM-DD_HHMMSS_mmm`)의 날짜를 `load_date=YYYY-MM-DD` 파티션으로(#60 약속①).
 
     형식이 아니면(테스트용 짧은 run_id 등) 빈 문자열 → 날짜 파티션 없이 동작(방어적).
+    구(`YYYY/MM/DD`) 레이아웃 오브젝트도 리더는 `run_id=` 부분문자열 기반이라 공존 판독 가능.
     """
     m = _RUN_DATE_RE.match(run_id)
-    return f"{m.group(1)}/{m.group(2)}/{m.group(3)}" if m else ""
+    return f"load_date={m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ""
 
 
 def run_collect_date(run_id: str) -> str:
@@ -70,14 +87,44 @@ def bronze_object_key(*, prefix: str = "", run_id: str, short: str, ext: str = "
     return f"{bronze_run_dir(prefix=prefix, run_id=run_id)}/{short}.{ext}"
 
 
+def markers_run_dir(*, prefix: str = "", run_id: str) -> str:
+    """이 run 의 마커 폴더(#60 오너 해석 — 마커는 지시 파일이라 control 존).
+
+    MARKERS_LAYER 설정 시 `{layer}/load_date=<d>/run_id=<rid>`(run 폴더와 1:1 미러),
+    미설정 시 구 위치(run 폴더 안 `_markers/`) 폴백(하위호환).
+    """
+    if MARKERS_LAYER:
+        root = _root(prefix, MARKERS_LAYER)
+        date_dir = _run_date_dir(run_id)
+        base = f"{root}/{date_dir}" if date_dir else root
+        return f"{base}/run_id={run_id}"
+    return f"{bronze_run_dir(prefix=prefix, run_id=run_id)}/{MARKERS_DIR}"
+
+
+def run_index_root(*, prefix: str = "") -> str:
+    """run 발견(list_run_ids) 스캔 루트 — 마커 존(설정 시) 또는 raw 루트.
+
+    identical run(전 API 무변경 → 데이터 파일 0개)은 마커만 남기므로, 마커가 control 존으로
+    간 뒤에는 run 목록의 단일 소스가 마커 존이 된다.
+    """
+    return _root(prefix, MARKERS_LAYER) if MARKERS_LAYER else _root(prefix, RAW_LAYER)
+
+
+def markers_date_prefix(*, prefix: str = "", date: str) -> str:
+    """해당 수집일 마커 파티션 접두(`load_date=<date>/`) — 일자 스캔용(watchdog 등)."""
+    if MARKERS_LAYER:
+        return f"{_root(prefix, MARKERS_LAYER)}/load_date={date}/"
+    return raw_date_prefix(prefix=prefix, date=date)
+
+
 def bronze_marker_key(*, prefix: str = "", run_id: str, short: str, status: str) -> str:
     """API별 마커. status = 'completed' | 'incomplete'."""
-    return f"{bronze_run_dir(prefix=prefix, run_id=run_id)}/{MARKERS_DIR}/{short}.{status}"
+    return f"{markers_run_dir(prefix=prefix, run_id=run_id)}/{short}.{status}"
 
 
 def bronze_run_marker_key(*, prefix: str = "", run_id: str, status: str) -> str:
     """실행 전체 마커(_RUN.completed | _RUN.incomplete)."""
-    return f"{bronze_run_dir(prefix=prefix, run_id=run_id)}/{MARKERS_DIR}/_RUN.{status}"
+    return f"{markers_run_dir(prefix=prefix, run_id=run_id)}/_RUN.{status}"
 
 
 def silver_key(*, prefix: str = "", short: str, observed_date: str,
@@ -95,6 +142,17 @@ def bronze_full_landing_key(*, prefix: str = "", run_id: str, short: str,
     return f"{bronze_run_dir(prefix=prefix, run_id=run_id)}/{FULL_LANDING_DIR}/{short}.{ext}"
 
 
+def _diff_target_root(prefix: str) -> str:
+    """diff-target 레이어 루트(#60 약속② — 가변 상태는 raw 밖).
+
+    COMMERCE_DIFF_TARGET_LAYER 설정 시 그 레이어(예: `ops/control/state/commerce/diff_target`),
+    미설정 시 구 위치 `{RAW_LAYER}/_diff_target` 폴백(하위호환).
+    """
+    if DIFF_TARGET_LAYER:
+        return _root(prefix, DIFF_TARGET_LAYER)
+    return f"{_root(prefix, RAW_LAYER)}/{DIFF_TARGET_DIR}"
+
+
 def bronze_diff_target_key(*, prefix: str = "", short: str, collect_date: str,
                            ext: str = "jsonl") -> str:
     """API별 롤링 diff-target(최신 정렬 전체본). 다음 수집의 비교 기준.
@@ -102,14 +160,14 @@ def bronze_diff_target_key(*, prefix: str = "", short: str, collect_date: str,
     파일명에 **수집일(YYYY-MM-DD)** 을 태깅 — 완료(오늘 날짜로 교체됨)/중단(이전 날짜 잔존)을
     파일명만으로 구분한다. 교체 시 구 날짜 파일은 삭제.
     """
-    return f"{_root(prefix, RAW_LAYER)}/{DIFF_TARGET_DIR}/{short}.{collect_date}.{ext}"
+    return f"{_diff_target_root(prefix)}/{short}.{collect_date}.{ext}"
 
 
 def bronze_diff_target_keyfile(*, prefix: str = "", short: str, collect_date: str) -> str:
     """diff-target 의 검증키(sha256) 사이드카(수집일 태깅 동일)."""
-    return f"{_root(prefix, RAW_LAYER)}/{DIFF_TARGET_DIR}/{short}.{collect_date}.key"
+    return f"{_diff_target_root(prefix)}/{short}.{collect_date}.key"
 
 
 def diff_target_prefix(*, prefix: str = "", short: str) -> str:
     """이 API 의 diff-target 파일 나열용 접두(`<short>.` — 날짜 무관 발견용)."""
-    return f"{_root(prefix, RAW_LAYER)}/{DIFF_TARGET_DIR}/{short}."
+    return f"{_diff_target_root(prefix)}/{short}."

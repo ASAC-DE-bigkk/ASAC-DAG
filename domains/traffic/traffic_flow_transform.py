@@ -23,7 +23,11 @@ from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa:
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
-from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from common.runtime_guard import (  # noqa: E402
+    TARGET_CHOICES,
+    default_target,
+    validate_dev_runtime,
+)
 from traffic_dbt_failure import (  # noqa: E402
     R2RecoveryRecordSink,
     build_failure_notification,
@@ -42,7 +46,7 @@ from traffic_ingest.assets import (  # noqa: E402
     publish_through_alias,
     schedule_asset,
 )
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from traffic_ingest.common.resources import TRINO_TRANSFORM_POOL  # noqa: E402
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     TransformFailurePorts,
@@ -67,7 +71,11 @@ SNAPSHOT_TASK_ID = "resolve_traffic_flow_silver_snapshot_run"
 FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
 PIN_CRITICAL_PRIORITY = 10
 DBT_RETRY_DELAY = timedelta(minutes=2)
-DEFAULT_PARAMS = {"target": Param(default="dev", type="string", enum=["dev"])}
+DEFAULT_PARAMS = {
+    "target": Param(
+        default=default_target(), type="string", enum=list(TARGET_CHOICES)
+    )
+}
 record_traffic_problem = problem_failure_callback(domain="traffic")
 
 
@@ -187,7 +195,7 @@ with DAG(
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
         python_callable=resolve_traffic_flow_silver_snapshot_run,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,

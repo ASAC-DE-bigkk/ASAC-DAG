@@ -57,7 +57,7 @@ def test_canonical_w2_dag_has_a_small_independent_phase_chain():
     assert module.dag.kwargs["schedule"] == [FakeAsset(module.WEATHER_BRONZE_ASSET)]
     assert module.dag.kwargs["max_active_runs"] == 1
     assert module.dag.kwargs["is_paused_upon_creation"] is True
-    assert module.DEFAULT_PARAMS["target"].schema["enum"] == ["dev"]
+    assert module.DEFAULT_PARAMS["target"].schema["enum"] == ["dev", "prod"]
 
     expected_order = [
         "validate_dev_runtime",
@@ -87,7 +87,13 @@ def test_canonical_w2_dag_has_a_small_independent_phase_chain():
         else:
             assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
         assert task.kwargs["weight_rule"] == "absolute"
-        assert task.kwargs["on_failure_callback"] is module.record_weather_problem
+        if task_id == module.DBT_PHASE_TASK_IDS[-1]:
+            assert task.kwargs["on_failure_callback"] == [
+                module.record_weather_problem,
+                module.record_weather_gold_product_failure,
+            ]
+        else:
+            assert task.kwargs["on_failure_callback"] is module.record_weather_problem
 
     metrics = module.dag.task_dict["publish_dbt_run_metrics"]
     assert metrics.is_teardown is True

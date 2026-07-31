@@ -46,6 +46,10 @@ def dev_env():
         "TRINO_DEV_ICEBERG_CATALOG": APPROVED_DEV_CATALOG,
         "ASK_SEOUL_SCHEMA": APPROVED_DEV_SCHEMA,
         "WEATHER_SCHEMA": "weather",
+        "R2_DEV_BUCKET_NAME": "seoul-dev",
+        "R2_DEV_ENDPOINT": "https://dev.invalid",
+        "R2_DEV_ACCESS_KEY_ID": "dev-access",
+        "R2_DEV_SECRET_ACCESS_KEY": "dev-secret",
     }
 
 
@@ -56,6 +60,10 @@ def prod_env():
         "TRINO_ICEBERG_CATALOG": APPROVED_PROD_CATALOG,
         "ASK_SEOUL_SCHEMA": APPROVED_DEV_SCHEMA,
         "WEATHER_SCHEMA": "weather",
+        "R2_BUCKET_NAME": "seoul",
+        "R2_ENDPOINT": "https://prod.invalid",
+        "R2_ACCESS_KEY_ID": "prod-access",
+        "R2_SECRET_ACCESS_KEY": "prod-secret",
     }
 
 

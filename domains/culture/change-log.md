@@ -3,6 +3,105 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-07-29 — 첫 volume_hwm 쓰기를 레거시 리포트로 부트스트랩 (#582)
+
+- **결함** — `write_volume_hwm` 의 첫 쓰기는 `previous={}` 라 **이번 run 에 rows>0 인
+  데이터셋만** 남는다. 누적 장부는 두 번째 쓰기부터 "부분 run 이 최신이어도 나머지는
+  과거에서 보충된다"는 성질을 갖지만, 첫 쓰기에는 물려받을 과거가 없다.
+- **왜 조용히 굳나** — `load_baselines` 는 HWM 이 **비어 있을 때만** 레거시로 폴백한다.
+  14개짜리 장부는 "비어 있지 않음"이라 폴백이 다시 안 타고, 빠진 데이터셋의 볼륨
+  가드(#147)가 꺼진 채로 굳는다. fail-open 이라 로그 한 줄 외엔 아무 신호도 없다.
+- **하필 걸리기 쉬운 데이터셋** — `kopis_facility_detail` 은 야간 top-up 대상이 0건이면
+  `skipped`(rows=0)로 끝나는 게 **정상 경로**다(#466·#562). dev 실측에서 최근 4개 리포트 중
+  2개가 그랬다(7/26·7/28 rows=0 / 7/25 1700 · 7/27 3).
+- **해법** — `previous.datasets` 가 비면 `_load_baselines_legacy` 로 부트스트랩. 레거시
+  리포트를 정리한 뒤에는 `{}` 를 돌려주므로 자연히 no-op 이 된다(폴백 제거의 전제).
+  대안인 "`load_baselines` 를 `{**legacy, **control}` 병합"은 드물게만 rows>0 인
+  데이터셋 때문에 옛 리포트를 오래 남겨야 해서 정리가 늦어진다. → `source/ingest.py`
+- **dev 는 수동 재시딩 완료** — 레거시 5건 병합(15개)으로 채워 레거시와 차이 0.
+  prod 는 아직 HWM 이 없어 이 수정이 첫 런에 적용된다. → `tests/test_reports_ops_zone.py`(+2)
+
+## 2026-07-29 — run 리포트를 raw 밖으로, 볼륨 HWM 은 control 존 분리 (#579)
+
+- **`write_run_report` 목적지 이동** — `raw/culture/_reports/load_date=…` →
+  `ops/reports/culture/observed_date=…`. raw 는 "영구 보존·이동 금지" 구역(#60 약속 ②)이라
+  관측 산출물이 거기 살면 그 규칙이 가변물까지 영구 보존한다. 날짜 키가 `observed_date` 인
+  이유는 이 파일의 날짜가 원본 수신일이 아니라 **관측일**이고 자동 삭제·감사가 그 기준으로
+  돌기 때문. → `source/config.py`(존 상수 3종) · `source/ingest.py`
+- **리포트를 통째로 옮기면 안 되는 이유 = `run_report.json` 의 역할이 둘** — SLO·대시보드가
+  읽는 관측 기록이면서 동시에 **#147 볼륨 가드의 기준선(HWM) 공급원**이다. `ops/reports/` 는
+  TTL 대상 구역이라 거기서만 기준선을 읽으면 **lifecycle 이 걸리는 순간 가드가 조용히
+  꺼진다** — `load_baselines` 가 fail-open 이라 에러도 안 나고 로그 한 줄만 남는다. #60 이
+  `ops/control/` 을 "HWM·커서·diff 기준"이라 콕 집어 쓴 게 이 경우다.
+- **`write_volume_hwm` 신설** — `ops/control/state/culture/volume_hwm.json` 단일 최신본
+  (누적 장부). 데이터셋별 "가장 최근 성공 run 의 rows". 리포트 5건을 훑던 종전 방식과 결과는
+  같지만 **창이 없어** 부분 run 이 연속돼도 기준선이 밀려나지 않는다. 두 가지를 일부러 안
+  한다: ⓐ 에러난 데이터셋 미반영(실패 런 부분 rows 가 기준선을 끌어내리면 다음 날 진짜
+  급락이 정상으로 보인다) ⓑ 과거 `ingest_ts` 는 기존 값을 덮지 않음(백필·재실행 방어).
+- **과도기 dual-read** — `load_baselines` 는 control HWM 우선 → 없으면 옛 리포트 스캔 폴백.
+  없으면 **전환 첫날 볼륨 가드가 통째로 꺼진다.** `scan_new_reports` 는 신·구 prefix 양쪽을
+  훑고 배치 안에서도 `ingest_ts` 로 중복을 접는다 — 같은 리포트가 두 존에 있는 상황이
+  실제로 있다(prod 승격 중 복사된 61건). → `slo/loader.py` · `culture_bronze.py`
+- **기존 62건은 이동 0건** — #60 "기존 객체 이동 0건", 전환은 새 쓰기부터. 물리 이사 대상으로
+  명시된 건 가변 상태 3건(`_diff_target`·`_backup`·`_checkpoints`)뿐이고 culture 리포트는
+  거기 없다. → `tests/test_reports_ops_zone.py`(11건), `docs/storage.md`, `docs/architecture.md`
+
+## 2026-07-29 — 완결 확인서에 #60 필수 6필드 (#577)
+
+- **`_manifest.json` 에 `completed_at`·`status`·`expected_count`·`actual_count` 추가.**
+  ASK-Seoul#60 약속 ③ R2 가 정한 필수 6필드 중 3개가 비어 있었다 — dev·prod raw 전수
+  실측(각 23,763객체) 결과 **확인서 561건 전부** 동일하게 누락. `rows`·`pages`·`bytes` 는
+  실제값만 있어 "기대 vs 실제" 대조가 안 됐고, `completed_at`·`status` 부재로 R1(확인서 =
+  완료 표시)의 근거가 **파일 유무 하나**뿐이었다. → `source/ingest.py`
+- **`status` 가 필요한 진짜 이유** — 확인서는 위반이 있어도 쓰인다. 볼륨 급락(#147)은
+  확인서를 **쓴 뒤** `result.error` 로 승격되므로, 확인서가 있으면서 그 run 은 실패인
+  랜딩이 실제로 남는다. 즉 "확인서가 있다 = 온전하다" 가 성립하지 않는다. 위반 목록은
+  확인서 작성 **전에** 확정돼 있어(`evaluate_landing`) 정확히 판정 가능.
+- **`expected_count` 를 원천 총계로 두지 않았다** — 서울 openapi 의 `list_total_count` 는
+  신뢰 대상이 아니다(#147: 실제 19,377행에 3,925를 `INFO-000` 으로 반환 → 80% 조용한
+  누락). 그 값을 기대치로 삼으면 검증 장치가 거짓말을 정답으로 삼는 구조가 된다. 그래서
+  기대는 **계약 하한(`min_rows`) + 직전 good 런(HWM)** 으로 정의하고, 확인서가 그 정의를
+  자기 안에 밝힌다. 같은 재료가 `checks` 에도 있지만 일반 소비자가 culture 의 checks
+  스키마를 몰라도 읽을 수 있게 최상위로 승격. → #60 확정 시 문구 수정 제안 예정.
+- **추가만 · 소급 수정 0건** — 확인서를 읽는 기존 소비자 2곳(`_ids_from_landed_list`,
+  prod 백필 스크립트)이 쓰는 필드는 그대로. 기존 561건은 손대지 않는다(#60 "기존 객체
+  이동 0건"과 같은 원칙). → `tests/test_manifest_contract.py`(6건), `docs/storage.md`
+- **`finished_ts` 재사용 불가** — `DatasetResult.finished_ts` 는 `ingest_dataset` 의
+  `finally` 에서 채워져 확인서 조립 시점엔 비어 있다. 확인서 작성 시점에 직접 찍는다.
+
+## 2026-07-29 — culture_transform 체인 맨 앞에 dbt deps (#564)
+
+- **`dbt_deps` 태스크 신설** — 체인이 `dbt_deps → dbt_source_freshness → dbt_seed →
+  dbt_run → dbt_test` 가 됐다. dbt 는 `packages.yml` 선언 수와 `dbt_packages/` 설치 수가
+  어긋나면 **파스 단계**에서 죽어(`dbt found N package(s) specified ... but only M
+  installed`) 네 태스크가 전부 시작조차 못 한다. → `culture_transform.py`
+- **어긋나는 경로가 둘** — ① `packages.yml` 에 패키지를 추가하는 PR(대기 중인 ASAC-DBT#347
+  이 서빙 계약 #346 의 복합 PK 근거로 `dbt_utils 1.3.1` 추가) ② `dbt_packages/` 유실
+  (gitignore 대상이라 `git clean -fdx`·컨테이너 재생성으로 사라지는데 **아무도 다시 설치해
+  주지 않았다**). ②는 #347 과 무관한 기존 취약점으로, culture 가 로컬 패키지 하나
+  (`asac_axes`, 심볼릭 링크)로 버텨 와서 드러나지 않았을 뿐이다.
+- **실측 근거** — scheduler 컨테이너에 culture 프로젝트를 복사해 재현: `dbt_packages` 삭제 시
+  `1 specified / 0 installed`, #347 의 packages.yml 적용 시 `2 specified / 1 installed`
+  로 각각 `Compilation Error`. `dbt deps` 를 먼저 돌리면 둘 다 해소되고 parse 성공.
+  컨테이너에서 dbt hub API·GitHub tarball 도달 확인(HTTP 200), `dbt deps --target dev`
+  플래그 호환 확인.
+- **선례** — citydata `install_deps: True` + `_dbt("deps")`, traffic `dbt_deps` 태스크.
+- **영향 범위** — 실패 시 `culture_transform` 전체(silver 10 + gold 14 + 계약 테스트)와
+  Asset 하류 `culture_slo`. 수집(`culture_bronze`)은 무관해 데이터 유실은 없고 신선도만 정지.
+
+## 2026-07-27 — culture D1 서빙 export DAG 신설 (#520)
+
+- **`culture_serving_export` — 공통 Publisher factory 소비자 1호** — 외부 gold 7종을
+  Serving Contract v1.1(`meta.serving`, ASAC-DBT#346)에 따라 Cloudflare D1(팀 공용
+  `ask-seoul-dev-d1`)에 전량 스냅샷 게시. 스케줄 `30 4 * * *` KST(transform ~03:22 후 ·
+  culture_slo 05:01 전), 계약의 `publication_trigger.schedule_cron` 과 일치(§6).
+  파이프라인은 전부 공통(#505): Gate→D1 Write→Verify→`_catalog` Upsert→Smoke→자기검증.
+  → `culture_serving_export.py` (도메인 쪽은 이 얇은 파일 하나)
+- **윈도우(append) 방식 기각 근거** — 공통 append lookback 이 `last_good_max` 기준이라
+  미래 날짜 행 13.1만을 가진 `activity_by_dong` 에서 창이 깨진다. 수정은 `common/serving`
+  변경 = 멘토 게이트라, Workers Paid 예산(7종 ~28.1만/일 ≈ 8.6M/월, 포함량의 ~22%) 안에서
+  전량 스냅샷(A안) 채택. → `docs/design/2026-07-27-culture-serving-export-d1.md`
+
 ## 2026-07-27 — 공연 상세 야간 안티조인 전환 (#518)
 
 - **`kopis_performance_detail` → `missing_only_nightly`** — 야간엔 신규 공연만

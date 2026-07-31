@@ -31,10 +31,19 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.ops.product_observability import record_domain_stage_event  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
-from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from common.runtime_guard import (  # noqa: E402
+    TARGET_CHOICES,
+    default_target,
+    validate_dev_runtime,
+)
 from weather_ingest.common.resources import DbtWorkload, TRINO_HEAVY_POOL  # noqa: E402
 from weather_ingest.runtime import build_weather_manifest  # noqa: E402
+from weather_ingest.w2_canonical_runtime import (  # noqa: E402
+    AdminDongCrosswalkSnapshotUnavailableError,
+    resolve_admin_dong_crosswalk_snapshot_id,
+)
 import weather_dbt_execution as weather_dbt  # noqa: E402
 from weather_dbt_failure import classify_weather_dbt_failure  # noqa: E402
 from weather_lineage import enable_lineage_if_configured  # noqa: E402
@@ -90,16 +99,20 @@ DBT_PHASE_SPECS = (
 DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
 DEFAULT_PARAMS = {
     "target": Param(
-        default="dev",
+        default=default_target(),
         type="string",
-        enum=["dev"],
-        description="dbt target profile name (dev only).",
+        enum=list(TARGET_CHOICES),
+        description="dbt target profile name; defaults to the runtime env (#561).",
     )
 }
 record_weather_problem = problem_failure_callback(
     domain="weather",
     dbt_project_dir=DBT_PROJECT,
     dbt_run_results_xcom_key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
+)
+record_weather_gold_product_event = record_domain_stage_event("weather", "gold")
+record_weather_gold_product_failure = record_domain_stage_event(
+    "weather", "gold", status="failed"
 )
 
 
@@ -116,40 +129,6 @@ def _triggering_asset_events(*, context: dict, asset_uri: str):
             "weather transform requires at least one triggering Bronze asset event"
         )
     return matched
-
-
-class AdminDongCrosswalkSnapshotUnavailableError(RuntimeError):
-    """The shared admin_dong crosswalk Iceberg table has no usable snapshot to pin."""
-
-
-def resolve_admin_dong_crosswalk_snapshot_id() -> int:
-    """Pin the shared admin_dong crosswalk seed to one Iceberg snapshot (ASAC-DAG#480)."""
-    from weather_ingest.common.runtime import sql_identifier, trino_cursor
-
-    cursor, catalog, _ = trino_cursor()
-    schema = sql_identifier(os.environ.get("COMMON_SCHEMA", "common"))
-    table = sql_identifier("seoul_admin_dong_crosswalk")
-    cursor.execute(
-        "SELECT snapshot_id "
-        f'FROM {catalog}.{schema}."{table}$snapshots" '
-        "ORDER BY committed_at DESC, snapshot_id DESC LIMIT 1"
-    )
-    row = cursor.fetchone()
-    try:
-        raw_snapshot_id = row[0]
-    except (TypeError, IndexError) as exc:
-        raise AdminDongCrosswalkSnapshotUnavailableError(
-            "admin_dong crosswalk Iceberg snapshot is unavailable"
-        ) from exc
-    if (
-        isinstance(raw_snapshot_id, bool)
-        or not isinstance(raw_snapshot_id, int)
-        or raw_snapshot_id <= 0
-    ):
-        raise AdminDongCrosswalkSnapshotUnavailableError(
-            "admin_dong crosswalk Iceberg snapshot ID must be a positive integer"
-        )
-    return raw_snapshot_id
 
 
 def resolve_weather_snapshot_run(**context) -> str:
@@ -426,6 +405,12 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
     }
     if spec.workload is DbtWorkload.TRINO:
         operator_kwargs["pool"] = TRINO_HEAVY_POOL
+    if spec.task_id == DBT_PHASE_TASK_IDS[-1]:
+        operator_kwargs["on_success_callback"] = record_weather_gold_product_event
+        operator_kwargs["on_failure_callback"] = [
+            record_weather_problem,
+            record_weather_gold_product_failure,
+        ]
     return PythonOperator(**operator_kwargs)
 
 

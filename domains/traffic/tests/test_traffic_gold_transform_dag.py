@@ -24,6 +24,7 @@ def _use_current_silver_evidence(
         "current_silver_output_evidence",
         lambda: module.SilverOutputEvidence(snapshot_id, fingerprint),
     )
+    monkeypatch.setattr(module, "traffic_gold_anchor_exists", lambda: True)
 
     class Manifest:
         def require_publishable(self, run_id):
@@ -32,7 +33,7 @@ def _use_current_silver_evidence(
     monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
 
 
-def test_gold_dag_is_independent_and_owns_test_tier_marker():
+def test_gold_dag_is_independent_and_owns_hot_publication_marker():
     module = load_gold_transform_module()
     dag = module.dag
 
@@ -47,9 +48,6 @@ def test_gold_dag_is_independent_and_owns_test_tier_marker():
     assert dag.kwargs["max_active_runs"] == 1
     assert "dbt_run_silver" not in dag.task_ids
     assert dag.task_dict["validate_dev_runtime"].downstream_task_ids == {
-        "select_traffic_test_tier"
-    }
-    assert dag.task_dict["select_traffic_test_tier"].downstream_task_ids == {
         "resolve_traffic_gold_snapshot_run"
     }
     assert dag.task_dict["resolve_traffic_gold_snapshot_run"].downstream_task_ids == {
@@ -58,20 +56,21 @@ def test_gold_dag_is_independent_and_owns_test_tier_marker():
     assert dag.task_dict["admit_traffic_gold_snapshot"].downstream_task_ids == {
         "dbt_deps_gold"
     }
-    assert dag.task_dict["dbt_test_gold"].downstream_task_ids == {
+    assert dag.task_dict["dbt_run_gold"].downstream_task_ids == {
         "mark_traffic_gold_success"
     }
+    assert "select_traffic_test_tier" not in dag.task_ids
+    assert "dbt_test_gold" not in dag.task_ids
 
 
-def test_gold_validation_fence_outranks_silver_writer_without_promoting_gold_run():
+def test_gold_hot_build_receipt_outranks_silver_writer():
     gold = load_gold_transform_module()
 
     assert gold.PIN_CRITICAL_PRIORITY > 10
     assert (
-        gold.dag.task_dict["dbt_test_gold"].kwargs["priority_weight"]
+        gold.dag.task_dict["dbt_run_gold"].kwargs["priority_weight"]
         == gold.PIN_CRITICAL_PRIORITY
     )
-    assert gold.dag.task_dict["dbt_run_gold"].kwargs["priority_weight"] == 1
 
 
 def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_bronze(
@@ -106,6 +105,91 @@ def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_br
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
     assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
     assert pushed[module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY] == 99
+    assert pushed[module.GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY] is False
+
+
+def test_gold_resolver_pins_bootstrap_requirement_when_anchor_is_missing(
+    monkeypatch,
+):
+    module = load_gold_transform_module()
+    _use_current_silver_evidence(monkeypatch, module)
+    monkeypatch.setattr(module, "traffic_gold_anchor_exists", lambda: False)
+    FakeVariable.values[module.SILVER_SUCCESS_MARKER_KEY] = (
+        module.TransformSuccessMarker(
+            version=1,
+            pipeline="silver",
+            identity=module.TransformIdentity.silver("incident-1"),
+            output_snapshot_id=42,
+            compacted_files_fingerprint="a" * 64,
+        ).to_json()
+    )
+    monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
+    )
+    pushed = {}
+    ti = types.SimpleNamespace(
+        xcom_push=lambda *, key, value: pushed.update({key: value})
+    )
+
+    module.resolve_traffic_gold_snapshot_run(
+        ti=ti,
+        triggering_asset_events={module.TRAFFIC_FLOW_SILVER_ASSET: []},
+    )
+
+    assert pushed[module.GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY] is True
+
+
+@pytest.mark.parametrize(
+    ("bootstrap_required", "expected_selector", "expected_incident_selector"),
+    [
+        (
+            True,
+            "ask_seoul_traffic_transform_gold_bootstrap_hot_build",
+            "ask_seoul_traffic_transform_gold_incident_bootstrap_hot_build",
+        ),
+        (
+            False,
+            "ask_seoul_traffic_transform_gold_hot_build",
+            "ask_seoul_traffic_transform_gold_incident_hot_build",
+        ),
+    ],
+)
+def test_gold_build_selects_bootstrap_only_for_a_missing_anchor(
+    monkeypatch,
+    bootstrap_required,
+    expected_selector,
+    expected_incident_selector,
+):
+    module = load_gold_transform_module()
+    captured = {}
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids, key=None: (
+            bootstrap_required
+            if key == module.GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY
+            else "incident-1"
+        )
+    )
+    monkeypatch.setattr(
+        module.transform_runtime,
+        "run_dbt_phase",
+        lambda **kwargs: captured.update(kwargs) or {"status": "success"},
+    )
+
+    module.run_dbt_phase(
+        dbt_command="build",
+        selector="ask_seoul_traffic_transform_gold_hot_build",
+        selector_when_flow_missing=(
+            "ask_seoul_traffic_transform_gold_incident_hot_build"
+        ),
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        silver_persisted=True,
+        snapshot_required=True,
+        ti=ti,
+    )
+
+    assert captured["selector"] == expected_selector
+    assert captured["selector_when_flow_missing"] == expected_incident_selector
 
 
 def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch):
@@ -473,6 +557,6 @@ def test_gold_success_marker_uses_fresh_evidence_and_heavy_pool(monkeypatch):
     )
     assert marker.output_snapshot_id == 43
     task = module.dag.task_dict["mark_traffic_gold_success"]
-    assert task.kwargs["pool"] == module.TRINO_HEAVY_POOL
+    assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
     assert task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
     assert task.kwargs["weight_rule"] == "absolute"

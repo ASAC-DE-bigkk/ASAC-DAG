@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from typing import Callable, Protocol
 
 from traffic_ingest.flow_info import (
+    KST,
     SOURCE_ID,
     build_raw_object_key,
     parse_traffic_info_response,
 )
+from traffic_ingest.errors import TrafficBronzeConfigurationError
+from common.raw_manifest import build_raw_manifest
 
 
 class RawObjectStore(Protocol):
@@ -29,14 +33,36 @@ class TrafficFlowLanding:
         self._fetch_page = fetch_page
         self._clock = clock
 
-    def collect(self, *, link_ids: list[str], dag_run_id: str) -> dict:
+    def _resolve_landing_load_date(self, value: str | None) -> str:
+        if value is None:
+            return self._clock().astimezone(KST).date().isoformat()
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+        except (TypeError, ValueError) as exc:
+            raise TrafficBronzeConfigurationError(
+                "TrafficInfo landing_load_date must be YYYY-MM-DD"
+            ) from exc
+
+    def collect(
+        self,
+        *,
+        link_ids: list[str],
+        dag_run_id: str,
+        landing_load_date: str | None = None,
+    ) -> dict:
+        landing_load_date = self._resolve_landing_load_date(landing_load_date)
         raw_objects: list[dict] = []
         parsed_rows = 0
         for link_id in link_ids:
             collected_at = self._clock()
             http_status, payload = self._fetch_page(link_id)
             metadata, rows = parse_traffic_info_response(payload)
-            raw_object_key = build_raw_object_key(collected_at, dag_run_id, link_id)
+            raw_object_key = build_raw_object_key(
+                collected_at,
+                dag_run_id,
+                link_id,
+                landing_load_date=landing_load_date,
+            )
             self._raw_store.write_bytes(
                 raw_object_key,
                 payload,
@@ -61,6 +87,23 @@ class TrafficFlowLanding:
             )
             parsed_rows += len(rows)
 
+        manifest_key = str(raw_objects[0]["raw_object_key"]).rsplit("/", 1)[0] + "/_manifest.json"
+        self._raw_store.write_bytes(
+            manifest_key,
+            json.dumps(
+                build_raw_manifest(
+                    run_id=dag_run_id,
+                    dataset=SOURCE_ID,
+                    load_date=landing_load_date,
+                    object_keys=[item["raw_object_key"] for item in raw_objects],
+                    expected_count=len(link_ids),
+                    actual_count=len(raw_objects),
+                    completed_at=self._clock().isoformat(),
+                ),
+                sort_keys=True,
+            ).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
         return {
             "source_id": SOURCE_ID,
             "link_ids": list(link_ids),
@@ -70,6 +113,8 @@ class TrafficFlowLanding:
             "expected_rows": parsed_rows,
             "expected_raw_objects": len(raw_objects),
             "is_publishable": True,
+            "manifest_key": manifest_key,
+            "landing_load_date": landing_load_date,
         }
 
 

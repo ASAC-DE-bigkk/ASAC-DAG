@@ -42,9 +42,15 @@ if _DAGS_ROOT not in sys.path:
 
 from common.assets import CITYDATA_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.ops.airflow import record_run_metadata  # noqa: E402
+from common.ops.run_sink import record_run  # noqa: E402
 
 KST_TZ = ZoneInfo("Asia/Seoul")
+
+# 단일 env 노브 — prod 컷오버 = DBT_TARGET=prod 한 줄, 롤백 = 제거(#556).
+# 미설정 시 기본 "dev"(불변). 파싱 시점에 읽는다 — Cosmos ProfileConfig/RenderConfig 는
+# DAG 파싱 시점에 고정되는 정적 설정이라, 태스크 실행 시점 params 로는 dbt --target 을
+# 바꿀 수 없다(Cosmos 가 렌더한 태스크 커맨드에 이미 박혀있음). 그래서 여기만 env 로 읽는다.
+_TARGET = os.environ.get("DBT_TARGET", "prod")
 
 # 단독 citydata dbt 프로젝트 (모노 루트 아님).
 DBT_PROJECT = "/opt/airflow/dbt/domains/citydata"
@@ -53,10 +59,10 @@ DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata", dbt_project_dir=DBT_PROJECT)
 
-# run-metadata(ops.run_metadata) — 성공·실패 모두 1행 append(태스크 단위). 기존 problem
+# run 기록 — 성공·실패 모두 R2 runs/ 에 파일 1개(태스크 단위, common.ops.run_sink). 기존 problem
 # 콜백과 병행하며, best-effort(기록 실패는 태스크 판정 안 가림).
-_run_md_ok = record_run_metadata("citydata", "transform", status="success")
-_run_md_fail = record_run_metadata("citydata", "transform", status="failed")
+_run_ok = record_run("citydata", "transform", status="success")
+_run_fail = record_run("citydata", "transform", status="failed")
 
 # 티어는 dbt **태그**로 관리 — 모델명 하드코딩 리스트 대신. 각 모델의 tier 는 그 모델
 # schema.yml `config: tags: [fast|slow]` 에 있고(SQL=비즈니스로직 / yml=문서·메타 분리
@@ -69,6 +75,13 @@ _run_md_fail = record_run_metadata("citydata", "transform", status="failed")
 # 주의: 태그는 manifest 에 반영돼야 선택됨 → 모델/태그 변경 시 manifest 재생성 필요.
 FAST_SELECT = ["tag:fast"]
 SLOW_SELECT = ["tag:slow"]
+# daily(매일 자정): 패턴 골드(dow_hour·forecast·demographics) — 과거 누적 평균이라 한시간새
+# 안 바뀜, 하루 1회 재빌드면 충분. 무거운 by_time 전체 스캔을 하루 1회로 제한 → OOM 최소화.
+# grain 은 시간(0~23)이지만 '갱신주기'는 일. 서빙(8시 DAILY)보다 앞서 자정에 실행.
+DAILY_SELECT = ["tag:daily"]
+# hourly(매시 :05~:09): 시간 grain 골드(ppltn_hourly·x_weather·x_incident) — 시간 버킷이라
+# 매시 1회면 충분(현재-시각 실시간은 fast 스냅샷이 담당). fast(5분)에서 빼 OOM 완화.
+HOURLY_SELECT = ["tag:hourly"]
 
 # DBT_MANIFEST 로드 — 파싱 시점에 dbt 를 돌리지 않고 target/manifest.json 을 읽어 그래프를
 # 만든다. dbt 가 전용 venv 에만 있어(메인 env 에 dbt-trino 없음) DBT_LS(in-process ls)가
@@ -79,7 +92,7 @@ project_config = ProjectConfig(
 )
 profile_config = ProfileConfig(
     profile_name="seoul_ppltn",
-    target_name="dev",  # 실험 단계 고정 — 본 전환 시 params 연동 검토
+    target_name=_TARGET,  # DBT_TARGET env 노브 — 컷오버(#556). 기본 dev(불변).
     profiles_yml_filepath=f"{DBT_PROJECT}/profiles.yml",
 )
 # dbt 는 전용 venv 에 있어(메인 파이썬에 미설치) in-process 불가 → SUBPROCESS 로 venv 호출.
@@ -94,7 +107,7 @@ def _dbt(args: str) -> str:
         "set -euo pipefail\n"
         f"cd {DBT_PROJECT}\n"
         f"export DBT_PROFILES_DIR={DBT_PROJECT} DBT_PROJECT_DIR={DBT_PROJECT}\n"
-        f"{DBT_BIN} {args} --target dev --no-use-colors"
+        f"{DBT_BIN} {args} --target {_TARGET} --no-use-colors"
     )
 
 
@@ -120,8 +133,8 @@ def _tier_group(group_id: str, select: list[str]) -> DbtTaskGroup:
         # retries=0 유지(위 주석의 중복 방지 근거). run-metadata 는 성공·실패 모두 기록.
         default_args={
             "retries": 0,
-            "on_success_callback": _run_md_ok,
-            "on_failure_callback": [record_citydata_problem, _run_md_fail],
+            "on_success_callback": _run_ok,
+            "on_failure_callback": [record_citydata_problem, _run_fail],
         },
     )
 
@@ -129,6 +142,42 @@ def _tier_group(group_id: str, select: list[str]) -> DbtTaskGroup:
 def _is_slow_window(**_) -> bool:
     """slow 티어(10분) 게이트 — 기존 citydata_transform 과 동일 벽시계 근사."""
     return datetime.now(KST_TZ).minute % 10 < 5
+
+
+def _is_daily_window(**_) -> bool:
+    """daily 티어 게이트 — 매일 0시 15~19분 KST 만(slow·hourly 창과 stagger). 패턴 골드."""
+    now = datetime.now(KST_TZ)
+    return now.hour == 0 and 15 <= now.minute < 20
+
+
+def _is_hourly_window(**_) -> bool:
+    """hourly 티어 게이트 — 매시 '첫 실행 1회'(분 무관, slow 의 :00~:04 는 양보).
+    과거엔 '매시 5~9분' 5분 창이었으나, transform 이 asset 트리거라 불규칙한 분(예: :18·:37·:56)에
+    돌아 창을 자주 빗나가 hourly 티어가 몇 시간씩 안 도는 버그(2026-07-26). Variable 로 '이 시간에
+    이미 돌았나'를 보고 시간당 정확히 1회 통과 → 타이밍에 안 흔들린다. downstream 실패 시엔 다음
+    시간 run 이 self-heal(hourly 골드는 table+replace)."""
+    from airflow.models import Variable
+
+    now = datetime.now(KST_TZ)
+    if now.minute < 5:
+        return False  # :00~:04 는 slow 창 — stagger 양보
+    key = "citydata_transform_hourly_last_hour"
+    cur = now.strftime("%Y-%m-%dT%H")  # 시간 버킷
+    if Variable.get(key, default_var="") == cur:
+        return False  # 이 시간엔 이미 실행함
+    Variable.set(key, cur)
+    return True
+
+
+def _not_maintenance(**_) -> bool:
+    """maintenance 진행 중이면(Variable citydata_maintenance_active=1) transform 전체 skip.
+
+    주간 유지보수(citydata_maintenance)가 optimize 로 데이터파일을 재작성하는 동안 transform 의
+    delete+insert 가 겹치면 Iceberg 커밋 충돌이 난다. 그 창에서만 transform 을 막는다 —
+    maintenance DAG 가 플래그를 set(pause)/clear(resume, trigger_rule=all_done 로 항상 clear)."""
+    from airflow.models import Variable
+
+    return Variable.get("citydata_maintenance_active", default_var="0") != "1"
 
 
 with DAG(
@@ -139,6 +188,9 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     is_paused_upon_creation=True,  # 기존 DAG 와 동시 write 금지 — 검증 후 스왑
+    # record_run(runs/ 관측)이 이 target 을 읽어 runs 경로/버킷을 정함 — dbt --target 과
+    # 같은 DBT_TARGET 노브를 따르게 해 관측과 실제 빌드 대상이 어긋나지 않게 한다.
+    params={"target": _TARGET},
     tags=["transform", "citydata", "cosmos", "dbt"],
 ) as dag:
     # deps/seed 는 Cosmos 가 다루지 않아 BashOperator 유지. 미사용 seoul_gu_boundary 제외(#267).
@@ -154,5 +206,24 @@ with DAG(
         on_failure_callback=record_citydata_problem,
     )
     slow = _tier_group("slow", SLOW_SELECT)
+    gate_daily = ShortCircuitOperator(
+        task_id="gate_daily_midnight", python_callable=_is_daily_window,
+        on_failure_callback=record_citydata_problem,
+    )
+    daily = _tier_group("daily", DAILY_SELECT)
+    gate_hourly = ShortCircuitOperator(
+        task_id="gate_hourly", python_callable=_is_hourly_window,
+        on_failure_callback=record_citydata_problem,
+    )
+    hourly = _tier_group("hourly", HOURLY_SELECT)
 
-    deps_seed >> fast >> gate_slow >> slow
+    # 최상위 게이트: 주간 maintenance 진행 중이면 transform 전체 skip(optimize↔delete+insert 충돌 방지).
+    gate_maint = ShortCircuitOperator(
+        task_id="gate_not_maintenance", python_callable=_not_maintenance,
+        on_failure_callback=record_citydata_problem,
+    )
+
+    # fast 완료 후 게이트 분기(독립·stagger 로 상호 비겹침) — slow(:00~04)·hourly(:05~09)·daily(0시:15~19).
+    gate_maint >> deps_seed >> fast >> gate_slow >> slow
+    fast >> gate_hourly >> hourly
+    fast >> gate_daily >> daily

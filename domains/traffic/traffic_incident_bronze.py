@@ -21,6 +21,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.ops.product_observability import record_domain_stage_event  # noqa: E402
 from traffic_ingest.acc_info import KST  # noqa: E402
 from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_INCIDENT_BRONZE_ASSET_REF,
@@ -29,7 +30,7 @@ from traffic_ingest.assets import (  # noqa: E402
     publish_through_alias,
 )
 from traffic_ingest.bronze_dag_support import DAG_ID, current_dag_id  # noqa: E402
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from traffic_ingest.common.resources import TRINO_INGEST_POOL  # noqa: E402
 from traffic_ingest.errors import TrafficBronzeConfigurationError  # noqa: E402
 from traffic_ingest.incident_pipeline import MATERIALIZER_TASK_ID  # noqa: E402
 from traffic_ingest.runtime import (  # noqa: E402
@@ -42,6 +43,10 @@ from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 TRAFFIC_BRONZE_ASSET_REF = TRAFFIC_INCIDENT_BRONZE_ASSET_REF
 record_traffic_problem = problem_failure_callback(
     domain="traffic", source_system="seoul_topis"
+)
+record_traffic_bronze_product_event = record_domain_stage_event("traffic", "bronze")
+record_traffic_bronze_product_failure = record_domain_stage_event(
+    "traffic", "bronze", status="failed"
 )
 
 
@@ -111,13 +116,19 @@ with DAG(
     materialize = PythonOperator(
         task_id=MATERIALIZER_TASK_ID,
         python_callable=materialize_pending_traffic_incident_snapshots,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_INGEST_POOL,
         retries=3,
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
         outlets=[TRAFFIC_INCIDENT_MATERIALIZED_ALIAS],
-        on_success_callback=acknowledge_materialized_traffic_incident_snapshots,
-        on_failure_callback=record_traffic_problem,
+        on_success_callback=[
+            acknowledge_materialized_traffic_incident_snapshots,
+            record_traffic_bronze_product_event,
+        ],
+        on_failure_callback=[
+            record_traffic_problem,
+            record_traffic_bronze_product_failure,
+        ],
     )
 
 

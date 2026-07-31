@@ -18,6 +18,8 @@ _MARKER_FIELDS = frozenset(
     }
 )
 _FINGERPRINT_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+SILVER_SUCCESS_MARKER_KEY = "ask_seoul.traffic.silver_transform.last_success.v1"
+GOLD_SUCCESS_MARKER_KEY = "ask_seoul.traffic.gold_transform.last_success.v1"
 
 
 class TransformAdmissionError(ValueError):
@@ -234,6 +236,8 @@ def admission_decision(
 
 __all__ = [
     "AdmissionDecision",
+    "GOLD_SUCCESS_MARKER_KEY",
+    "SILVER_SUCCESS_MARKER_KEY",
     "TransformAdmissionError",
     "TransformIdentity",
     "TransformSuccessMarker",

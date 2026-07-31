@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Protocol
@@ -62,6 +62,24 @@ class TrafficRunManifest:
             failure_reason=None,
         )
 
+    def start_many(
+        self,
+        entries: Iterable[tuple[TrafficRun, int | None]],
+    ) -> str | None:
+        return self._record_many(
+            {
+                "run": run,
+                "status": STATUS_STARTED,
+                "is_publishable": False,
+                "expected_rows": None,
+                "actual_rows": None,
+                "expected_raw_objects": expected_raw_objects,
+                "actual_raw_objects": None,
+                "failure_reason": None,
+            }
+            for run, expected_raw_objects in entries
+        )
+
     def publish(
         self,
         run: TrafficRun,
@@ -83,6 +101,24 @@ class TrafficRunManifest:
             failure_reason=None,
         )
 
+    def publish_many(
+        self,
+        entries: Iterable[tuple[TrafficRun, Mapping[str, object]]],
+    ) -> str | None:
+        return self._record_many(
+            {
+                "run": run,
+                "status": STATUS_SUCCESS,
+                "is_publishable": bool(metrics.get("is_publishable", True)),
+                "expected_rows": metrics.get("expected_rows"),
+                "actual_rows": metrics.get("actual_rows"),
+                "expected_raw_objects": metrics.get("expected_raw_objects"),
+                "actual_raw_objects": metrics.get("actual_raw_objects"),
+                "failure_reason": None,
+            }
+            for run, metrics in entries
+        )
+
     def fail(
         self,
         run: TrafficRun,
@@ -101,6 +137,27 @@ class TrafficRunManifest:
             expected_raw_objects=expected_raw_objects,
             actual_raw_objects=actual_raw_objects,
             failure_reason=f"{type(error).__name__} in {task_id}",
+        )
+
+    def fail_many(
+        self,
+        entries: Iterable[tuple[TrafficRun, int | None]],
+        *,
+        task_id: str,
+        error: BaseException,
+    ) -> str | None:
+        return self._record_many(
+            {
+                "run": run,
+                "status": STATUS_FAILED,
+                "is_publishable": False,
+                "expected_rows": None,
+                "actual_rows": None,
+                "expected_raw_objects": expected_raw_objects,
+                "actual_raw_objects": None,
+                "failure_reason": f"{type(error).__name__} in {task_id}",
+            }
+            for run, expected_raw_objects in entries
         )
 
     def coalesce(self, run_id: str, *, replacement_run_id: str) -> str | None:
@@ -263,6 +320,28 @@ class TrafficRunManifest:
         actual_raw_objects: int | None,
         failure_reason: str | None,
     ) -> str:
+        result = self._record_many(
+            (
+                {
+                    "run": run,
+                    "status": status,
+                    "is_publishable": is_publishable,
+                    "expected_rows": expected_rows,
+                    "actual_rows": actual_rows,
+                    "expected_raw_objects": expected_raw_objects,
+                    "actual_raw_objects": actual_raw_objects,
+                    "failure_reason": failure_reason,
+                },
+            )
+        )
+        if result is None:  # pragma: no cover - a single record is never empty
+            raise RuntimeError("Traffic run manifest record was unexpectedly empty")
+        return result
+
+    def _record_many(self, records: Iterable[Mapping[str, object]]) -> str | None:
+        normalized_records = tuple(records)
+        if not normalized_records:
+            return None
         cursor, catalog, schema = self._cursor_factory()
         qualified_schema = f"{catalog}.{schema}"
         qualified_table = f"{qualified_schema}.{MANIFEST_TABLE}"
@@ -290,20 +369,25 @@ class TrafficRunManifest:
             """
         )
         event_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
-        values = ", ".join(
-            (
-                _sql_string(self._source_id),
-                _sql_string(run.dag_id),
-                _sql_string(run.run_id),
-                _sql_string(status),
-                "true" if is_publishable else "false",
-                f"TIMESTAMP {_sql_string(event_at)}",
-                _sql_int(expected_rows),
-                _sql_int(actual_rows),
-                _sql_int(expected_raw_objects),
-                _sql_int(actual_raw_objects),
-                _sql_string(failure_reason),
+        values_rows = ", ".join(
+            "("
+            + ", ".join(
+                (
+                    _sql_string(self._source_id),
+                    _sql_string(record["run"].dag_id),
+                    _sql_string(record["run"].run_id),
+                    _sql_string(record["status"]),
+                    "true" if record["is_publishable"] else "false",
+                    f"TIMESTAMP {_sql_string(event_at)}",
+                    _sql_int(record.get("expected_rows")),
+                    _sql_int(record.get("actual_rows")),
+                    _sql_int(record.get("expected_raw_objects")),
+                    _sql_int(record.get("actual_raw_objects")),
+                    _sql_string(record.get("failure_reason")),
+                )
             )
+            + ")"
+            for record in normalized_records
         )
         columns = (
             "source_id, dag_id, dag_run_id, status, is_publishable, event_at, "
@@ -312,7 +396,7 @@ class TrafficRunManifest:
         cursor.execute(
             f"""
             MERGE INTO {qualified_table} AS target
-            USING (VALUES ({values})) AS incoming ({columns})
+            USING (VALUES {values_rows}) AS incoming ({columns})
               ON target.source_id = incoming.source_id
              AND target.dag_run_id = incoming.dag_run_id
              AND target.status = incoming.status

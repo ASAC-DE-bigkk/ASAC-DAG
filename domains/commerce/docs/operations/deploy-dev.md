@@ -6,34 +6,32 @@ dev 는 **Cloudflare R2 dev 버킷**(`seoul-dev`)을 쓴다. prod 와 동일한 
 
 > 클라우드 없이 순수 로컬은 [deploy-local.md](deploy-local.md). 환경 축: [environments.md](../configuration/environments.md).
 
-## 1. commerce 환경파일
+## 1. 환경 설정 (루트 `.env` 의 `commerce 전용값` 블록)
+
+commerce 실값은 **루트 `.env`** 에서 관리한다(2026-07-28 개편). 번들의 `.env.commerce` 는 루트 값을
+코드 이름으로 매핑만 하므로 복사만 하고 그대로 둔다:
 
 ```bash
 cd dags/domains/commerce
-cp .env.commerce.example .env.commerce
+cp .env.commerce.example .env.commerce      # 매핑만 담김 — 수정 불필요
 ```
 
-채울 항목 — commerce 전용 값만 적고, R2 자격증명/엔드포인트/버킷은 **루트 `.env` 를 참조**한다
-(템플릿 기본값이 이미 `${R2_DEV_*}` 참조라 보통 그대로 두면 된다):
+dev 용으로 **루트 `.env` 의 `commerce 전용값` 블록**에서 설정:
 
 ```bash
-# 인증키는 호스트 루트 .env 에: SEOUL_API_KEY_COMM=<발급키> (#70 이관)
-STORAGE_BACKEND=r2
-
-# R2 블록은 루트 .env 값을 불러옴(중복 입력 불필요). 템플릿 기본:
-#   R2_ENDPOINT=${R2_DEV_ENDPOINT}
-#   R2_BUCKET=${R2_DEV_BUCKET_NAME}            # 루트는 R2_DEV_BUCKET_NAME → commerce 는 R2_BUCKET
-#   R2_ACCESS_KEY_ID=${R2_DEV_ACCESS_KEY_ID}
-#   R2_SECRET_ACCESS_KEY=${R2_DEV_SECRET_ACCESS_KEY}
-#   R2_REGION=auto
+# 루트 .env (호스트 프로젝트)
+SEOUL_API_KEY_COMM=<발급키>          # #70 이관, 필수
+COMMERCE_STORAGE_BACKEND=r2          # dev = R2 dev 버킷 사용
+# JUSO_CONFM_KEY=<도로명주소 승인키>  # silver 지번 보강 쓰면
+# R2 dev 자격증명/버킷은 루트 .env 의 R2_DEV_* 세트를 그대로 사용
+#   (.env.commerce 가 R2_BUCKET=${R2_DEV_BUCKET_NAME} 등으로 코드 이름에 매핑)
 ```
 
-루트 `.env` 에 해당 키가 없으면 `${VAR:-기본값}` 또는 실제 값으로 바꿔 넣는다. R2 토큰
-발급/권한은 [storage.md](../architecture/storage.md)의 "Cloudflare R2 설정"(버킷명 dev). 전체 변수·참조
-규칙: [configuration.md](../configuration/configuration.md).
+R2 토큰 발급/권한은 [storage.md](../architecture/storage.md)의 "Cloudflare R2 설정"(버킷명 dev).
+전체 변수·매핑 대응표: [configuration.md](../configuration/configuration.md).
 
-> 호스트 루트 `.env`(번들 밖)가 같은 이름의 R2 키를 이미 프로세스 env 로 주입하면 그 값이
-> 우선한다(setdefault). 이름이 다른 `R2_BUCKET` 은 `${R2_DEV_BUCKET_NAME}` 참조로 매핑된다.
+> generic 이름(`STORAGE_BACKEND` 등)은 루트에서 `COMMERCE_` 접두로 두고 `.env.commerce` 가 코드
+> 이름으로 되돌린다. 이름이 다른 `R2_BUCKET` 은 루트 `R2_DEV_BUCKET_NAME` 참조로 매핑된다.
 
 ## 2. 의존성
 
@@ -63,7 +61,8 @@ PY
 
 ## 4. 코드/인자 수정 반영
 
-- `./dags` 바인드 마운트라 코드·`.env.commerce` 수정은 스케줄러 재파싱으로 반영(재빌드 불필요).
+- `./dags` 바인드 마운트라 코드·`.env.commerce`(매핑) 수정은 스케줄러 재파싱으로 반영(재빌드 불필요).
+- **루트 `.env` 값 변경은 `env_file` 재주입이 필요** → `docker compose up -d`(컨테이너 재생성)로 반영.
 - 단, 새 패키지가 필요해질 경우(현재 boto3/pandas/pyarrow 는 이미지에 이미 있음) 이미지/환경
   변경이라 재빌드·재기동이 필요할 수 있다.
 
@@ -72,6 +71,6 @@ PY
 | 증상 | 원인/조치 |
 |---|---|
 | `R2 backend requires ...` | `R2_BUCKET/ENDPOINT/ACCESS_KEY_ID/SECRET_ACCESS_KEY` 중 빈 값 |
-| 데이터가 R2 에 안 보임 | `STORAGE_BACKEND=r2` 인지 + `R2_BUCKET` 채워졌는지 확인(빈값이면 local 로 적재) |
-| 데이터가 prod 와 섞임 | `R2_BUCKET=seoul-dev` 인지 확인(prod 와 버킷 분리) |
+| 데이터가 R2 에 안 보임 | 루트 `COMMERCE_STORAGE_BACKEND=r2` + `R2_DEV_BUCKET_NAME` 채워졌는지 확인(빈값이면 local 로 적재) |
+| 데이터가 prod 와 섞임 | 루트 `R2_DEV_BUCKET_NAME=seoul-dev` 인지 확인(prod 와 버킷 분리) |
 | 키 이름 불일치 | 루트 `.env` 는 `R2_BUCKET_NAME` — commerce 는 `R2_BUCKET` 필요 |

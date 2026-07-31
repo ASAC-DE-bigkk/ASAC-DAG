@@ -132,6 +132,7 @@ Serve       API·화면 조회 최적화 최종 결과 = D1(SQLite) 선별 expor
 |---|---|
 | DB 당 용량 상한(D1 10GB, 실용 권장 ≪1GB)·단일 파일 | **소형 테이블만 export** — 전량 이력·`record_json`(통짜 JSON)·수백만 행 원장은 D1 금지, Iceberg gold 에만 둔다 |
 | 단일 writer·동시 쓰기 제약 | export 는 **전량 교체 스냅샷**(재생성) 우선 — 증분 upsert 대신 파일 단위 재생성이 단순·안전 |
+| 쓰기량 과금·일일 한도 | **내용이 같으면 행을 재기록하지 않는다**(무변경 스킵) — 게시 payload 지문을 직전 게시와 비교해 동일하면 DROP+CREATE+INSERT 를 생략하고 메타(`_catalog`·`d1_meta`·핸드오프)만 갱신한다. 판정축은 집계 그레인·달력이 아니라 **지문**이다: 월/연 그레인이어도 전량 재계산 모델은 매일 값이 바뀌고(실측 `churn_yearly` 3.7%·`dong_summary` 36.7%), 반대로 append-only 증분 모델은 그레인과 무관하게 안 바뀐다. 실측 절감 = commerce 일 261,807행 → 58,813행(−77.5%, `flow_monthly`·`flow_yearly` 2종) |
 | 시퀀스/bigserial 없음(rowid 만) | **식별자는 자연키/결정적 키** — DB 발급 서러게이트 금지. `commerce_entity_key`(Postgres bigserial) 계약 종료, 자연키 = (dataset, opnsfteamcode, mgtno) |
 | 서버리스 엣지 **읽기 최적화** | export 대상은 조회 형태로 **사전 집계/평탄화**(조인 최소화) — 행정동 집계·현재 상태 등 |
 | 동적 타이핑(타입 강제 약함) | export 시 타입 정규화(문자/정수/실수 명시) — 좌표 double·코드 varchar 유지 |
@@ -238,6 +239,15 @@ silver/gold 변환·DB 명세는 **dbt 번들**(별도 서브모듈 ASAC-DBT —
 
 ## 7. 변경 이력
 
+- 2026-07-30: **무변경 스킵 정책 추가(§4.2 표)**(ASAC-DAG#601) — 게시 payload 지문이 직전과 같으면
+  D1 행 재기록을 생략하고 메타만 갱신한다. 판정축은 그레인·달력이 아니라 지문(실측: 월/연 그레인
+  전량 재계산 모델도 매일 변함). 밴드 게이트 스킵(`stale`, 경보)과 상태·경로를 분리해 정상 무변경이
+  경보로 오독되지 않게 한다.
+- 2026-07-23: **서빙 D1 export 구현 + 계약 tier 화**(#493 · ASAC-DBT#334) — §4 의 gold→D1 선별 export 를
+  gold **빌드 라인과 분리한 신규 DAG**(`commerce_serving_export`, gold 완료 Asset 트리거)로 구현(사용자
+  확정 — spec §1.4 의 gold DAG 내 편입 대신 분리). gold `meta.serving` 을 행수캡 `enabled` →
+  **`serving_tier`(d1_direct/d1_rollup/iceberg_api)** 로 재정리해 "지정 품목"을 정본화. 코어 서빙셋
+  (direct 15 + rollup 7); dim·current-period 는 후속.
 - 2026-07-14: **서빙 레이어 전면 개편(§4 신설)** — 서빙 DB Postgres 폐기, 대상 = **D1(SQLite)**.
   gold 는 bronze/silver 와 동일 **Iceberg 카탈로그**(dbt)로 재구축하고 **선별 소수 테이블만 D1 export**
   (예정). "DB 특성(용량 상한·단일 writer·시퀀스 없음·엣지 읽기 최적화)에 따라 gold·서빙 레이어를

@@ -32,8 +32,13 @@ import pendulum
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+_DAGS_ROOT = os.path.dirname(os.path.dirname(_HERE))  # dags/ 루트 — common 임포트용
+if _DAGS_ROOT not in sys.path:
+    sys.path.insert(0, _DAGS_ROOT)
 
+from common.runtime_guard import default_target  # noqa: E402
 from citydata_ingest.source.maintenance import (  # noqa: E402
     CITYDATA_TABLES,
     citydata_schema,
@@ -43,7 +48,7 @@ from citydata_ingest.source.maintenance import (  # noqa: E402
 
 KST = "Asia/Seoul"
 
-DEFAULT_PARAMS = {"target": "dev", "retention": "3d", "cleanup_hours": 6, "drain_seconds": 300}
+DEFAULT_PARAMS = {"target": default_target(), "retention": "3d", "cleanup_hours": 6, "drain_seconds": 300}
 
 # maintenance 의 optimize 가 silver/gold 데이터파일을 재작성하는 동안 transform 의
 # delete+insert 가 같은 행을 지우면 Iceberg 커밋 충돌 → 중복 발생. 그래서 maintenance
@@ -52,44 +57,46 @@ DEFAULT_PARAMS = {"target": "dev", "retention": "3d", "cleanup_hours": 6, "drain
 TRANSFORM_DAG = "citydata_transform_cosmos"  # 활성 변환(Cosmos). 구 citydata_transform 은 삭제됨
 
 
-def _dags_cli(action: str) -> None:
-    """``airflow dags <action> <TRANSFORM_DAG>`` 를 subprocess 로 실행한다.
-
-    Airflow 3.0 은 태스크에서 ORM 직접 접근(create_session)을 금지한다(#303) — DagModel
-    을 직접 갱신하던 방식이 RuntimeError 로 죽었다. pause/unpause 는 CLI 로 위임한다.
-    """
-    import subprocess
-    subprocess.run(["airflow", "dags", action, TRANSFORM_DAG], check=True)
+# transform 과의 delete+insert ↔ optimize 충돌을 막는 Variable 플래그.
+# Airflow 3 은 태스크 프로세스에 메타DB 접속을 안 준다(Task SDK 격리) → 태스크에서 `airflow dags
+# pause` CLI 가 DB URL 을 못 만들어 실패했다(2026-07 Airflow3 업그레이드 회귀, 3주 연속 실패).
+# Variable.set/get 은 태스크에서 API 서버 경유로 동작하므로 DAG pause 대신 플래그로 위임한다 —
+# transform_cosmos 의 gate_not_maintenance 가 이 플래그를 보고 새 run 을 skip 한다.
+MAINT_FLAG = "citydata_maintenance_active"
 
 
 def _pause_transform(**context) -> None:
-    """transform 을 pause + 진행 중 run 이 배수되도록 drain_seconds 만큼 대기.
+    """maintenance 진행 플래그 ON + 진행 중 transform run 이 배수되도록 drain_seconds 만큼 대기.
 
-    pause 로 새 run(스케줄·Asset 트리거 모두) 은 막히고, 이미 running 인 run(≈1~4분)은
-    이어진다. ``list-runs`` CLI 가 이 버전에서 불안정해 러닝 폴링 대신 유한 sleep 으로
-    in-flight 를 배수한다(주간 1회라 고정 대기 비용은 무시할 수준).
+    플래그가 서면 transform_cosmos 의 gate_not_maintenance 가 새 run(스케줄·Asset 트리거 모두)을
+    skip 한다. 이미 running 인 run(≈1~4분)은 이어지므로 유한 sleep 으로 in-flight 를 배수한다.
     """
     import time
+
+    from airflow.models import Variable
+
     drain = int(context["params"].get("drain_seconds", 300))
-    _dags_cli("pause")
-    print(f"[maintenance] {TRANSFORM_DAG} paused — 진행 중 run 배수 대기 {drain}s")
+    Variable.set(MAINT_FLAG, "1")
+    print(f"[maintenance] {MAINT_FLAG}=1 — transform 차단, 진행 중 run 배수 대기 {drain}s")
     time.sleep(drain)
     print("[maintenance] 배수 대기 완료 — 유지보수 진행")
 
 
 def _resume_transform(**_) -> None:
-    _dags_cli("unpause")
-    print(f"[maintenance] {TRANSFORM_DAG} resumed")
+    from airflow.models import Variable
+
+    Variable.set(MAINT_FLAG, "0")
+    print(f"[maintenance] {MAINT_FLAG}=0 — transform 재개")
 
 
 def _maintain(**context) -> None:
     params = context["params"]
     target = params["target"]
     retention = params.get("retention", "3d")
-    # 단일 스키마(seoul_citydata) 유지보수 — 인구 마트도 통합(#87/#233).
+    # 단일 스키마 유지보수(target 별: prod=citydata, dev=seoul_citydata — #612) — 인구 마트 통합(#87/#233).
     results: dict[str, str] = {}
     results.update(run_maintenance(
-        target, tables=CITYDATA_TABLES, retention=retention, schema=citydata_schema()))
+        target, tables=CITYDATA_TABLES, retention=retention, schema=citydata_schema(target)))
     for tbl, status in results.items():
         print(f"[citydata maintenance] {tbl}: {status}")
     failed = [t for t, s in results.items() if not s == "ok"]
@@ -102,8 +109,9 @@ def _storage_cleanup(**context) -> None:
     params = context["params"]
     target = params["target"]
     hours = int(params.get("cleanup_hours", 6))
-    # 단일 스키마(seoul_citydata) 정리 — 스키마 UUID 프리픽스로 스코프됨(타 도메인 불가침).
-    for label, schema in (("seoul_citydata", citydata_schema()),):
+    # 단일 스키마 정리(target 별 해석 — #612) — 스키마 UUID 프리픽스로 스코프됨(타 도메인 불가침).
+    schema_name = citydata_schema(target)
+    for label, schema in ((schema_name, schema_name),):
         tally = run_storage_cleanup(target, retention_hours=hours, schema=schema)
         print(
             f"[citydata storage_cleanup:{label}] "

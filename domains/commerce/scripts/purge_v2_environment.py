@@ -8,8 +8,10 @@
 
 삭제 범위(레이어별 — v2 shorts 만, v1 무접촉):
   raw    : run 폴더의 <short>.jsonl(증분/save) · _full/<short>.jsonl(랜딩 잔존) ·
-           _markers/<short>.* (당일 completed 삭제 → 다음 collect 가 v2 만 재수집) ·
-           _diff_target/<short>.* (삭제 → 다음 수집 mode=first 자가 시드, resort 불필요)
+           마커 <short>.* (당일 completed 삭제 → 다음 collect 가 v2 만 재수집) ·
+           diff-target <short>.* (삭제 → 다음 수집 mode=first 자가 시드, resort 불필요)
+           ※ #60 재배치 후 마커/diff-target 는 ops 존(COMMERCE_MARKERS_LAYER/
+           COMMERCE_DIFF_TARGET_LAYER) — 설정 시 해당 존도 함께 스캔한다(구 위치는 폴백 스캔).
   state  : bronze `_watermark.json` 의 v2 엔트리 제거 · `_pending.json` v2 제거 ·
            receipts/<date>/<run>__<short>.json 삭제
   bronze : iceberg `bronze_localdata_license` · `bronze_collection_run_manifest` 의 v2 행 DELETE
@@ -74,6 +76,14 @@ def classify_raw_keys(keys: list[str], shorts: set[str]) -> dict[str, list[str]]
     return out
 
 
+def classify_zone_keys(keys: list[str], shorts: set[str]) -> list[str]:
+    """존 루트(마커/diff-target 존) 아래 키에서 stem(첫 '.' 앞)이 v2 short 인 것만.
+
+    `_RUN.*`(실행 마커)·`.key` 사이드카의 v1 파일은 stem 불일치로 배제(부분 문자열 매칭 금지).
+    """
+    return [k for k in keys if k.split("/")[-1].split(".", 1)[0] in shorts]
+
+
 def strip_shorts_from_watermark(datasets: dict[str, str], shorts: set[str]) -> tuple[dict, int]:
     """워터마크 dict 에서 v2 엔트리 제거. (남은 dict, 제거 수) 반환."""
     kept = {k: v for k, v in datasets.items() if k not in shorts}
@@ -118,15 +128,27 @@ def _in_list(shorts: list[str]) -> str:
 def purge_raw(storage, prefix: str, shorts: list[str], *, apply: bool) -> dict:
     from commerce_core import paths
 
+    v2 = set(shorts)
     root = paths.bronze_root(prefix=prefix)
     keys = storage.list_keys(f"{root}/")
-    hit = classify_raw_keys(keys, set(shorts))
+    hit = classify_raw_keys(keys, v2)
+    scanned = len(keys)
+    # #60 재배치(감사 B2): 마커/diff-target 이 ops 존으로 간 환경은 해당 존도 스캔
+    # (미설정 환경은 구 위치가 raw 스캔에 이미 포함 — 이중 스캔 없음).
+    if paths.MARKERS_LAYER:
+        zone = storage.list_keys(f"{paths.run_index_root(prefix=prefix)}/")
+        hit["markers"].extend(classify_zone_keys(zone, v2))
+        scanned += len(zone)
+    if paths.DIFF_TARGET_LAYER:
+        zone = storage.list_keys(f"{paths._diff_target_root(prefix)}/")
+        hit["diff_targets"].extend(classify_zone_keys(zone, v2))
+        scanned += len(zone)
     total = sum(len(v) for v in hit.values())
     if apply:
         for group in hit.values():
             for k in group:
                 storage.delete(k)
-    return {"scanned": len(keys), "deleted" if apply else "would_delete": total,
+    return {"scanned": scanned, "deleted" if apply else "would_delete": total,
             **{k: len(v) for k, v in hit.items()}}
 
 
@@ -210,31 +232,16 @@ def purge_silver(shorts: list[str], *, apply: bool) -> dict:
 
 
 def purge_gold(shorts: list[str], *, apply: bool) -> dict:
-    from gold import pg
+    """gold 레이어 v2 정리 — **스킵**(2026-07-14 개편으로 서빙 Postgres 폐기, gold=Iceberg).
 
-    conn = pg.connect()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("select to_regclass('commerce_catalog')")
-            if cur.fetchone()[0] is None:                       # gold 미구축 환경 — 스킵
-                return {"skipped": "commerce_catalog 없음(gold 미구축)"}
-            cur.execute("select object, members from commerce_catalog "
-                        "where kind in ('detail_cluster', 'detail_single')")
-            details = v2_detail_objects([(r[0], r[1]) for r in cur.fetchall()], set(shorts))
-            targets = details + ["commerce_business_entity_history", "commerce_business_entity"]
-            out: dict = {}
-            for t in targets:
-                cur.execute(f"select count(*) from {t} where dataset = any(%s)",  # security: allow-sql - t 는 카탈로그/상수 식별자, 값 바인딩
-                            (shorts,))
-                out[t] = int(cur.fetchone()[0])
-            if apply:
-                for t in targets:
-                    cur.execute(f"delete from {t} where dataset = any(%s)",  # security: allow-sql - 동일
-                                (shorts,))
-                conn.commit()
-        return out
-    finally:
-        conn.close()
+    구 구현은 `gold.pg`(Postgres) 를 임포트했으나 해당 모듈은 개편으로 삭제되어 기본 실행이
+    ImportError 로 전체 런북을 죽였다(#60 감사 B3). Iceberg gold 는 dbt 코어가 silver 에서
+    재생성하므로 silver 의 v2 행 삭제(purge_silver) 후 다음 gold run 이 반영한다.
+    잔행 여부는 재적재 후 Trino 로 실측 확인(잔존 시 해당 gold 테이블 수동 DELETE — 런북 참조).
+    """
+    del shorts, apply  # 서명 유지(레이어 디스패치 공통) — 현재 동작 없음
+    return {"skipped": "gold=Iceberg(2026-07-14 개편, 구 gold.pg 폐사) — "
+                       "silver purge 후 다음 gold run 반영, 잔행은 재적재 후 실측"}
 
 
 def _print_layer(name: str, result: dict) -> None:

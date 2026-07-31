@@ -24,6 +24,7 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.ops.product_observability import record_domain_stage_event  # noqa: E402
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from weather_ingest.bronze import (  # noqa: E402
     append_kma_bronze_row_batches_pyiceberg,
@@ -94,12 +95,21 @@ record_weather_problem = problem_failure_callback(
     domain="weather", source_system=SOURCE_ID
 )
 WEATHER_BRONZE_ASSET_REF = Asset(WEATHER_BRONZE_ASSET)
+record_weather_raw_product_event = record_domain_stage_event("weather", "raw")
+record_weather_bronze_product_event = record_domain_stage_event("weather", "bronze")
+record_weather_raw_product_failure = record_domain_stage_event(
+    "weather", "raw", status="failed"
+)
+record_weather_bronze_product_failure = record_domain_stage_event(
+    "weather", "bronze", status="failed"
+)
 
 
 @fail_fast_weather_bronze
 def land_kma_raw(**context) -> dict:
+    conf = dag_run_conf(context)
     base_date, base_time = (
-        kma_base_datetime_from_conf(dag_run_conf(context))
+        kma_base_datetime_from_conf(conf)
         or resolve_kma_base_datetime()
     )
     request = KmaLandingRequest(
@@ -112,7 +122,13 @@ def land_kma_raw(**context) -> dict:
         num_of_rows=kma_num_of_rows(),
     )
     batch = build_weather_landing().collect(
-        RunIdentity(current_dag_id(context), context["run_id"]),
+        RunIdentity(
+            current_dag_id(context),
+            context["run_id"],
+            landing_load_date=(
+                str(conf["load_date"]) if conf.get("load_date") is not None else None
+            ),
+        ),
         request,
     )
     return batch.to_xcom()
@@ -120,6 +136,7 @@ def land_kma_raw(**context) -> dict:
 
 @fail_fast_weather_bronze
 def land_kma_raw_object_keys(**context) -> dict:
+    conf = dag_run_conf(context)
     grids = tuple(
         KmaGrid(str(grid["place_id"]), int(grid["nx"]), int(grid["ny"]))
         for grid in load_kma_grids()
@@ -129,6 +146,15 @@ def land_kma_raw_object_keys(**context) -> dict:
         .replay(
             raw_object_keys_from_conf(context),
             grids=grids,
+            run=RunIdentity(
+                current_dag_id(context),
+                context["run_id"],
+                landing_load_date=(
+                    str(conf["load_date"])
+                    if conf.get("load_date") is not None
+                    else None
+                ),
+            ),
         )
         .to_xcom()
     )
@@ -299,7 +325,9 @@ def build_kma_bronze_dag(
             on_failure_callback=[
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
+                record_weather_raw_product_failure,
             ],
+            on_success_callback=record_weather_raw_product_event,
         )
 
         load_bronze = PythonOperator(
@@ -325,7 +353,9 @@ def build_kma_bronze_dag(
             on_failure_callback=[
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
+                record_weather_bronze_product_failure,
             ],
+            on_success_callback=record_weather_bronze_product_event,
         )
         publish_bronze_asset = PythonOperator(
             task_id="publish_weather_bronze_asset",
@@ -374,7 +404,9 @@ def build_kma_bronze_backfill_dag():
             on_failure_callback=[
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
+                record_weather_raw_product_failure,
             ],
+            on_success_callback=record_weather_raw_product_event,
         )
 
         load_bronze = PythonOperator(
@@ -400,7 +432,9 @@ def build_kma_bronze_backfill_dag():
             on_failure_callback=[
                 record_and_notify_kma_run_failed,
                 record_weather_problem,
+                record_weather_bronze_product_failure,
             ],
+            on_success_callback=record_weather_bronze_product_event,
         )
         publish_bronze_asset = PythonOperator(
             task_id="publish_weather_bronze_asset",

@@ -1,8 +1,8 @@
 """bronze 수집 — 데이터셋 1개를 끝까지 순회해 **run_id 폴더에 API당 1파일**로 적재.
 
-저장(이 run_id 폴더 안에서만):
-  - 원본: {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<ts>/<short>.jsonl  (페이지별 원본 응답을 줄단위 NDJSON)
-  - 마커: .../run_id=<ts>/_markers/<short>.completed | .incomplete  (API별 결과 + 리니지 JSON)
+저장(데이터=run 폴더 · 마커=마커 존):
+  - 원본: {prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<ts>/<short>.jsonl  (페이지별 원본 응답을 줄단위 NDJSON)
+  - 마커: {COMMERCE_MARKERS_LAYER}/load_date=<d>/run_id=<ts>/<short>.completed | .incomplete  (API별 결과+리니지 — #60 지시 파일, control 존; 미설정 시 run 폴더 안 _markers/ 폴백)
   (연/월/일은 run_id 날짜에서 파생 — paths.bronze_run_dir)
 
 마커 운용(2 타입, API당 1개·상호배타):
@@ -11,7 +11,7 @@
   (없음=이번 실행 미시도. '완료'와 '미완료'를 동시에 두면 중복·불일치 위험이라 1개만 둔다.)
 
 CLAUDE.md 준수: §2.1 리니지(마커 JSON) · §2.2 원본 보존(NDJSON 줄=원본 응답) · §2.5 인증키 비노출.
-serving DB·외부 매니페스트 없음 — 상태는 run_id 폴더의 마커가 전부.
+serving DB·외부 매니페스트 없음 — 수집 상태는 마커 존(run 미러)의 마커가 전부.
 """
 from __future__ import annotations
 
@@ -101,6 +101,19 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
     if error:
         marker["error"] = error
     storage.write_json(marker_key, marker)     # 인증키 제외 리니지(§2.1)
+
+    # 마커 상호배타 유지(#60 감사 F7): 같은 run 의 태스크 재시도가 1차 시도의 incomplete 를
+    # 남겼을 수 있다 — completed 기록 **후** 잔존 incomplete 를 지운다(기록 전 삭제는 실패 시
+    # 마커 0개 창이 생기므로 금지). 역방향(completed 삭제)은 적재 계획 파손이라 하지 않는다.
+    if marker_type == paths.MARKER_COMPLETED:
+        stale = paths.bronze_marker_key(prefix=prefix, run_id=bronze_run_id,
+                                        short=short, status=paths.MARKER_INCOMPLETE)
+        try:
+            if storage.exists(stale):
+                storage.delete(stale)
+                log.info("%s: 같은 run 잔존 incomplete 마커 정리(재시도 흔적): %s", short, stale)
+        except Exception as exc:               # 정리 실패가 수집 성공을 막지 않게
+            log.warning("%s: 잔존 incomplete 정리 실패(무시): %s", short, exc)
 
     log.info("%s: bronze %s rows=%d/%d incr=%s -> %s (marker=%s)",
              short, status, rows_total, list_total_count or "?",

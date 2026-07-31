@@ -11,6 +11,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from traffic_ingest.errors import (  # noqa: E402
+    TrafficSourceEmptyResponseError,
+    TrafficSourceSchemaError,
+)
 from traffic_ingest.landing import (  # noqa: E402
     RunIdentity,
     TrafficLanding,
@@ -18,6 +22,7 @@ from traffic_ingest.landing import (  # noqa: E402
     TrafficLandingIncompleteError,
     TrafficLandingRequest,
 )
+from traffic_ingest.errors import TrafficSourceSchemaError  # noqa: E402
 
 
 def acc_info_payload(*, total_count: int, incident_ids: tuple[str, ...]) -> bytes:
@@ -57,6 +62,7 @@ class SequentialTopisSource:
 class MemoryRawObjectStore:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, str]] = {}
+        self.write_order: list[str] = []
 
     def exists(self, key: str) -> bool:
         return key in self.objects
@@ -66,6 +72,66 @@ class MemoryRawObjectStore:
 
     def write_bytes(self, key: str, payload: bytes, content_type: str) -> None:
         self.objects[key] = (payload, content_type)
+        self.write_order.append(key)
+
+
+def test_collect_keeps_raw_and_manifest_in_run_start_partition_across_midnight():
+    clock_values = iter(
+        (
+            datetime(2026, 7, 30, 14, 59, 59, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 1, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 2, tzinfo=timezone.utc),
+            datetime(2026, 7, 30, 15, 0, 3, tzinfo=timezone.utc),
+        )
+    )
+    raw_store = MemoryRawObjectStore()
+    batch = TrafficLanding(
+        source=ScriptedTopisSource(
+            {
+                (1, 1): acc_info_payload(total_count=2, incident_ids=("A1",)),
+                (2, 2): acc_info_payload(total_count=2, incident_ids=("A2",)),
+            }
+        ),
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: next(clock_values),
+        request_id=iter(("request-1", "request-2")).__next__,
+    ).collect(
+        RunIdentity(dag_id="traffic_incident_landing", run_id="scheduled__midnight"),
+        TrafficLandingRequest(start_index=1, end_index=1, page_size=1),
+    )
+
+    assert all("/load_date=2026-07-30/" in item.raw_object_key for item in batch.raw_objects)
+    assert "/load_date=2026-07-30/" in str(batch.manifest_key)
+    assert batch.to_xcom()["landing_load_date"] == "2026-07-30"
+    assert json.loads(raw_store.read_bytes(str(batch.manifest_key)))["load_date"] == "2026-07-30"
+
+
+def test_replay_rejects_raw_objects_from_multiple_load_date_partitions():
+    raw_store = MemoryRawObjectStore()
+    first_key = (
+        "raw/traffic_incident/seoul_traffic_incident/load_date=2026-07-30/"
+        "20260730T235959KST_AccInfo-1-1_request-1.xml"
+    )
+    second_key = (
+        "raw/traffic_incident/seoul_traffic_incident/load_date=2026-07-31/"
+        "20260731T000001KST_AccInfo-2-2_request-2.xml"
+    )
+    raw_store.write_bytes(first_key, acc_info_payload(total_count=2, incident_ids=("A1",)), "application/xml")
+    raw_store.write_bytes(second_key, acc_info_payload(total_count=2, incident_ids=("A2",)), "application/xml")
+    landing = TrafficLanding(
+        source=ScriptedTopisSource({}),
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 31, tzinfo=timezone.utc),
+        request_id=lambda: "unused",
+    )
+
+    with pytest.raises(TrafficSourceSchemaError, match="one landing_load_date"):
+        landing.replay(
+            [first_key, second_key],
+            run=RunIdentity("traffic_incident_backfill", "manual__mixed"),
+        )
 
 
 def test_collect_preserves_raw_lineage_for_one_successful_page():
@@ -101,6 +167,18 @@ def test_collect_preserves_raw_lineage_for_one_successful_page():
         == "application/xml; charset=utf-8"
     )
     assert "SEOUL_API_KEY" not in raw_object.raw_object_key
+    assert batch.manifest_key is not None
+    assert raw_store.write_order[-1] == batch.manifest_key
+    assert json.loads(raw_store.read_bytes(batch.manifest_key)) == {
+        "run_id": "scheduled__2026-07-14T00:20:00Z",
+        "dataset": "seoul_traffic_incident",
+        "load_date": "2026-07-14",
+        "object_keys": [raw_object.raw_object_key],
+        "expected_count": 1,
+        "actual_count": 1,
+        "completed_at": "2026-07-14T09:20:00+09:00",
+        "status": "SUCCESS",
+    }
 
 
 def test_collect_fetches_every_page_required_by_topis_total_count():
@@ -189,6 +267,76 @@ def test_collect_refetches_once_after_source_count_exceeds_metadata():
     assert len([key for key in raw_store.objects if key.endswith(".xml")]) == 2
 
 
+def test_collect_retries_one_empty_response_before_landing_valid_page():
+    valid_payload = acc_info_payload(total_count=1, incident_ids=("A1",))
+    source = SequentialTopisSource([b"", valid_payload])
+    raw_store = MemoryRawObjectStore()
+    landing = TrafficLanding(
+        source=source,
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 31, 0, 0, tzinfo=timezone.utc),
+        request_id=lambda: "request-valid",
+    )
+
+    batch = landing.collect(
+        RunIdentity("traffic_incident_landing", "scheduled__empty-then-valid"),
+        TrafficLandingRequest(1, 1000, 1000),
+    )
+
+    assert source.requests == [(1, 1000), (1, 1000)]
+    assert batch.parsed_rows == 1
+    assert batch.raw_objects[0].payload_hash == hashlib.sha256(valid_payload).hexdigest()
+    landed_payloads = [
+        payload
+        for key, (payload, _content_type) in raw_store.objects.items()
+        if key.endswith(".xml")
+    ]
+    assert landed_payloads == [valid_payload]
+
+
+def test_collect_fails_after_two_empty_responses_without_landing_raw_page():
+    source = SequentialTopisSource([b"", b"  \n"])
+    raw_store = MemoryRawObjectStore()
+    landing = TrafficLanding(
+        source=source,
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 31, 0, 0, tzinfo=timezone.utc),
+        request_id=lambda: "unused",
+    )
+
+    with pytest.raises(TrafficSourceEmptyResponseError):
+        landing.collect(
+            RunIdentity("traffic_incident_landing", "scheduled__empty-twice"),
+            TrafficLandingRequest(1, 1000, 1000),
+        )
+
+    assert source.requests == [(1, 1000), (1, 1000)]
+    assert not any(key.endswith(".xml") for key in raw_store.objects)
+
+
+def test_collect_does_not_retry_non_empty_malformed_xml():
+    source = SequentialTopisSource(
+        [b"not-xml", acc_info_payload(total_count=1, incident_ids=("A1",))]
+    )
+    landing = TrafficLanding(
+        source=source,
+        raw_store=MemoryRawObjectStore(),
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 31, 0, 0, tzinfo=timezone.utc),
+        request_id=lambda: "unused",
+    )
+
+    with pytest.raises(TrafficSourceSchemaError):
+        landing.collect(
+            RunIdentity("traffic_incident_landing", "scheduled__malformed"),
+            TrafficLandingRequest(1, 1000, 1000),
+        )
+
+    assert source.requests == [(1, 1000)]
+
+
 def test_collect_reuses_same_run_checkpoint_without_duplicate_source_request():
     source = ScriptedTopisSource(
         {(1, 1000): acc_info_payload(total_count=1, incident_ids=("A1",))}
@@ -213,7 +361,14 @@ def test_collect_reuses_same_run_checkpoint_without_duplicate_source_request():
     assert second == first
     assert source.requests == []
     assert (
-        len([key for key in raw_store.objects if not key.endswith("landing.json")]) == 1
+        len(
+            [
+                key
+                for key in raw_store.objects
+                if not key.endswith(("landing.json", "_manifest.json"))
+            ]
+        )
+        == 1
     )
     checkpoint_key = next(
         key for key in raw_store.objects if key.endswith("landing.json")
@@ -398,7 +553,10 @@ def test_replay_deduplicates_raw_keys_and_rebuilds_lineage_without_source_reques
         request_id=lambda: "must-not-be-used",
     )
 
-    batch = landing.replay([raw_key, raw_key])
+    batch = landing.replay(
+        [raw_key, raw_key],
+        run=RunIdentity("traffic_incident_backfill", "manual__deduplicated-replay"),
+    )
 
     assert source.requests == []
     assert len(batch.raw_objects) == 1
@@ -432,7 +590,10 @@ def test_replay_rejects_duplicate_page_ranges_that_mask_missing_rows():
     )
 
     with pytest.raises(TrafficLandingIncompleteError, match="duplicate page range"):
-        landing.replay([first_key, duplicate_key])
+        landing.replay(
+            [first_key, duplicate_key],
+            run=RunIdentity("traffic_incident_backfill", "manual__duplicate-replay"),
+        )
 
 
 def test_landing_batch_round_trips_through_airflow_xcom_mapping():

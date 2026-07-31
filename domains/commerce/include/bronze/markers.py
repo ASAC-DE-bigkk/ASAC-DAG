@@ -14,8 +14,12 @@ _RUN_MARKER = "run_id="
 
 
 def list_run_ids(storage: Storage, prefix: str = "") -> list[str]:
-    """raw/commerce 아래의 모든 run_id 를 시간순(오름차순)으로."""
-    root = paths.bronze_root(prefix=prefix)
+    """모든 run_id 를 시간순(오름차순)으로.
+
+    스캔 루트 = 마커 존(COMMERCE_MARKERS_LAYER 설정 시) 또는 raw 루트(폴백).
+    identical run(데이터 파일 0개)도 마커는 반드시 남기므로 마커 존이 run 목록의 단일 소스다.
+    """
+    root = paths.run_index_root(prefix=prefix)
     run_ids: set[str] = set()
     for key in storage.list_keys(root):
         idx = key.find(_RUN_MARKER)
@@ -33,7 +37,7 @@ def latest_run_id(storage: Storage, prefix: str = "") -> str | None:
 
 def completed_shorts(storage: Storage, prefix: str, run_id: str) -> set[str]:
     """해당 run 에서 `<short>.completed` 마커가 있는 short 집합."""
-    mdir = f"{paths.bronze_run_dir(prefix=prefix, run_id=run_id)}/{paths.MARKERS_DIR}"
+    mdir = paths.markers_run_dir(prefix=prefix, run_id=run_id)
     suffix = f".{paths.MARKER_COMPLETED}"
     done: set[str] = set()
     for key in storage.list_keys(mdir):
@@ -99,22 +103,41 @@ def recollect_targets_same_day(storage: Storage, prefix: str, enabled_shorts: li
     return [s for s in enabled_shorts if s not in done]
 
 
-def cleanup_incomplete(storage: Storage, prefix: str, short: str, keep_run_id: str) -> list[str]:
-    """해당 API 의 **incomplete 데이터/마커를 정리**(성공 run=keep_run_id 제외) → API당 한 파일 관리.
+def _same_day_run_ids(storage: Storage, prefix: str, date: str) -> set[str]:
+    """해당 KST 일자의 run_id 합집합 — 마커 존 + raw 일자 파티션 양쪽에서 수집.
 
-    재수집이 성공 run 에 완결되면, **같은 KST 일자**의 이전 실패 run 파편(파일·incomplete 마커)을
-    지워 하나로 유지한다. 다른 일자(날짜 변경분)는 건드리지 않는다(별개 정보). 삭제 키 목록 반환.
-    (storage.delete 필요.)
+    마커 존이 run 목록의 단일 소스지만, 마커 기록 **전에** 죽은 run 은 raw 에만 흔적
+    (`_full/` 고아 랜딩)을 남길 수 있어 정리(GC)용으로는 raw 파티션도 함께 본다.
+    """
+    rids = {r for r in list_run_ids(storage, prefix) if run_date(r) == date}
+    for key in storage.list_keys(paths.raw_date_prefix(prefix=prefix, date=date)):
+        idx = key.find(_RUN_MARKER)
+        if idx != -1:
+            rids.add(key[idx + len(_RUN_MARKER):].split("/", 1)[0])
+    return rids
+
+
+def cleanup_incomplete(storage: Storage, prefix: str, short: str, keep_run_id: str) -> list[str]:
+    """해당 API 의 **incomplete 파편을 정리**(성공 run=keep_run_id 제외) → API당 한 파일 관리.
+
+    재수집이 성공 run 에 완결되면, **같은 KST 일자**의 이전 실패 run 파편(데이터 파일·
+    incomplete 마커·`_full/` 고아 랜딩)을 지워 하나로 유지한다. 다른 일자(날짜 변경분)는
+    건드리지 않는다(별개 정보). 삭제 키 목록 반환. (storage.delete 필요.)
+
+    고아 랜딩(#60 감사 F5): 랜딩 저장~diff 완료 사이에 중단된 run 은 `_full/<short>.jsonl` 을
+    raw 에 영구 잔존시키므로, 동일자 후속 성공 시 여기서 함께 정리한다(잔존=중단 증거 시맨틱은
+    '다음 성공 전까지'로 유지).
     """
     keep_date = run_date(keep_run_id)
     removed: list[str] = []
-    for rid in list_run_ids(storage, prefix):
-        if rid == keep_run_id or run_date(rid) != keep_date:   # 같은 KST 일자만 정리
+    for rid in sorted(_same_day_run_ids(storage, prefix, keep_date)):
+        if rid == keep_run_id:                                 # 같은 KST 일자만 정리
             continue
         mkey = paths.bronze_marker_key(prefix=prefix, run_id=rid, short=short,
                                        status=paths.MARKER_INCOMPLETE)
         okey = paths.bronze_object_key(prefix=prefix, run_id=rid, short=short)
-        for k in (mkey, okey):
+        lkey = paths.bronze_full_landing_key(prefix=prefix, run_id=rid, short=short)
+        for k in (mkey, okey, lkey):
             if storage.exists(k):
                 storage.delete(k)
                 removed.append(k)

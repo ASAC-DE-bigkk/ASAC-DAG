@@ -56,8 +56,14 @@ CITYDATA_SCHEMA_ENV = "SEOUL_CITYDATA_SCHEMA"
 DEFAULT_CITYDATA_SCHEMA = "seoul_citydata"
 
 
-def citydata_schema() -> str:
-    """citydata 스키마명(seoul_citydata) — env override 가능."""
+def citydata_schema(target: str = "dev") -> str:
+    """citydata 스키마명 — target 인지 (ASAC-DAG#612, serving_monitor 확정 패턴과 동일).
+
+    prod=`citydata`(dbt profiles #556 착지와 정렬), dev=env 오버라이드 or `seoul_citydata`.
+    #607 이 target 만 고치고 스키마를 남겨 prod maintenance 가 구 스키마를 조준하던 것 교정.
+    """
+    if (target or "dev").lower() == "prod":
+        return "citydata"
     return os.environ.get(CITYDATA_SCHEMA_ENV, DEFAULT_CITYDATA_SCHEMA)
 
 # metadata 파일 경로: s3://<bucket>/__r2_data_catalog/<schema-uuid>/<table-dir>/metadata/<name>

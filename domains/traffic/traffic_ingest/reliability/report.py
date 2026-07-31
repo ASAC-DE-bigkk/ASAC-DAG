@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from common.ops.product_observability import build_traffic_product_health
+
 from .config import (
     KST,
     TRAFFIC_AUDIT_TABLE,
@@ -25,6 +27,7 @@ from .lineage import collect_pipeline_stages
 from .trino_repository import (
     _qualified,
     collect_dag_run_summary,
+    collect_traffic_product_profile,
     collect_traffic_summary,
     trino_cursor,
 )
@@ -47,6 +50,11 @@ def collect_traffic_data_plane(
             "table": _qualified(config, TRAFFIC_TABLE),
             "audit_table": _qualified(config, TRAFFIC_AUDIT_TABLE),
         }
+    try:
+        product_profile = collect_traffic_product_profile(cursor, config, detected_at)
+    except Exception:
+        product_profile = None
+    product_health = build_traffic_product_health(profile=product_profile)
     try:
         dag_runs = collect_dag_run_summary(
             cursor, config, TRAFFIC_BRONZE_DAG_ID, detected_at
@@ -149,6 +157,7 @@ def collect_traffic_data_plane(
         "lookback_hours": config.lookback_hours,
         "status": status,
         "traffic": traffic,
+        "product_health": product_health,
         "dag_runs": dag_runs,
         "flow_dag_runs": flow_dag_runs,
         "scheduled_runs": scheduled_runs,
@@ -215,10 +224,14 @@ def compose_traffic_pipeline_report(
     stages: dict[str, Any],
     history: list[dict[str, Any]],
     detected_at: datetime,
+    contract_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data_status = str(data_plane.get("status") or "FAIL").upper()
     control_status = str(stages.get("status") or "UNKNOWN").upper()
     status = _pipeline_status(data_status, control_status)
+    if contract_audit is not None:
+        audit_status = str(contract_audit.get("status") or "FAIL").upper()
+        status = _pipeline_status(status, audit_status)
     stage_items = stages.get("stages")
     if not isinstance(stage_items, list):
         stage_items = []
@@ -247,6 +260,8 @@ def compose_traffic_pipeline_report(
         "stages": stage_items,
         "bottleneck": _select_bottleneck(stage_items),
     }
+    if contract_audit is not None:
+        result["contract_audit"] = dict(contract_audit)
     result["trend"] = _trend(history, report_date, status)
     return result
 

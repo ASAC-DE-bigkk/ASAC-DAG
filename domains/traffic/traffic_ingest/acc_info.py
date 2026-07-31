@@ -8,6 +8,7 @@ from traffic_ingest.common.runtime import raw_prefix
 from traffic_ingest.errors import (
     TrafficInvalidWindowError,
     TrafficSourceBusinessError,
+    TrafficSourceEmptyResponseError,
     TrafficSourceSchemaError,
 )
 
@@ -132,6 +133,8 @@ def xml_text(element: ET.Element | None, name: str) -> str | None:
 
 
 def parse_seoul_acc_info_response(raw_bytes: bytes) -> tuple[dict, list[dict]]:
+    if not raw_bytes.strip():
+        raise TrafficSourceEmptyResponseError("Seoul AccInfo response body is empty")
     try:
         root = ET.fromstring(raw_bytes)
     except ET.ParseError as exc:

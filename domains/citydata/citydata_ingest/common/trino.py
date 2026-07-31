@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .config import normalize_target
+from .config import normalize_target, uses_split_dev_keys
 
 # 안전한 SQL 식별자(카탈로그/스키마/테이블)만 허용 -- 인젝션 방지.
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -61,7 +61,12 @@ def build_trino_settings(target: str = "dev", env: dict | None = None) -> TrinoS
 
     target = normalize_target(target)
     env = env if env is not None else os.environ
-    dev = target == "dev"
+    # 카탈로그 논리명도 env 규약을 따른다(ASK-Seoul#66, config.uses_split_dev_keys):
+    # 구 규약 dev 만 ``TRINO_DEV_ICEBERG_CATALOG``(기본 iceberg_dev), 신 규약은 파일 하나가
+    # 한 환경이라 dev·prod 모두 ``TRINO_ICEBERG_CATALOG``. 신 규약 판별 없이 dev 에서
+    # ``TRINO_ICEBERG_CATALOG`` 로 폴백하면 구 규약 박스(iceberg·iceberg_dev 공존)에서 dev 가
+    # prod 창고를 가리킨다.
+    dev = target == "dev" and uses_split_dev_keys(env)
     catalog = (
         env.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
         if dev

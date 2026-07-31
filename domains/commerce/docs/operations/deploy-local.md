@@ -4,23 +4,23 @@
 — 신규 기여자가 바로 시작하는 모드. R2 를 쓰는 dev 는 [deploy-dev.md](deploy-dev.md).
 
 > 호스트 스택은 단일 `docker-compose.yml`(`elt-infra`, LocalExecutor) + 루트 `.env`(번들 밖).
-> commerce 인자는 이 번들의 `.env.commerce`. 두 축 개념은 [environments.md](../configuration/environments.md).
+> commerce 실값은 루트 `.env` 의 `commerce 전용값` 블록, `.env.commerce` 는 매핑. 두 축 개념은 [environments.md](../configuration/environments.md).
 
 ## 사전 요건
 
 - Docker Desktop(Compose v2). Windows 는 WSL2 백엔드 권장.
 - 호스트 루트 `.env` 가 채워져 있어야 한다(Airflow/Postgres 등 — 번들 밖).
 
-## 1. commerce 환경파일
+## 1. 환경 설정
 
 ```powershell
 cd dags/domains/commerce
-Copy-Item .env.commerce.example .env.commerce
+Copy-Item .env.commerce.example .env.commerce      # 매핑만 담김 — 수정 불필요
 ```
 
-- 루트 `.env` 에 `SEOUL_API_KEY_COMM` 입력(**필수**, #70 이관) — 없으면 `check_api_key` 게이트에서 전체 실패.
-- `STORAGE_BACKEND=local`(기본), `LOCAL_DATA_ROOT=/opt/airflow/data` 확인.
-- 전체 변수: [configuration.md](../configuration/configuration.md).
+- 루트 `.env` 의 `commerce 전용값` 블록에서 `SEOUL_API_KEY_COMM` 입력(**필수**, #70 이관) — 없으면 `check_api_key` 게이트에서 전체 실패.
+- `COMMERCE_STORAGE_BACKEND=local`(기본), `COMMERCE_LOCAL_DATA_ROOT=/opt/airflow/data` 확인.
+- 전체 변수·매핑 대응표: [configuration.md](../configuration/configuration.md).
 
 ## 2. 기동 (호스트 루트에서)
 
@@ -33,8 +33,9 @@ docker compose ps
 - 이미지가 없으면 자동 빌드.
 - UI: http://localhost:30585
 
-> 컴포즈가 `./dags` 를 마운트하므로 `.env.commerce` 가 컨테이너에서 보이고, DAG 임포트 시
-> `load_commerce_env()` 가 자동 적재한다. 코드/`.env.commerce` 수정은 스케줄러 재파싱으로 반영.
+> 컴포즈가 `./dags` 를 마운트하므로 `.env.commerce`(매핑) 가 컨테이너에서 보이고, DAG 임포트 시
+> `load_commerce_env()` 가 루트 값을 코드 이름으로 채운다. 코드/`.env.commerce` 수정은 스케줄러
+> 재파싱으로, **루트 `.env` 값 변경은 `docker compose up -d`(env 재주입)** 로 반영.
 
 ## 3. 파이프라인 실행
 

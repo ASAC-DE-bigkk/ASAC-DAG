@@ -134,6 +134,31 @@ docker exec elt-infra-airflow-scheduler-1 bash -c \
   켠다(#238 사고 — 빈 테이블 감시 금지). 스킵이 이틀 넘게 지속되면 freshness 가
   다시 error 를 낼 수 있으니 Connection 부터 확인한다.
 
+## D1 서빙 export — `culture_serving_export` (#520)
+
+외부 gold 7종을 팀 공용 D1(`ask-seoul-dev-d1`)에 전량 스냅샷 게시. 도메인 쪽 코드는
+`culture_serving_export.py`(factory 호출) 하나이고, 계약·파이프라인은 공통이 정본:
+계약 = ASAC-DBT culture `meta.serving`(v1.1) · 파이프라인 = `common/serving`(#505).
+
+- **env 선행 3키** (`sample/.env` → env_file 주입, ASK-Seoul#54):
+  `CLOUDFLARE_API_TOKEN`(D1 Edit, 비밀) + `SERVING_CLOUDFLARE_ACCOUNT_ID` ·
+  `SERVING_D1_DATABASE_ID`(팀 D1 식별자, 비밀 아님 — 값은 상위 레포
+  `serving/wrangler.toml` 과 동일). 없으면 `publish_to_d1` 이 RuntimeError 로 즉시 실패.
+  **`.env` 를 고친 뒤에는 컨테이너 재생성 필수** — env_file 은 생성 시점에만 읽힌다.
+- **manifest 선행**: `/opt/airflow/dbt/domains/culture/target/manifest.json` 에
+  `meta.serving` 이 있어야 한다(없으면 "enabled 계약이 없다" 로 실패). transform 이
+  매일 갱신하지만, 계약 yml 만 바꾼 직후엔 컨테이너에서 `dbt parse` 로 재생성:
+
+```bash
+docker exec elt-infra-airflow-scheduler-1 bash -c \
+  '/home/airflow/dbt-venv/bin/dbt parse --project-dir /opt/airflow/dbt/domains/culture --profiles-dir /opt/airflow/dbt --target dev'
+```
+
+- 수동 1회 실행: `airflow dags test culture_serving_export`(스케줄러 컨테이너).
+- 스모크는 `SERVING_API_BASE_URL` 미설정 시 no-op pass(공개 Worker 창구는 #476 결정 대기).
+- 검증 쿼리(행수·등록): `SELECT name, row_count, serving_status FROM _catalog WHERE
+  product_id LIKE 'culture_%'` — 게시 수 == 등록 수가 자기검증(#477)의 통과 조건.
+
 ## 디버깅
 
 1. **어느 데이터셋이 깨졌나** — Airflow 그리드에서 red `fetch_raw` 매핑 인덱스 → 태스크 로그.

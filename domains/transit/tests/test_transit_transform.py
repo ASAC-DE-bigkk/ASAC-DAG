@@ -47,6 +47,13 @@ class _FakeOperator:
         self.downstream_task_ids.add(other.task_id)
         return other
 
+    def as_teardown(self, setups=None, on_failure_fail_dagrun=False):
+        # traffic/weather transform_test_support 의 fake 와 동일 모델링(#526)
+        self.is_teardown = True
+        self.on_failure_fail_dagrun = on_failure_fail_dagrun
+        self.kwargs["trigger_rule"] = "all_done_setup_success"
+        return self
+
 
 class FakeBashOperator(_FakeOperator):
     def __init__(self, task_id, bash_command, **kwargs):
@@ -130,6 +137,17 @@ def test_task_order_deps_build_publish():
         assert dag.task_dict[upstream].downstream_task_ids == {downstream}
 
 
+def test_publish_teardown_restores_run_failure():
+    # #526: all_done 리프(publish)가 유일 리프면 dbt_build 실패가 DagRun success 로
+    # 마스킹된다(리프 판정). weather/traffic 관례대로 publish 를 teardown 으로 선언해
+    # DagRun 판정에서 제외 → dbt_build 가 실질 리프 → build 실패 = run 실패 복원.
+    module = load_transform_module()
+    publish = module.dag.task_dict["publish_silver_metrics"]
+
+    assert getattr(publish, "is_teardown", False) is True
+    assert publish.on_failure_fail_dagrun is False  # teardown 자체 실패도 run 상태 불개입
+
+
 def test_dbt_build_is_single_contract_gate():
     module = load_transform_module()
     dag = module.dag
@@ -195,10 +213,12 @@ def test_target_param_limited_to_dev_or_prod():
 
 
 # ── 메트릭 적재 태스크 ───────────────────────────────────────────────────────────
-def test_publish_metrics_runs_on_all_done():
+def test_publish_metrics_runs_even_when_build_fails():
+    # #188 의도: build 실패에서도 모델/테스트 메트릭을 남긴다.
+    # teardown(#526)의 all_done_setup_success 트리거가 그 역할을 승계한다.
     module = load_transform_module()
     task = module.dag.task_dict["publish_silver_metrics"]
-    assert task.kwargs["trigger_rule"] == "all_done"
+    assert task.kwargs["trigger_rule"] == "all_done_setup_success"
 
 
 def _sample_run_results(path: Path) -> None:

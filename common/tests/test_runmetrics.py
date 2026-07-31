@@ -372,9 +372,8 @@ def test_r2_sink_bronze_key_convention_and_payload():
     f(**_context(run_id="scheduled__2026-07-07T00:00:00+09:00", try_number=2))
     assert len(put.calls) == 1
     key, payload = put.calls[0]
-    # metrics/date=YYYY-MM-DD/domain=<domain>/<dag>__<task>__<run 안전화>__tryN.json
-    assert key.startswith("metrics/date=")
-    assert "/domain=transit/" in key
+    # ops/metrics/<domain>/observed_date=YYYY-MM-DD/<dag>__<task>__<run 안전화>__tryN.json (#60/#573)
+    assert key.startswith("ops/metrics/transit/observed_date=")
     assert key.endswith("__try2.json")
     assert ":" not in key.split("/")[-1] and "+" not in key.split("/")[-1]
     record = json.loads(payload.decode("utf-8"))
@@ -393,7 +392,7 @@ def test_r2_sink_silver_key_uses_model_and_invocation(tmp_path):
     assert len(put.calls) == 3
     key = put.calls[0][0]
     # silver 는 dag 없음 — <domain> 아래 <모델명>__<invocation>.json
-    assert "/domain=transit/" in key
+    assert key.startswith("ops/metrics/transit/")
     assert key.endswith("silver_subway_arrival__inv-123.json")
     assert "unknown" not in key  # dag_id 부재가 이름에 새지 않음
 

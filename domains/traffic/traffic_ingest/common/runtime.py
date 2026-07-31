@@ -31,9 +31,7 @@ def required_env(name: str) -> str:
 
 def r2_env_name(name: str) -> str:
     if is_dev_target():
-        dev_name = "R2_DEV_" + name.removeprefix("R2_")
-        if os.environ.get(dev_name):
-            return dev_name
+        return "R2_DEV_" + name.removeprefix("R2_")
     return name
 
 
@@ -45,6 +43,20 @@ def raw_prefix() -> str:
     if is_dev_target():
         return os.environ.get("ASK_SEOUL_DEV_RAW_PREFIX", "raw")
     return os.environ.get("ASK_SEOUL_RAW_PREFIX", "raw")
+
+
+def checkpoint_prefix() -> str:
+    """landing checkpoint 루트 — 기본 ops 존, `TRAFFIC_CHECKPOINT_PREFIX` 는 롤백용(#60 약속②).
+
+    checkpoint 는 다음 실행의 재개 지점을 바꾸는 가변 상태라, 불변 박제 구역인
+    raw 밖(ops/control)이 목적지다. 기본값이 곧 목적지이므로 배포만 하면 맞고,
+    env 는 구 위치(`raw/_checkpoints`)로 되돌릴 때만 쓴다 — common(#573)·
+    culture(#579)·recovery(#585)와 같은 방식.
+    """
+    configured = os.environ.get("TRAFFIC_CHECKPOINT_PREFIX", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return "ops/control/checkpoints/traffic"
 
 
 def trino_catalog() -> str:

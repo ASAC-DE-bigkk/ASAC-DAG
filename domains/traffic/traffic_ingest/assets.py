@@ -19,12 +19,14 @@ TRAFFIC_INCIDENT_BRONZE_ASSET = TRAFFIC_BRONZE_ASSET
 TRAFFIC_INCIDENT_SILVER_ASSET = "iceberg://traffic/incident/silver"
 TRAFFIC_FLOW_BRONZE_ASSET = "iceberg://traffic/flow/bronze"
 TRAFFIC_FLOW_SILVER_ASSET = "iceberg://traffic/flow/silver"
+TRAFFIC_GOLD_PUBLICATION_READY_ASSET = "iceberg://traffic/gold/publication-ready"
 
 TRAFFIC_INCIDENT_RAW_ASSET_REF = Asset(TRAFFIC_INCIDENT_RAW_ASSET)
 TRAFFIC_INCIDENT_BRONZE_ASSET_REF = Asset(TRAFFIC_INCIDENT_BRONZE_ASSET)
 TRAFFIC_INCIDENT_SILVER_ASSET_REF = Asset(TRAFFIC_INCIDENT_SILVER_ASSET)
 TRAFFIC_FLOW_BRONZE_ASSET_REF = Asset(TRAFFIC_FLOW_BRONZE_ASSET)
 TRAFFIC_FLOW_SILVER_ASSET_REF = Asset(TRAFFIC_FLOW_SILVER_ASSET)
+TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF = Asset(TRAFFIC_GOLD_PUBLICATION_READY_ASSET)
 TRAFFIC_INCIDENT_MATERIALIZED_ALIAS = AssetAlias("traffic_incident_materialized")
 TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS = AssetAlias(
     "traffic_incident_silver_materialized"
@@ -275,25 +277,22 @@ def materializer_schedule(
     airflow_version: str | None = None,
     schedule_factory: Callable[..., object] | None = None,
 ):
-    """Build Asset+time recovery scheduling on Airflow 3.
+    """Return a cron-only drain schedule from explicit override or shared default.
 
-    The repository's Windows unit-test environment still carries Airflow 2.11,
-    while the deployed image is pinned to 3.2.2. Airflow 2 therefore receives
-    the Asset-only equivalent; container import tests cover the production path.
+    Raw Asset events are deliberately not a second scheduling path: the 5-minute
+    landing cadence is drained in bounded groups by this 15-minute materializer.
     """
 
+    canonical_schedule_env = "ASK_SEOUL_TRAFFIC_MATERIALIZER_DAG_SCHEDULE"
+    if canonical_schedule_env in env:
+        return env[canonical_schedule_env] or None
     if env.get("ASK_SEOUL_TARGET", env.get("DBT_TARGET", "prod")) != "dev":
-        return None
-    cron = env.get(
+        return "*/15 * * * *"
+    del airflow_version, schedule_factory
+    return env.get(
         "ASK_SEOUL_TRAFFIC_MATERIALIZER_FALLBACK_SCHEDULE",
         "*/15 * * * *",
-    )
-    version = airflow_version or airflow.__version__
-    major = _major_version(version)
-    if not cron or major < 3:
-        return [schedule_asset(TRAFFIC_INCIDENT_RAW_ASSET, airflow_version=version)]
-    factory = schedule_factory or _airflow_three_schedule
-    return factory(cron=cron, asset=TRAFFIC_INCIDENT_RAW_ASSET_REF, timezone=KST)
+    ) or None
 
 
 def publish_through_alias(
@@ -319,6 +318,8 @@ __all__ = [
     "TRAFFIC_FLOW_MATERIALIZED_ALIAS",
     "TRAFFIC_FLOW_SILVER_ASSET",
     "TRAFFIC_FLOW_SILVER_ASSET_REF",
+    "TRAFFIC_GOLD_PUBLICATION_READY_ASSET",
+    "TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF",
     "TRAFFIC_FLOW_SILVER_MATERIALIZED_ALIAS",
     "TRAFFIC_INCIDENT_BRONZE_ASSET",
     "TRAFFIC_INCIDENT_BRONZE_ASSET_REF",

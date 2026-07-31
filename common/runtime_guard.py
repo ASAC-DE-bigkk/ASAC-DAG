@@ -18,6 +18,65 @@ _TARGET_CATALOGS = {
     "dev": ("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev"),
     "prod": ("TRINO_ICEBERG_CATALOG", "iceberg"),
 }
+TARGET_CHOICES = ("dev", "prod")
+_TARGET_ALIASES = ("ASK_SEOUL_TARGET", "DBT_TARGET")
+_R2_TARGETS = {
+    "dev": (
+        "seoul-dev",
+        (
+            "R2_DEV_BUCKET_NAME",
+            "R2_DEV_ENDPOINT",
+            "R2_DEV_ACCESS_KEY_ID",
+            "R2_DEV_SECRET_ACCESS_KEY",
+        ),
+    ),
+    "prod": (
+        "seoul",
+        (
+            "R2_BUCKET_NAME",
+            "R2_ENDPOINT",
+            "R2_ACCESS_KEY_ID",
+            "R2_SECRET_ACCESS_KEY",
+        ),
+    ),
+}
+
+
+def default_target(env: Mapping[str, str] | None = None) -> str:
+    """DAG ``target`` Param 의 기본값 — 런타임 env 를 따라간다.
+
+    bronze 는 env(``is_dev_target()``)로, transform 은 DAG param 으로 타깃을 정하던
+    이원화(#236)를 없앤다. env 를 prod 로 넘기면 transform param 도 같이 따라오므로
+    "bronze=prod / silver=dev" 엇갈림이 생기지 않는다.
+
+    알 수 없는 값은 ``dev`` 로 clamp 한다 — Param ``enum`` 밖의 기본값은 DAG 파싱
+    자체를 깨뜨리는데, 그러면 잘못된 값 하나가 도메인 전체를 스케줄에서 지운다.
+    실제 거부는 태스크 시점의 :func:`validate_dev_runtime` 이 맡는다.
+    """
+    values = os.environ if env is None else env
+    for name in _TARGET_ALIASES:
+        candidate = str(values.get(name, "")).strip().lower()
+        if candidate:
+            return candidate if candidate in TARGET_CHOICES else "dev"
+    return "dev"
+
+
+def resolve_runtime_target(env: Mapping[str, str] | None = None) -> str:
+    """Resolve the authoritative runtime target for execution-time side effects.
+
+    DAG parsing keeps :func:`default_target` permissive so a malformed local
+    environment does not hide every DAG.  A write path must instead have an
+    explicit target: ``DBT_TARGET`` is authoritative and a legacy alias may
+    only be present when it agrees.
+    """
+    values = os.environ if env is None else env
+    target = str(values.get("DBT_TARGET", "")).strip().lower()
+    if target not in TARGET_CHOICES:
+        raise RuntimeTargetError("DBT_TARGET must be explicitly set to dev or prod")
+    alias = str(values.get("ASK_SEOUL_TARGET", "")).strip().lower()
+    if alias and alias != target:
+        raise RuntimeTargetError("runtime target aliases disagree")
+    return target
 
 
 def validate_dev_runtime(
@@ -72,4 +131,18 @@ def validate_dev_runtime(
         if not _IDENTIFIER.fullmatch(schema):
             raise RuntimeTargetError(f"schema identifier is invalid: {env_name}")
         if target == "dev" and schema.lower() in _RESERVED_PROD_SCHEMAS:
-            raise RuntimeTargetError(f"schema is reserved for another environment: {env_name}")
+            raise RuntimeTargetError(
+                f"schema is reserved for another environment: {env_name}"
+            )
+
+    expected_bucket, required_r2_keys = _R2_TARGETS[target]
+    for env_name in required_r2_keys:
+        if not str(values.get(env_name, "")).strip():
+            raise RuntimeTargetError(
+                f"{target} R2 credential is missing: {env_name}"
+            )
+    bucket_name = str(values[required_r2_keys[0]]).strip()
+    if bucket_name != expected_bucket:
+        raise RuntimeTargetError(
+            f"{target} R2 bucket must be {expected_bucket}"
+        )

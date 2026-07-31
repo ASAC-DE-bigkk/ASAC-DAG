@@ -19,10 +19,10 @@
 스토리지 백엔드가 자동 부착. 자세히: [../architecture/storage.md](../architecture/storage.md).
 
 ```text
-{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(NDJSON)
-{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/<short>.completed | .incomplete  # API별 수집 결과 마커
-{prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<...>/_markers/_RUN.completed | .incomplete      # 실행 전체 마커
-{prefix}/raw/commerce/_diff_target/<short>.<YYYY-MM-DD>.jsonl                                  # run 무관 롤링 전체본(증분 기준)
+{prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(NDJSON)
+{prefix}/ops/control/state/commerce/markers/load_date=<YYYY-MM-DD>/run_id=<...>/<short>.completed | .incomplete  # API별 수집 결과 마커
+{prefix}/ops/control/state/commerce/markers/load_date=<YYYY-MM-DD>/run_id=<...>/_RUN.completed | .incomplete      # 실행 전체 마커
+{prefix}/ops/control/state/commerce/diff_target/<short>.<YYYY-MM-DD>.jsonl                                  # run 무관 롤링 전체본(증분 기준)
 ```
 
 - `<short>` = API 축약단어 = 데이터셋 `slug`(예: `general_restaurant`, `lodging`, `beauty_shop`).
@@ -81,10 +81,10 @@ DB·외부 매니페스트 없음 — 상태/이력은 **각 `run_id` 폴더의 
 
 | 마커 | 의미 |
 |---|---|
-| `_markers/<short>.completed` | cap 없이 끝까지 + 건수 일치(status=ok) |
-| `_markers/<short>.incomplete` | 건수 불일치/부분(cap)/오류(status=partial\|failed) |
+| `<short>.completed` | cap 없이 끝까지 + 건수 일치(status=ok) |
+| `<short>.incomplete` | 건수 불일치/부분(cap)/오류(status=partial\|failed) |
 | (마커 없음) | 이번 실행 미시도 |
-| `_markers/_RUN.completed\|.incomplete` | 실행 전체 요약(datasets_ok/incomplete/rows…) |
+| `_RUN.completed\|.incomplete` | 실행 전체 요약(datasets_ok/incomplete/rows…) |
 
 - bronze(수집)는 매 실행 전체 수집, 같은 KST 일자 이미 완료분은 제외(feat/59). `incomplete` 는
   `commerce_recollect_raw`(6h)가 이어서 재수집. 상세: [raw/status-tracking-model.md](raw/status-tracking-model.md).

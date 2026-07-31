@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,9 +12,25 @@ from zoneinfo import ZoneInfo
 
 
 RECEIPT_VERSION = 1
-RECEIPT_PREFIX = "traffic-snapshot-receipts"
+# pending receipt 는 "다음 실행의 동작을 바꾸는" 제어 상태라 ops/control 존이
+# 목적지다(TTL 금지 — 지워지면 materialization 이 멈춘다). 구 위치는
+# 루트 `traffic-snapshot-receipts`.
+RECEIPT_PREFIX = "ops/control/state/traffic/snapshot_receipts"
+
+
+def receipt_prefix() -> str:
+    """receipt 루트 — 기본 ops 존, `TRAFFIC_SNAPSHOT_RECEIPT_PREFIX` 는 롤백용(#60).
+
+    기본값이 곧 목적지이므로 배포만 하면 맞고, env 는 구 위치로 되돌릴 때만 쓴다 —
+    common(#573)·culture(#579)·recovery(#585)와 같은 방식.
+    """
+    configured = os.environ.get("TRAFFIC_SNAPSHOT_RECEIPT_PREFIX", "").strip()
+    return configured.rstrip("/") if configured else RECEIPT_PREFIX
+
+
 INCIDENT_SOURCE_ID = "seoul_traffic_incident"
 KST = ZoneInfo("Asia/Seoul")
+_MISSING_OBJECT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 
 
 class SnapshotReceiptContractError(ValueError):
@@ -38,6 +55,12 @@ class JsonStorage(Protocol):
 
 def _safe_segment(value: object) -> str:
     return quote(str(value or "unknown"), safe="-._~")
+
+
+def _is_missing_object_error(error: Exception) -> bool:
+    response = getattr(error, "response", {}) or {}
+    details = response.get("Error", {}) if isinstance(response, Mapping) else {}
+    return str(details.get("Code", "")) in _MISSING_OBJECT_CODES
 
 
 def _timestamp(value: object, *, field: str) -> datetime:
@@ -213,7 +236,7 @@ class TrafficSnapshotReceipts:
         self._storage = storage
         self._source_id = source_id
         self._source_prefix = (
-            f"{RECEIPT_PREFIX}/source_id={_safe_segment(source_id)}"
+            f"{receipt_prefix()}/source_id={_safe_segment(source_id)}"
         )
 
     def pending_key(self, snapshot_run_id: str) -> str:
@@ -344,6 +367,19 @@ class TrafficSnapshotReceipts:
         self._storage.delete(pending_key)
         return True
 
+    def is_pending(self, snapshot_run_id: str) -> bool:
+        """Return whether the snapshot still awaits acknowledgement, fail-closed."""
+
+        try:
+            self._storage.read_json(self.pending_key(snapshot_run_id))
+        except FileNotFoundError:
+            return False
+        except Exception as error:
+            if _is_missing_object_error(error):
+                return False
+            raise
+        return True
+
     def pending(self, *, limit: int | None = None) -> list[LandedSnapshot]:
         prefix = f"{self._source_prefix}/pending/"
         receipts: list[LandedSnapshot] = []
@@ -399,6 +435,7 @@ __all__ = [
     "LandedSnapshot",
     "MaterializedSnapshot",
     "RECEIPT_PREFIX",
+    "receipt_prefix",
     "SnapshotReceiptConflict",
     "SnapshotReceiptContractError",
     "TrafficSnapshotReceipts",

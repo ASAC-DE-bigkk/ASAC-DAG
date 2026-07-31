@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Callable, Protocol
 
+from common.raw_manifest import build_raw_manifest
 from weather_ingest.kma import KST, parse_kma_response
 from weather_ingest.errors import (
     WeatherCompletenessError,
@@ -48,6 +49,7 @@ def verify_raw_payload_hash(
 class RunIdentity:
     dag_id: str
     run_id: str
+    landing_load_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,8 @@ class KmaLandingBatch:
     base_date: str
     base_time: str
     is_publishable: bool = True
+    manifest_key: str | None = None
+    landing_load_date: str | None = None
 
     def to_xcom(self) -> dict:
         raw_objects = [
@@ -128,6 +132,8 @@ class KmaLandingBatch:
             "base_date": self.base_date,
             "base_time": self.base_time,
             "is_publishable": self.is_publishable,
+            "manifest_key": self.manifest_key,
+            "landing_load_date": self.landing_load_date,
         }
 
     @classmethod
@@ -160,6 +166,16 @@ class KmaLandingBatch:
             base_date=str(document.get("base_date") or ""),
             base_time=str(document.get("base_time") or ""),
             is_publishable=bool(document.get("is_publishable", True)),
+            manifest_key=(
+                str(document["manifest_key"])
+                if document.get("manifest_key")
+                else None
+            ),
+            landing_load_date=(
+                str(document["landing_load_date"])
+                if document.get("landing_load_date")
+                else None
+            ),
         )
 
 
@@ -193,10 +209,15 @@ class KmaLanding:
         raw_prefix: str,
         clock: Callable[[], datetime],
         request_id: Callable[[], str],
+        checkpoint_prefix: str | None = None,
     ) -> None:
         self._source = source
         self._raw_store = raw_store
         self._raw_prefix = raw_prefix.rstrip("/")
+        # 미지정 = 구 위치(raw 안). 호출자가 ops 존을 주면 그쪽으로 간다(#60 약속②).
+        self._checkpoint_prefix = (
+            checkpoint_prefix or f"{self._raw_prefix}/_checkpoints"
+        ).rstrip("/")
         self._clock = clock
         self._request_id = request_id
 
@@ -218,34 +239,119 @@ class KmaLanding:
 
     def _checkpoint_key(self, run: RunIdentity, request: KmaLandingRequest) -> str:
         return (
-            f"{self._raw_prefix}/_checkpoints/kma_vilage_fcst/"
+            f"{self._checkpoint_prefix}/kma_vilage_fcst/"
             f"dag_id={self._safe_key_segment(run.dag_id)}/"
             f"run_id={self._safe_key_segment(run.run_id)}/"
             f"base-{request.base_date}{request.base_time}.json"
         )
 
+    @staticmethod
+    def _validate_load_date(load_date: str) -> str:
+        try:
+            return datetime.strptime(load_date, "%Y-%m-%d").date().isoformat()
+        except (TypeError, ValueError) as exc:
+            raise WeatherSourceSchemaError(
+                "KMA landing_load_date must be YYYY-MM-DD"
+            ) from exc
+
+    @staticmethod
+    def _raw_object_load_dates(raw_objects: list[KmaRawObject]) -> set[str]:
+        return {
+            match.group("load_date")
+            for item in raw_objects
+            if (match := _RAW_OBJECT_KEY.search(item.raw_object_key)) is not None
+        }
+
+    def _resolve_landing_load_date(
+        self,
+        run: RunIdentity,
+        checkpoint_load_date: str | None,
+        raw_objects: list[KmaRawObject],
+    ) -> str:
+        candidates = {
+            self._validate_load_date(value)
+            for value in (
+                run.landing_load_date,
+                checkpoint_load_date,
+                *self._raw_object_load_dates(raw_objects),
+            )
+            if value
+        }
+        if len(candidates) > 1:
+            raise WeatherSourceSchemaError(
+                "KMA landing run must use one landing_load_date"
+            )
+        if candidates:
+            return candidates.pop()
+        return self._clock().astimezone(KST).date().isoformat()
+
+    def _manifest_key(self, run: RunIdentity, landing_load_date: str) -> str:
+        return (
+            f"{self._raw_prefix}/weather_forecast/kma_vilage_fcst/"
+            f"load_date={landing_load_date}/run_id={self._safe_key_segment(run.run_id)}"
+            "/_manifest.json"
+        )
+
+    def _write_manifest(
+        self,
+        run: RunIdentity,
+        raw_objects: list[KmaRawObject],
+        landing_load_date: str,
+    ) -> str:
+        key = self._manifest_key(run, landing_load_date)
+        manifest = build_raw_manifest(
+            run_id=run.run_id,
+            dataset="kma_vilage_fcst",
+            load_date=landing_load_date,
+            object_keys=[item.raw_object_key for item in raw_objects],
+            expected_count=len(raw_objects),
+            actual_count=len(raw_objects),
+            completed_at=self._clock().astimezone(KST).isoformat(),
+        )
+        self._raw_store.write_bytes(
+            key,
+            json.dumps(manifest, ensure_ascii=True, sort_keys=True).encode("utf-8"),
+            "application/json; charset=utf-8",
+        )
+        return key
+
     def _load_checkpoint(
         self,
         run: RunIdentity,
         request: KmaLandingRequest,
-    ) -> list[KmaRawObject]:
+    ) -> tuple[str | None, list[KmaRawObject]]:
         checkpoint_key = self._checkpoint_key(run, request)
         if not self._raw_store.exists(checkpoint_key):
-            return []
+            return None, []
         checkpoint_payload = self._raw_store.read_bytes(checkpoint_key)
         try:
             document = json.loads(checkpoint_payload.decode("utf-8"))
             if not isinstance(document, dict):
                 raise TypeError("checkpoint root must be an object")
             if document.get("request") != self._request_document(request):
-                return []
+                return None, []
             raw_objects_node = document["raw_objects"]
             if not isinstance(raw_objects_node, list):
                 raise TypeError("checkpoint raw_objects must be a list")
-            return [
+            raw_objects = [
                 KmaRawObject(**normalize_kma_checkpoint_raw_object(item))
                 for item in raw_objects_node
             ]
+            load_dates = self._raw_object_load_dates(raw_objects)
+            checkpoint_load_date = document.get("landing_load_date")
+            if checkpoint_load_date is not None and not isinstance(checkpoint_load_date, str):
+                raise TypeError("checkpoint landing_load_date must be a string")
+            if checkpoint_load_date:
+                checkpoint_load_date = self._validate_load_date(checkpoint_load_date)
+            if len(load_dates) > 1:
+                raise WeatherSourceSchemaError(
+                    "KMA checkpoint raw objects must share one load_date"
+                )
+            if load_dates and checkpoint_load_date and checkpoint_load_date not in load_dates:
+                raise WeatherSourceSchemaError(
+                    "KMA checkpoint landing_load_date disagrees with raw objects"
+                )
+            return checkpoint_load_date or next(iter(load_dates), None), raw_objects
         except (
             UnicodeError,
             json.JSONDecodeError,
@@ -262,12 +368,15 @@ class KmaLanding:
         run: RunIdentity,
         request: KmaLandingRequest,
         raw_objects: list[KmaRawObject],
+        *,
+        landing_load_date: str,
     ) -> None:
         document = {
             "source_id": "kma_vilage_fcst",
             "dag_id": run.dag_id,
             "dag_run_id": run.run_id,
             "request": self._request_document(request),
+            "landing_load_date": landing_load_date,
             "raw_objects": [asdict(item) for item in raw_objects],
         }
         self._raw_store.write_bytes(
@@ -285,11 +394,12 @@ class KmaLanding:
         base_time: str,
         nx: int,
         ny: int,
+        landing_load_date: str,
     ) -> str:
         collected_kst = collected_at.astimezone(KST)
         return (
             f"{self._raw_prefix}/weather_forecast/kma_vilage_fcst/"
-            f"load_date={collected_kst:%Y-%m-%d}/nx={nx}/ny={ny}/"
+            f"load_date={landing_load_date}/nx={nx}/ny={ny}/"
             f"{collected_kst:%Y%m%dT%H%M%S}KST_"
             f"base-{base_date}{base_time}_{request_id}.json"
         )
@@ -299,38 +409,56 @@ class KmaLanding:
         run: RunIdentity,
         request: KmaLandingRequest,
     ) -> KmaLandingBatch:
+        checkpoint_load_date, saved_checkpoint_objects = self._load_checkpoint(run, request)
+        landing_load_date = self._resolve_landing_load_date(
+            run, checkpoint_load_date, saved_checkpoint_objects
+        )
         checkpoint_objects = [
             item
-            for item in self._load_checkpoint(run, request)
+            for item in saved_checkpoint_objects
             if self._checkpoint_object_is_trustworthy(item)
         ]
         checkpoint_pages = {
             (item.nx, item.ny, item.page_no): item for item in checkpoint_objects
         }
         raw_objects: list[KmaRawObject] = []
+        self._save_checkpoint(
+            run, request, raw_objects, landing_load_date=landing_load_date
+        )
         api_request_count = 0
         reused_raw_object_count = 0
         for grid in request.grids:
             grid_objects: list[KmaRawObject] = []
             first_page = checkpoint_pages.get((grid.nx, grid.ny, 1))
             if first_page is None:
-                first_page = self._fetch_page(request, grid, page_no=1)
+                first_page = self._fetch_page(
+                    request, grid, page_no=1, landing_load_date=landing_load_date
+                )
                 api_request_count += 1
             else:
                 reused_raw_object_count += 1
             raw_objects.append(first_page)
             grid_objects.append(first_page)
-            self._save_checkpoint(run, request, raw_objects)
+            self._save_checkpoint(
+                run, request, raw_objects, landing_load_date=landing_load_date
+            )
             for page_no in range(2, first_page.page_count + 1):
                 raw_object = checkpoint_pages.get((grid.nx, grid.ny, page_no))
                 if raw_object is None:
-                    raw_object = self._fetch_page(request, grid, page_no=page_no)
+                    raw_object = self._fetch_page(
+                        request,
+                        grid,
+                        page_no=page_no,
+                        landing_load_date=landing_load_date,
+                    )
                     api_request_count += 1
                 else:
                     reused_raw_object_count += 1
                 raw_objects.append(raw_object)
                 grid_objects.append(raw_object)
-                self._save_checkpoint(run, request, raw_objects)
+                self._save_checkpoint(
+                    run, request, raw_objects, landing_load_date=landing_load_date
+                )
             total_count = max(item.total_count for item in grid_objects)
             parsed_rows = sum(item.row_count for item in grid_objects)
             if parsed_rows < total_count:
@@ -339,6 +467,7 @@ class KmaLanding:
                     f"nx={grid.nx}, ny={grid.ny}, "
                     f"total_count={total_count}, parsed_rows={parsed_rows}"
                 )
+        manifest_key = self._write_manifest(run, raw_objects, landing_load_date)
         return KmaLandingBatch(
             raw_objects=tuple(raw_objects),
             grid_count=len(request.grids),
@@ -347,6 +476,8 @@ class KmaLanding:
             base_date=request.base_date,
             base_time=request.base_time,
             is_publishable=True,
+            manifest_key=manifest_key,
+            landing_load_date=landing_load_date,
         )
 
     def _checkpoint_object_is_trustworthy(self, item: KmaRawObject) -> bool:
@@ -361,6 +492,7 @@ class KmaLanding:
         grid: KmaGrid,
         *,
         page_no: int,
+        landing_load_date: str,
     ) -> KmaRawObject:
         collected_at = self._clock()
         request_id = self._request_id()
@@ -382,6 +514,7 @@ class KmaLanding:
             base_time=request.base_time,
             nx=grid.nx,
             ny=grid.ny,
+            landing_load_date=landing_load_date,
         )
         self._raw_store.write_bytes(
             raw_object_key,
@@ -411,6 +544,7 @@ class KmaLanding:
         raw_object_keys: list[str],
         *,
         grids: tuple[KmaGrid, ...],
+        run: RunIdentity | None = None,
     ) -> KmaLandingBatch:
         grid_place_ids = {(grid.nx, grid.ny): grid.place_id for grid in grids}
         raw_objects: list[KmaRawObject] = []
@@ -487,6 +621,11 @@ class KmaLanding:
         base_date, base_time = next(iter(base_datetimes))
         actual_grid_keys = {(item.nx, item.ny) for item in raw_objects}
         configured_grid_keys = {(grid.nx, grid.ny) for grid in grids}
+        replay_run = run or RunIdentity("weather_vilage_fcst_bronze", "replay")
+        landing_load_date = self._resolve_landing_load_date(
+            replay_run, None, raw_objects
+        )
+        manifest_key = self._write_manifest(replay_run, raw_objects, landing_load_date)
         return KmaLandingBatch(
             raw_objects=tuple(raw_objects),
             grid_count=len(actual_grid_keys),
@@ -495,4 +634,6 @@ class KmaLanding:
             base_date=base_date,
             base_time=base_time,
             is_publishable=actual_grid_keys == configured_grid_keys,
+            manifest_key=manifest_key,
+            landing_load_date=landing_load_date,
         )

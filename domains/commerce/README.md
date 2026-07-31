@@ -16,8 +16,8 @@ Airflow 카테고리 번들이다. **서빙 DB·외부 매니페스트 없이** 
 ## 데이터 흐름
 
 ```text
-raw     {prefix}/raw/commerce/<YYYY>/<MM>/<DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl   # API당 1파일(원본 row-NDJSON 증분)
-state   .../run_id=<...>/_markers/<short>.completed|.incomplete + _RUN.*                        # 수집 결과 마커(DB·매니페스트 대체)
+raw     {prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl   # API당 1파일(원본 row-NDJSON 증분)
+state   {prefix}/ops/control/state/commerce/markers/load_date=…/run_id=…/<short>.completed|.incomplete + _RUN.*   # 수집 결과 마커(지시 파일 — control 존, #60)
 bronze  Iceberg <catalog>.commerce.bronze_localdata_license (+ collection_run_manifest)         # raw 증분의 append-only 변경로그 (commerce_load_bronze)
 silver  dbt/domains/commerce — silver_license_history · silver_license_current                  # 파싱·정제·암묵 버저닝 (commerce_load_silver)
 ```
@@ -36,17 +36,19 @@ silver  dbt/domains/commerce — silver_license_history · silver_license_curren
 
 commerce 가 읽는 모든 인자는 [docs/configuration.md](docs/configuration/configuration.md) 에 정리돼 있다.
 인증키 `SEOUL_API_KEY_COMM` 은 **호스트 루트 `.env`** 에 있다(ASAC-DAG#70 에서 도메인 공통
-`SEOUL_API_KEY_<도메인>` 규칙으로 이관). 나머지 commerce 전용 값은 이 번들의 `.env.commerce` 가 채운다:
+`SEOUL_API_KEY_<도메인>` 규칙으로 이관). 나머지 commerce 전용 값도 **루트 `.env` 의 `commerce 전용값`
+블록**이 단일 소스이고(2026-07-28 개편), 이 번들의 `.env.commerce` 는 그 값을 코드 이름으로 매핑만 한다:
 
 ```bash
+# 실값은 루트 .env 의 'commerce 전용값' 블록에서 관리(SEOUL_API_KEY_COMM·COMMERCE_STORAGE_BACKEND 등)
 cd dags/domains/commerce
-cp .env.commerce.example .env.commerce      # PowerShell: Copy-Item
-# 인증키는 루트 .env 의 SEOUL_API_KEY_COMM(필수). R2 쓰면 STORAGE_BACKEND=r2 + R2_* 확인.
+cp .env.commerce.example .env.commerce      # PowerShell: Copy-Item (매핑만 담김, 수정 불필요)
 ```
 
 DAG 임포트 시 [include/commerce_core/env.py](include/commerce_core/env.py) 의 `load_commerce_env()` 가
-`.env.commerce` 를 `os.environ` 에 채운다(프로세스/compose env 가 우선, 빈 값만 setdefault).
-값에는 `${VAR}` 참조를 쓸 수 있어 **루트 `.env` 와 겹치는 R2 값은 중복 없이 불러온다**.
+`.env.commerce` 의 `${...}` 참조를 프로세스 env(=루트 `.env`)로 치환해 `os.environ` 에 채운다
+(프로세스/compose env 가 우선, 빈 값만 setdefault). generic 이름은 루트에서 `COMMERCE_` 접두로
+네임스페이스하고 `.env.commerce` 가 코드 이름으로 되돌린다.
 
 | 변수 | 기본 | 비고 |
 |---|---|---|

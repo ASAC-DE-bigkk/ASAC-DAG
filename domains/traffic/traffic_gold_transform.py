@@ -21,8 +21,13 @@ for path in (DIR, os.path.dirname(DIR), os.path.dirname(os.path.dirname(DIR))):
 from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa: E402
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
+from common.ops.product_observability import record_domain_stage_event  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
-from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from common.runtime_guard import (  # noqa: E402
+    TARGET_CHOICES,
+    default_target,
+    validate_dev_runtime,
+)
 from traffic_dbt_failure import (  # noqa: E402
     R2RecoveryRecordSink,
     build_failure_notification,
@@ -36,13 +41,15 @@ from traffic_ingest import transform_runtime  # noqa: E402
 from traffic_ingest.transform_runtime import PREFLIGHT_SNAPSHOT_DAG_RUN_ID  # noqa: E402, F401
 from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_FLOW_SILVER_ASSET,
+    TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF,
     TRAFFIC_INCIDENT_SILVER_ASSET,
     schedule_asset,
 )
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from traffic_ingest.common.resources import TRINO_TRANSFORM_POOL  # noqa: E402
 from traffic_ingest.external_snapshot import (  # noqa: E402
     resolve_admin_dong_crosswalk_snapshot_id,
     resolve_citydata_crowding_snapshot_id,
+    traffic_gold_anchor_exists,
 )
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
@@ -73,8 +80,8 @@ from traffic_ingest.transform_specs import GOLD_DBT_PHASE_SPECS  # noqa: E402
 from traffic_ingest.transform_test_tier import (  # noqa: E402
     SELECT_TEST_TIER_TASK_ID,  # noqa: F401
     TrafficTestTier,  # noqa: F401
-    select_traffic_test_tier,
-    mark_traffic_test_tier,
+    mark_traffic_test_tier,  # noqa: F401
+    select_traffic_test_tier,  # noqa: F401
 )
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 
@@ -87,16 +94,35 @@ SNAPSHOT_TASK_ID = "resolve_traffic_gold_snapshot_run"
 FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
 CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY = "traffic_citydata_crowding_snapshot_id"
 ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY = "admin_dong_crosswalk_pin_snapshot_id"
+GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY = "traffic_gold_bootstrap_required"
+GOLD_HOT_SELECTOR = "ask_seoul_traffic_transform_gold_hot_build"
+GOLD_INCIDENT_HOT_SELECTOR = (
+    "ask_seoul_traffic_transform_gold_incident_hot_build"
+)
+GOLD_BOOTSTRAP_HOT_SELECTOR = (
+    "ask_seoul_traffic_transform_gold_bootstrap_hot_build"
+)
+GOLD_INCIDENT_BOOTSTRAP_HOT_SELECTOR = (
+    "ask_seoul_traffic_transform_gold_incident_bootstrap_hot_build"
+)
 # Gold validation must win the next slot after its priority-1 build. Silver
 # writers remain priority 10, preserving their precedence before Gold starts.
 PIN_CRITICAL_PRIORITY = 20
 DBT_RETRY_DELAY = timedelta(minutes=2)
-DEFAULT_PARAMS = {"target": Param(default="dev", type="string", enum=["dev"])}
+DEFAULT_PARAMS = {
+    "target": Param(
+        default=default_target(), type="string", enum=list(TARGET_CHOICES)
+    )
+}
 record_traffic_problem = problem_failure_callback(domain="traffic")
+record_traffic_gold_product_event = record_domain_stage_event("traffic", "gold")
+record_traffic_gold_product_failure = record_domain_stage_event(
+    "traffic", "gold", status="failed"
+)
 
 
 def resolve_traffic_gold_snapshot_run(**context) -> str:
-    return _resolve_traffic_gold_snapshot_run(
+    incident_run_id = _resolve_traffic_gold_snapshot_run(
         context=context,
         variable=Variable,
         incident_manifest_factory=build_traffic_manifest,
@@ -108,6 +134,13 @@ def resolve_traffic_gold_snapshot_run(**context) -> str:
         citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
         admin_dong_crosswalk_xcom_key=ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
     )
+    task_instance = context.get("ti") or context.get("task_instance")
+    if task_instance is not None:
+        task_instance.xcom_push(
+            key=GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY,
+            value=not traffic_gold_anchor_exists(),
+        )
+    return incident_run_id
 
 
 def resolve_gold_citydata_snapshot_id(*, ti):
@@ -138,8 +171,7 @@ def admit_traffic_gold_snapshot(**context) -> dict[str, object]:
 
 
 def mark_traffic_gold_success(**context) -> dict[str, object]:
-    """Advance cadence conservatively, then persist the admission marker last."""
-    mark_traffic_test_tier(**context)
+    """Persist the admission marker only after the hot build receipt passes."""
     ti = context["ti"]
     serialized = write_success_marker(
         variable=Variable,
@@ -147,6 +179,12 @@ def mark_traffic_gold_success(**context) -> dict[str, object]:
         identity=_gold_identity(ti=ti),
         evidence=current_silver_output_evidence(),
     )
+    outlet_events = context.get("outlet_events")
+    if outlet_events is not None:
+        outlet_events[TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF].extra = {
+            "gold_dag_run_id": str(context.get("run_id") or ""),
+            "gold_success_marker": serialized,
+        }
     return {"marker": serialized}
 
 
@@ -166,8 +204,21 @@ def run_dbt_phase(
     selector_by_test_tier_when_flow_missing=None,
     **context,
 ) -> dict[str, object]:
+    if dbt_command == "build" and selector == GOLD_HOT_SELECTOR:
+        bootstrap_required = context["ti"].xcom_pull(
+            task_ids=SNAPSHOT_TASK_ID,
+            key=GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY,
+        )
+        if not isinstance(bootstrap_required, bool):
+            raise AirflowFailException(
+                "Traffic Gold bootstrap requirement is unavailable"
+            )
+        if bootstrap_required:
+            selector = GOLD_BOOTSTRAP_HOT_SELECTOR
+            selector_when_flow_missing = GOLD_INCIDENT_BOOTSTRAP_HOT_SELECTOR
+
     def guard_current_silver_output() -> None:
-        mismatch_action = "skip" if dbt_command == "run" else "fail"
+        mismatch_action = "skip" if dbt_command in {"run", "build"} else "fail"
         expected_evidence = silver_output_evidence_from_resolver(
             context["ti"],
             snapshot_task_id=snapshot_task_id,
@@ -259,23 +310,22 @@ with DAG(
         op_kwargs={"domain": "traffic", "requested_target": "{{ params.target }}"},
         on_failure_callback=record_traffic_problem,
     )
-    select_test_tier = PythonOperator(
-        task_id="select_traffic_test_tier",
-        python_callable=select_traffic_test_tier,
-        on_failure_callback=record_traffic_problem,
-    )
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
         python_callable=resolve_traffic_gold_snapshot_run,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
-        on_failure_callback=record_traffic_problem,
+        on_failure_callback=[
+            record_traffic_problem,
+            record_traffic_gold_product_failure,
+        ],
+        on_success_callback=record_traffic_gold_product_event,
     )
     admit_snapshot = PythonOperator(
         task_id="admit_traffic_gold_snapshot",
         python_callable=admit_traffic_gold_snapshot,
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
@@ -294,7 +344,8 @@ with DAG(
     mark_success = PythonOperator(
         task_id="mark_traffic_gold_success",
         python_callable=mark_traffic_gold_success,
-        pool=TRINO_HEAVY_POOL,
+        outlets=[TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF],
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
@@ -307,7 +358,6 @@ with DAG(
 
     chain = [
         validate_runtime,
-        select_test_tier,
         resolve_snapshot,
         admit_snapshot,
         *dbt_phase_tasks.values(),

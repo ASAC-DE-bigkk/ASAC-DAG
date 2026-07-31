@@ -24,7 +24,11 @@ from common.discord import COLOR_FAIL, first_notice_for_run, send_embed  # noqa:
 from common.errors.airflow import problem_failure_callback, problem_from_airflow_context  # noqa: E402
 from common.errors.sink import R2ErrorSink  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
-from common.runtime_guard import validate_dev_runtime  # noqa: E402
+from common.runtime_guard import (  # noqa: E402
+    TARGET_CHOICES,
+    default_target,
+    validate_dev_runtime,
+)
 from traffic_dbt_failure import (  # noqa: E402
     R2RecoveryRecordSink,
     build_failure_notification,
@@ -42,7 +46,7 @@ from traffic_ingest.assets import (  # noqa: E402
     publish_through_alias,
     schedule_asset,
 )
-from traffic_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from traffic_ingest.common.resources import TRINO_TRANSFORM_POOL  # noqa: E402
 from traffic_ingest.runtime import build_traffic_manifest  # noqa: E402
 from traffic_ingest.transform_dag_support import (  # noqa: E402
     SILVER_ASSET_CONTRACT,
@@ -81,10 +85,10 @@ PIN_CRITICAL_PRIORITY = 10
 DBT_RETRY_DELAY = timedelta(minutes=2)
 DEFAULT_PARAMS = {
     "target": Param(
-        default="dev",
+        default=default_target(),
         type="string",
-        enum=["dev"],
-        description="dbt target profile name (dev only until production rollout).",
+        enum=list(TARGET_CHOICES),
+        description="dbt target profile name; defaults to the runtime env (#561).",
     )
 }
 record_traffic_problem = problem_failure_callback(domain="traffic")
@@ -99,7 +103,9 @@ def resolve_traffic_snapshot_run(**context) -> str:
 
 def admit_traffic_silver_snapshot(**context) -> dict[str, object]:
     ti = context["ti"]
-    incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
+    incident_run_id = context.pop("incident_run_id", None)
+    if incident_run_id is None:
+        incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
     try:
         return admit_transform(
             variable=Variable,
@@ -112,33 +118,27 @@ def admit_traffic_silver_snapshot(**context) -> dict[str, object]:
             ti,
             snapshot_task_id=SNAPSHOT_TASK_ID,
             incident_manifest_factory=build_traffic_manifest,
+            replacement_run_id=incident_run_id,
         )
         raise
 
 
-def assert_traffic_silver_snapshot_not_superseded(**context) -> str:
-    """Re-check the pin before the expensive dbt phases, not just at dbt_run_silver.
-
-    dbt_deps/dbt_source_freshness/dbt_test_traffic_incident_availability/
-    dbt_test_traffic_bronze_source_contract take several minutes even off the
-    heavy pool. Bronze arrives roughly every 5 minutes, so a run that only
-    discovers it was superseded once it reaches dbt_run_silver has already
-    burned that whole window — and the next run repeats the same waste,
-    livelocking the pipeline (#510). Checking here, right after admission,
-    keeps a superseded run's pool/wall-clock cost to one cheap manifest
-    lookup instead. The pre_execution_guard inside dbt_run_silver/
-    dbt_test_silver stays as-is for defense in depth.
-    """
-    ti = context["ti"]
-    incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
+def prepare_traffic_silver_snapshot(**context) -> str:
+    """Resolve, admit and verify one latest pin without an Airflow scheduling gap."""
+    incident_run_id = resolve_traffic_snapshot_run(**context)
+    admit_traffic_silver_snapshot(incident_run_id=incident_run_id, **context)
     return require_latest_publishable_incident_snapshot(
         build_traffic_manifest(), incident_run_id
     )
 
 
+verify_traffic_silver_write_evidence = transform_runtime.verify_silver_write_evidence
+
+
 def publish_traffic_incident_silver_asset(**context) -> dict[str, object]:
     ti = context["ti"]
     incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
+    verify_traffic_silver_write_evidence(ti)
     evidence = silver_output_evidence_from_dbt_run(ti)
     metadata = {
         "source_id": "seoul_traffic_incident",
@@ -160,19 +160,13 @@ def publish_traffic_incident_silver_asset(**context) -> dict[str, object]:
         asset=TRAFFIC_INCIDENT_SILVER_ASSET_REF,
         metadata=metadata,
     )
-    return metadata
-
-
-def mark_traffic_silver_success(**context) -> dict[str, object]:
-    ti = context["ti"]
-    incident_run_id = ti.xcom_pull(task_ids=SNAPSHOT_TASK_ID)
-    serialized = write_success_marker(
+    write_success_marker(
         variable=Variable,
         marker_key=SILVER_SUCCESS_MARKER_KEY,
         identity=TransformIdentity.silver(incident_run_id),
-        evidence=silver_output_evidence_from_dbt_run(ti),
+        evidence=evidence,
     )
-    return {"marker": serialized}
+    return metadata
 
 
 def run_dbt_phase(
@@ -265,23 +259,9 @@ with DAG(
     )
     resolve_snapshot = PythonOperator(
         task_id=SNAPSHOT_TASK_ID,
-        python_callable=resolve_traffic_snapshot_run,
-        pool=TRINO_HEAVY_POOL,
+        python_callable=prepare_traffic_silver_snapshot,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
-        weight_rule="absolute",
-        on_failure_callback=record_traffic_problem,
-    )
-    admit_snapshot = PythonOperator(
-        task_id="admit_traffic_silver_snapshot",
-        python_callable=admit_traffic_silver_snapshot,
-        pool=TRINO_HEAVY_POOL,
-        priority_weight=PIN_CRITICAL_PRIORITY,
-        weight_rule="absolute",
-        on_failure_callback=record_traffic_problem,
-    )
-    assert_not_superseded = PythonOperator(
-        task_id="assert_traffic_silver_snapshot_not_superseded",
-        python_callable=assert_traffic_silver_snapshot_not_superseded,
         weight_rule="absolute",
         on_failure_callback=record_traffic_problem,
     )
@@ -300,14 +280,9 @@ with DAG(
         task_id="publish_traffic_incident_silver_asset",
         python_callable=publish_traffic_incident_silver_asset,
         outlets=[TRAFFIC_INCIDENT_SILVER_MATERIALIZED_ALIAS],
-        pool=TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",
-        on_failure_callback=record_traffic_problem,
-    )
-    mark_success = PythonOperator(
-        task_id="mark_traffic_silver_success",
-        python_callable=mark_traffic_silver_success,
         on_failure_callback=record_traffic_problem,
     )
     publish_metrics = PythonOperator(
@@ -316,15 +291,9 @@ with DAG(
         on_failure_callback=record_traffic_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
-    # #510: run the Bronze source gates (deps/freshness/availability/contract)
-    # BEFORE pinning a snapshot, then resolve/admit/assert the latest publishable
-    # Bronze run immediately before dbt_run_silver. The gates are Bronze-source
-    # tests that do not depend on the pinned run (run_dbt_phase falls back to the
-    # preflight sentinel var when no snapshot is resolved yet), so moving them
-    # ahead of the pin keeps every contract gate intact while shrinking the
-    # pin->build window from ~10 min to seconds. That window used to exceed the
-    # ~5 min Bronze ingestion cadence, so the pin was always superseded before
-    # dbt_run_silver and the run self-skipped, starving Gold/Flow (livelock).
+    # #510: all Bronze gates stay ahead of the pin. Resolve/admit/latest-check
+    # share one task so Airflow cannot insert a scheduling gap between them.
+    # Models and pin-based tests run in one dbt build invocation.
     gate_tasks = [
         dbt_phase_tasks[spec.task_id]
         for spec in SILVER_DBT_PHASE_SPECS
@@ -339,11 +308,8 @@ with DAG(
         validate_runtime,
         *gate_tasks,
         resolve_snapshot,
-        admit_snapshot,
-        assert_not_superseded,
         *build_tasks,
         publish_silver,
-        mark_success,
         publish_metrics,
     ]
     for upstream, downstream in zip(chain, chain[1:]):

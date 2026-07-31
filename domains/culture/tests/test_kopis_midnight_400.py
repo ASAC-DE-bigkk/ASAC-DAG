@@ -74,7 +74,11 @@ def test_transient_400_retried_and_list_continues():
 
 
 def test_persistent_overshoot_400_still_ends_list():
-    """진짜 범위 밖(지속 400)은 재시도 후에도 400 → #84 대로 목록 끝."""
+    """진짜 범위 밖(지속 400)은 재시도 후에도 400 → #84 대로 목록 끝.
+
+    단 끝으로 읽기 전에 cpage=1 확인 요청이 한 번 들어간다(#201) — 살아 있으므로
+    "범위 밖이 맞다"로 확정된다.
+    """
     c, transport = _client({
         1: [_resp(200, _xml_page("A", "B"))],
         2: [_resp(200, _xml_page("C", "D"))],
@@ -82,7 +86,8 @@ def test_persistent_overshoot_400_still_ends_list():
     })
     pages = list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
     assert [p.row_count for p in pages] == [2, 2]
-    assert transport.calls == [1, 2, 3, 3]  # 재시도로 2회 확인 후 종료
+    # 1,2 정상 → 3 요청·재시도 → cpage=1 확인 요청(#201) → 끝
+    assert transport.calls == [1, 2, 3, 3, 1]
 
 
 def test_first_page_persistent_400_raises():
@@ -91,6 +96,49 @@ def test_first_page_persistent_400_raises():
     with pytest.raises(HttpProblemError):
         list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
     assert transport.calls == [1, 1]
+
+
+def test_mid_pagination_400_with_dead_list_raises_instead_of_truncating():
+    """🔴 #201 핵심 — 서버가 거절 중이면 '목록 끝'이 아니다.
+
+    7/29 실측 재현: 페이지네이션 도중(cpage=6 자리) 400 이 왔고 기존 코드는 그걸
+    목록 끝으로 읽어 1,261 행 중 500 행을 **정상 완결로 반환**했다. 확인 요청(cpage=1)이
+    같이 죽으면 범위 문제가 아니므로 전파해서 태스크를 시끄럽게 실패시켜야 한다 —
+    Airflow 재시도가 그 다음을 맡는다(실제로 재시도에서 매번 복구됐다).
+    """
+    c, transport = _client({
+        1: [_resp(200, _xml_page("A", "B")), _resp(400)],  # 확인 시점엔 1페이지도 거절
+        2: [_resp(200, _xml_page("C", "D"))],
+        3: [_resp(400)],
+    })
+    with pytest.raises(HttpProblemError):
+        list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
+    # 3 요청·재시도 → cpage=1 확인(그 자체도 1회 재시도) → 전부 400 이라 raise
+    assert transport.calls == [1, 2, 3, 3, 1, 1]
+
+
+def test_alive_probe_costs_at_most_one_extra_request_per_list():
+    """확인 요청은 목록당 1회다 — 목록이 끝날 때 한 번만 불린다."""
+    c, transport = _client({
+        1: [_resp(200, _xml_page("A", "B"))],
+        2: [_resp(200, _xml_page("C", "D"))],
+        3: [_resp(200, _xml_page("E", "F"))],
+        4: [_resp(400)],
+    })
+    pages = list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
+    assert [p.row_count for p in pages] == [2, 2, 2]
+    assert transport.calls.count(1) == 2, "1페이지 최초 조회 + 확인 요청 1회"
+
+
+def test_short_last_page_never_triggers_a_probe():
+    """짧은 마지막 페이지로 끝나면 400 이 없으므로 확인 요청도 없다(추가 호출 0)."""
+    c, transport = _client({
+        1: [_resp(200, _xml_page("A", "B"))],
+        2: [_resp(200, _xml_page("C"))],  # 짧은 페이지 = 끝
+    })
+    pages = list(c.list_pages("pblprfr", {}, rows=2, max_pages=None))
+    assert [p.row_count for p in pages] == [2, 1]
+    assert transport.calls == [1, 2]
 
 
 def test_transient_429_retried_by_core():

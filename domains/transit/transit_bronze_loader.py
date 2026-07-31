@@ -1,7 +1,7 @@
 """transit bronze loader (#369) — pending 마커 소비 → R2 원본 재파싱 → Iceberg 청크 적재.
 
 수집·적재 분리의 적재 쪽: collector(고빈도)가 남긴 pending 마커
-(state/transit/loader_pending/<dataset>/<ingest_ts>__<run>.json)를 시간순으로 처리한다.
+(ops/control/state/transit/loader_pending/<dataset>/<ingest_ts>__<run>.json)를 시간순으로 처리한다.
 
 멱등성: 마커 단위로 `DELETE WHERE dag_run_id=<collector run>` 후 재적재 —
 loader 가 중간에 죽어도 마커가 남아 다음 런이 통째로 재처리(중복 없음).
@@ -110,7 +110,10 @@ def _load_marker(cursor, marker_key: str, marker: dict, ensured: set) -> int:
 
 def load_pending() -> dict:
     """pending 마커 전량을 시간순 처리. 개별 실패는 격리하고 마지막에 실패로 마감."""
-    marker_keys = list_keys(config.LOADER_PENDING_PREFIX)
+    # 구경로 먼저(더 오래된 마커) → 신경로 — prefix 그룹 내에서는 사전순 = 시간순 유지.
+    marker_keys = [
+        k for legacy in config.LOADER_PENDING_LEGACY_PREFIXES for k in list_keys(legacy)
+    ] + list_keys(config.LOADER_PENDING_PREFIX)
     if not marker_keys:
         print("pending 없음 — skip")
         return {"markers": 0, "rows": 0}

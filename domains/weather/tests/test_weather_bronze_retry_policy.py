@@ -185,6 +185,24 @@ def test_weather_empty_bronze_batch_uses_completeness_type():
         )
 
 
+def test_weather_missing_manifest_blocks_bronze_before_trino():
+    ports = BronzeLoadPorts(
+        open_trino=lambda: pytest.fail("must fail before Trino"),
+        ensure_table=lambda *_args: pytest.fail("must fail before Trino"),
+        download=lambda *_args: pytest.fail("must fail before R2 download"),
+        append_batches=lambda **_kwargs: pytest.fail("must fail before append"),
+    )
+
+    with pytest.raises(WeatherCompletenessError, match="manifest is missing"):
+        load_kma_bronze_batch(
+            raw_result={"raw_objects": [{"raw_object_key": "raw/weather/page.json"}]},
+            dag_run_id="manual__missing-manifest",
+            allow_partial_pages=False,
+            expected_raw_object_count_key="expected_raw_object_count",
+            ports=ports,
+        )
+
+
 class _Dag:
     dag_id = "weather_vilage_fcst_bronze"
 

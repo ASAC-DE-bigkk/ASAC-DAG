@@ -124,6 +124,10 @@ def test_runtime_factory_lazily_composes_domain_landing(monkeypatch):
     assert isinstance(raw_store, R2RawObjectStore)
     assert raw_store._client is sentinel_s3
     assert raw_store._bucket == "seoul-dev"
+    # 프로덕션 경로는 항상 빌더가 주입한다 — TrafficLanding 의 생성자 폴백
+    # (`{raw_prefix}/_checkpoints`)은 직접 생성하는 테스트 편의일 뿐이다.
+    # 새 caller 가 주입을 빠뜨리면 구 위치로 새므로 여기서 고정한다(#60 약속②).
+    assert captured["landing"]["checkpoint_prefix"] == "ops/control/checkpoints/traffic"
     assert captured["landing"]["raw_prefix"] == "dev/raw"
 
 
@@ -177,3 +181,137 @@ def test_manifest_factory_keeps_trino_wiring_out_of_the_dag(monkeypatch):
     )
 
     assert runtime.build_traffic_manifest() is sentinel_manifest
+
+
+def test_incident_materializer_runtime_replays_legacy_raw_before_loading(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class Landing:
+        def replay(self, raw_object_keys, *, run):
+            captured["replay"] = (raw_object_keys, run)
+            return SimpleNamespace(
+                to_xcom=lambda: {
+                    "raw_object_keys": raw_object_keys,
+                    "raw_objects": [
+                        {
+                            "raw_object_key": "raw/traffic/page-1.xml",
+                            "raw_hash": "a" * 64,
+                        }
+                    ],
+                    "expected_rows": 4,
+                    "manifest_key": "raw/traffic/legacy/_manifest.json",
+                }
+            )
+
+    monkeypatch.setattr(runtime, "build_traffic_landing", lambda: Landing())
+    monkeypatch.setattr(runtime, "build_traffic_snapshot_receipts", lambda: object())
+    monkeypatch.setattr(runtime, "build_traffic_manifest", lambda: object())
+    monkeypatch.setattr(runtime, "IncidentMaterializer", lambda **kwargs: kwargs)
+
+    materializer = runtime.build_incident_materializer()
+    recover = materializer["recover_legacy_raw_result"]
+    raw_result = {
+        "raw_object_keys": ["raw/traffic/page-1.xml"],
+        "raw_objects": [
+            {
+                "raw_object_key": "raw/traffic/page-1.xml",
+                "raw_hash": "a" * 64,
+            }
+        ],
+        "expected_rows": 4,
+    }
+
+    assert recover(raw_result, "legacy-snapshot") == {
+        **raw_result,
+        "manifest_key": "raw/traffic/legacy/_manifest.json",
+    }
+    replayed_keys, replayed_run = captured["replay"]
+    assert replayed_keys == ["raw/traffic/page-1.xml"]
+    assert replayed_run.run_id == "legacy-snapshot"
+
+
+def test_incident_materializer_preflight_initializes_fresh_bronze_tables(monkeypatch):
+    import traffic_ingest.bronze as bronze
+
+    events: list[tuple[object, ...]] = []
+    cursor = object()
+    monkeypatch.setattr(
+        runtime,
+        "trino_cursor",
+        lambda: (cursor, "iceberg", "weather_traffic_bronze"),
+    )
+    monkeypatch.setattr(
+        bronze,
+        "create_seoul_traffic_bronze_table",
+        lambda actual_cursor, catalog, schema: events.append(
+            ("create", actual_cursor, catalog, schema)
+        ),
+    )
+
+    def find_verified(receipts, *, cursor_factory):
+        events.append(("find", receipts, cursor_factory()))
+        return {}
+
+    monkeypatch.setattr(
+        bronze,
+        "find_verified_seoul_traffic_bronze_receipts",
+        find_verified,
+    )
+    monkeypatch.setattr(runtime, "build_traffic_snapshot_receipts", lambda: object())
+    monkeypatch.setattr(runtime, "build_traffic_manifest", lambda: object())
+    monkeypatch.setattr(runtime, "IncidentMaterializer", lambda **kwargs: kwargs)
+
+    materializer = runtime.build_incident_materializer()
+    receipt = SimpleNamespace(
+        snapshot_run_id="snapshot-1",
+        raw_result={"raw_objects": []},
+    )
+
+    assert materializer["verified_receipts"]([receipt]) == {}
+    assert events == [
+        ("create", cursor, "iceberg", "weather_traffic_bronze"),
+        (
+            "find",
+            {"snapshot-1": {"raw_objects": []}},
+            (cursor, "iceberg", "weather_traffic_bronze"),
+        ),
+    ]
+
+
+def test_incident_materializer_runtime_rejects_legacy_raw_hash_mismatch(monkeypatch):
+    class Landing:
+        def replay(self, raw_object_keys, *, run):
+            return SimpleNamespace(
+                to_xcom=lambda: {
+                    "raw_object_keys": raw_object_keys,
+                    "raw_objects": [
+                        {
+                            "raw_object_key": "raw/traffic/page-1.xml",
+                            "raw_hash": "b" * 64,
+                        }
+                    ],
+                    "expected_rows": 4,
+                    "manifest_key": "raw/traffic/legacy/_manifest.json",
+                }
+            )
+
+    monkeypatch.setattr(runtime, "build_traffic_landing", lambda: Landing())
+    monkeypatch.setattr(runtime, "build_traffic_snapshot_receipts", lambda: object())
+    monkeypatch.setattr(runtime, "build_traffic_manifest", lambda: object())
+    monkeypatch.setattr(runtime, "IncidentMaterializer", lambda **kwargs: kwargs)
+
+    recover = runtime.build_incident_materializer()["recover_legacy_raw_result"]
+    with pytest.raises(ValueError, match="payload hashes do not match receipt"):
+        recover(
+            {
+                "raw_object_keys": ["raw/traffic/page-1.xml"],
+                "raw_objects": [
+                    {
+                        "raw_object_key": "raw/traffic/page-1.xml",
+                        "raw_hash": "a" * 64,
+                    }
+                ],
+                "expected_rows": 4,
+            },
+            "legacy-snapshot",
+        )

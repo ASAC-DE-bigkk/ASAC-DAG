@@ -25,7 +25,7 @@ domains/culture/
 └─ docs/
    ├─ README.md       (이 문서) 인덱스
    ├─ architecture.md 오케스트레이션 전략 + 코드 지도
-   ├─ sources.md      12데이터셋 카탈로그 + 소스 API + 좌표/CRS
+   ├─ sources.md      15데이터셋 카탈로그 + 소스 API + 좌표/CRS
    ├─ storage.md      R2 파티션 + bronze 스키마(다운스트림 계약)
    ├─ reliability.md  수집 계약 v0 + run_report SLO
    └─ operations.md   트리거·재수집·디버깅·env

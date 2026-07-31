@@ -126,6 +126,19 @@ class KopisClient:
     def _count(body: bytes) -> int:
         return _count_tag(body, "db")  # 페이지 안의 <db> 개수 = 행 수
 
+    def _list_still_alive(self, path: str, base_params: dict, rows: int) -> bool:
+        """'목록 끝'과 '서버가 지금 우리를 거절함'을 가르는 확인 요청(#201).
+
+        **이미 성공했던 1페이지를 다시 물어본다.** 살아 있으면 방금 400 은 범위 문제
+        (= 진짜 목록 끝)이고, 1페이지까지 같이 죽으면 서버 쪽 거절이라 목록 끝이 아니다.
+        확인은 목록당 최대 1회이므로 비용은 런당 KOPIS 목록 수만큼이다.
+        """
+        try:
+            self._get(path, {**base_params, "cpage": 1, "rows": rows})
+            return True
+        except (HttpProblemError, KopisError):
+            return False
+
     def list_pages(self, path: str, base_params: dict, rows: int, max_pages: int | None):
         """KOPIS 목록 엔드포인트를 페이징하며 :class:`Page`를 하나씩 내보낸다.
 
@@ -133,14 +146,25 @@ class KopisClient:
         도달하면 멈춘다. 총 행수가 ``rows``의 정확한 배수면 마지막 페이지가 꽉 차
         다음 페이지를 조회하게 되는데, KOPIS는 범위 밖 페이지에 HTTP 400을 준다 —
         이 오버슛 400은 '목록 끝'으로 처리한다(#84). 1페이지의 400은 진짜 오류.
+
+        단 **끝으로 읽기 전에 확인 요청을 한 번 더 넣는다**(#201). 밤 시간대 동시
+        호출에서 오는 400 은 페이지네이션 도중에도 오는데, 그걸 끝으로 읽으면 부분
+        데이터가 완전한 결과로 반환된다 — 7/29 실측이 그 형태였다(1,261 행 중 500 행을
+        정상 완결로 반환, 볼륨 계약 #147 하나가 잡았다). 즉시 400(rows=0)은 오히려
+        안전하다. 위험한 건 조용한 절단 쪽이고, 그건 baseline 이 있는 데이터셋에서만
+        걸린다.
         """
         def fetch_page(page: int) -> bytes | None:
             try:
                 return self._get(path, {**base_params, "cpage": page, "rows": rows})
             except HttpProblemError as exc:
                 if page > 1 and exc.status == 400:
-                    log.info("[kopis] %s cpage=%d 오버슛 400 — 목록 끝으로 종료", path, page)
-                    return None  # 오버슛 400 = 목록 끝(#84)
+                    if self._list_still_alive(path, base_params, rows):
+                        log.info("[kopis] %s cpage=%d 오버슛 400 — 목록 끝으로 종료", path, page)
+                        return None  # 오버슛 400 = 목록 끝(#84)
+                    log.warning(
+                        "[kopis] %s cpage=%d 400 — 확인 요청(cpage=1)도 400. 목록 끝이 아니라 "
+                        "서버 거절로 판단해 전파한다(#201, 조용한 절단 방지)", path, page)
                 raise
         yield from _paginate(fetch_page, self._count, rows, max_pages)
 
