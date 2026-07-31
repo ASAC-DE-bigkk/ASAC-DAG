@@ -19,6 +19,9 @@ if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.pools import (  # noqa: E402
+    TRINO_TRAFFIC_HEAVY_POOL as TRAFFIC_TRINO_HEAVY_POOL,
+)
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
 from weather_ingest.iceberg_maintenance import (  # noqa: E402
@@ -47,7 +50,6 @@ CANONICAL_TABLES = (
     "silver_seoul_traffic_incident",
     "gold_traffic_incident_summary",
 )
-TRAFFIC_TRINO_HEAVY_POOL = "trino_traffic_heavy"
 TRAFFIC_TABLES = frozenset(
     {
         "bronze_seoul_traffic_incident",
