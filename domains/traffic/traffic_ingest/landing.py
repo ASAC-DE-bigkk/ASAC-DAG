@@ -23,6 +23,7 @@ from traffic_ingest.errors import (
     TrafficCompletenessError,
     TrafficInvalidWindowError,
     TrafficRawIntegrityError,
+    TrafficSourceEmptyResponseError,
     TrafficSourceSchemaError,
 )
 from traffic_ingest.landing_contracts import (
@@ -373,8 +374,17 @@ class TrafficLanding:
             if raw_object is None:
                 collected_at = self._clock()
                 request_id = self._request_id()
-                http_status, payload = self._source.fetch_page(start_index, end_index)
-                metadata, rows = parse_seoul_acc_info_response(payload)
+                for empty_response_attempt in range(2):
+                    http_status, payload = self._source.fetch_page(
+                        start_index, end_index
+                    )
+                    try:
+                        metadata, rows = parse_seoul_acc_info_response(payload)
+                    except TrafficSourceEmptyResponseError:
+                        if empty_response_attempt == 0:
+                            continue
+                        raise
+                    break
                 result_code = str(metadata.get("result_code") or result_code)
                 raw_object_key = self._raw_object_key(
                     collected_at=collected_at,
