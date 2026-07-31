@@ -11,6 +11,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from traffic_ingest.errors import (  # noqa: E402
+    TrafficSourceEmptyResponseError,
+    TrafficSourceSchemaError,
+)
 from traffic_ingest.landing import (  # noqa: E402
     RunIdentity,
     TrafficLanding,
@@ -261,6 +265,76 @@ def test_collect_refetches_once_after_source_count_exceeds_metadata():
     assert batch.parsed_rows == 1
     assert batch.raw_objects[0].request_id == "request-2"
     assert len([key for key in raw_store.objects if key.endswith(".xml")]) == 2
+
+
+def test_collect_retries_one_empty_response_before_landing_valid_page():
+    valid_payload = acc_info_payload(total_count=1, incident_ids=("A1",))
+    source = SequentialTopisSource([b"", valid_payload])
+    raw_store = MemoryRawObjectStore()
+    landing = TrafficLanding(
+        source=source,
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 31, 0, 0, tzinfo=timezone.utc),
+        request_id=lambda: "request-valid",
+    )
+
+    batch = landing.collect(
+        RunIdentity("traffic_incident_landing", "scheduled__empty-then-valid"),
+        TrafficLandingRequest(1, 1000, 1000),
+    )
+
+    assert source.requests == [(1, 1000), (1, 1000)]
+    assert batch.parsed_rows == 1
+    assert batch.raw_objects[0].payload_hash == hashlib.sha256(valid_payload).hexdigest()
+    landed_payloads = [
+        payload
+        for key, (payload, _content_type) in raw_store.objects.items()
+        if key.endswith(".xml")
+    ]
+    assert landed_payloads == [valid_payload]
+
+
+def test_collect_fails_after_two_empty_responses_without_landing_raw_page():
+    source = SequentialTopisSource([b"", b"  \n"])
+    raw_store = MemoryRawObjectStore()
+    landing = TrafficLanding(
+        source=source,
+        raw_store=raw_store,
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 31, 0, 0, tzinfo=timezone.utc),
+        request_id=lambda: "unused",
+    )
+
+    with pytest.raises(TrafficSourceEmptyResponseError):
+        landing.collect(
+            RunIdentity("traffic_incident_landing", "scheduled__empty-twice"),
+            TrafficLandingRequest(1, 1000, 1000),
+        )
+
+    assert source.requests == [(1, 1000), (1, 1000)]
+    assert not any(key.endswith(".xml") for key in raw_store.objects)
+
+
+def test_collect_does_not_retry_non_empty_malformed_xml():
+    source = SequentialTopisSource(
+        [b"not-xml", acc_info_payload(total_count=1, incident_ids=("A1",))]
+    )
+    landing = TrafficLanding(
+        source=source,
+        raw_store=MemoryRawObjectStore(),
+        raw_prefix="raw",
+        clock=lambda: datetime(2026, 7, 31, 0, 0, tzinfo=timezone.utc),
+        request_id=lambda: "unused",
+    )
+
+    with pytest.raises(TrafficSourceSchemaError):
+        landing.collect(
+            RunIdentity("traffic_incident_landing", "scheduled__malformed"),
+            TrafficLandingRequest(1, 1000, 1000),
+        )
+
+    assert source.requests == [(1, 1000)]
 
 
 def test_collect_reuses_same_run_checkpoint_without_duplicate_source_request():
