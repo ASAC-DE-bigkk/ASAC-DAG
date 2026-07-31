@@ -279,13 +279,15 @@ def _report(**context) -> None:
     ctx = _ctx_from_end(_interval_end(context), context["dag_run"].run_id)
     # 매핑 인스턴스 1개면 pull 이 dict 하나를 줄 수 있어 정규화 필수(#87).
     summaries = normalize_mapped_results(context["ti"].xcom_pull(task_ids="fetch_raw"))
-    # load_bronze 결과(iceberg 행수)를 리포트에 반영 — fetch summary의 iceberg_rows=0 을 덮는다.
+    # load_bronze 결과(iceberg 행수)를 리포트에 반영 — fetch summary의 미측정 자리를 채운다.
     # 적재할 fetch 성공분이 있는데 load_bronze XCom이 없으면(=태스크 실패) SLO 실패로 드러낸다.
     loaded = context["ti"].xcom_pull(task_ids="load_bronze")
     load_failed = loaded is None and any(not s["error"] for s in summaries)
     loaded = loaded or {}
+    # 없는 이름은 None — "적재 0행"이 아니라 "재지 않음"이다(#619 NULL≠0). load 태스크가
+    # 죽으면 loaded 가 통째로 비는데, 예전엔 그 run 이 전 데이터셋 0행 적재로 기록됐다.
     for s in summaries:
-        s["iceberg_rows"] = loaded.get(s["name"], 0)
+        s["iceberg_rows"] = loaded.get(s["name"])
     # 기대 커버리지 = plan이 계획한 데이터셋 수(성공 summary 수가 아님). 하드 실패한
     # fetch_raw 매핑 인스턴스는 예외를 던져 XCom에 결과를 안 남기므로, summaries만
     # 세면 실패가 분모에서도 사라져 coverage가 늘 ~100%로 보인다(#39).
@@ -297,7 +299,7 @@ def _report(**context) -> None:
             "name": name, "source": "", "endpoint": "", "prefix": "",
             "pages": 0, "rows": 0, "bytes": 0,
             "error": "task failed (no result reported)",
-            "checks": {}, "iceberg_rows": 0,
+            "checks": {}, "iceberg_rows": None,
         }
         for name in planned
         if name not in returned
@@ -306,9 +308,12 @@ def _report(**context) -> None:
     report = build_run_report(summaries + missing, ctx, expected_total=expected, load_failed=load_failed)
 
     cov = report["coverage"]
+    pct = "--" if cov["coverage_pct"] is None else cov["coverage_pct"]
+    ib = report["total_iceberg_rows"]
+    ib_txt = "미측정" if ib is None else f"{ib} ({report['iceberg_rows_measured']}/{cov['landed']} 측정)"
     print(
-        f"[culture bronze] coverage {cov['landed']}/{cov['expected']} ({cov['coverage_pct']}%) · "
-        f"rows={report['total_rows']} · iceberg={report['total_iceberg_rows']} · "
+        f"[culture bronze] coverage {cov['landed']}/{cov['expected']} ({pct}%) · "
+        f"rows={report['total_rows']} · iceberg={ib_txt} · "
         f"violations={report['violation_count']} · "
         f"freshness_max={report['freshness']['max_age_hours']}h · SLO={'PASS' if report['slo_passed'] else 'FAIL'}"
     )

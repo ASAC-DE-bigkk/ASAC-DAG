@@ -90,7 +90,7 @@ def main(argv=None) -> int:
                 target=args.target, env_file=args.env_file, engine=args.engine,
             )
             for r in results:
-                r.iceberg_rows = loaded.get(r.name, 0)
+                r.iceberg_rows = loaded.get(r.name)  # 없으면 None = 재지 않음(#619 NULL≠0)
             print(f"iceberg loaded: {sum(loaded.values())} rows across {len(loaded)} datasets")
         except RuntimeError as exc:
             load_failed = True
