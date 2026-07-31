@@ -15,6 +15,11 @@ from common.serving.d1_client import (
     HttpD1Client,
     build_insert_statements,
     group_api_batches,
+    handoff_ddl,
+    handoff_migrate_statements,
+    handoff_schema_is_current,
+    handoff_stale_delete_statement,
+    handoff_upsert_statements,
 )
 
 
@@ -262,6 +267,207 @@ def test_snapshot_restore_reactivates_previous_table_after_post_promotion_failur
 
     assert d1._query(f'SELECT product_row_id FROM "{table}";') == [{"product_row_id": "old"}]
     assert d1._query(f"SELECT name FROM sqlite_master WHERE name = '{table}__previous';") == []
+
+
+def _product_meta_payload(publication_id: str) -> tuple[list, list, list]:
+    columns_rows = [{
+        "product_id": "commerce_x", "table_name": "d1_x", "ordinal": 0,
+        "column_name": "gu", "type": "TEXT", "description_ko": "자치구명",
+        "publication_id": publication_id,
+    }]
+    ext_rows = [{
+        "product_id": "commerce_x", "table_name": "d1_x", "source_model": "gold_x",
+        "grain": "자치구", "primary_key": '["gu"]', "time_axis": None,
+        "tier": "d1_direct", "rollup_rule": None, "publication_id": publication_id,
+    }]
+    pattern_rows = [{
+        "product_id": "commerce_x", "pattern_id": "top_gu", "question_ko": "어느 구가 많나?",
+        "sql": "SELECT gu FROM d1_x ORDER BY cnt DESC LIMIT :n", "axes": "구 랭킹",
+        "requires": '["sort"]', "verified_rows": 10, "verified_at": None,
+        "verified_publication_id": None, "allow_empty": 0, "insight_sample_ko": None,
+        "publication_id": publication_id,
+    }]
+    return columns_rows, ext_rows, pattern_rows
+
+
+def test_product_meta_migrates_legacy_table_preserving_skipped_product_rows():
+    """레거시(자연키 없음) → v1 은 **행 보존 이행** 1회(#638 §4) — 이행 run 에 게시되지 않는
+    제품(밴드 스킵)의 직전 메타가 살아남아야 한다(#593 보존 시맨틱 승계)."""
+    d1 = SqliteCatalogClient()
+    d1._query(  # 구 commerce 전량 교체 시절 컬럼 순서 그대로
+        "CREATE TABLE d1_catalog_ext (product_id TEXT, table_name TEXT, source_model TEXT, "
+        "tier TEXT, grain TEXT, primary_key TEXT, rollup_rule TEXT, time_axis TEXT, "
+        "publication_id TEXT);"
+    )
+    d1._query(
+        "INSERT INTO d1_catalog_ext VALUES ('commerce_skipped', 'd1_skipped', 'gold_skipped', "
+        "'d1_direct', '자치구', '[\"gu\"]', NULL, NULL, 'old-pub');"
+    )
+
+    columns_rows, ext_rows, pattern_rows = _product_meta_payload("pub-1")
+    d1.publish_product_meta("commerce_x", "pub-1", columns_rows, ext_rows, pattern_rows)
+
+    pragma = d1._query('PRAGMA table_info("d1_catalog_ext");')
+    assert handoff_schema_is_current("d1_catalog_ext", pragma)
+    assert [row["name"] for row in pragma if row["pk"]] == ["product_id"]  # 자연키 강제
+    rows = d1._query("SELECT product_id, grain, publication_id FROM d1_catalog_ext ORDER BY product_id;")
+    assert rows == [
+        {"product_id": "commerce_skipped", "grain": "자치구", "publication_id": "old-pub"},  # 보존
+        {"product_id": "commerce_x", "grain": "자치구", "publication_id": "pub-1"},
+    ]
+
+    migrate_count = sum('RENAME TO "d1_catalog_ext__migrate"' in q for q in d1.queries)
+    assert migrate_count == 1
+    d1.publish_product_meta("commerce_x", "pub-1", columns_rows, ext_rows, pattern_rows)
+    assert sum('RENAME TO "d1_catalog_ext__migrate"' in q for q in d1.queries) == migrate_count  # 1회뿐
+    assert d1._query("SELECT count(*) c FROM d1_catalog_ext;")[0]["c"] == 2  # upsert 멱등
+
+
+def test_glossary_legacy_field_schema_migrates_to_namespaced_vocabulary():
+    """glossary 레거시(field/source) → v1: 'commerce:' 네임스페이스 변환 + origin/source_type 채움."""
+    d1 = SqliteCatalogClient()
+    d1._query(
+        "CREATE TABLE d1_catalog_glossary (field TEXT, code TEXT, label_ko TEXT, "
+        "source TEXT, exported_at TEXT);"
+    )
+    d1._query(
+        "INSERT INTO d1_catalog_glossary VALUES "
+        "('major', 'health', '보건', 'gold_license_cohort_survival.major_ko', 't0');"
+    )
+
+    pragma = d1._query('PRAGMA table_info("d1_catalog_glossary");')
+    d1._query(handoff_migrate_statements("d1_catalog_glossary", [r["name"] for r in pragma]))
+
+    assert handoff_schema_is_current(
+        "d1_catalog_glossary", d1._query('PRAGMA table_info("d1_catalog_glossary");'))
+    rows = d1._query("SELECT * FROM d1_catalog_glossary;")
+    assert rows == [{
+        "vocabulary_id": "commerce:major", "code": "health", "label_ko": "보건",
+        "origin": "commerce", "source_type": "warehouse", "exported_at": "t0",
+    }]
+
+
+def test_pattern_removed_from_declaration_pruned_even_when_publication_id_reused():
+    """무변경 게이트(#601)가 publication_id 를 재사용해도 yml 에서 지운 패턴은 정리돼야 한다.
+
+    publication_id 부등 판별이었다면 no-op 이 되는 정확히 그 경우 — 키셋(NOT IN) 정리의 근거.
+    """
+    d1 = SqliteCatalogClient()
+    columns_rows, ext_rows, pattern_rows = _product_meta_payload("pub-1")
+    removed = dict(pattern_rows[0], pattern_id="removed_later")
+    d1.publish_product_meta("commerce_x", "pub-1", columns_rows, ext_rows, pattern_rows + [removed])
+
+    # 데이터 무변경 → 같은 publication_id 로 재게시, 선언에서 removed_later 만 사라진 상황
+    d1.publish_product_meta("commerce_x", "pub-1", columns_rows, ext_rows, pattern_rows)
+
+    rows = d1._query("SELECT pattern_id FROM d1_usage_patterns WHERE product_id = 'commerce_x';")
+    assert rows == [{"pattern_id": "top_gu"}]
+
+
+def test_publisher_meta_rows_round_trip_through_real_sqlite_schema():
+    """행 빌더 ↔ 공용 스키마 키 정합 — 빌더 출력이 실제 스키마에 그대로 실리는지(NULL 드리프트 방지)."""
+    from common.serving.contract import ServingContract
+    from common.serving.publisher import ProductRecord, _product_meta_rows
+
+    contract = ServingContract(
+        product_id="weather_place_current_outlook",
+        model_name="gold_weather_place_current_outlook",
+        enabled=True, external=True, publication_mode="snapshot", zero_policy="fail",
+        primary_key=("product_row_id",), grain="place_id마다 한 행.",
+        column_descriptions={"product_row_id": "행 식별자"},
+        usage_patterns=({"pattern_id": "p1", "sql": "SELECT 1", "question_ko": "질문",
+                         "axes": "축", "requires": ["sort"]},),
+    )
+    record = ProductRecord(
+        product_id=contract.product_id, model_name=contract.model_name,
+        publication_id="pub-9", source_run_id="r", published_at="t",
+        serving_status="published", reason="")
+    columns_rows, ext_rows, pattern_rows = _product_meta_rows(
+        contract, [("product_row_id", "varchar")], record)
+
+    d1 = SqliteCatalogClient()
+    d1.publish_product_meta(contract.product_id, "pub-9", columns_rows, ext_rows, pattern_rows)
+
+    assert d1._query("SELECT column_name, description_ko, publication_id FROM d1_catalog_columns;") == [
+        {"column_name": "product_row_id", "description_ko": "행 식별자", "publication_id": "pub-9"}]
+    assert d1._query("SELECT grain, primary_key FROM d1_catalog_ext;") == [
+        {"grain": "place_id마다 한 행.", "primary_key": '["product_row_id"]'}]
+    assert d1._query("SELECT pattern_id, requires, allow_empty FROM d1_usage_patterns;") == [
+        {"pattern_id": "p1", "requires": '["sort"]', "allow_empty": 0}]
+
+
+def test_product_meta_upsert_prunes_stale_rows_within_product_scope_only():
+    """#638 §3 ② — 잔여 정리는 그 제품 스코프만. 타 제품(=타 도메인) 행은 무접촉."""
+    d1 = SqliteCatalogClient()
+    columns_rows, ext_rows, pattern_rows = _product_meta_payload("pub-1")
+    d1.publish_product_meta("commerce_x", "pub-1", columns_rows, ext_rows, pattern_rows)
+    d1._query(
+        'INSERT INTO d1_usage_patterns ("product_id", "pattern_id", "question_ko", "sql", '
+        '"axes", "requires", "verified_rows", "verified_at", "verified_publication_id", '
+        '"allow_empty", "insight_sample_ko", "publication_id") VALUES '
+        "('culture_event', 'ongoing_events', '진행 중 행사?', 'SELECT 1', '기간', '[]', "
+        "5, NULL, NULL, 0, NULL, 'other-pub');"
+    )
+
+    columns_rows, ext_rows, pattern_rows = _product_meta_payload("pub-2")
+    pattern_rows[0]["pattern_id"] = "top_gu_renamed"  # 선언에서 옛 pattern_id 가 사라진 상황
+    d1.publish_product_meta("commerce_x", "pub-2", columns_rows, ext_rows, pattern_rows)
+
+    mine = d1._query(
+        "SELECT pattern_id, publication_id FROM d1_usage_patterns "
+        "WHERE product_id = 'commerce_x';"
+    )
+    assert mine == [{"pattern_id": "top_gu_renamed", "publication_id": "pub-2"}]  # 옛 행 정리됨
+    other = d1._query(
+        "SELECT pattern_id, publication_id FROM d1_usage_patterns "
+        "WHERE product_id = 'culture_event';"
+    )
+    assert other == [{"pattern_id": "ongoing_events", "publication_id": "other-pub"}]  # 무접촉
+
+
+def test_glossary_upsert_scopes_cleanup_to_one_vocabulary():
+    """용어사전 잔여 정리는 vocabulary_id 스코프 — 다른 어휘(=다른 소유 도메인)는 무접촉."""
+    d1 = SqliteCatalogClient()
+    d1._query(handoff_ddl("d1_catalog_glossary"))
+    seed = [
+        {"vocabulary_id": "commerce:major", "code": "health", "label_ko": "보건",
+         "origin": "commerce", "source_type": "warehouse", "exported_at": "t0"},
+        {"vocabulary_id": "commerce:major", "code": "food", "label_ko": "식품",
+         "origin": "commerce", "source_type": "warehouse", "exported_at": "t0"},
+        {"vocabulary_id": "culture:event_type", "code": "festival", "label_ko": "축제",
+         "origin": "culture", "source_type": "codebook", "exported_at": "t0"},
+    ]
+    for statement in handoff_upsert_statements("d1_catalog_glossary", seed):
+        d1._query(statement)
+
+    refreshed = [dict(seed[0], label_ko="보건업", exported_at="t1")]  # food 는 원천에서 사라졌다
+    for statement in handoff_upsert_statements("d1_catalog_glossary", refreshed):
+        d1._query(statement)
+    d1._query(handoff_stale_delete_statement("d1_catalog_glossary", "commerce:major", "t1"))
+
+    major = d1._query(
+        "SELECT code, label_ko FROM d1_catalog_glossary WHERE vocabulary_id = 'commerce:major';"
+    )
+    assert major == [{"code": "health", "label_ko": "보건업"}]
+    culture = d1._query(
+        "SELECT code FROM d1_catalog_glossary WHERE vocabulary_id = 'culture:event_type';"
+    )
+    assert culture == [{"code": "festival"}]  # 타 어휘 무접촉
+
+
+def test_glossary_registry_gate_flags_unregistered_and_mismatched_rows():
+    """#638 §5-5 — 미등록 어휘와 정본(origin/source_type) 불일치 행을 게시 전에 판별한다."""
+    from common.serving.d1_client import glossary_registry_violations
+
+    rows = [
+        {"vocabulary_id": "commerce:major", "origin": "commerce", "source_type": "warehouse"},
+        {"vocabulary_id": "culture:event_type", "origin": "culture", "source_type": "codebook"},
+        {"vocabulary_id": "common:gu_code", "origin": "commerce", "source_type": "warehouse"},
+    ]
+    violations = glossary_registry_violations(rows)
+    assert "commerce:major" not in violations                       # 등록·정합 — 통과
+    assert violations["culture:event_type"] == "레지스트리 미등록"  # culture 온보딩 PR 에서 등재
+    assert "asac_axes" in violations["common:gu_code"]              # 정본 origin 위조 감지
 
 
 def test_publication_ledger_is_append_only_and_records_publication_stage():

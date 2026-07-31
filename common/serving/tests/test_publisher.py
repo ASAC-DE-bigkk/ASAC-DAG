@@ -32,6 +32,7 @@ class FakeD1:
         self.ledger: list[dict[str, Any]] = []
         self.previous_tables: dict[str, list[dict[str, Any]]] = {}
         self.replace_calls = 0
+        self.product_meta: dict[str, dict[str, Any]] = {}  # 핸드오프 메타(#638) 게시 기록
 
     def table_row_count(self, name: str) -> int:
         return len(self.tables.get(name, []))
@@ -102,6 +103,14 @@ class FakeD1:
     def catalog_domain_count(self, model_names: set[str]) -> int:
         return sum(1 for n in model_names if n in self.catalog)
 
+    def publish_product_meta(self, product_id, publication_id, columns_rows, ext_rows, pattern_rows) -> None:
+        self.product_meta[product_id] = {
+            "publication_id": publication_id,
+            "columns": [dict(row) for row in columns_rows],
+            "ext": [dict(row) for row in ext_rows],
+            "patterns": [dict(row) for row in pattern_rows],
+        }
+
 
 class ForgetfulCatalogD1(FakeD1):
     """Writes tables but 'forgets' to register _catalog — reproduces the #477 bug."""
@@ -115,6 +124,13 @@ class ExplodingCatalogD1(FakeD1):
 
     def upsert_catalog(self, catalog_rows) -> None:
         raise RuntimeError("simulated catalog write failure")
+
+
+class ExplodingMetaD1(FakeD1):
+    """Fails in the handoff-meta step (#638), after the catalog upsert committed."""
+
+    def publish_product_meta(self, *args, **kwargs) -> None:
+        raise RuntimeError("simulated product meta write failure")
 
 
 class FakeSource:
@@ -206,6 +222,84 @@ def test_snapshot_catalog_carries_static_contract_and_runtime_publication_id():
     assert json.loads(catalog["public_gold"])["time"]["canonical_timezone"] == "Asia/Seoul"
     assert json.loads(catalog["mcp_projection"])["operation"]["id"] == "weather.get_current_outlook"
     assert catalog["publication_id"]
+
+
+def test_snapshot_publish_writes_product_meta_rows():
+    """핸드오프 메타(#638 §2.2) — 컬럼 설명·ext·질의 예시가 계약 선언에서 그대로 게시된다."""
+    contract = _contract(
+        grain="place_id마다 한 행.",
+        column_descriptions={"product_row_id": "행 식별자", "place_id": ""},
+        usage_patterns=(
+            {
+                "pattern_id": "hottest_places_now",
+                "question_ko": "지금 가장 더운 장소는?",
+                "axes": "장소 랭킹",
+                "requires": ["select_columns", "sort"],
+                "verified_rows": 10,
+                "verified_at": "2026-07-30T09:00:00Z",
+                "verified_publication_id": "prev-pub",
+                "sql": "SELECT 1",
+            },
+            {"pattern_id": "sql_missing_dropped"},  # sql 없는 선언은 게시 제외
+        ),
+    )
+    d1 = FakeD1()
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(2))})
+
+    report = publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="run-meta")
+
+    assert report.ok
+    meta = d1.product_meta[contract.product_id]
+    assert meta["publication_id"] == report.records[0].publication_id
+    by_name = {row["column_name"]: row for row in meta["columns"]}
+    assert by_name["product_row_id"]["description_ko"] == "행 식별자"
+    assert by_name["place_id"]["description_ko"] is None  # 빈 설명은 NULL — 컬럼 행은 게시
+    assert by_name["forecast_at"]["type"] == "TEXT"  # timestamp → D1 실물 타입
+    assert meta["ext"][0]["grain"] == "place_id마다 한 행."
+    assert meta["ext"][0]["primary_key"] == json.dumps(["product_row_id"], ensure_ascii=False)
+    assert meta["ext"][0]["time_axis"] == "forecast_at"
+    assert meta["ext"][0]["tier"] is None  # 물리 확장 미선언 도메인 — NULL
+    patterns = meta["patterns"]
+    assert [row["pattern_id"] for row in patterns] == ["hottest_places_now"]
+    assert patterns[0]["requires"] == json.dumps(["select_columns", "sort"], ensure_ascii=False)
+    assert patterns[0]["verified_publication_id"] == "prev-pub"
+    assert patterns[0]["allow_empty"] == 0
+    assert patterns[0]["publication_id"] == report.records[0].publication_id
+
+
+def test_skip_retain_does_not_touch_product_meta():
+    """스킵 제품은 upsert 자체를 건너뛴다(#638 §3) — 직전 메타 행이 자연 보존."""
+    contract = _contract(zero_policy="retain_last_good")
+    d1 = FakeD1()
+    d1.tables[contract.model_name] = _rows(5)
+    d1.catalog[contract.model_name] = {"name": contract.model_name, "row_count": 5}
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=[])})
+
+    report = publish([contract], source, d1, FakeSmoke(), source_run_id="run-skip-meta")
+
+    assert report.records[0].serving_status == STATUS_SKIPPED
+    assert contract.product_id not in d1.product_meta
+
+
+def test_product_meta_failure_restores_snapshot_and_catalog():
+    """메타 게시 실패도 catalog 스테이지 롤백 경로를 탄다 — 스냅샷·_catalog 복원, 스테이지 기록."""
+    contract = _contract()
+    d1 = ExplodingMetaD1()
+    old_rows = _rows(2)
+    old_catalog = {"name": contract.model_name, "row_count": 2, "publication_id": "old"}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))})
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="meta-failure")
+
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert d1.ledger[-1]["outcome"] == "failed"
+    assert d1.ledger[-1]["stage"] == "product_meta"
+    assert d1.ledger[-1]["rollback_status"] == "restored"
+    assert any("product_meta 실패" in failure for failure in excinfo.value.report.failures)
 
 
 def test_zero_rows_retain_last_good_keeps_previous():
@@ -455,3 +549,16 @@ def test_load_contracts_filters_enabled_and_product_ids():
     assert contract.external is True and contract.publication_mode == "snapshot"
     assert contract.primary_key == ("product_row_id",)
     assert contract.tests == ("not_null(product_row_id)",)  # gate label collected from manifest
+    # 핸드오프 메타(#638) — manifest 의 컬럼 설명·usage_patterns 가 계약까지 실려 온다
+    assert contract.grain == "place_id마다 한 행."
+    assert contract.column_descriptions == {
+        "product_row_id": "행 식별자(장소).",
+        "place_id": "서울 121 장소 코드.",
+        "forecast_at": "",
+    }
+    assert [p["pattern_id"] for p in contract.usage_patterns] == [
+        "hottest_places_now",
+        "missing_sql_dropped",  # 계약은 선언 그대로 나른다 — sql 필터는 게시 시점(_product_meta_rows)
+    ]
+    assert contract.usage_patterns[0]["verified_at"] == "2026-07-30T09:00:00Z"
+    assert contract.serving_tier is None and contract.rollup_rule is None

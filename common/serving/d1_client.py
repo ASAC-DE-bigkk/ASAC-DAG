@@ -133,6 +133,14 @@ class D1Client(Protocol):
     def delete_catalog_row(self, name: str) -> None: ...
     def catalog_domain_count(self, model_names: set[str]) -> int: ...
     def append_publication_ledger(self, record: dict[str, Any]) -> None: ...
+    def publish_product_meta(
+        self,
+        product_id: str,
+        publication_id: str,
+        columns_rows: Sequence[dict[str, Any]],
+        ext_rows: Sequence[dict[str, Any]],
+        pattern_rows: Sequence[dict[str, Any]],
+    ) -> None: ...
 
 
 # ---- catalog schema (single source for both real client and Worker) -----------------
@@ -164,12 +172,213 @@ PUBLICATION_LEDGER_DDL = "CREATE TABLE IF NOT EXISTS _publication_ledger (" + ",
 ) + ");"
 
 
+# ---- handoff metadata schema (ASAC-DAG#638 §2 — single source, all-domain shared) ----
+# 자연키 upsert 전용(#638 §3): 테이블 전체 DROP/DELETE 금지. writer 는 공용 publisher 와
+# commerce exporter 둘뿐이며 둘 다 아래 상수·빌더에서 같은 문장을 얻는다.
+# verified_at/verified_publication_id 는 #638 §2.3 기준 필수이나 commerce 275건 백필 전이라
+# NULL 허용으로 시작한다(백필 완료 후 NOT NULL 강화 — #638 §5-1 참조).
+
+HANDOFF_COLUMN_TYPES: dict[str, tuple[tuple[str, str], ...]] = {
+    "d1_catalog_columns": (
+        ("product_id", "TEXT NOT NULL"), ("table_name", "TEXT NOT NULL"),
+        ("ordinal", "INTEGER NOT NULL"), ("column_name", "TEXT NOT NULL"),
+        ("type", "TEXT NOT NULL"), ("description_ko", "TEXT"),
+        ("publication_id", "TEXT NOT NULL"),
+    ),
+    "d1_catalog_ext": (
+        ("product_id", "TEXT NOT NULL"), ("table_name", "TEXT NOT NULL"),
+        ("source_model", "TEXT NOT NULL"), ("grain", "TEXT"),
+        ("primary_key", "TEXT NOT NULL"),  # 두 writer 모두 항상 JSON 배열 문자열('[]' 포함)을 싣는다
+        ("time_axis", "TEXT"),
+        ("tier", "TEXT"), ("rollup_rule", "TEXT"),  # 물리 게시 확장 — 없는 도메인은 NULL(#638 §2.2)
+        ("publication_id", "TEXT NOT NULL"),
+    ),
+    "d1_usage_patterns": (
+        ("product_id", "TEXT NOT NULL"), ("pattern_id", "TEXT NOT NULL"),
+        ("question_ko", "TEXT"), ("sql", "TEXT NOT NULL"), ("axes", "TEXT"),
+        ("requires", "TEXT NOT NULL"), ("verified_rows", "INTEGER"),
+        ("verified_at", "TEXT"), ("verified_publication_id", "TEXT"),
+        ("allow_empty", "INTEGER NOT NULL DEFAULT 0"),
+        ("insight_sample_ko", "TEXT"), ("publication_id", "TEXT NOT NULL"),
+    ),
+    "d1_catalog_glossary": (
+        ("vocabulary_id", "TEXT NOT NULL"), ("code", "TEXT NOT NULL"),
+        ("label_ko", "TEXT NOT NULL"), ("origin", "TEXT NOT NULL"),
+        ("source_type", "TEXT NOT NULL"), ("exported_at", "TEXT NOT NULL"),
+    ),
+}
+HANDOFF_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
+    "d1_catalog_columns": ("product_id", "column_name"),
+    "d1_catalog_ext": ("product_id",),
+    "d1_usage_patterns": ("product_id", "pattern_id"),
+    "d1_catalog_glossary": ("vocabulary_id", "code"),
+}
+# 잔여 행 정리(#638 §3 ②)의 스코프 컬럼. 판별 방식은 테이블 성질로 갈린다:
+#  - columns/patterns(복합 자연키): **이번 선언 키셋 기준 NOT IN**(HANDOFF_PRUNE_KEYS).
+#    publication_id 부등 판별이 아닌 이유 — 무변경 게이트(#601)가 publication_id 를 재사용하면
+#    부등 삭제가 no-op 이 되어, yml 에서 지운 패턴이 같은 id 로 잔존한다(리뷰 확정 결함).
+#  - ext(단일 키 = 스코프): upsert 가 곧 전체 교체라 publication_id 부등 판별로 충분.
+#  - glossary: 제품 스코프가 아니고 exported_at 이 run 마다 새 값이라 부등 판별이 유효.
+HANDOFF_SCOPE_COLUMNS: dict[str, str] = {
+    "d1_catalog_columns": "product_id",
+    "d1_catalog_ext": "product_id",
+    "d1_usage_patterns": "product_id",
+    "d1_catalog_glossary": "vocabulary_id",
+}
+HANDOFF_PRUNE_KEYS: dict[str, str] = {
+    "d1_catalog_columns": "column_name",
+    "d1_usage_patterns": "pattern_id",
+}
+HANDOFF_STALE_MARKERS: dict[str, str] = {
+    "d1_catalog_ext": "publication_id",
+    "d1_catalog_glossary": "exported_at",
+}
+HANDOFF_PRODUCT_TABLES = ("d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns")
+HANDOFF_COLUMNS = {table: tuple(name for name, _ in cols) for table, cols in HANDOFF_COLUMN_TYPES.items()}
+
+
+def handoff_ddl(table: str) -> str:
+    cols = ", ".join(f'"{name}" {column_type}' for name, column_type in HANDOFF_COLUMN_TYPES[table])
+    key_columns = '", "'.join(HANDOFF_PRIMARY_KEYS[table])
+    return f'CREATE TABLE IF NOT EXISTS "{table}" ({cols}, PRIMARY KEY ("{key_columns}"));'
+
+
+def handoff_schema_is_current(table: str, pragma_rows: Sequence[dict[str, Any]]) -> bool:
+    """``PRAGMA table_info`` 결과가 #638 v1 스키마인지 — 컬럼 집합과 자연키를 함께 본다.
+
+    전량 교체 시절 테이블은 컬럼 집합이 같아도 PRIMARY KEY 가 없어(upsert 충돌 기준 부재)
+    반드시 걸러야 한다. pragma_rows 가 비면 테이블 부재.
+    """
+    if not pragma_rows:
+        return False
+    names = {str(row.get("name")) for row in pragma_rows}
+    key_rows = [row for row in pragma_rows if int(row.get("pk") or 0) > 0]
+    key_columns = tuple(
+        str(row.get("name")) for row in sorted(key_rows, key=lambda row: int(row.get("pk") or 0))
+    )
+    return names == set(HANDOFF_COLUMNS[table]) and key_columns == HANDOFF_PRIMARY_KEYS[table]
+
+
+# 레거시 → v1 이행 복사에서 v1 컬럼이 레거시에 없을 때 쓰는 기본값 식. NOT NULL 컬럼은
+# 반드시 여기 있어야 이행이 깨지지 않는다. glossary 는 field → 'commerce:' 네임스페이스 변환
+# (구 스키마의 writer 는 commerce 단독이었으므로 출처가 자명하다 — #638 §2.4).
+_MIGRATE_DEFAULTS: dict[tuple[str, str], str] = {
+    ("d1_catalog_columns", "publication_id"): "''",
+    ("d1_catalog_ext", "publication_id"): "''",
+    ("d1_catalog_ext", "primary_key"): "'[]'",
+    ("d1_usage_patterns", "publication_id"): "''",
+    ("d1_usage_patterns", "requires"): "'[]'",
+    ("d1_usage_patterns", "allow_empty"): "0",
+    ("d1_catalog_glossary", "origin"): "'commerce'",
+    ("d1_catalog_glossary", "source_type"): "'warehouse'",
+    ("d1_catalog_glossary", "exported_at"): "''",
+}
+_MIGRATE_RENAMES: dict[tuple[str, str], tuple[str, str]] = {
+    ("d1_catalog_glossary", "vocabulary_id"): ("field", "'commerce:' || \"field\""),
+}
+
+
+def handoff_migrate_statements(table: str, existing_columns: Sequence[str]) -> str:
+    """레거시(전량 교체 시절) → v1 자연키 스키마 **행 보존** 이행(1회, #638 §4).
+
+    DROP 재생성이 아니라 rename → create → 복사 → drop: 이행 run 에 게시되지 않는 제품
+    (밴드 스킵)의 직전 메타도 살아남는다. 복사는 INSERT OR REPLACE 라 레거시 중복 행도
+    자연키 기준으로 정리된다. 전 문장을 한 요청으로 보내 중간 상태 노출을 줄인다
+    (replace_table 의 2-ALTER 단일 요청과 동일 관행).
+    """
+    legacy = f"{table}__migrate"
+    present = set(existing_columns)
+    select_exprs = []
+    for name in HANDOFF_COLUMNS[table]:
+        rename = _MIGRATE_RENAMES.get((table, name))
+        if name in present:
+            select_exprs.append(f'"{name}"')
+        elif rename and rename[0] in present:
+            select_exprs.append(rename[1])
+        else:
+            select_exprs.append(_MIGRATE_DEFAULTS.get((table, name), "NULL"))
+    column_names = '", "'.join(HANDOFF_COLUMNS[table])
+    return (
+        f'DROP TABLE IF EXISTS "{legacy}"; '
+        f'ALTER TABLE "{table}" RENAME TO "{legacy}"; '
+        + handoff_ddl(table) + " "
+        f'INSERT OR REPLACE INTO "{table}" ("{column_names}") '
+        f'SELECT {", ".join(select_exprs)} FROM "{legacy}"; '
+        f'DROP TABLE IF EXISTS "{legacy}";'
+    )
+
+
+def handoff_upsert_statements(table: str, rows: Sequence[dict[str, Any]]) -> list[str]:
+    """#638 §3 ① 자연키 upsert. 항상 전 컬럼을 싣는 전제라 ``INSERT OR REPLACE`` 가
+    ``ON CONFLICT DO UPDATE`` 와 결과 동치다(_catalog 처럼 보존할 레거시 컬럼이 없다)."""
+    columns: list[Column] = [(name, "TEXT") for name in HANDOFF_COLUMNS[table]]
+    return build_insert_statements(table, columns, rows, replace=True)
+
+
+def handoff_stale_delete_statement(table: str, scope_value: str, current_marker: str) -> str:
+    """#638 §3 ② (ext·glossary) — 같은 스코프에서 이번 게시본이 아닌 잔여 행 제거."""
+    scope_column = HANDOFF_SCOPE_COLUMNS[table]
+    marker_column = HANDOFF_STALE_MARKERS[table]
+    return (
+        f'DELETE FROM "{table}" WHERE "{scope_column}" = {sql_literal(scope_value)} '
+        f'AND "{marker_column}" <> {sql_literal(current_marker)};'
+    )
+
+
+# ---- glossary registry (#638 §2.4 — 게시 시 검증 기준. D1 컬럼이 아니라 공용 계약이다) ----
+# vocabulary_id 마다 쓰기 도메인(owner) 하나 — 미등록 어휘는 게시 거부(#638 §5-5). 등재는 취합
+# 담당(commerce)의 인벤토리 절차를 거친 것만(#638 §2.4); 타 도메인 어휘(culture:* 등)는 그
+# 도메인 온보딩 PR 에서 추가한다. origin = 취합 전 라벨이 있던 곳(도메인/공용 축 패키지).
+GLOSSARY_REGISTRY: dict[str, dict[str, str]] = {
+    "commerce:major":      {"owner": "commerce", "origin": "commerce",  "source_type": "warehouse"},
+    "commerce:category":   {"owner": "commerce", "origin": "commerce",  "source_type": "warehouse"},
+    "commerce:event_type": {"owner": "commerce", "origin": "commerce",  "source_type": "warehouse"},
+    # 공통 축(#638 §2.4 승격): 게시(취합)는 commerce 가 맡되 정본은 공용 축 패키지의
+    # 라이브 행안부 마스터(asac_axes.dim_admin_dong) — commerce 자체 스냅샷 파생이 아니다.
+    "common:gu_code":      {"owner": "commerce", "origin": "asac_axes", "source_type": "warehouse"},
+}
+
+
+def glossary_registry_violations(rows: Sequence[dict[str, Any]]) -> dict[str, str]:
+    """vocabulary_id → 거부 사유. 미등록이거나 레지스트리의 origin/source_type 과 불일치."""
+    violations: dict[str, str] = {}
+    for row in rows:
+        vocabulary_id = str(row.get("vocabulary_id") or "")
+        entry = GLOSSARY_REGISTRY.get(vocabulary_id)
+        if entry is None:
+            violations[vocabulary_id] = "레지스트리 미등록"
+        elif (row.get("origin"), row.get("source_type")) != (entry["origin"], entry["source_type"]):
+            violations[vocabulary_id] = (
+                f"레지스트리 불일치: origin/source_type={row.get('origin')}/{row.get('source_type')} "
+                f"(정본 {entry['origin']}/{entry['source_type']})"
+            )
+    return violations
+
+
+def handoff_prune_statement(table: str, scope_value: str, keep_keys: Sequence[str]) -> str:
+    """#638 §3 ② (columns·patterns) — 이번 선언에 없는 자연키 행 제거(키셋 NOT IN).
+
+    publication_id 부등 판별을 쓰지 않는 이유: commerce 무변경 게이트(#601)가 내용 불변 run 에
+    publication_id 를 재사용하므로, 부등 삭제는 그 run 에서 no-op 이 되어 yml 에서 지운 패턴이
+    같은 id 로 무기한 잔존한다. 선언 키셋 기준이면 재사용 여부와 무관하게 정리된다.
+    keep_keys 가 비면 스코프 전체 삭제(그 제품이 이번 선언에서 항목을 전부 지운 경우).
+    """
+    scope_column = HANDOFF_SCOPE_COLUMNS[table]
+    key_column = HANDOFF_PRUNE_KEYS[table]
+    base = f'DELETE FROM "{table}" WHERE "{scope_column}" = {sql_literal(scope_value)}'
+    if not keep_keys:
+        return base + ";"
+    keeps = ", ".join(sql_literal(key) for key in keep_keys)
+    return f'{base} AND "{key_column}" NOT IN ({keeps});'
+
+
 class HttpD1Client:
     """Cloudflare D1 HTTP API implementation. Constructed from env by the DAG factory."""
 
     def __init__(self, api_url: str, token: str) -> None:
         self._api_url = api_url
         self._token = token  # never logged
+        self._handoff_ready: set[str] = set()  # per-run schema check cache
 
     def _request(self, body: dict[str, Any]) -> dict[str, Any]:
         import requests  # lazy import so tests never need it
@@ -378,3 +587,45 @@ class HttpD1Client:
         columns = '", "'.join(PUBLICATION_LEDGER_COLUMNS)
         values = ", ".join(sql_literal(record.get(column)) for column in PUBLICATION_LEDGER_COLUMNS)
         self._query(f'INSERT INTO _publication_ledger ("{columns}") VALUES ({values});')
+
+    def _ensure_handoff_schema(self, table: str) -> None:
+        if table in self._handoff_ready:
+            return
+        pragma_rows = self._query(f'PRAGMA table_info("{table}");')
+        if handoff_schema_is_current(table, pragma_rows):
+            pass
+        elif pragma_rows:
+            # 레거시 1회 **행 보존** 이행(#638 §4) — 이번 run 에 게시되지 않는 제품의 메타도 유지
+            self._query(handoff_migrate_statements(table, [str(row["name"]) for row in pragma_rows]))
+        else:
+            self._query(handoff_ddl(table))
+        self._handoff_ready.add(table)
+
+    def publish_product_meta(
+        self,
+        product_id: str,
+        publication_id: str,
+        columns_rows: Sequence[dict[str, Any]],
+        ext_rows: Sequence[dict[str, Any]],
+        pattern_rows: Sequence[dict[str, Any]],
+    ) -> None:
+        """제품 스코프 보조 3종을 자연키 upsert 후 이번 선언에 없는 잔여 행만 정리(#638 §3).
+
+        원자성 경계는 제품 단위(#638 §3) — 중간 실패 시 이 제품의 메타만 신·구 혼재하고
+        다른 제품·도메인 행은 건드리지 않는다. columns/patterns 정리는 선언 키셋 기준
+        (handoff_prune_statement 참조 — publication_id 부등 판별은 id 재사용 run 에서 구멍).
+        glossary 는 제품 스코프가 아니라 여기 없다(취합 소유 도메인의 게시 경로가 별도 — #638 §2.4).
+        """
+        statements: list[str] = []
+        for table in ("d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns"):
+            self._ensure_handoff_schema(table)
+        statements.extend(handoff_upsert_statements("d1_catalog_columns", columns_rows))
+        statements.extend(handoff_upsert_statements("d1_catalog_ext", ext_rows))
+        statements.extend(handoff_upsert_statements("d1_usage_patterns", pattern_rows))
+        statements.append(handoff_prune_statement(
+            "d1_catalog_columns", product_id, [str(row["column_name"]) for row in columns_rows]))
+        statements.append(handoff_stale_delete_statement("d1_catalog_ext", product_id, publication_id))
+        statements.append(handoff_prune_statement(
+            "d1_usage_patterns", product_id, [str(row["pattern_id"]) for row in pattern_rows]))
+        for batch in group_api_batches(statements):
+            self._query_batch(batch)
