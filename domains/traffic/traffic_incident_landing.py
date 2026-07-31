@@ -21,7 +21,10 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.ops.product_observability import record_domain_stage_event  # noqa: E402
+from common.ops.product_observability import (  # noqa: E402
+    record_domain_stage_event,
+    record_product_event,
+)
 from traffic_ingest.acc_info import KST, resolve_acc_info_page_window  # noqa: E402
 from traffic_ingest.assets import TRAFFIC_INCIDENT_RAW_ASSET_REF  # noqa: E402
 from traffic_ingest.bronze_dag_support import (  # noqa: E402
@@ -43,10 +46,29 @@ DAG_ID = "traffic_incident_landing"
 record_traffic_problem = problem_failure_callback(
     domain="traffic", source_system="seoul_topis"
 )
-record_traffic_raw_product_event = record_domain_stage_event("traffic", "raw")
 record_traffic_raw_product_failure = record_domain_stage_event(
     "traffic", "raw", status="failed"
 )
+
+
+def record_traffic_raw_product_event(context: dict) -> dict:
+    row_count = None
+    try:
+        task_instance = context.get("ti") or context.get("task_instance")
+        result = task_instance.xcom_pull(task_ids=LANDING_TASK_ID)
+        raw_result = result.get("raw_result") if isinstance(result, dict) else None
+        value = raw_result.get("parsed_rows") if isinstance(raw_result, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            row_count = value
+    except Exception:
+        row_count = None
+    return record_product_event(
+        context,
+        domain="traffic",
+        layer="raw",
+        row_count=row_count,
+        rows_source="raw_manifest" if row_count is not None else "not_observed",
+    )
 
 
 @fail_fast_traffic_bronze

@@ -26,10 +26,34 @@ except ImportError:  # pragma: no cover - Airflow supplies Stats in production.
 
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = "product-observability/v1"
+SCHEMA_VERSION = "product-observability/v2"
 _KST = timezone(timedelta(hours=9))
 _VALID_LAYERS = {"raw", "bronze", "gold", "d1"}
 _VALID_STATUSES = {"success", "failed", "skipped", "degraded"}
+_VALID_ROWS_SOURCES = {
+    "raw_manifest",
+    "bronze_run_manifest",
+    "iceberg_snapshot",
+    "count_query",
+    "publication_ledger",
+    "not_observed",
+}
+
+
+def _validate_row_observation(
+    row_count: int | None,
+    rows_source: str,
+) -> None:
+    if rows_source not in _VALID_ROWS_SOURCES:
+        raise ValueError(f"unsupported product event rows_source: {rows_source!r}")
+    if row_count is None:
+        if rows_source != "not_observed":
+            raise ValueError("row_count=None requires rows_source='not_observed'")
+        return
+    if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+        raise ValueError("row_count must be a non-negative integer or None")
+    if rows_source == "not_observed":
+        raise ValueError("observed row_count requires an authoritative rows_source")
 
 
 def _context_identity(context: Mapping[str, Any]) -> tuple[str, str, str, int | None]:
@@ -94,6 +118,7 @@ def build_product_event(
     product_ids: Sequence[str] = (),
     status: str = "success",
     row_count: int | None = None,
+    rows_source: str = "not_observed",
     quality: Mapping[str, Any] | None = None,
     publication_id: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
@@ -102,6 +127,7 @@ def build_product_event(
         raise ValueError(f"unsupported product event layer: {layer!r}")
     if status not in _VALID_STATUSES:
         raise ValueError(f"unsupported product event status: {status!r}")
+    _validate_row_observation(row_count, rows_source)
     observed_at = _observed_at(context)
     dag_id, task_id, run_id, try_number = _context_identity(context)
     observed_date = observed_at.astimezone(_KST).date().isoformat()
@@ -145,6 +171,7 @@ def build_product_event(
         "run_id": run_id,
         "try_number": try_number,
         "row_count": row_count,
+        "rows_source": rows_source,
         "quality": dict(quality or {}),
         "publication_id": publication_id,
     }

@@ -77,3 +77,30 @@ def test_incident_landing_wrapper_maps_context_and_sets_raw_asset_metadata(monke
     assert captured["run"].landing_load_date == "2026-07-10"
     assert captured["request"].start_index == 1
     assert event.extra == Outcome.asset_metadata
+
+
+def test_incident_raw_product_event_uses_landing_manifest_rows(monkeypatch):
+    import traffic_incident_landing as module
+
+    captured = []
+    monkeypatch.setattr(
+        module,
+        "record_product_event",
+        lambda _context, **kwargs: captured.append(kwargs) or kwargs,
+    )
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            assert task_ids == module.LANDING_TASK_ID
+            return {"raw_result": {"parsed_rows": 11}}
+
+    module.record_traffic_raw_product_event({"ti": TI(), "run_id": "run-1"})
+
+    assert captured == [
+        {
+            "domain": "traffic",
+            "layer": "raw",
+            "row_count": 11,
+            "rows_source": "raw_manifest",
+        }
+    ]

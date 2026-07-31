@@ -306,6 +306,7 @@ def test_traffic_bronze_empty_fallback_does_not_publish_or_skip(monkeypatch):
     class Result:
         processed_count = 0
         snapshot_run_ids = ()
+        row_count = 0
         latest_asset_metadata = None
 
     class Materializer:
@@ -326,7 +327,65 @@ def test_traffic_bronze_empty_fallback_does_not_publish_or_skip(monkeypatch):
         outlet_events={
             scheduled_module.TRAFFIC_INCIDENT_MATERIALIZED_ALIAS: Accessor()
         },
-    ) == {"processed": 0, "snapshot_run_ids": []}
+    ) == {"processed": 0, "row_count": 0, "snapshot_run_ids": []}
+
+
+def test_traffic_bronze_materializer_returns_verified_row_total(monkeypatch):
+    class Result:
+        processed_count = 2
+        snapshot_run_ids = ("snapshot-1", "snapshot-2")
+        row_count = 7
+        asset_metadata = (
+            {"row_count": 4, "event_at": "2026-07-16T00:00:00+00:00"},
+            {"row_count": 3, "event_at": "2026-07-16T00:05:00+00:00"},
+        )
+        latest_asset_metadata = asset_metadata[-1]
+
+    class Materializer:
+        def run(self, **_kwargs):
+            return Result()
+
+    monkeypatch.setattr(
+        scheduled_module, "build_incident_materializer", lambda: Materializer()
+    )
+    monkeypatch.setattr(scheduled_module, "publish_through_alias", lambda *_args, **_kwargs: None)
+
+    assert scheduled_module.materialize_pending_traffic_incident_snapshots(
+        dag=Dag(),
+        run_id="scheduled__materializer",
+        outlet_events={},
+    ) == {
+        "processed": 2,
+        "row_count": 7,
+        "snapshot_run_ids": ["snapshot-1", "snapshot-2"],
+    }
+
+
+def test_traffic_bronze_product_event_uses_manifest_row_total(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        scheduled_module,
+        "record_product_event",
+        lambda _context, **kwargs: captured.append(kwargs) or kwargs,
+    )
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            assert task_ids == scheduled_module.MATERIALIZER_TASK_ID
+            return {"row_count": 7}
+
+    scheduled_module.record_traffic_bronze_product_event(
+        {"ti": TI(), "run_id": "run-1"}
+    )
+
+    assert captured == [
+        {
+            "domain": "traffic",
+            "layer": "bronze",
+            "row_count": 7,
+            "rows_source": "bronze_run_manifest",
+        }
+    ]
 
 
 def test_traffic_bronze_success_callback_acknowledges_materialized_receipts(
