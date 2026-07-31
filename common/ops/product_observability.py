@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
+from common.ops.contract import Layer, RowsSource, RunStatus
 from common.ops.run_sink import _put_r2, _safe
 from common.runtime_guard import resolve_runtime_target
 
@@ -28,16 +29,12 @@ except ImportError:  # pragma: no cover - Airflow supplies Stats in production.
 LOGGER = logging.getLogger(__name__)
 SCHEMA_VERSION = "product-observability/v2"
 _KST = timezone(timedelta(hours=9))
-_VALID_LAYERS = {"raw", "bronze", "gold", "d1"}
-_VALID_STATUSES = {"success", "failed", "skipped", "degraded"}
-_VALID_ROWS_SOURCES = {
-    "raw_manifest",
-    "bronze_run_manifest",
-    "iceberg_snapshot",
-    "count_query",
-    "publication_ledger",
-    "not_observed",
-}
+# 값 집합의 단일 출처는 관문(common.ops.contract) — 여기서 따로 세지 않는다.
+# ``silver`` 가 빠져 있어 정제 단계 기록이 값 검증에서 튕기던 결함을 함께 고친다
+# (ASK-Seoul#78 §16 정정 2 · V-4). 전 도메인 적용 전에 반드시 필요한 수정이다.
+_VALID_LAYERS = {member.value for member in Layer}
+_VALID_STATUSES = {member.value for member in RunStatus}
+_VALID_ROWS_SOURCES = {member.value for member in RowsSource}
 
 
 def _validate_row_observation(

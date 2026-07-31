@@ -5,6 +5,141 @@
 
 ---
 
+## 2026-08-01
+
+### 86. 운영 기록 단일 관문 + ops 존 → 조회 DB(D1) 적재 (ASK-Seoul#78)
+
+request:
+- ASK-Seoul#78「저장소·운영 기록 적용 규약 v1」이 commerce 담당분으로 지목한 항목이 적용됐는지
+  확인하고 수정 조치.
+- `logship` 이 "해당 위치에 쌓일 데이터를 특정 주기로 D1 에 적재하려는 기능"으로 보이는데,
+  **이 기능 하나로** 규약이 명시한 위치의 파일을 감지해 D1 로그 테이블에 **같은 규격·같은
+  포맷**으로 적재되도록 설계돼 있는지 확인하고 개발할 것.
+- 중복 데이터가 처리되지 않도록 파일 경로 이동 로직이나 중복 체크·파일 저장 규약도 적용.
+  (그런 규약이 문서에 있는지 먼저 확인하고, 없으면 대응)
+- 이번 개정 반영은 commerce 담당 파트뿐 아니라 **규약에 명시된 경로에 저장되는 모든 도메인의
+  로그류를 통합해 DB 에 싣는 것**. commerce 는 내 소관이니 각 파트가 그 정보를 파일로 기록해
+  적재할 수 있도록 준비.
+- 모든 모듈이 **같은 형태의 로그 모듈**을 쓰게 하고, 공용 위치의 것이 부족하면 공용 로그 모듈을
+  따로 만들어 다른 도메인이 그것을 쓰도록 강제. 필수 기입 정보가 빠지면 에러를 내거나 즉각
+  피드백. 경로도 용도에 따라 틀린 곳에 쓰는 것을 막게 **선택지를 사전에 좁혀** 두고, 추후
+  문제가 생겨도 **이 한 가지 관문만 통과하면 되게** 설계 반영.
+
+response:
+- **현행 감사 결과(수정 전)**: `logship` 은 D1 적재 기능이 아니었다 — 태스크 텍스트 로그를
+  tar.gz 로 R2 에 옮기는 것이 전부였고 조회 DB 배선은 0. 규약 대비 위반·미구현은 다음과 같다.
+  - `P-4` 위반 — 관측 계열인 `ops/logs/commerce/` 가 `load_date=` 를 씀(#78 §2 "현재 어긋난 곳"
+    표에 @Exisign 소관으로 명시).
+  - `P-9` 위반 — `LOGS_LAYER` 기본값에 도메인명이 박혀 있고 키 빌더가 도메인을 인자로 받지 않음
+    (#78 이 `commerce_ops_logship` 을 지목).
+  - `C-2`·`C-3`·`C-4`·`C-7`, `D-1`~`D-4`, `F-1`~`F-6` **전부 미구현**(조회 DB 자체가 없었다).
+  - `V-4` 결함 — 공통 모듈 `_VALID_LAYERS` 에 `silver` 가 빠져 정제 단계 기록이 검증에서 튕김
+    (#78 §16 정정 2).
+  - commerce 는 ops 존에 **상태값과 로그 압축본만** 남기고 실행 기록을 남기지 않아, 조회 DB
+    관점에서 도메인 전체가 관측 공백이었다.
+- **중복 처리 규약은 문서에 이미 있고, 사용자가 상정한 "파일 이동"과는 반대 방향이다.**
+  `C-6` 은 *"어디까지 적재했는지는 경로가 아니라 DB 안에 그 기록이 있는지 없는지로 판단한다.
+  파일 이동도 별도 표시도 만들지 않는다"* 이고, `C-4` 는 대조 기준을 `event_id`(축은
+  `source_path_date`), `D-4` 는 자연키 범위 갱신, `G-3` 은 전환일 중복을 `event_id` 로 제거다.
+  → 파일을 옮기는 로직은 **만들지 않았다**. `event_id` 를 PRIMARY KEY 로 두어 재적재가 자연히
+  멱등해지게 했고, 적재기는 저장소를 **읽기만** 한다(테스트의 저장소 스텁이 write/delete/copy
+  호출 시 실패하도록 강제).
+- **공용 관문 `common/ops/contract.py` 신설** — 사용자가 요구한 "한 가지 관문". 규약 중 기계가
+  강제할 수 있는 전부를 코드로 옮겼다.
+  - 경로는 **만들 수 없고 요청만 가능**(`ops_key`). 관측 계열은 `observed_date=` 필수, 상태
+    계열은 날짜 칸 금지 — 용도에 안 맞는 조합은 그 자리에서 거부(P-4·P-5·P-6·P-9).
+  - 선택지를 미리 좁힘: `OpsCategory`(10종 닫힌 집합, R-1) · `Layer`(V-4, **silver 포함**) ·
+    `Grain`(V-5) · `RunStatus`(V-1) · `ManifestStatus`(V-2) · `RowsSource`(N-5) · `SinkType` ·
+    `Environment`(Z-7). 값 집합 세 벌(V-1/V-2/V-3)은 이름이 비슷해도 **섞지 않는다**.
+  - 필수 항목 누락은 `OpsContractError` 로 즉시 실패하고, 메시지에 **무엇이 어느 규칙 때문에
+    필요한지**를 담는다. grain 별 필수 항목 표(`_REQUIRED_BY_GRAIN`)가 판정 기준.
+  - `NULL ≠ 0` 강제(F-3·F-6·N-5): `row_count=None` ↔ `rows_source='not_observed'` 쌍이 아니면
+    거부하고, 측정값에 `not_observed` 를 붙이는 것도 거부.
+  - `X-1` 강제: `api_name` 에 URL 형태가 오면 거부. 서울 열린데이터 API 는 인증키를 URL 경로에
+    싣기 때문에 그대로 저장하면 시크릿이 남는다. 저장 직전 `redact()`(X-2).
+  - `F-5` 날짜 축 두 개: `observed_date_kst`(기록 내용 기준·정본) + `source_path_date`(경로
+    날짜 그대로, 대조 전용). 소급 재정리를 안 하기로 한 이상(G-2) 이게 없으면 과거 전 구간이
+    매일 어긋난다.
+  - `event_id` 는 원천이 발급했으면 그대로 쓰고(원천 충실), 없을 때만 식별 항목 sha256 으로
+    파생 — `product_observability` 와 같은 해시 규칙.
+- **조회 DB 스키마 `common/ops/d1_ops.py`** — #78 §8 테이블 4종(`_ops_run_event` ·
+  `_ops_daily_metric` · `_ops_pipeline_state` · `_ops_pipeline_expectation`).
+  - **이 모듈은 `DROP TABLE` 문장을 아예 만들지 않는다**(D-6). 대시보드 마이그레이션이
+    `DROP TABLE IF EXISTS` 로 시작해 팀 데이터를 지우던 사고와 같은 계열을 코드 수준에서 차단.
+    테스트가 모든 산출 문장에 `DROP`/`DELETE`/`TRUNCATE` 가 없음을 검사한다.
+  - 갱신은 전부 `ON CONFLICT(<자연키>) DO UPDATE`(D-4). 스키마 진화는 `ADD COLUMN` 만(D-3).
+  - `_ops_daily_metric` 은 파이썬 슬라이스가 아니라 **`_ops_run_event` 에서 다시 계산**한다 —
+    적재가 나눠 일어나므로 슬라이스 집계는 나중 적재분을 덮어써 조용히 과소 계상된다.
+  - `layer` 는 **nullable**. 관문 이전 기록(errors 의 Problem 문서 등)에는 단계 정보가 아예
+    없고, 없는 것을 추측해 채우면 그게 거짓말이 된다(F-3). 대신 단계별 집계에서 제외하고
+    (`layer IS NOT NULL`) 그 건수를 도메인별로 영수증·경고 로그가 보고한다.
+- **감지·정규화·적재 `common/ops/ingest.py`** — 규약이 정한 위치의 파일을 **전 도메인** 대상으로
+  감지해 기록 형식 한 벌로 접는다.
+  - `parse_ops_key` 가 현재 살아 있는 경로 배치를 전부 읽는다(G-1·G-4 dual-read): 도메인 우선
+    bare(`ops/errors/commerce/observed_date=`) · 전환 전 날짜 칸(`load_date=`·`type=…/date=`) ·
+    날짜 우선(`ops/runs/observed_date=…/domain=`) · `domain=` key=value · 관문 신규 경로.
+    상태 계열(control·receipts)과 ops 존 밖은 대상에서 제외(R-4).
+  - 기록기 5벌(run_sink·runmetrics·errors.sink·product_observability·관문)의 서로 다른 모양을
+    F 표 한 벌로 정규화. 관문이 쓴 기록은 경로 정보만 덧붙여 그대로 통과.
+  - `ops/logs/` 의 tar.gz 는 "기록 1건"이 아니라 텍스트 압축본이라(R-1) **행으로 만들지 않고**,
+    같은 (dag_id, run_id) 실행 기록에 `log_bundle_key` 포인터로 붙인다 — 새 `grain` 값을 만들어
+    닫힌 집합(V-5)을 깨지 않으면서 화면에서 실행 → 로그 원문으로 갈 수 있다(F-1 추가는 허용).
+    run_id 안전화 규칙이 전환 전후로 한 번 바뀌었으므로 양쪽 규칙으로 되짚는다.
+  - 영수증(`IngestReceipt`)이 **말하지 않은 누락이 없도록** 건너뛴 것을 전부 센다: 파싱 불가,
+    정규화 실패(카테고리별), `layer` 없음(도메인별), 이미 DB 에 있어 건너뜀, 상한 절단 건수.
+    조용히 자르면 "전부 봤다"로 읽힌다(C-9).
+  - `reconcile()` 은 저장소와 DB 를 `event_id` 기준·`source_path_date` 축으로 대조해 **빠진 것만**
+    짚는다(C-3·C-4). 묶어 쓰기(C-5) 전제라 파일 수와 행 수를 같다고 보지 않는다.
+- **commerce 배선** — 각 파트가 규약대로 기록을 파일로 남기게 했다.
+  - `commerce_core/observability.py`: Airflow 콜백에서 관문을 호출. `ops_default_args(layer)`
+    한 줄로 그 DAG 의 모든 태스크가 `ops/runs/commerce/observed_date=…` 에 기록을 남긴다.
+    9개 DAG 전부 배선(raw·recollect=raw, bronze, silver, gold, gold_refresh, serving_export=d1,
+    watchdog=raw, logship=d1). `commerce_collect_raw` 의 기존 실패 상세 콜백(ops/errors)은
+    **교체하지 않고 뒤에 붙였다** — 담는 단위가 다르다(V-6).
+  - 행 수는 태스크 반환 dict 의 관례 키(`row_count`/`rows`/`inserted`/`loaded`)에서만 읽고,
+    못 읽으면 `not_observed`. 아무 숫자나 행 수로 승격하지 않는다.
+  - `is_final_try` 는 판단 근거가 없으면 `None` — 관측 공백은 `False` 가 아니다(C-7).
+  - 예외는 **타입명만** 싣는다(`error_ref`) — 메시지에 URL·자격증명이 섞일 수 있다(X-1·X-2).
+    본문은 `ops/errors/` 문서의 몫이고 실행 기록은 그 위치만 가리킨다.
+  - 관측 실패는 태스크를 죽이지 않고(C-2), **관문 거부는 `log.error`** 로 남긴다 — 배선이
+    규약을 못 지키고 있다는 뜻이라 조용히 넘기면 관문이 아니다.
+- **`commerce_ops_logship` 이 두 일을 한다** (사용자 요구 "이 기능 하나로").
+  1. `ship_logs` — 경로를 관문이 만든다(`observed_date=`, 도메인 인자). 구경로(`load_date=`)에
+     이미 올라간 번들을 보고 중복 업로드를 건너뛴다(G-4) — 못 보면 같은 로그를 두 번 올리고
+     로컬만 두 번 지운다. 구경로 조회는 **그 시점의 명명 규칙**(`+` 보존)으로 되짚는다.
+  2. `load_ops_to_d1` — 전 도메인 ops 관측 파일 감지 → 정규화 → D1 자연키 적재 + 일별 집계
+     재계산 + 파이프라인 상태(C-9 완전/부분/**미확인**) + commerce 기대 주기 사본 등록.
+     기본 조회 구간 3일(`COMMERCE_OPS_INGEST_LOOKBACK_DAYS`), 도메인 스코프는
+     `COMMERCE_OPS_INGEST_DOMAINS`(비우면 전 도메인).
+- **`commerce_core/ops_expectations.py`** — #78 §9 commerce 표(오너 확인 @Exisign)를 코드로.
+  정본은 DAG 선언이고 이 표는 사본이다(S-1). 상류 이벤트형은 트리거·상류·최대 허용 지연으로
+  등록(S-3), 수동 전용 `commerce_load_gold_refresh` 는 감시 제외(S-4). 테스트가 DAG 파일의
+  `schedule=` 선언을 실제로 파싱해 사본과 양방향 대조하므로, 스케줄만 바꾸고 표를 안 고치면 막힌다.
+- **공통 모듈 수정 2건**(전 도메인 영향, 둘 다 순수 추가):
+  - `common/ops/product_observability.py` — 값 집합 3종의 출처를 관문으로 위임. `_VALID_LAYERS`
+    에 **`silver` 가 들어갔다**(#78 §16 정정 2 — 이대로 전 도메인에 적용하면 정제 단계 기록이
+    검증에서 튕긴다).
+  - `common/serving/d1_client.py` — `HttpD1Client.execute()` 공개 seam 추가(적재기가 private
+    `_query` 에 손대지 않게). 기존 동작 변경 0.
+- **관문 우회 금지 강제** (`common/tests/test_ops_gate_enforcement.py`): `dags/` 전체를 훑어
+  `"ops/…"` 문자열로 경로를 조립하는 코드를 찾아 **유예 목록에 없으면 실패**시킨다. 유예 목록은
+  관문보다 먼저 있던 기록기 15개 파일이고 각 줄에 경로·사유·오너를 적었다 — 이 목록이 곧
+  **남은 전환 작업의 정본**이며, 전환이 끝나 목록에 죽은 줄이 남아도 실패한다.
+- **부수 수정(기존 결함)**: `include/bronze/bronze_tasks.py` 의 완료 로그가
+  `rows=%d/%d` 에 `list_total_count or "?"` 를 넘겨, 총계를 모르는 run 에서 포맷 `TypeError` 로
+  **그 로그 줄이 통째로 유실**되고 있었다(`%s` 로 수정). 공통 스위트와 함께 돌릴 때만 드러나
+  지금까지 안 잡혔다.
+- 테스트: 신규 4파일 **63건**(관문 30 · 적재기 31·강제검사 3 → 관문 30, ingest 31, 강제 3,
+  commerce observability 12, 기대주기 6, logship 6). 전체 **620건 통과**
+  (commerce 428 + common 192) · `python -m security` **PASS**(차단 0, 경고 3건은 런타임 설치
+  확인 항목으로 정적 실행 시 상시 표시).
+- **스코프 밖으로 남긴 것**(#78 이 다른 오너에게 배정): `P-1`·`P-2`(commerce raw 의
+  `2026/06/30` 날짜 표기) · `Y-7`(89 GiB DROP) · 타 도메인 기록기의 경로/타임존/환경 분리
+  전환(`P-4`·`P-7`·`P-8`·`Z-7`) · `D-6` 대시보드 증분 전환. 관문·적재기는 이것들이 정리되기
+  전에도 동작하도록 dual-read 로 만들었다.
+
+---
+
 ## 2026-07-30
 
 ### 85. 서빙 게시 — 무변경 스킵 게이트(payload 지문) (#601)

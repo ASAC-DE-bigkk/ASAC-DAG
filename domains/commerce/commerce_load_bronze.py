@@ -41,15 +41,18 @@ from airflow.utils.trigger_rule import TriggerRule  # noqa: E402
 
 from bronze import load_plan, load_state, warehouse  # noqa: E402
 from commerce_core import registry  # noqa: E402
+from commerce_core.observability import ops_default_args  # noqa: E402
 from commerce_core.settings import get_settings  # noqa: E402
 from commerce_core.storage import get_storage  # noqa: E402
+from common.ops import Layer  # noqa: E402
 
 log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 COLLECTIBLE_SHORTS = [d.short for d in registry.enabled_for_schedule("daily")]
 _DEFAULT_LOOKBACK_DAYS = int(os.getenv("COMMERCE_LOAD_LOOKBACK_DAYS", "3") or "3")
-_DEFAULT_ARGS = {"owner": "data-eng", "retries": 2, "retry_delay": pendulum.duration(minutes=3)}
+_DEFAULT_ARGS = {"owner": "data-eng", "retries": 2, "retry_delay": pendulum.duration(minutes=3),
+                 **ops_default_args(Layer.BRONZE)}
 _PARAMS = {"lookback_days": Param(default=_DEFAULT_LOOKBACK_DAYS, type="integer",
            description="최근 N일 창(today-N~today)의 미적재 run 만 적재(0=무제한). "
                        "ENV: COMMERCE_LOAD_LOOKBACK_DAYS. #223 이전엔 '가장 이른 N날짜'였음(신규셋 배제 버그).")}

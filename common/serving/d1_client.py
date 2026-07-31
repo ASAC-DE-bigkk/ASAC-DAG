@@ -448,6 +448,15 @@ class HttpD1Client:
         for batch in group_api_batches(statements):
             self._query_batch(batch)
 
+    def execute(self, sql: str) -> list[dict[str, Any]]:
+        """Run one statement and return the last statement's rows.
+
+        Public seam for callers that own their SQL — the ops-record loader builds every
+        statement from `common.ops.d1_ops` (constant identifiers, escaped values), so it
+        needs a plain execute without reaching into the private `_query`.
+        """
+        return self._query(sql)
+
     def table_row_count(self, name: str) -> int:
         try:
             out = self._query(f'SELECT count(*) c FROM "{name}";')
