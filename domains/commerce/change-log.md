@@ -5,6 +5,42 @@
 
 ---
 
+## 2026-07-31
+
+### 86. 수집 0종 실행도 완료 알림 발송 — 침묵 구간 제거
+
+request:
+- "commerce raw 수집이 정상적으로 종료되지 않아서 discord 메세지를 못받은 것 같은데. 확인해서
+  원인 분석 진행해줘. 조치는 일단 하지 말아봐." → 원인 분석만 선행.
+- 이어서 "수집 건수가 0건이더라도 실행 완료가 되면 알림을 주도록 코드 수정해줘."
+
+response:
+- **원인(실측)**: `commerce_collect_raw` 는 실패한 게 아니라 **대상 0종으로 정상 종료**했다.
+  `plan_all_targets` 가 동일 KST 일자 completed 를 제외(feat/59)해 대상 0 → `ingest_one` 0개 매핑 →
+  `finalize_run` 이 `if not summaries:` 에서 **리포트 전송 코드보다 위에서 조기 return**. DAG 상태는
+  success 라 실패 알림도 안 나가 **성공인데 아무 메시지도 없는 침묵 구간**이 됐다(2026-07-31 실행
+  3건 전부 동일). 그날 152/152 를 끝낸 run 은 `2026-07-31_014858_879` 로, 로컬 메타DB·로그에 없는
+  **다른 Airflow 인스턴스**가 공유 prod 마커 존에 남긴 것.
+- **조치**: 0종이어도 완료 리포트 1건을 보낸다. run 마커(`_RUN.*`)는 종전대로 쓰지 않는다 —
+  "마커 생략"과 "알림 생략"을 분리했다.
+  - `commerce_raw.py`: 리포트 전송을 `_send_report()` 로 추출해 정상 경로와 0종 경로가 같은 코드를
+    타게 하고, 0종 분기에서 `_no_target_reason()` 사유 섹션과 함께 전송. `_dag_stage()` 로
+    dag_id/stage 해석 일원화.
+  - `bronze/markers.py` `same_day_completed_summary()` — 동일 KST 일자의 완료 short 합집합 +
+    **run 별 완료 종수**. 0종 알림에 "어느 run 이 이미 끝냈는지"를 싣기 위한 근거 조회.
+  - `commerce_core/run_report.py` `no_target_section()` — 사유 문구(collect=동일자 완료 N/152종 +
+    완료 run_id, recollect=미완료 없음/일자변경 가드). 근거 조회 실패 시에도 알림은 나간다(사유 축약).
+  - **잔여 감지**: 동일자 완료로 설명되지 않는 API 는 `scope_shorts` 로 넘겨 **⛔ 미수집 + 경고색**
+    으로 뜨게 했다 → 게이트 실패 같은 상류 스킵이 '초록 0종'으로 묻히지 않는다.
+- 정책 반영: `docs/PROJECT.md` §2 에 "실행 1회 = 알림 1건, 0종도 발송 + 사유 명시" 추가(§7 변경 이력
+  기재). 운영 문서 `docs/operations/recollect-and-alerts.md` §1-b 신설.
+- 검증: 단위 테스트 8건 추가/갱신(`test_markers.py` 1 · `test_run_report.py` 4) 전량 통과,
+  스케줄러 컨테이너 DagBag 파싱 import_errors 0, 실 마커 존 대상 dry-build 로 문구 실측
+  ("동일 KST 일자(2026-07-31)에 이미 완료 152/152종 · 완료 run: `2026-07-31_014858_879` 152종").
+  보안 게이트 `python -m security` PASS(차단 0), `test_security.py` 162건 통과.
+
+---
+
 ## 2026-07-30
 
 ### 85. 서빙 게시 — 무변경 스킵 게이트(payload 지문) (#601)

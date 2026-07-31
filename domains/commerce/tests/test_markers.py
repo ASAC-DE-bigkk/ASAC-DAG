@@ -64,6 +64,23 @@ def test_incomplete_targets_no_prior_run_is_all():
     assert markers.incomplete_targets(FakeStorage([]), "", None, ["a", "b"]) == ["a", "b"]
 
 
+def test_same_day_completed_summary_groups_by_run():
+    # 0종 완료 알림의 근거 — 동일 KST 일자의 run 별 완료 종수 + 완료 short 합집합.
+    d = "2026-07-31"
+    r1, r2, prev = f"{d}_014858_879", f"{d}_120000_000", "2026-07-30_235959_999"
+    st = FakeStorage([
+        f"{paths.markers_run_dir(run_id=r1)}/clinic.completed",
+        f"{paths.markers_run_dir(run_id=r1)}/hospital.incomplete",     # 미완료는 세지 않음
+        f"{paths.markers_run_dir(run_id=r2)}/hospital.completed",
+        f"{paths.markers_run_dir(run_id=r2)}/not_enabled.completed",   # 수집 대상 밖 → 제외
+        f"{paths.markers_run_dir(run_id=prev)}/pharmacy.completed",    # 다른 일자 → 제외
+    ])
+    s = markers.same_day_completed_summary(st, "", d, ["clinic", "hospital", "pharmacy"])
+    assert s["date"] == d
+    assert s["completed"] == ["clinic", "hospital"]
+    assert s["runs"] == {r1: 1, r2: 1}                                 # prev run 은 미포함
+
+
 def test_honors_storage_prefix():
     rid = "2026-06-30_120000_000"
     base = paths.bronze_run_dir(prefix="dev/x", run_id=rid)
