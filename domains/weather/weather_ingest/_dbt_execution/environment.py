@@ -13,6 +13,7 @@ OPENLINEAGE_ENABLED_ENV = "ASK_SEOUL_DBT_OPENLINEAGE_ENABLED"
 OPENLINEAGE_URL_ENV = "ASK_SEOUL_DBT_OPENLINEAGE_URL"
 OPENLINEAGE_ENDPOINT_ENV = "ASK_SEOUL_DBT_OPENLINEAGE_ENDPOINT"
 OPENLINEAGE_NAMESPACE_ENV = "ASK_SEOUL_DBT_OPENLINEAGE_NAMESPACE"
+OPENLINEAGE_NAMESPACE_PREFIX_ENV = "ASK_SEOUL_DBT_OPENLINEAGE_NAMESPACE_PREFIX"
 _STANDARD_OPENLINEAGE_CONFIG_KEYS = (
     "OPENLINEAGE_URL",
     "OPENLINEAGE_ENDPOINT",
@@ -52,12 +53,18 @@ def openlineage_environment(
     env: Mapping[str, str], *, pipeline: str, task_id: str | None
 ) -> dict[str, str]:
     url = str(env.get(OPENLINEAGE_URL_ENV) or "").strip()
-    namespace = str(env.get(OPENLINEAGE_NAMESPACE_ENV) or "").strip()
+    namespace_prefix = str(env.get(OPENLINEAGE_NAMESPACE_PREFIX_ENV) or "").strip()
+    namespace = (
+        f"{namespace_prefix}-weather"
+        if namespace_prefix
+        else str(env.get(OPENLINEAGE_NAMESPACE_ENV) or "").strip()
+    )
     if not url:
         raise RuntimeError(f"{OPENLINEAGE_URL_ENV} is required when lineage is enabled")
     if not namespace:
         raise RuntimeError(
-            f"{OPENLINEAGE_NAMESPACE_ENV} is required when lineage is enabled"
+            f"{OPENLINEAGE_NAMESPACE_ENV} or {OPENLINEAGE_NAMESPACE_PREFIX_ENV} "
+            "is required when lineage is enabled"
         )
     if not executable_available(DEFAULT_DBT_OL_BIN):
         raise RuntimeError(f"dbt-ol executable is unavailable: {DEFAULT_DBT_OL_BIN}")
