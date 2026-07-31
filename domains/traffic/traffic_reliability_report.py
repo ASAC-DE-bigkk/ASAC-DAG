@@ -19,6 +19,7 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.ops.product_observability import record_product_health  # noqa: E402
+from common.pools import TRINO_TRAFFIC_HEAVY_POOL  # noqa: E402
 from common.runmetrics import track  # noqa: E402
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 
@@ -387,14 +388,14 @@ with DAG(
     audit_contracts_task = PythonOperator(
         task_id="audit_traffic_dbt_contracts",
         python_callable=audit_traffic_dbt_contracts,
-        pool="trino_traffic_heavy",
+        pool=TRINO_TRAFFIC_HEAVY_POOL,
         pool_slots=1,
         on_failure_callback=record_traffic_problem,
     )
     collect_data_plane_task = PythonOperator(
         task_id="collect_traffic_data_plane",
         python_callable=collect_pipeline_data_plane,
-        pool="trino_traffic_heavy",
+        pool=TRINO_TRAFFIC_HEAVY_POOL,
         pool_slots=1,
         on_failure_callback=record_traffic_problem,
     )

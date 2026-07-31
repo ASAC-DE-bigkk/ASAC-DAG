@@ -39,6 +39,7 @@ from common.assets import (  # noqa: E402
     WEATHER_BRONZE_ASSET,
     WEATHER_GOLD_PUBLICATION_READY_ASSET,
 )
+from common.pools import TRINO_WEATHER_LEGACY_HEAVY_POOL  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from common.runtime_guard import (  # noqa: E402
     TARGET_CHOICES,
@@ -71,7 +72,6 @@ WEATHER_GOLD_PUBLICATION_READY_ASSET_REF = Asset(
 # needs to serialize behind canonical/bronze — only against itself
 # (max_active_runs=1 plus this pool's own single slot keep its internal
 # step order intact, same as before).
-TRINO_WEATHER_LEGACY_HEAVY_POOL = "trino_weather_legacy_heavy"
 
 
 @dataclass(frozen=True)

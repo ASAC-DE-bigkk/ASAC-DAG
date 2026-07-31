@@ -25,6 +25,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.pools import TRINO_WEATHER_RECOVERY_HEAVY_POOL  # noqa: E402
 from common.runtime_guard import (  # noqa: E402
     TARGET_CHOICES,
     default_target,
@@ -89,7 +90,6 @@ DBT_RETRY_DELAY = timedelta(minutes=2)
 # Recovery runs on a dedicated one-slot lane so a long manual backfill cannot
 # starve live weather ingestion. Canonical transform must remain paused because
 # both DAGs can write the same W2 Gold relation.
-TRINO_WEATHER_RECOVERY_HEAVY_POOL = "trino_weather_recovery_heavy"
 CHECKPOINT_PREFIX = "ask_seoul.weather.w2_observation_recovery"
 CHECKPOINT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 DEFAULT_PARAMS = {
