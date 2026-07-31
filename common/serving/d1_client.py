@@ -325,6 +325,36 @@ def handoff_stale_delete_statement(table: str, scope_value: str, current_marker:
     )
 
 
+# ---- glossary registry (#638 §2.4 — 게시 시 검증 기준. D1 컬럼이 아니라 공용 계약이다) ----
+# vocabulary_id 마다 쓰기 도메인(owner) 하나 — 미등록 어휘는 게시 거부(#638 §5-5). 등재는 취합
+# 담당(commerce)의 인벤토리 절차를 거친 것만(#638 §2.4); 타 도메인 어휘(culture:* 등)는 그
+# 도메인 온보딩 PR 에서 추가한다. origin = 취합 전 라벨이 있던 곳(도메인/공용 축 패키지).
+GLOSSARY_REGISTRY: dict[str, dict[str, str]] = {
+    "commerce:major":      {"owner": "commerce", "origin": "commerce",  "source_type": "warehouse"},
+    "commerce:category":   {"owner": "commerce", "origin": "commerce",  "source_type": "warehouse"},
+    "commerce:event_type": {"owner": "commerce", "origin": "commerce",  "source_type": "warehouse"},
+    # 공통 축(#638 §2.4 승격): 게시(취합)는 commerce 가 맡되 정본은 공용 축 패키지의
+    # 라이브 행안부 마스터(asac_axes.dim_admin_dong) — commerce 자체 스냅샷 파생이 아니다.
+    "common:gu_code":      {"owner": "commerce", "origin": "asac_axes", "source_type": "warehouse"},
+}
+
+
+def glossary_registry_violations(rows: Sequence[dict[str, Any]]) -> dict[str, str]:
+    """vocabulary_id → 거부 사유. 미등록이거나 레지스트리의 origin/source_type 과 불일치."""
+    violations: dict[str, str] = {}
+    for row in rows:
+        vocabulary_id = str(row.get("vocabulary_id") or "")
+        entry = GLOSSARY_REGISTRY.get(vocabulary_id)
+        if entry is None:
+            violations[vocabulary_id] = "레지스트리 미등록"
+        elif (row.get("origin"), row.get("source_type")) != (entry["origin"], entry["source_type"]):
+            violations[vocabulary_id] = (
+                f"레지스트리 불일치: origin/source_type={row.get('origin')}/{row.get('source_type')} "
+                f"(정본 {entry['origin']}/{entry['source_type']})"
+            )
+    return violations
+
+
 def handoff_prune_statement(table: str, scope_value: str, keep_keys: Sequence[str]) -> str:
     """#638 §3 ② (columns·patterns) — 이번 선언에 없는 자연키 행 제거(키셋 NOT IN).
 

@@ -117,8 +117,52 @@ def test_glossary_cleanup_scoped_by_vocabulary(monkeypatch):
     spy = _D1Spy()
     _run(monkeypatch, spy, glossary=[_glossary_row(vocab="commerce:major", stamp="t9")], stamp="t9")
     deletes = [s for s in spy.sqls if s.startswith('DELETE FROM "d1_catalog_glossary"')]
-    assert len(deletes) == 1 and "'commerce:major'" in deletes[0] and "'t9'" in deletes[0]
-    assert "exported_at" in deletes[0]                   # 어휘 스코프 판별축은 exported_at
+    scope_deletes = [s for s in deletes if "exported_at" in s]
+    assert len(scope_deletes) == 1 and "'commerce:major'" in scope_deletes[0] and "'t9'" in scope_deletes[0]
+    # 승격 잔재(commerce:gu_code) 정리는 별도 멱등 DELETE — 다른 어휘 스코프는 건드리지 않는다
+    superseded = [s for s in deletes if "commerce:gu_code" in s]
+    assert len(superseded) == 1 and "exported_at" not in superseded[0]
+
+
+def test_unregistered_vocabulary_is_rejected(monkeypatch):
+    """레지스트리 미등록 어휘는 게시 거부(#638 §5-5) — 등록 어휘만 실리고 run 은 진행."""
+    spy = _D1Spy()
+    rogue = dict(_glossary_row(vocab="commerce:unknown_vocab"), code="x")
+    _run(monkeypatch, spy, glossary=[_glossary_row(vocab="commerce:major"), rogue])
+    assert not [s for s in spy.sqls if "commerce:unknown_vocab" in s]
+    assert [s for s in spy.sqls if s.startswith('INSERT OR REPLACE INTO "d1_catalog_glossary"')
+            and "commerce:major" in s]
+
+
+def test_registry_origin_mismatch_is_rejected(monkeypatch):
+    """레지스트리 정본과 origin/source_type 이 어긋난 행도 거부 — 출처 위조 방지."""
+    spy = _D1Spy()
+    forged = dict(_glossary_row(vocab="common:gu_code"), origin="commerce")  # 정본은 asac_axes
+    _run(monkeypatch, spy, glossary=[forged])
+    assert not [s for s in spy.sqls if s.startswith('INSERT OR REPLACE INTO "d1_catalog_glossary"')]
+
+
+def test_gu_code_sources_from_common_live_master():
+    """gu_code 승격(#638 §2.4) — 자체 스냅샷이 아니라 공용 축 라이브 마스터에서 뽑는다."""
+    class _Cur:
+        def __init__(self):
+            self.sqls = []
+            self._out = []
+
+        def execute(self, sql):
+            self.sqls.append(sql)
+            self._out = [("11680", "강남구")] if "dim_admin_dong" in sql else []
+
+        def fetchall(self):
+            return self._out
+
+    cur = _Cur()
+    rows = se._glossary_rows(cur, "iceberg_dev", "iceberg_dev.commerce", "t1")
+    gu_rows = [r for r in rows if r["vocabulary_id"] == "common:gu_code"]
+    assert gu_rows == [{"vocabulary_id": "common:gu_code", "code": "11680", "label_ko": "강남구",
+                        "origin": "asac_axes", "source_type": "warehouse", "exported_at": "t1"}]
+    assert any("iceberg_dev.common.dim_admin_dong" in s for s in cur.sqls)
+    assert not any("bronze_ref_admin_dong" in s for s in cur.sqls)   # 자체 스냅샷 파생 폐기
 
 
 def test_failed_label_source_leaves_previous_vocabulary_rows(monkeypatch):

@@ -328,39 +328,51 @@ def _handoff_rows(spec, m: dict, col_defs: list, publication_id: str) -> tuple[l
     return col_rows, ext_row, pat_rows
 
 
-def _glossary_rows(cur, qschema: str, exported_at: str) -> list[dict]:
+def _glossary_rows(cur, catalog: str, qschema: str, exported_at: str) -> list[dict]:
     """코드값 → 한국어 라벨 용어사전(d1_catalog_glossary) — 웨어하우스 실데이터에서 파생.
 
     D1 롤업엔 코드만 실리는 열거값(major/category/event_type/gu_code)의 한국어 의미를
     MCP/API 담당자가 D1 만으로 알 수 있게 한다(오너 지시 — 용어의 실제 한국어 뜻 정리).
-    소스는 gold 의 `*_ko` 라벨 컬럼·행정동 참조 테이블이라 하드코딩이 없다(계보 유지 — 라벨
-    출처 컬럼은 아래 specs 주석이 정본).
+    소스는 라벨 컬럼이 있는 실테이블이라 하드코딩이 없다(계보 유지 — 출처는 specs 의 SELECT).
 
-    네임스페이스(#638 §2.4): commerce 자기 소유 어휘만 `commerce:` 로 게시한다. `gu_code` 는
-    자체 행정동 스냅샷 파생(미수록 구는 라벨 부재 가능)이라 `common:` 승격은 취합 작업에서
-    origin=asac_axes 로 별도 수행 — 그 전까지 commerce: 네임스페이스에 남긴다.
+    네임스페이스(#638 §2.4 취합 반영): commerce 자기 소유 어휘는 `commerce:`. `gu_code` 는
+    **`common:gu_code` 로 승격** — 원본(origin)은 공용 축 패키지의 라이브 행안부 마스터
+    (`{catalog}.common.dim_admin_dong`, asac_axes 뷰 — gu_code·gu 컬럼, @weekly 갱신 #154)다.
+    자체 스냅샷(bronze_ref_admin_dong, 미수록 구 라벨 부재 가능) 파생을 접고 정본을 직접 읽는다.
+    조회 실패 시 해당 어휘만 생략되고 직전 행이 D1 에 남는다(upsert 보존 — 전환 실패 내성).
     """
+    common_schema = os.getenv("COMMON_SCHEMA", "common")
+    assert_identifier(common_schema, field="COMMON_SCHEMA")
     rows: list[dict] = []
-    specs = [  # (어휘, SELECT, source_type) — 라벨 출처: *_ko 컬럼 / bronze_ref_admin_dong.sgg_name
-        ("major", f"select distinct major, major_ko from {qschema}.gold_license_cohort_survival",
-         "warehouse"),
-        ("category", f"select distinct category, category_ko from {qschema}.gold_license_cohort_survival",
-         "warehouse"),
-        ("event_type", f"select distinct event_type, event_type_ko from {qschema}.gold_license_seasonality",
-         "warehouse"),
-        ("gu_code", f"select sgg_code, max(sgg_name) from {qschema}.bronze_ref_admin_dong "
-                    f"group by sgg_code", "warehouse"),
+    specs = [  # (vocabulary_id, SELECT, origin, source_type) — 레지스트리(#638 §2.4)와 일치해야 게시된다
+        ("commerce:major",
+         f"select distinct major, major_ko from {qschema}.gold_license_cohort_survival",
+         "commerce", "warehouse"),
+        ("commerce:category",
+         f"select distinct category, category_ko from {qschema}.gold_license_cohort_survival",
+         "commerce", "warehouse"),
+        ("commerce:event_type",
+         f"select distinct event_type, event_type_ko from {qschema}.gold_license_seasonality",
+         "commerce", "warehouse"),
+        ("common:gu_code",
+         f"select gu_code, max(gu) from {catalog}.{common_schema}.dim_admin_dong group by gu_code",
+         "asac_axes", "warehouse"),
     ]
-    for vocab, sql, source_type in specs:
+    for vocabulary_id, sql, origin, source_type in specs:
         try:
-            cur.execute(sql)  # security: allow-sql — qschema 는 _qualified() 검증 식별자, 상수 SELECT
-            rows.extend({"vocabulary_id": f"commerce:{vocab}", "code": str(r[0]),
-                         "label_ko": str(r[1]), "origin": "commerce",
+            cur.execute(sql)  # security: allow-sql — catalog/qschema/common_schema 는 검증 식별자, 상수 SELECT
+            rows.extend({"vocabulary_id": vocabulary_id, "code": str(r[0]),
+                         "label_ko": str(r[1]), "origin": origin,
                          "source_type": source_type, "exported_at": exported_at}
                         for r in cur.fetchall() if r[0] is not None and r[1] is not None)
         except Exception as exc:                       # 라벨 소스 부재 시 해당 어휘만 생략
-            log.warning("glossary %s 생략: %s", vocab, exc)
+            log.warning("glossary %s 생략: %s", vocabulary_id, exc)
     return rows
+
+
+# 승격으로 writer 가 사라진 어휘(#638 §2.4) — 레거시 이행 매핑('commerce:'||field)이 만든 잔재를
+# glossary 게시가 있는 run 에 한해 정리한다(멱등 DELETE).
+_SUPERSEDED_VOCABULARIES = ("commerce:gu_code",)
 
 
 # 게시본 식별(#600 masondev1024 요청): 제품 스코프 3종은 그 제품의 `publication_id` 를 행에 싣는다.
@@ -391,6 +403,7 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
     """
     from common.serving.d1_client import (
         HANDOFF_COLUMN_TYPES,
+        glossary_registry_violations,
         handoff_ddl,
         handoff_migrate_statements,
         handoff_prune_statement,
@@ -439,11 +452,23 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
         _d1(handoff_prune_statement(
             "d1_usage_patterns", pid, [str(r["pattern_id"]) for r in product_patterns]), token)  # security: allow-sql — 공용 빌더
 
+    # 레지스트리 게이트(#638 §5-5) — 미등록·정본 불일치 어휘는 게시 거부(해당 어휘만, run 은 진행)
+    violations = glossary_registry_violations(glossary_rows)
+    if violations:
+        log_event("serve.glossary_registry_reject", level="warning", where="_publish_handoff",
+                  task="commerce_serving_export", rejected=violations)
+        glossary_rows = [r for r in glossary_rows
+                         if str(r.get("vocabulary_id") or "") not in violations]
+
     for statement in handoff_upsert_statements("d1_catalog_glossary", glossary_rows):
         _d1(statement, token)   # security: allow-sql — 공용 빌더
     vocabularies = sorted({r["vocabulary_id"] for r in glossary_rows if _PID_RE.match(str(r.get("vocabulary_id") or ""))})
     for vocabulary_id in vocabularies:
         _d1(handoff_stale_delete_statement("d1_catalog_glossary", vocabulary_id, glossary_stamp), token)  # security: allow-sql — 공용 빌더
+    if glossary_rows:   # 승격 잔재 정리(멱등) — glossary 게시가 있는 run 에만
+        for vocabulary_id in _SUPERSEDED_VOCABULARIES:
+            _d1('DELETE FROM "d1_catalog_glossary" WHERE "vocabulary_id" = '
+                + _lit(vocabulary_id) + ";", token)   # security: allow-sql — 상수 어휘, _lit 이스케이프
 
     log.info("[serving export] 핸드오프 메타 upsert: columns=%d ext=%d patterns=%d glossary=%d "
              "(잔여 정리 — 제품 %d종·어휘 %d종)", len(columns_rows), len(ext_rows),
@@ -759,7 +784,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
         _upsert_meta(meta_rows, token)
         _upsert_publish_state(state_rows, token)
         _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats,
-                         _glossary_rows(cur, qschema, now), published, now)
+                         _glossary_rows(cur, catalog, qschema, now), published, now)
     finally:
         conn.close()
 

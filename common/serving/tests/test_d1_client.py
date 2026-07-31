@@ -455,6 +455,21 @@ def test_glossary_upsert_scopes_cleanup_to_one_vocabulary():
     assert culture == [{"code": "festival"}]  # 타 어휘 무접촉
 
 
+def test_glossary_registry_gate_flags_unregistered_and_mismatched_rows():
+    """#638 §5-5 — 미등록 어휘와 정본(origin/source_type) 불일치 행을 게시 전에 판별한다."""
+    from common.serving.d1_client import glossary_registry_violations
+
+    rows = [
+        {"vocabulary_id": "commerce:major", "origin": "commerce", "source_type": "warehouse"},
+        {"vocabulary_id": "culture:event_type", "origin": "culture", "source_type": "codebook"},
+        {"vocabulary_id": "common:gu_code", "origin": "commerce", "source_type": "warehouse"},
+    ]
+    violations = glossary_registry_violations(rows)
+    assert "commerce:major" not in violations                       # 등록·정합 — 통과
+    assert violations["culture:event_type"] == "레지스트리 미등록"  # culture 온보딩 PR 에서 등재
+    assert "asac_axes" in violations["common:gu_code"]              # 정본 origin 위조 감지
+
+
 def test_publication_ledger_is_append_only_and_records_publication_stage():
     d1 = SqliteCatalogClient()
     record = {
