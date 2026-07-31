@@ -34,6 +34,12 @@ class ServingContract:
     tests: tuple[str, ...] = ()
     public_gold: dict[str, Any] | None = None
     mcp_projection: dict[str, Any] | None = None
+    # ── 핸드오프 메타(#638) — d1_catalog_columns/ext·d1_usage_patterns 게시 원천 ──
+    grain: str | None = None
+    serving_tier: str | None = None      # 물리 게시 확장 — 미선언 도메인은 None(#638 §2.2)
+    rollup_rule: str | None = None       # 물리 게시 확장(commerce d1_rollup) — 동상
+    column_descriptions: dict[str, str] | None = None  # manifest node.columns description
+    usage_patterns: tuple[dict[str, Any], ...] = ()
 
 
 def _merged_meta(node: dict[str, Any]) -> dict[str, Any]:
@@ -111,6 +117,23 @@ def load_contracts(
                       dict(serving["mcp_projection"])
                       if isinstance(serving.get("mcp_projection"), dict)
                       else None
+                  ),
+                  grain=serving.get("grain"),
+                  # commerce 로컬 키(serving_tier/d1_rollup)와 #638 §1 스펙 키(tier/rollup_rule) 겸용
+                  serving_tier=serving.get("serving_tier") or serving.get("tier"),
+                  rollup_rule=serving.get("d1_rollup") or serving.get("rollup_rule"),
+                  column_descriptions=(
+                      {
+                          str(column): str(spec.get("description") or "").strip()
+                          for column, spec in node["columns"].items()
+                      }
+                      if isinstance(node.get("columns"), dict) and node["columns"]
+                      else None
+                  ),
+                  usage_patterns=tuple(
+                      pattern
+                      for pattern in (serving.get("usage_patterns") or ())
+                      if isinstance(pattern, dict)
                   ),
               )
         )

@@ -4,6 +4,11 @@
       "resource_type": "model",
       "name": "gold_weather_place_current_outlook",
       "description": "지금 이 장소의 가장 가까운 예보.",
+      "columns": {
+        "product_row_id": {"description": "행 식별자(장소)."},
+        "place_id": {"description": "서울 121 장소 코드."},
+        "forecast_at": {"description": ""}
+      },
       "config": {
         "meta": {
           "serving": {
@@ -16,7 +21,23 @@
             "publication_mode": "snapshot",
             "zero_policy": "fail",
             "publication_trigger": {"schedule_cron": "10 * * * *"},
-            "event_time": "forecast_at"
+            "event_time": "forecast_at",
+            "usage_patterns": [
+              {
+                "pattern_id": "hottest_places_now",
+                "question_ko": "지금 가장 더운 장소는?",
+                "axes": "장소 랭킹 — 기온 DESC",
+                "requires": ["select_columns", "sort"],
+                "verified_rows": 10,
+                "verified_at": "2026-07-30T09:00:00Z",
+                "verified_publication_id": "fixture-pub-1",
+                "sql": "-- :n=10\nSELECT place_id FROM gold_weather_place_current_outlook ORDER BY temperature DESC LIMIT :n"
+              },
+              {
+                "pattern_id": "missing_sql_dropped",
+                "question_ko": "sql 없는 선언은 게시되지 않아야 한다"
+              }
+            ]
           }
         }
       }

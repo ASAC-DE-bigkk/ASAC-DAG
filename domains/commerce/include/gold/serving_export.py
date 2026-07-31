@@ -9,8 +9,11 @@ PROJECT.md §4(서빙 = D1 선별 export) · docs/DB/gold/opus-serving-build-ins
 매핑, dbt 계약이 선언·검증 소스). 지정 품목만 D1 로 **전량 교체 스냅샷**한다.
 
 서빙 대상 D1 = 공유 **`ask-seoul-dev-d1`** (citydata·transit 와 동일 DB, ASAC-DAG#475 단일
-브랜치 통합). commerce 소유 테이블(`d1_*`)만 DROP+CREATE 로 교체하고, **공유
+브랜치 통합). commerce 소유 **데이터** 테이블만 DROP+CREATE 로 교체하고, **공유
 `_catalog`/`_request_log`/`d1_meta` 는 upsert(DROP 금지)** — 타 도메인 행 보존(transit 규약 승계).
+핸드오프 보조 4종(`d1_catalog_columns`/`d1_catalog_ext`/`d1_usage_patterns`/`d1_catalog_glossary`)은
+#638 공통 규약으로 **전 도메인 공용 테이블**이 됐다 — 자연키 upsert 만(전량 교체 금지),
+스키마 정본은 `common/serving/d1_client.HANDOFF_COLUMN_TYPES`.
 
 `_catalog` 스키마 정본 = **`common/serving/d1_client.py` 의 `CATALOG_COLUMNS`/`CATALOG_DDL`
 (15컬럼, #478 Serving Contract v1 §3.4)** — 자체 축약 스키마(8컬럼) 금지. 정본과 다른 컬럼
@@ -285,144 +288,166 @@ def _load_serving_meta() -> dict[str, dict]:
 
 
 # ── MCP/API 개발 핸드오프 보조 테이블(commerce 소유 d1_*) — 계보: dbt yml→manifest→여기→D1 ──
-def _handoff_rows(spec, m: dict, col_defs: list, publication_id: str) -> tuple[list, list, list]:
+def _handoff_rows(spec, m: dict, col_defs: list, publication_id: str) -> tuple[list, dict, list]:
     """(columns_rows, ext_row, pattern_rows) — d1_catalog_{columns,ext}/d1_usage_patterns 용.
 
     공유 `_catalog` 의 columns JSON 은 전 도메인이 name/type 관행이라 건드리지 않고(동형 유지),
-    컬럼 역할·그레인/PK 계보·검증 질의 패턴은 commerce 소유 보조 테이블로 게시한다 —
+    컬럼 역할·그레인/PK 계보·검증 질의 패턴은 공용 보조 테이블로 게시한다(#638 공통 규약) —
     MCP/API 담당자가 저장소 접근 없이 D1 만으로 description·key 역할을 처리할 수 있게(오너 지시).
+    행 모양은 공용 스키마 정본(`common/serving/d1_client.HANDOFF_COLUMN_TYPES`)을 따르는 dict.
     """
     pid = "commerce_" + spec.d1_table[3:]
     sv = m.get("serving") or {}
     descs = m.get("columns") or {}
-    col_rows = [(pid, spec.d1_table, i, c, _sqlite_type(t), descs.get(c) or None, publication_id)
+    col_rows = [{"product_id": pid, "table_name": spec.d1_table, "ordinal": i,
+                 "column_name": c, "type": _sqlite_type(t),
+                 "description_ko": descs.get(c) or None, "publication_id": publication_id}
                 for i, (c, t) in enumerate(col_defs)]
-    ext_row = (pid, spec.d1_table, spec.source, spec.tier,
-               sv.get("grain"), json.dumps(sv.get("primary_key") or [], ensure_ascii=False),
-               sv.get("d1_rollup"), sv.get("event_time"), publication_id)
+    ext_row = {"product_id": pid, "table_name": spec.d1_table, "source_model": spec.source,
+               "grain": sv.get("grain"),
+               "primary_key": json.dumps(sv.get("primary_key") or [], ensure_ascii=False),
+               "time_axis": sv.get("event_time"),
+               "tier": spec.tier, "rollup_rule": sv.get("d1_rollup"),   # 물리 확장(#638 §2.2)
+               "publication_id": publication_id}
     # requires = 이 질의를 재현하려면 필요한 조회 기능(정렬·집계·조인 등). 소비 측이 SQL 을 파싱하지
     # 않고 "우리 호출 경로로 되는가"를 판단하는 용도 — 미선언이면 빈 배열(#600 §2.5).
-    pat_rows = [(pid, p.get("pattern_id"), p.get("question_ko"), p.get("sql"),
-                 p.get("axes"), p.get("verified_rows"), p.get("insight_sample_ko"),
-                 json.dumps(p.get("requires") or [], ensure_ascii=False), publication_id)
+    # verified_at/verified_publication_id 는 검증 스크립트 백필 전까지 NULL(#638 §5-1 — 손 백필 금지).
+    pat_rows = [{"product_id": pid, "pattern_id": p.get("pattern_id"),
+                 "question_ko": p.get("question_ko"), "sql": p.get("sql"), "axes": p.get("axes"),
+                 "requires": json.dumps(p.get("requires") or [], ensure_ascii=False),
+                 "verified_rows": p.get("verified_rows"),
+                 "verified_at": p.get("verified_at"),
+                 "verified_publication_id": p.get("verified_publication_id"),
+                 "allow_empty": 1 if p.get("allow_empty") else 0,
+                 "insight_sample_ko": p.get("insight_sample_ko"),
+                 "publication_id": publication_id}
                 for p in (sv.get("usage_patterns") or [])
-                # 한 모델→다제품(geo_grid overview/detail)용: d1_table 명시 시 해당 제품만.
-                if p.get("sql") and p.get("d1_table", spec.d1_table) == spec.d1_table]
+                # 자연키 (product_id, pattern_id) 필수 + 한 모델→다제품(geo_grid)용 d1_table 라우팅.
+                if p.get("sql") and p.get("pattern_id")
+                and p.get("d1_table", spec.d1_table) == spec.d1_table]
     return col_rows, ext_row, pat_rows
 
 
-def _glossary_rows(cur, qschema: str, exported_at: str) -> list:
+def _glossary_rows(cur, qschema: str, exported_at: str) -> list[dict]:
     """코드값 → 한국어 라벨 용어사전(d1_catalog_glossary) — 웨어하우스 실데이터에서 파생.
 
     D1 롤업엔 코드만 실리는 열거값(major/category/event_type/gu_code)의 한국어 의미를
     MCP/API 담당자가 D1 만으로 알 수 있게 한다(오너 지시 — 용어의 실제 한국어 뜻 정리).
-    소스는 gold 의 `*_ko` 라벨 컬럼·행정동 참조 테이블이라 하드코딩이 없다(계보 유지).
+    소스는 gold 의 `*_ko` 라벨 컬럼·행정동 참조 테이블이라 하드코딩이 없다(계보 유지 — 라벨
+    출처 컬럼은 아래 specs 주석이 정본).
+
+    네임스페이스(#638 §2.4): commerce 자기 소유 어휘만 `commerce:` 로 게시한다. `gu_code` 는
+    자체 행정동 스냅샷 파생(미수록 구는 라벨 부재 가능)이라 `common:` 승격은 취합 작업에서
+    origin=asac_axes 로 별도 수행 — 그 전까지 commerce: 네임스페이스에 남긴다.
     """
-    rows: list = []
-    specs = [
+    rows: list[dict] = []
+    specs = [  # (어휘, SELECT, source_type) — 라벨 출처: *_ko 컬럼 / bronze_ref_admin_dong.sgg_name
         ("major", f"select distinct major, major_ko from {qschema}.gold_license_cohort_survival",
-         "gold_license_cohort_survival.major_ko"),
+         "warehouse"),
         ("category", f"select distinct category, category_ko from {qschema}.gold_license_cohort_survival",
-         "gold_license_cohort_survival.category_ko"),
+         "warehouse"),
         ("event_type", f"select distinct event_type, event_type_ko from {qschema}.gold_license_seasonality",
-         "gold_license_seasonality.event_type_ko"),
+         "warehouse"),
         ("gu_code", f"select sgg_code, max(sgg_name) from {qschema}.bronze_ref_admin_dong "
-                    f"group by sgg_code", "bronze_ref_admin_dong(참조 스냅샷 — 미수록 구는 라벨 부재 가능)"),
+                    f"group by sgg_code", "warehouse"),
     ]
-    for field, sql, src in specs:
+    for vocab, sql, source_type in specs:
         try:
             cur.execute(sql)  # security: allow-sql — qschema 는 _qualified() 검증 식별자, 상수 SELECT
-            rows.extend((field, str(r[0]), str(r[1]), src, exported_at)
+            rows.extend({"vocabulary_id": f"commerce:{vocab}", "code": str(r[0]),
+                         "label_ko": str(r[1]), "origin": "commerce",
+                         "source_type": source_type, "exported_at": exported_at}
                         for r in cur.fetchall() if r[0] is not None and r[1] is not None)
-        except Exception as exc:                       # 라벨 소스 부재 시 해당 필드만 생략
-            log.warning("glossary %s 생략: %s", field, exc)
+        except Exception as exc:                       # 라벨 소스 부재 시 해당 어휘만 생략
+            log.warning("glossary %s 생략: %s", vocab, exc)
     return rows
 
 
 # 게시본 식별(#600 masondev1024 요청): 제품 스코프 3종은 그 제품의 `publication_id` 를 행에 싣는다.
 # `_catalog.publication_id` 와 대조하면 "이 설명이 지금 서빙 중인 데이터를 설명하는가"를 조인 신뢰
-# 없이 확인할 수 있고(스킵 제품은 보존 경로가 직전 행을 그대로 옮기므로 **옛 id 가 유지**된다),
-# #601 로 publication_id 가 내용이 바뀔 때만 갱신되므로 소비 측 캐시 키(ETag)로 그대로 쓸 수 있다.
-# `exported_at` 은 제품 스코프 3종에는 넣지 않는다 — product_id 로 `_catalog` 를 조인하면 같은 값이라
-# 두 번째 정본을 만들 뿐이다. 반대로 용어사전은 제품 스코프가 아니라 조인할 대상이 없어 여기만 싣는다.
-_HANDOFF_DDL = {
-    "d1_catalog_glossary": ('"field" TEXT, "code" TEXT, "label_ko" TEXT, "source" TEXT, '
-                            '"exported_at" TEXT'),
-    "d1_catalog_columns": ('"product_id" TEXT, "table_name" TEXT, "ordinal" INTEGER, '
-                           '"column_name" TEXT, "type" TEXT, "description_ko" TEXT, '
-                           '"publication_id" TEXT'),
-    "d1_catalog_ext": ('"product_id" TEXT, "table_name" TEXT, "source_model" TEXT, '
-                       '"tier" TEXT, "grain" TEXT, "primary_key" TEXT, '
-                       '"rollup_rule" TEXT, "time_axis" TEXT, "publication_id" TEXT'),
-    "d1_usage_patterns": ('"product_id" TEXT, "pattern_id" TEXT, "question_ko" TEXT, '
-                          '"sql" TEXT, "axes" TEXT, "verified_rows" INTEGER, '
-                          '"insight_sample_ko" TEXT, "requires" TEXT, "publication_id" TEXT'),
-}
-_HANDOFF_COLS = {
-    "d1_catalog_glossary": ["field", "code", "label_ko", "source", "exported_at"],
-    "d1_catalog_columns": ["product_id", "table_name", "ordinal", "column_name", "type",
-                           "description_ko", "publication_id"],
-    "d1_catalog_ext": ["product_id", "table_name", "source_model", "tier", "grain",
-                       "primary_key", "rollup_rule", "time_axis", "publication_id"],
-    "d1_usage_patterns": ["product_id", "pattern_id", "question_ko", "sql", "axes",
-                          "verified_rows", "insight_sample_ko", "requires", "publication_id"],
-}
-
-
-_PID_RE = re.compile(r"^[a-z0-9_]+$")
-
-
-def _preserve_skipped_handoff(token: str, skipped_pids: list[str]) -> dict[str, list]:
-    """스왑 스킵 제품의 **직전 메타 행을 보존**해 반환(`_catalog` upsert 와 동일 semantics).
-
-    보조 테이블은 DROP+CREATE 라, 성공분만 다시 넣으면 스킵 제품의 컬럼 설명·질의 예시가
-    사라진다. 그런데 그 제품의 D1 데이터 테이블은 직전 스냅샷을 그대로 유지하고(`zero_policy:
-    retain_last_good`) `_catalog` 행도 남는다 — 메타만 없어지면 소비 측에서 '데이터는 있는데
-    설명이 없는' 상태가 된다. 따라서 스킵 제품은 직전 행을 그대로 옮겨 싣는다(현재 gold 스키마로
-    새로 만들지 않는다 — 게시되지 않은 스키마를 설명하면 데이터와 어긋나므로).
-    """
-    keep: dict[str, list] = {}
-    pids = [p for p in skipped_pids if _PID_RE.match(p)]
-    if not pids:
-        return keep
-    inlist = ", ".join(f"'{p}'" for p in pids)   # 상수 파생 + 화이트리스트 통과분만
-    for table in ("d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns"):
-        cols = _HANDOFF_COLS[table]
-        try:
-            rows = _d1(  # security: allow-sql — 테이블/컬럼은 상수, pid 는 ^[a-z0-9_]+$ 검증
-                f'SELECT {", ".join(cols)} FROM "{table}" WHERE product_id IN ({inlist});', token)
-            keep[table] = [tuple(r.get(c) for c in cols) for r in rows]
-        except Exception as exc:  # 첫 실행 등 테이블 부재 — 보존할 것이 없다
-            log.info("핸드오프 보존 스킵(%s): %s", table, type(exc).__name__)
-            keep[table] = []
-    total = sum(len(v) for v in keep.values())
-    if total:
-        log.info("[serving export] 스킵 제품 %d종 메타 %d행 보존", len(pids), total)
-    return keep
+# 없이 확인할 수 있고(스킵 제품은 upsert 를 건너뛰어 직전 행이 그대로 남으므로 **옛 id 가
+# 유지**된다), #601 로 publication_id 가 내용이 바뀔 때만 갱신되므로 소비 측 캐시 키(ETag)로
+# 그대로 쓸 수 있다. `exported_at` 은 제품 스코프 3종에는 넣지 않는다 — product_id 로 `_catalog`
+# 를 조인하면 같은 값이라 두 번째 정본을 만들 뿐이다. 반대로 용어사전은 제품 스코프가 아니라
+# 조인할 대상이 없어 여기만 싣는다. 스키마 정본 = common/serving/d1_client.HANDOFF_COLUMN_TYPES.
+_PID_RE = re.compile(r"^[a-z0-9_:]+$")
 
 
 def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_rows: list,
-                     glossary_rows: list, skipped_pids: list[str] | None = None) -> None:
-    """보조 테이블 4종 전량 교체 게시(commerce 소유 — 공유 메타 무접촉, 멱등).
+                     glossary_rows: list, published: dict[str, str], glossary_stamp: str) -> None:
+    """보조 4종 **자연키 upsert** 게시(#638 §3 — 전량 교체 금지, 공용 스키마 정본 소비).
 
-    스왑 스킵 제품은 직전 메타를 이어 싣는다(`_preserve_skipped_handoff`). 용어사전은
-    제품 스코프가 아니라 웨어하우스 파생이므로 항상 전량 재생성한다.
+    절차는 전 도메인 동일하며 **제품 단위**로 돈다(#638 §3 원자성 경계): 제품마다 ① 이번
+    게시본 행을 자연키로 upsert → ② 이번 선언에 없는 잔여 행 삭제. columns/patterns 정리는
+    **선언 키셋 기준(NOT IN)** 이다 — 무변경 게이트(#601)가 publication_id 를 재사용하는 run 에
+    부등 판별이 no-op 이 되는 구멍을 막는다(공용 `handoff_prune_statement` 참조).
+
+    ``published`` 는 이번 run 게시(무변경 포함) 제품의 {product_id: publication_id} — 밴드 스킵
+    제품은 여기 없어 upsert 도 정리도 하지 않으므로 직전 행이 자연 보존된다(옛 publication_id 가
+    "직전 스냅샷 기준 메타"임을 드러낸다 — 구 보존 로직 `_preserve_skipped_handoff` 제거, #638).
+    라벨 소스 실패로 이번 run 에 빠진 어휘도 같은 이유로 직전 행이 남는다(구 DROP 방식에선
+    통째로 사라졌다). 레거시(자연키 없음) 스키마는 **행 보존 이행** 1회로 전환한다(#638 §4 —
+    rename→create→복사→drop 이라 밴드 스킵 제품의 직전 메타도 살아남는다).
     """
-    keep = _preserve_skipped_handoff(token, skipped_pids or [])
-    for table, rows in (("d1_catalog_glossary", glossary_rows),
-                        ("d1_catalog_columns", columns_rows),
-                        ("d1_catalog_ext", ext_rows),
-                        ("d1_usage_patterns", pattern_rows)):
-        merged = list(rows) + keep.get(table, [])
-        _d1(f'DROP TABLE IF EXISTS "{table}"; '            # security: allow-sql — 상수 DDL
-            f'CREATE TABLE "{table}" ({_HANDOFF_DDL[table]});', token)
-        if merged:
-            _insert_rows(table, _HANDOFF_COLS[table], merged, token)
-    log.info("[serving export] 핸드오프 메타 게시: columns=%d ext=%d patterns=%d glossary=%d "
-             "(스킵 보존 %d행)", len(columns_rows) + len(keep.get("d1_catalog_columns", [])),
-             len(ext_rows) + len(keep.get("d1_catalog_ext", [])),
-             len(pattern_rows) + len(keep.get("d1_usage_patterns", [])),
-             len(glossary_rows), sum(len(v) for v in keep.values()))
+    from common.serving.d1_client import (
+        HANDOFF_COLUMN_TYPES,
+        handoff_ddl,
+        handoff_migrate_statements,
+        handoff_prune_statement,
+        handoff_schema_is_current,
+        handoff_stale_delete_statement,
+        handoff_upsert_statements,
+    )
+
+    migrated = []
+    for table in HANDOFF_COLUMN_TYPES:
+        # PRAGMA 실패는 전파한다 — 부재로 오판하면 자연키 없는 레거시에 upsert 가 append 로
+        # 퇴화해 중복 행을 만든다(공용 HttpD1Client._ensure_handoff_schema 와 동일 방침).
+        pragma = _d1(f'PRAGMA table_info("{table}");', token)  # security: allow-sql — 상수 식별자
+        if handoff_schema_is_current(table, pragma):
+            continue
+        if pragma:
+            _d1(handoff_migrate_statements(table, [str(r["name"]) for r in pragma]), token)  # security: allow-sql — 공용 상수 DDL
+            migrated.append(table)
+        else:
+            _d1(handoff_ddl(table), token)  # security: allow-sql — 공용 상수 DDL
+    if migrated:
+        log.info("[serving export] 핸드오프 v1 행 보존 이행(#638 §4, 1회): %s", ", ".join(migrated))
+
+    columns_by_pid: dict[str, list] = {}
+    ext_by_pid: dict[str, list] = {}
+    patterns_by_pid: dict[str, list] = {}
+    for grouped, rows in ((columns_by_pid, columns_rows), (ext_by_pid, ext_rows),
+                          (patterns_by_pid, pattern_rows)):
+        for row in rows:
+            grouped.setdefault(str(row.get("product_id")), []).append(row)
+
+    for pid, publication_id in sorted(published.items()):
+        if not _PID_RE.match(pid):                     # 식별자 화이트리스트(§20) — 방어적
+            log.warning("핸드오프 잔여 정리 스킵(pid 형식): %r", pid)
+            continue
+        product_columns = columns_by_pid.get(pid, [])
+        product_patterns = patterns_by_pid.get(pid, [])
+        for table, rows in (("d1_catalog_columns", product_columns),
+                            ("d1_catalog_ext", ext_by_pid.get(pid, [])),
+                            ("d1_usage_patterns", product_patterns)):
+            for statement in handoff_upsert_statements(table, rows):
+                _d1(statement, token)   # security: allow-sql — 공용 빌더(식별자 상수, 값 이스케이프)
+        _d1(handoff_prune_statement(
+            "d1_catalog_columns", pid, [str(r["column_name"]) for r in product_columns]), token)  # security: allow-sql — 공용 빌더
+        _d1(handoff_stale_delete_statement("d1_catalog_ext", pid, publication_id), token)  # security: allow-sql — 공용 빌더
+        _d1(handoff_prune_statement(
+            "d1_usage_patterns", pid, [str(r["pattern_id"]) for r in product_patterns]), token)  # security: allow-sql — 공용 빌더
+
+    for statement in handoff_upsert_statements("d1_catalog_glossary", glossary_rows):
+        _d1(statement, token)   # security: allow-sql — 공용 빌더
+    vocabularies = sorted({r["vocabulary_id"] for r in glossary_rows if _PID_RE.match(str(r.get("vocabulary_id") or ""))})
+    for vocabulary_id in vocabularies:
+        _d1(handoff_stale_delete_statement("d1_catalog_glossary", vocabulary_id, glossary_stamp), token)  # security: allow-sql — 공용 빌더
+
+    log.info("[serving export] 핸드오프 메타 upsert: columns=%d ext=%d patterns=%d glossary=%d "
+             "(잔여 정리 — 제품 %d종·어휘 %d종)", len(columns_rows), len(ext_rows),
+             len(pattern_rows), len(glossary_rows), len(published), len(vocabularies))
 
 
 def _check_contract_drift(meta: dict[str, dict]) -> None:
@@ -533,8 +558,8 @@ def _write_serve_state(marker: dict, now: str) -> None:
     전량 재export 할 뿐이라 안전(fail-open).
 
     이번 run 이 게시하지 않은 테이블(밴드 게이트 스킵)은 **직전 기록을 이어 싣는다** —
-    전량 덮어쓰면 서빙 중인 스냅샷이 감사 기록에서 사라진다(`_preserve_skipped_handoff` 와
-    동일 semantics)."""
+    전량 덮어쓰면 서빙 중인 스냅샷이 감사 기록에서 사라진다(핸드오프 upsert 가 스킵 제품의
+    직전 행을 남기는 것과 동일 semantics)."""
     try:
         from commerce_core.settings import get_settings
         from commerce_core.storage import get_storage
@@ -595,7 +620,8 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     - rollup: 화면 축 GROUP BY 파생(§1.3) 스냅샷.
     - 행수 밴드 밖(0행/2배 초과)이면 **스왑 스킵 + d1_meta.build_status='stale'**(직전 유지).
     - payload 지문이 직전 게시와 같으면 **행 재기록만 생략**(무변경 스킵) — 메타는 그대로 갱신.
-    - commerce 소유 d1_* 만 DROP+CREATE, 공유 `_catalog`/`_request_log`/`d1_meta` 는 upsert.
+    - commerce 소유 **데이터** 테이블만 DROP+CREATE. 공유 `_catalog`/`_request_log`/`d1_meta` 와
+      핸드오프 보조 4종(#638 공용)은 upsert — 보조 4종은 자연키 upsert + 제품/어휘 스코프 잔여 정리.
     - 데이터 정합은 테이블 단위로 안전하다: 지문 커밋이 파괴적 쓰기를 감싸므로 어느 지점에서
       죽어도 **커밋된 지문 ⊆ D1 실물**이 유지되고, 다음 run 이 미완료분을 반드시 재기록한다.
       단 **메타 게시는 부분 전진하지 않는다** — `_upsert_catalog`/`_upsert_meta`/`_publish_handoff`
@@ -630,7 +656,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     meta_rows: list[tuple] = []
     state_rows: list[tuple] = []     # d1_publish_state upsert 대상
     marker: dict[str, dict] = {}
-    skipped_pids: list[str] = []     # 스왑 스킵 제품 — 직전 메타를 보존한다
+    published: dict[str, str] = {}   # 이번 run 게시(무변경 포함) — {product_id: publication_id}
     handoff_cols: list = []          # MCP/API 핸드오프 보조 테이블 행(성공 스왑분)
     handoff_ext: list = []
     handoff_pats: list = []
@@ -652,7 +678,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                           source=spec.source, rows=n, band=[lo, hi])
                 meta_rows.append((spec.d1_table, now, n, "stale", None))
                 skipped.append(spec.d1_table)
-                skipped_pids.append("commerce_" + spec.d1_table[3:])   # 메타 보존 대상
+                # 핸드오프 upsert 대상에서 제외 — 직전 메타 행이 자연 보존된다(#638 §3)
                 continue
 
             colnames = [c for c, _ in col_defs]
@@ -725,6 +751,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
             # MCP/API 핸드오프 계보(게시 스냅샷 기준) — publication_id 로 게시본을 식별한다
             cr, er, pr = _handoff_rows(spec, m, col_defs, publication_id)
             handoff_cols.extend(cr); handoff_ext.append(er); handoff_pats.extend(pr)
+            published["commerce_" + spec.d1_table[3:]] = publication_id   # 잔여 정리 스코프
             log.info("[serving export] %s ← %s: %d행(%s)%s", spec.d1_table, spec.source, n,
                      spec.tier, " — 무변경, 재기록 생략" if reuse else "")
 
@@ -732,7 +759,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
         _upsert_meta(meta_rows, token)
         _upsert_publish_state(state_rows, token)
         _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats,
-                         _glossary_rows(cur, qschema, now), skipped_pids)
+                         _glossary_rows(cur, qschema, now), published, now)
     finally:
         conn.close()
 

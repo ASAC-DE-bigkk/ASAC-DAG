@@ -20,7 +20,7 @@ from typing import Any, Protocol, Sequence
 
 from common.serving import gate as gatelib
 from common.serving.contract import ServingContract
-from common.serving.d1_client import Column, D1Client
+from common.serving.d1_client import Column, D1Client, sqlite_type
 from common.serving.gate import (
     STATUS_DEGRADED,
     STATUS_FAILED,
@@ -126,6 +126,65 @@ def _catalog_row(contract: ServingContract, columns: Sequence[Column], record: P
         "freshness": record.freshness,
         "exported_at": record.published_at,
     }
+
+
+def _product_meta_rows(
+    contract: ServingContract,
+    columns: Sequence[Column],
+    record: ProductRecord,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """핸드오프 메타 3종(#638 §2.2) 행 — 계약 선언(dbt yml→manifest)에서 그대로 나온다.
+
+    타입은 D1 실물과 같은 SQLite 타입으로 싣고(commerce 관행 동형), 컬럼 설명이 없는
+    도메인은 description_ko=NULL 로 컬럼 행 자체는 게시한다(이름·타입·게시본 대조는 유효).
+    """
+    descriptions = contract.column_descriptions or {}
+    columns_rows = [
+        {
+            "product_id": contract.product_id,
+            "table_name": contract.model_name,
+            "ordinal": ordinal,
+            "column_name": name,
+            "type": sqlite_type(trino_type),
+            "description_ko": descriptions.get(name) or None,
+            "publication_id": record.publication_id,
+        }
+        for ordinal, (name, trino_type) in enumerate(columns)
+    ]
+    ext_rows = [
+        {
+            "product_id": contract.product_id,
+            "table_name": contract.model_name,
+            "source_model": contract.model_name,
+            "grain": contract.grain,
+            "primary_key": json.dumps(list(contract.primary_key), ensure_ascii=False),
+            "time_axis": contract.event_time,
+            "tier": contract.serving_tier,
+            "rollup_rule": contract.rollup_rule,
+            "publication_id": record.publication_id,
+        }
+    ]
+    pattern_rows = [
+        {
+            "product_id": contract.product_id,
+            "pattern_id": pattern.get("pattern_id"),
+            "question_ko": pattern.get("question_ko"),
+            "sql": pattern.get("sql"),
+            "axes": pattern.get("axes"),
+            "requires": json.dumps(pattern.get("requires") or [], ensure_ascii=False),
+            "verified_rows": pattern.get("verified_rows"),
+            "verified_at": pattern.get("verified_at"),
+            "verified_publication_id": pattern.get("verified_publication_id"),
+            "allow_empty": 1 if pattern.get("allow_empty") else 0,
+            "insight_sample_ko": pattern.get("insight_sample_ko"),
+            "publication_id": record.publication_id,
+        }
+        for pattern in contract.usage_patterns
+        if pattern.get("pattern_id") and pattern.get("sql")
+        # 한 모델→다제품 선언(commerce geo_grid 관행)과의 동형성: d1_table 명시 시 해당 제품만.
+        and pattern.get("d1_table", contract.model_name) == contract.model_name
+    ]
+    return columns_rows, ext_rows, pattern_rows
 
 
 def _primary_key_stats(rows: Sequence[dict[str, Any]], primary_key: Sequence[str]) -> tuple[int, int, int]:
@@ -370,13 +429,20 @@ def publish(
             registered_count = d1.catalog_domain_count({contract.model_name})
             if registered_count != 1:
                 raise RuntimeError("_catalog 자기검증 실패: 등록 누락 가능")
-        except Exception as exc:  # noqa: BLE001 -- restore snapshot after any post-write catalog failure
+            # 핸드오프 메타(#638) — 같은 try 안이라 실패 시 스냅샷·_catalog 가 함께 복원된다.
+            # 메타 행 자체는 보상하지 않는다(#638 §3 — 제품 단위 신·구 혼재 허용, 타 제품 무영향).
+            record.stage = "product_meta"
+            columns_rows, ext_rows, pattern_rows = _product_meta_rows(contract, plan.columns, record)
+            d1.publish_product_meta(
+                contract.product_id, record.publication_id, columns_rows, ext_rows, pattern_rows
+            )
+        except Exception as exc:  # noqa: BLE001 -- restore snapshot after any post-write catalog/meta failure
             _fail_after_write(
                 d1,
                 report,
                 record,
                 contract,
-                message=f"catalog 실패: {type(exc).__name__}: {exc}",
+                message=f"{record.stage} 실패: {type(exc).__name__}: {exc}",
                 previous_catalog=catalog,
                 catalog_committed=catalog_committed,
             )

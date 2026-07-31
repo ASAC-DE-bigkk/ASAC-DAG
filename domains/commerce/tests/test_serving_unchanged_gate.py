@@ -137,8 +137,10 @@ def test_unchanged_payload_skips_rewrite_but_refreshes_meta(monkeypatch):
     # 메타는 그대로 갱신 — 26h 미게시 감시축이 계속 유효해야 한다
     assert fake.catalog_upserts() and fake.meta_upserts()
     assert "'ready'" in fake.meta_upserts()[0]     # 'stale' 이 아니다
-    # 핸드오프 메타도 정상 재생성(설명 없는 데이터 방지)
-    assert any(r[1] == "d1_x" for r in fake.inserted.get("d1_catalog_columns", []))
+    # 핸드오프 메타도 정상 upsert(#638 — 설명 없는 데이터 방지, 전량 교체 아님)
+    assert any(s.startswith('INSERT OR REPLACE INTO "d1_catalog_columns"') and "'d1_x'" in s
+               for s in fake.sqls)
+    assert not any('DROP TABLE IF EXISTS "d1_catalog_columns"' in s for s in fake.sqls)
 
 
 def test_unchanged_reuses_publication_id_and_keeps_written_at(monkeypatch):
@@ -156,16 +158,19 @@ def test_handoff_meta_carries_publication_id(monkeypatch):
     """핸드오프 메타가 게시본을 식별한다(#600) — `_catalog.publication_id` 와 대조 가능해야 한다.
 
     무변경이면 publication_id 가 재사용되므로 메타도 같은 값을 실어, 소비 측이 캐시를 유지할 수
-    있다. 밴드 스킵 제품은 보존 경로가 직전 행을 그대로 옮기므로 옛 id 가 남는다(= 그 설명이
-    지금 서빙 중인 스냅샷 기준임을 나타낸다).
+    있다. 밴드 스킵 제품은 upsert 를 건너뛰어 직전 행이 그대로 남으므로 옛 id 가 유지된다
+    (= 그 설명이 지금 서빙 중인 스냅샷 기준임을 나타낸다).
     """
+    from common.serving.d1_client import HANDOFF_COLUMNS
+
     fake = _FakeD1(state=_prev(_fingerprint(), pid="pid-old"), counts={"d1_x": 2})
     _run(monkeypatch, fake)
-    cols = fake.inserted["d1_catalog_columns"]
-    assert cols and all(r[-1] == "pid-old" for r in cols)     # 마지막 컬럼 = publication_id
-    assert all(r[-1] == "pid-old" for r in fake.inserted["d1_catalog_ext"])
-    # 용어사전은 제품 스코프가 아니라 조인 대상이 없다 → exported_at 을 직접 싣는다
-    assert se._HANDOFF_COLS["d1_catalog_glossary"][-1] == "exported_at"
+    cols_upserts = [s for s in fake.sqls if s.startswith('INSERT OR REPLACE INTO "d1_catalog_columns"')]
+    assert cols_upserts and all("'pid-old'" in s for s in cols_upserts)
+    ext_upserts = [s for s in fake.sqls if s.startswith('INSERT OR REPLACE INTO "d1_catalog_ext"')]
+    assert ext_upserts and all("'pid-old'" in s for s in ext_upserts)
+    # 용어사전은 제품 스코프가 아니라 조인 대상이 없다 → exported_at 을 직접 싣는다(공용 정본)
+    assert HANDOFF_COLUMNS["d1_catalog_glossary"][-1] == "exported_at"
 
 
 def test_changed_payload_rewrites_and_issues_new_publication_id(monkeypatch):
@@ -255,3 +260,6 @@ def test_band_skip_keeps_stale_path_and_no_state_row(monkeypatch):
     assert "'stale'" in fake.meta_upserts()[0]
     assert not fake.state_upserts()                 # D1 내용이 안 바뀌었으므로 직전 지문 유지
     assert not fake.catalog_upserts()                # 직전 published 행을 그대로 둔다
+    # 핸드오프도 무접촉 — 스킵 제품은 upsert 도 잔여 정리도 없다(#638 §3, 직전 메타 자연 보존)
+    assert not [s for s in fake.sqls if s.startswith("DELETE FROM")]
+    assert not [s for s in fake.sqls if s.startswith('INSERT OR REPLACE INTO "d1_catalog')]
