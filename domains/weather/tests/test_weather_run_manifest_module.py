@@ -34,14 +34,16 @@ class RecordingCursor:
 
 
 def test_manifest_status_constants_are_the_only_lifecycle_literals():
-    assert (STATUS_STARTED, STATUS_SUCCESS, STATUS_FAILED) == (
+    assert (STATUS_STARTED, STATUS_SUCCESS, STATUS_FAILED, STATUS_COALESCED) == (
         "STARTED",
         "SUCCESS",
         "FAILED",
+        "COALESCED",
     )
     assert "status=STATUS_STARTED" in inspect.getsource(WeatherRunManifest.start)
     assert "status=STATUS_SUCCESS" in inspect.getsource(WeatherRunManifest.complete)
     assert "status=STATUS_FAILED" in inspect.getsource(WeatherRunManifest.fail)
+    assert "status=STATUS_COALESCED" in inspect.getsource(WeatherRunManifest.coalesce)
 
 
 def test_publish_records_one_atomic_publishable_manifest_mutation():

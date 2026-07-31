@@ -14,7 +14,7 @@ from traffic_ingest.flow_info import (
     parse_traffic_info_response,
 )
 from traffic_ingest.errors import TrafficBronzeConfigurationError
-from common.raw_manifest import build_raw_manifest
+from common.raw_manifest import RAW_MANIFEST_STATUS_COMPLETE, build_raw_manifest
 
 
 class RawObjectStore(Protocol):
@@ -99,6 +99,7 @@ class TrafficFlowLanding:
                     expected_count=len(link_ids),
                     actual_count=len(raw_objects),
                     completed_at=self._clock().isoformat(),
+                    status=RAW_MANIFEST_STATUS_COMPLETE,
                 ),
                 sort_keys=True,
             ).encode("utf-8"),

@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Callable, Protocol
 
-from common.raw_manifest import build_raw_manifest
+from common.raw_manifest import RAW_MANIFEST_STATUS_COMPLETE, build_raw_manifest
 from traffic_ingest.acc_info import (
     KST,
     metadata_total_count,
@@ -176,6 +176,7 @@ class TrafficLanding:
             expected_count=len(raw_objects),
             actual_count=len(raw_objects),
             completed_at=self._clock().astimezone(KST).isoformat(),
+            status=RAW_MANIFEST_STATUS_COMPLETE,
         )
         self._raw_store.write_bytes(
             key,

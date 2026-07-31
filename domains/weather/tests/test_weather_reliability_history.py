@@ -78,9 +78,9 @@ def _report() -> dict[str, object]:
     }
 
 
-def test_history_key_is_domain_and_kst_date_scoped():
+def test_history_key_uses_the_ops_observed_date_partition_without_domain_suffix():
     assert history_object_key(date(2026, 7, 20)) == (
-        "ops/reports/weather/type=reliability/date=2026-07-20/domain=weather/"
+        "ops/reports/weather/type=reliability/observed_date=2026-07-20/"
         "pipeline-reliability-v2.json"
     )
 
@@ -104,12 +104,71 @@ def test_compact_snapshot_excludes_errors_and_run_payloads():
     assert "payload" not in serialized
 
 
-def test_load_recent_history_reads_exactly_seven_date_keys_and_marks_gaps_unknown():
+def test_load_recent_history_prefers_observed_date_over_the_legacy_path():
     report_date = date(2026, 7, 20)
-    prior_key = history_object_key(date(2026, 7, 19))
+    observed_key = (
+        "ops/reports/weather/type=reliability/observed_date=2026-07-19/"
+        "pipeline-reliability-v2.json"
+    )
+    legacy_key = (
+        "ops/reports/weather/type=reliability/date=2026-07-19/domain=weather/"
+        "pipeline-reliability-v2.json"
+    )
     storage = FakeStorage(
         {
-            prior_key: {
+            observed_key: {
+                "version": "pipeline-reliability-v2",
+                "domain": "weather",
+                "report_date": "2026-07-19",
+                "detected_at": "2026-07-19T09:00:00+09:00",
+                "status": "WARN",
+                "stages": [],
+                "source": {},
+                "bottleneck": None,
+            },
+            legacy_key: {
+                "version": "pipeline-reliability-v2",
+                "domain": "weather",
+                "report_date": "2026-07-19",
+                "detected_at": "2026-07-19T08:00:00+09:00",
+                "status": "FAIL",
+                "stages": [],
+                "source": {},
+                "bottleneck": None,
+            },
+        }
+    )
+
+    history = load_recent_history(report_date, storage=storage)
+
+    assert [item["report_date"] for item in history] == [
+        "2026-07-13",
+        "2026-07-14",
+        "2026-07-15",
+        "2026-07-16",
+        "2026-07-17",
+        "2026-07-18",
+        "2026-07-19",
+    ]
+    assert history[-1]["status"] == "WARN"
+    assert history[0]["status"] == "UNKNOWN"
+    assert storage.read_keys[-1] == observed_key
+    assert legacy_key not in storage.read_keys
+
+
+def test_load_recent_history_falls_back_to_the_legacy_date_and_domain_path():
+    report_date = date(2026, 7, 20)
+    observed_key = (
+        "ops/reports/weather/type=reliability/observed_date=2026-07-19/"
+        "pipeline-reliability-v2.json"
+    )
+    legacy_key = (
+        "ops/reports/weather/type=reliability/date=2026-07-19/domain=weather/"
+        "pipeline-reliability-v2.json"
+    )
+    storage = FakeStorage(
+        {
+            legacy_key: {
                 "version": "pipeline-reliability-v2",
                 "domain": "weather",
                 "report_date": "2026-07-19",
@@ -124,19 +183,8 @@ def test_load_recent_history_reads_exactly_seven_date_keys_and_marks_gaps_unknow
 
     history = load_recent_history(report_date, storage=storage)
 
-    assert len(storage.read_keys) == 7
-    assert len(set(storage.read_keys)) == 7
-    assert [item["report_date"] for item in history] == [
-        "2026-07-13",
-        "2026-07-14",
-        "2026-07-15",
-        "2026-07-16",
-        "2026-07-17",
-        "2026-07-18",
-        "2026-07-19",
-    ]
     assert history[-1]["status"] == "WARN"
-    assert history[0]["status"] == "UNKNOWN"
+    assert storage.read_keys[-2:] == [observed_key, legacy_key]
 
 
 def test_malformed_or_cross_domain_history_is_unknown_without_payload_leak():
