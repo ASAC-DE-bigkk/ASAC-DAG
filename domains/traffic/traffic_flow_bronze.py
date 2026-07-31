@@ -22,7 +22,10 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.ops.product_observability import record_domain_stage_event  # noqa: E402
+from common.ops.product_observability import (  # noqa: E402
+    record_domain_stage_event,
+    record_product_event,
+)
 from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_FLOW_MATERIALIZED_ALIAS,
     TRAFFIC_FLOW_BRONZE_ASSET_REF,
@@ -48,8 +51,6 @@ LAND_TASK_ID = "land_traffic_flow_snapshot"
 record_traffic_problem = problem_failure_callback(
     domain="traffic", source_system="seoul_topis"
 )
-record_traffic_raw_product_event = record_domain_stage_event("traffic", "raw")
-record_traffic_bronze_product_event = record_domain_stage_event("traffic", "bronze")
 record_traffic_raw_product_failure = record_domain_stage_event(
     "traffic", "raw", status="failed"
 )
@@ -73,6 +74,52 @@ record_traffic_flow_land_problem = problem_failure_callback(
     source_system="seoul_topis",
     should_notify=_should_notify_flow_land_failure,
 )
+
+
+def _record_traffic_flow_rows(
+    context: dict,
+    *,
+    layer: str,
+    task_id: str,
+    field: str,
+    rows_source: str,
+) -> dict:
+    row_count = None
+    try:
+        task_instance = context.get("ti") or context.get("task_instance")
+        result = task_instance.xcom_pull(task_ids=task_id)
+        value = result.get(field) if isinstance(result, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            row_count = value
+    except Exception:
+        row_count = None
+    return record_product_event(
+        context,
+        domain="traffic",
+        layer=layer,
+        row_count=row_count,
+        rows_source=rows_source if row_count is not None else "not_observed",
+    )
+
+
+def record_traffic_raw_product_event(context: dict) -> dict:
+    return _record_traffic_flow_rows(
+        context,
+        layer="raw",
+        task_id=LAND_TASK_ID,
+        field="expected_rows",
+        rows_source="raw_manifest",
+    )
+
+
+def record_traffic_bronze_product_event(context: dict) -> dict:
+    return _record_traffic_flow_rows(
+        context,
+        layer="bronze",
+        task_id=FLOW_MATERIALIZE_TASK_ID,
+        field="row_count",
+        rows_source="bronze_run_manifest",
+    )
 
 
 def _incident_parent_from_context(context: dict) -> str:

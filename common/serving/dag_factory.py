@@ -82,13 +82,20 @@ def record_publication_events(
         "skipped_retained": "skipped",
     }
     for record in records:
+        has_publication_measurement = record.serving_status in status_by_serving_status
+        row_count = (
+            record.published_row_count if has_publication_measurement else None
+        )
         record_product_event(
             context,
             domain=domain,
             layer="d1",
             product_ids=(record.product_id,),
             status=status_by_serving_status.get(record.serving_status, "failed"),
-            row_count=record.published_row_count,
+            row_count=row_count,
+            rows_source=(
+                "publication_ledger" if row_count is not None else "not_observed"
+            ),
             publication_id=record.publication_id,
             quality={"publication_delay": _publication_delay_quality(record)},
         )

@@ -195,6 +195,79 @@ def test_manifest_wrappers_use_weather_owned_contract(monkeypatch):
     ]
 
 
+def test_weather_product_events_use_raw_and_bronze_manifest_rows(monkeypatch):
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        dag_module,
+        "record_product_event",
+        lambda _context, **kwargs: captured.append(kwargs) or kwargs,
+    )
+    monkeypatch.setattr(
+        dag_module,
+        "pull_kma_raw_result",
+        lambda _context: {
+            "raw_objects": [
+                {"row_count": 3},
+                {"row_count": 4},
+            ]
+        },
+    )
+
+    dag_module.record_weather_raw_product_event({"run_id": "run-1"})
+    dag_module.record_weather_bronze_product_event(
+        {
+            "run_id": "run-1",
+            "ti": type(
+                "TI",
+                (),
+                {
+                    "xcom_pull": lambda _self, **_kwargs: 7,
+                },
+            )(),
+        }
+    )
+
+    assert captured == [
+        {
+            "domain": "weather",
+            "layer": "raw",
+            "row_count": 7,
+            "rows_source": "raw_manifest",
+        },
+        {
+            "domain": "weather",
+            "layer": "bronze",
+            "row_count": 7,
+            "rows_source": "bronze_run_manifest",
+        },
+    ]
+
+
+def test_weather_product_event_keeps_malformed_rows_unknown(monkeypatch):
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        dag_module,
+        "record_product_event",
+        lambda _context, **kwargs: captured.append(kwargs) or kwargs,
+    )
+    monkeypatch.setattr(
+        dag_module,
+        "pull_kma_raw_result",
+        lambda _context: {"raw_objects": [{"row_count": "7"}]},
+    )
+
+    dag_module.record_weather_raw_product_event({"run_id": "run-1"})
+
+    assert captured == [
+        {
+            "domain": "weather",
+            "layer": "raw",
+            "row_count": None,
+            "rows_source": "not_observed",
+        }
+    ]
+
+
 def test_verify_records_subset_backfill_as_success_nonpublishable(monkeypatch):
     calls: list[tuple[WeatherRun, dict]] = []
 

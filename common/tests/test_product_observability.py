@@ -38,6 +38,7 @@ def test_product_event_keeps_product_ids_runtime_publication_and_quality_togethe
         layer="bronze",
         product_ids=("weather_place_current_outlook",),
         row_count=427,
+        rows_source="bronze_run_manifest",
         quality={"coverage": {"value": 1.0, "quality_state": "observed"}},
     )
 
@@ -46,13 +47,60 @@ def test_product_event_keeps_product_ids_runtime_publication_and_quality_togethe
         "layer=bronze/event_id="
     )
     assert key.endswith(".json")
-    assert event["schema_version"] == "product-observability/v1"
+    assert event["schema_version"] == "product-observability/v2"
     assert len(event["event_id"]) == 64
     assert event["product_id"] == "weather_place_current_outlook"
     assert event["product_ids"] == ["weather_place_current_outlook"]
     assert event["publication_id"] is None
     assert event["row_count"] == 427
+    assert event["rows_source"] == "bronze_run_manifest"
     assert event["quality"]["coverage"]["quality_state"] == "observed"
+
+
+def test_product_event_keeps_observed_zero_distinct_from_unknown():
+    observed_key, observed = build_product_event(
+        _context(),
+        domain="traffic",
+        layer="raw",
+        row_count=0,
+        rows_source="raw_manifest",
+    )
+    unknown_key, unknown = build_product_event(
+        _context(),
+        domain="traffic",
+        layer="raw",
+    )
+
+    assert observed["row_count"] == 0
+    assert observed["rows_source"] == "raw_manifest"
+    assert unknown["row_count"] is None
+    assert unknown["rows_source"] == "not_observed"
+    assert observed_key == unknown_key
+    assert observed["event_id"] == unknown["event_id"]
+
+
+@pytest.mark.parametrize(
+    ("row_count", "rows_source"),
+    [
+        (None, "raw_manifest"),
+        (1, "not_observed"),
+        (-1, "raw_manifest"),
+        (True, "raw_manifest"),
+        (1, "unsupported"),
+    ],
+)
+def test_product_event_rejects_inconsistent_row_observation(
+    row_count,
+    rows_source,
+):
+    with pytest.raises(ValueError):
+        build_product_event(
+            _context(),
+            domain="traffic",
+            layer="raw",
+            row_count=row_count,
+            rows_source=rows_source,
+        )
 
 
 def test_product_event_uses_distinct_idempotent_keys_per_product_publication():
@@ -82,6 +130,7 @@ def test_product_event_uses_distinct_idempotent_keys_per_product_publication():
     assert first["event_id"] == retry["event_id"]
     assert first_key != second_key
     assert first["event_id"] != second["event_id"]
+    assert first["rows_source"] == "not_observed"
 
 
 def test_product_event_uses_runtime_target_when_callback_has_no_target_param(monkeypatch):

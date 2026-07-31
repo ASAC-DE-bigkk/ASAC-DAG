@@ -223,6 +223,7 @@ def bronze_asset_metadata(
 class MaterializationBatch:
     snapshot_run_ids: tuple[str, ...]
     asset_metadata: tuple[dict[str, object], ...]
+    row_count: int
 
     @property
     def processed_count(self) -> int:
@@ -306,7 +307,11 @@ class IncidentMaterializer:
             )
         ]
         if not active_receipts:
-            return MaterializationBatch(snapshot_run_ids=(), asset_metadata=())
+            return MaterializationBatch(
+                snapshot_run_ids=(),
+                asset_metadata=(),
+                row_count=0,
+            )
 
         runs = {
             receipt.snapshot_run_id: TrafficRun(
@@ -447,6 +452,10 @@ class IncidentMaterializer:
             return MaterializationBatch(
                 snapshot_run_ids=tuple(snapshot_run_ids),
                 asset_metadata=tuple(asset_metadata),
+                row_count=sum(
+                    int(publish_metrics[receipt.snapshot_run_id]["actual_rows"])
+                    for receipt in active_receipts
+                ),
             )
         except Exception as error:
             try:

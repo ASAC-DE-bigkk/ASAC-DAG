@@ -95,6 +95,7 @@ def test_materializer_preserves_landing_run_ids_and_publishes_latest_batch_event
 
     assert result.processed_count == 2
     assert result.snapshot_run_ids == ("snapshot-1", "snapshot-2")
+    assert result.row_count == 8
     assert result.latest_asset_metadata == {
         "source_id": "seoul_traffic_incident",
         "bronze_run_id": "snapshot-2",
@@ -113,6 +114,51 @@ def test_materializer_preserves_landing_run_ids_and_publishes_latest_batch_event
         ("materialized", "snapshot-1"),
         ("materialized", "snapshot-2"),
     ]
+
+
+def test_materializer_row_count_includes_nonpublishable_verified_snapshot():
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    receipt = _receipt("snapshot-1", "2026-07-16T00:00:00+00:00")
+
+    class Receipts:
+        def pending(self, *, limit):
+            assert limit == 24
+            return [receipt]
+
+        def record_materialized(self, _receipt):
+            return None
+
+    class Manifest:
+        def start(self, *_args, **_kwargs):
+            return None
+
+        def publish(self, *_args, **_kwargs):
+            return None
+
+        def fail(self, *_args, **_kwargs):
+            pytest.fail("verified nonpublishable snapshot must not fail")
+
+    result = IncidentMaterializer(
+        receipts=Receipts(),
+        manifest=Manifest(),
+        load=lambda raw_result, _run_id: {
+            "raw_object_keys": raw_result["raw_object_keys"],
+            "inserted": 4,
+            "expected_rows": 4,
+            "page_count": 1,
+            "is_publishable": False,
+        },
+        verify=lambda _result, _run_id: 4,
+        clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
+    ).run(
+        materializer_dag_id="traffic_incident_bronze",
+        materializer_run_id="scheduled__materializer",
+        limit=24,
+    )
+
+    assert result.row_count == 4
+    assert result.asset_metadata == ()
 
 
 def test_materializer_uses_batch_manifest_load_and_verification_ports_once():
@@ -490,6 +536,7 @@ def test_materializer_empty_queue_is_success_without_asset_metadata():
 
     assert result.processed_count == 0
     assert result.snapshot_run_ids == ()
+    assert result.row_count == 0
     assert result.latest_asset_metadata is None
 
 

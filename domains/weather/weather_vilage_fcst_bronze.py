@@ -24,7 +24,10 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.ops.product_observability import record_domain_stage_event  # noqa: E402
+from common.ops.product_observability import (  # noqa: E402
+    record_domain_stage_event,
+    record_product_event,
+)
 from common.runtime_guard import validate_dev_runtime  # noqa: E402
 from weather_ingest.bronze import (  # noqa: E402
     append_kma_bronze_row_batches_pyiceberg,
@@ -95,14 +98,63 @@ record_weather_problem = problem_failure_callback(
     domain="weather", source_system=SOURCE_ID
 )
 WEATHER_BRONZE_ASSET_REF = Asset(WEATHER_BRONZE_ASSET)
-record_weather_raw_product_event = record_domain_stage_event("weather", "raw")
-record_weather_bronze_product_event = record_domain_stage_event("weather", "bronze")
 record_weather_raw_product_failure = record_domain_stage_event(
     "weather", "raw", status="failed"
 )
 record_weather_bronze_product_failure = record_domain_stage_event(
     "weather", "bronze", status="failed"
 )
+
+
+def _non_negative_row_count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def record_weather_raw_product_event(context: dict) -> dict:
+    row_count = None
+    try:
+        raw_result = pull_kma_raw_result(context) or {}
+        raw_objects = raw_result.get("raw_objects")
+        if isinstance(raw_objects, list) and raw_objects:
+            counts = [
+                _non_negative_row_count(item.get("row_count"))
+                if isinstance(item, dict)
+                else None
+                for item in raw_objects
+            ]
+            if all(value is not None for value in counts):
+                row_count = sum(value for value in counts if value is not None)
+    except Exception:
+        row_count = None
+    return record_product_event(
+        context,
+        domain="weather",
+        layer="raw",
+        row_count=row_count,
+        rows_source="raw_manifest" if row_count is not None else "not_observed",
+    )
+
+
+def record_weather_bronze_product_event(context: dict) -> dict:
+    row_count = None
+    try:
+        task_instance = context.get("ti") or context.get("task_instance")
+        row_count = _non_negative_row_count(
+            task_instance.xcom_pull(task_ids="verify_kma_bronze_runtime")
+        )
+    except Exception:
+        row_count = None
+    return record_product_event(
+        context,
+        domain="weather",
+        layer="bronze",
+        row_count=row_count,
+        rows_source=(
+            "bronze_run_manifest" if row_count is not None else "not_observed"
+        ),
+    )
 
 
 @fail_fast_weather_bronze

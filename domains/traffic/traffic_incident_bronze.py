@@ -21,7 +21,10 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.ops.product_observability import record_domain_stage_event  # noqa: E402
+from common.ops.product_observability import (  # noqa: E402
+    record_domain_stage_event,
+    record_product_event,
+)
 from traffic_ingest.acc_info import KST  # noqa: E402
 from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_INCIDENT_BRONZE_ASSET_REF,
@@ -44,7 +47,6 @@ TRAFFIC_BRONZE_ASSET_REF = TRAFFIC_INCIDENT_BRONZE_ASSET_REF
 record_traffic_problem = problem_failure_callback(
     domain="traffic", source_system="seoul_topis"
 )
-record_traffic_bronze_product_event = record_domain_stage_event("traffic", "bronze")
 record_traffic_bronze_product_failure = record_domain_stage_event(
     "traffic", "bronze", status="failed"
 )
@@ -78,10 +80,38 @@ def materialize_pending_traffic_incident_snapshots(**context) -> dict[str, objec
             asset=TRAFFIC_BRONZE_ASSET_REF,
             metadata=result.latest_asset_metadata,
         )
+    value = getattr(result, "row_count", None)
+    row_count = (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else None
+    )
     return {
         "processed": result.processed_count,
+        "row_count": row_count,
         "snapshot_run_ids": list(result.snapshot_run_ids),
     }
+
+
+def record_traffic_bronze_product_event(context: dict) -> dict:
+    row_count = None
+    try:
+        task_instance = context.get("ti") or context.get("task_instance")
+        result = task_instance.xcom_pull(task_ids=MATERIALIZER_TASK_ID)
+        value = result.get("row_count") if isinstance(result, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            row_count = value
+    except Exception:
+        row_count = None
+    return record_product_event(
+        context,
+        domain="traffic",
+        layer="bronze",
+        row_count=row_count,
+        rows_source=(
+            "bronze_run_manifest" if row_count is not None else "not_observed"
+        ),
+    )
 
 
 def acknowledge_materialized_traffic_incident_snapshots(

@@ -104,3 +104,64 @@ def test_flow_materializer_does_not_emit_asset_for_stale_parent(monkeypatch):
         ti=ti,
         outlet_events={dag_module.TRAFFIC_FLOW_MATERIALIZED_ALIAS: Accessor()},
     ) == {"row_count": 1, "asset_published": False}
+
+
+def test_flow_product_events_use_raw_and_bronze_manifest_rows(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        dag_module,
+        "record_product_event",
+        lambda _context, **kwargs: captured.append(kwargs) or kwargs,
+    )
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            if task_ids == dag_module.LAND_TASK_ID:
+                return {"expected_rows": 9}
+            if task_ids == dag_module.FLOW_MATERIALIZE_TASK_ID:
+                return {"row_count": 8}
+            raise AssertionError(f"unexpected task_id: {task_ids}")
+
+    context = {"ti": TI(), "run_id": "run-1"}
+    dag_module.record_traffic_raw_product_event(context)
+    dag_module.record_traffic_bronze_product_event(context)
+
+    assert captured == [
+        {
+            "domain": "traffic",
+            "layer": "raw",
+            "row_count": 9,
+            "rows_source": "raw_manifest",
+        },
+        {
+            "domain": "traffic",
+            "layer": "bronze",
+            "row_count": 8,
+            "rows_source": "bronze_run_manifest",
+        },
+    ]
+
+
+def test_flow_product_event_keeps_malformed_rows_unknown(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        dag_module,
+        "record_product_event",
+        lambda _context, **kwargs: captured.append(kwargs) or kwargs,
+    )
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            assert task_ids == dag_module.LAND_TASK_ID
+            return {"expected_rows": "9"}
+
+    dag_module.record_traffic_raw_product_event({"ti": TI(), "run_id": "run-1"})
+
+    assert captured == [
+        {
+            "domain": "traffic",
+            "layer": "raw",
+            "row_count": None,
+            "rows_source": "not_observed",
+        }
+    ]
