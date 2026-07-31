@@ -71,8 +71,19 @@ def _to_kst_iso(value):
     return value.astimezone(_KST).isoformat()
 
 
+def _int_or_none(value) -> int | None:
+    return None if value is None else int(value)
+
+
 def dag_run_row(dag_run, *, domain: str) -> dict:
-    """Airflow DagRun ORM → 타입드 dict(KST _at). 도메인 파라미터화(§6.2 _shared 승격 대비)."""
+    """Airflow DagRun ORM → 타입드 dict(KST _at). 도메인 파라미터화(§6.2 _shared 승격 대비).
+
+    ``retried_tasks``·``max_try`` 는 task_instance 집계다(#201). run 의 state 만으로는
+    **재시도로 살아난 런과 처음부터 깨끗한 런이 구분되지 않는다** — 둘 다 success 다.
+    KOPIS 400 재발이 매번 재시도로 복구되는 탓에 7일 중 4일 재발을 아무도 못 봤고,
+    수집을 다른 기계로 옮기면 메타DB 직접 조회라는 마지막 관측 경로마저 사라진다.
+    그래서 재시도를 **런의 속성으로 적재**해 마트·대시보드까지 흐르게 한다.
+    """
     start = getattr(dag_run, "start_date", None)
     end = getattr(dag_run, "end_date", None)
     duration = (end - start).total_seconds() if (start and end) else None
@@ -86,5 +97,10 @@ def dag_run_row(dag_run, *, domain: str) -> dict:
         "start_at": _to_kst_iso(start),
         "end_at": _to_kst_iso(end),
         "duration_sec": duration,
+        # 집계가 없는 경로(구 표·조인 실패)는 0 이 아니라 NULL 이어야 한다 —
+        # 0 은 "재시도 없었다"는 주장이고, NULL 은 "모른다"다. 둘을 섞으면 마트가
+        # 관측 공백을 무재시도로 위장한다(#147 '초록 위장'과 같은 실패 모양).
+        "retried_tasks": _int_or_none(getattr(dag_run, "retried_tasks", None)),
+        "max_try": _int_or_none(getattr(dag_run, "max_try", None)),
         "load_date": load_date,
     }

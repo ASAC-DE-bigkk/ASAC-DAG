@@ -68,16 +68,31 @@ def _ensure_dag_runs_table(wh) -> str:
             start_at varchar,
             end_at varchar,
             duration_sec double,
+            retried_tasks bigint,
+            max_try bigint,
             load_date varchar
         )
         WITH (format = 'PARQUET', partitioning = ARRAY['load_date'])
         """
     )
+    # 이미 만들어진 표에는 CREATE IF NOT EXISTS 가 컬럼을 안 붙인다 — ASAC-DAG#521 에서
+    # `_catalog` 가 정확히 이걸로 갈라졌다(선언 15컬럼 vs 라이브 8컬럼). 신규 컬럼은
+    # 발행 시점에 명시적으로 맞춘다. ADD COLUMN IF NOT EXISTS 라 재실행에 안전하고,
+    # 기존 행은 NULL = "그 시절엔 안 재던 값"으로 남는다(0 으로 채우지 않는다).
+    for column, sql_type in (("retried_tasks", "bigint"), ("max_try", "bigint")):
+        wh.client.execute(
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {_ident(column)} {sql_type}"
+        )
     return table
 
 
 def _num(value) -> str:
     return "NULL" if value is None else repr(float(value))
+
+
+def _int(value) -> str:
+    """bigint 리터럴. NULL 은 그대로 둔다 — 0 으로 접으면 '관측 없음'이 '재시도 없음'이 된다."""
+    return "NULL" if value is None else str(int(value))
 
 
 def load_dag_runs(
@@ -106,13 +121,24 @@ def load_dag_runs(
     # Connection 미등록(스택 재구축 직후 등)이면 스킵 — 핵심 SLO(run_report 기반)는 dag_run 과
     # 무관하므로 마트는 정상 동작하고, 표는 빈 채로 보장된다(silver 가 읽음). 등록 절차 = 런북.
     try:
+        # 재시도 집계(#201) — task_instance 를 run 단위로 접어 붙인다. dag_run 만 보면
+        # 재시도로 살아난 런이 깨끗한 런과 똑같이 success 라, 재발이 지표에 안 남는다.
+        # LEFT JOIN 이라 태스크가 아직 없는 run(막 시작)은 NULL 로 남는다 — 0 이 아니다.
         sql = (
-            "SELECT dag_id, run_id, state, run_type, start_date, end_date "
-            "FROM dag_run WHERE dag_id IN :ids AND start_date IS NOT NULL"
+            "SELECT d.dag_id, d.run_id, d.state, d.run_type, d.start_date, d.end_date, "
+            "       t.retried_tasks, t.max_try "
+            "FROM dag_run d "
+            "LEFT JOIN ("
+            "    SELECT dag_id, run_id, "
+            "           count(*) FILTER (WHERE try_number > 1) AS retried_tasks, "
+            "           max(try_number) AS max_try "
+            "    FROM task_instance GROUP BY dag_id, run_id"
+            ") t ON t.dag_id = d.dag_id AND t.run_id = d.run_id "
+            "WHERE d.dag_id IN :ids AND d.start_date IS NOT NULL"
         )
         params = {"ids": list(dag_ids)}
         if not first_run:
-            sql += " AND start_date >= :cutoff"
+            sql += " AND d.start_date >= :cutoff"
             params["cutoff"] = cutoff_utc
         stmt = text(sql).bindparams(bindparam("ids", expanding=True))
 
@@ -146,7 +172,8 @@ def load_dag_runs(
     if not rows:
         return 0
 
-    cols = "(domain, dag_id, run_id, state, run_type, start_at, end_at, duration_sec, load_date)"
+    cols = ("(domain, dag_id, run_id, state, run_type, start_at, end_at, duration_sec, "
+            "retried_tasks, max_try, load_date)")
     values = [
         "("
         + ", ".join(
@@ -159,6 +186,8 @@ def load_dag_runs(
                 _lit(r["start_at"]),
                 _lit(r["end_at"]),
                 _num(r["duration_sec"]),
+                _int(r["retried_tasks"]),
+                _int(r["max_try"]),
                 _lit(r["load_date"]),
             ]
         )

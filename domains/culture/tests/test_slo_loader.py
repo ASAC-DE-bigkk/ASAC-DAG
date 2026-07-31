@@ -71,6 +71,46 @@ def test_dag_run_row_running_has_no_end():
     assert row["end_at"] is None and row["duration_sec"] is None
 
 
+def test_dag_run_row_carries_retry_counts():
+    """#201 — 재시도로 살아난 런이 지표에 남아야 한다(state 만으로는 깨끗한 런과 동일)."""
+    r = FakeDagRun(
+        "culture_bronze", "scheduled__2026-07-29T18:00:00+00:00", "success", "scheduled",
+        dt.datetime(2026, 7, 29, 18, 0, tzinfo=dt.timezone.utc),
+        dt.datetime(2026, 7, 29, 18, 11, tzinfo=dt.timezone.utc),
+    )
+    r.retried_tasks, r.max_try = 3, 2          # 7/30 실측 형태
+    row = loader.dag_run_row(r, domain="culture")
+    assert row["state"] == "success"           # 겉으로는 성공한 런인데
+    assert row["retried_tasks"] == 3           # 세 태스크가 재시도로 살아났다
+    assert row["max_try"] == 2
+
+
+def test_missing_retry_counts_stay_null_not_zero():
+    """🔑 관측 공백은 NULL 이다 — 0 으로 접으면 '무재시도'로 위장한다.
+
+    구 표에서 읽은 행, task_instance 조인이 비는 run(막 시작) 이 여기 해당한다.
+    ``COUNT`` 기반 마트가 0 과 NULL 을 다르게 세야 '초록 위장'(#147)이 안 생긴다.
+    """
+    r = FakeDagRun(
+        "culture_bronze", "manual__x", "running", "manual",
+        dt.datetime(2026, 7, 29, 18, 0, tzinfo=dt.timezone.utc), None,
+    )
+    row = loader.dag_run_row(r, domain="culture")
+    assert row["retried_tasks"] is None and row["max_try"] is None
+
+
+def test_zero_retries_is_recorded_as_zero():
+    """반대쪽 — 실제로 0 회면 0 으로 남아야 한다(NULL 로 뭉개면 관측한 사실이 사라진다)."""
+    r = FakeDagRun(
+        "culture_bronze", "scheduled__2026-07-30T18:00:00+00:00", "success", "scheduled",
+        dt.datetime(2026, 7, 30, 18, 0, tzinfo=dt.timezone.utc),
+        dt.datetime(2026, 7, 30, 18, 9, tzinfo=dt.timezone.utc),
+    )
+    r.retried_tasks, r.max_try = 0, 1          # 7/31 실측 — 완화 ② 첫 실전
+    row = loader.dag_run_row(r, domain="culture")
+    assert row["retried_tasks"] == 0 and row["max_try"] == 1
+
+
 def test_slo_dag_ids_are_four_culture_dags():
     assert loader.CULTURE_SLO_DAG_IDS == (
         "culture_bronze", "culture_transform", "culture_maintenance", "culture_facility_refresh",
