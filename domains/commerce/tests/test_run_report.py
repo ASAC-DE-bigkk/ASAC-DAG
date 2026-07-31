@@ -153,6 +153,51 @@ def test_empty_results_zero_summary():
     assert "❌ 실패" not in d and "⛔ 미수집" not in d           # 세부 섹션 없음(요약만)
 
 
+def test_no_target_section_collect_names_completed_runs():
+    # 수집 0종은 정상 경로 — 어느 run 이 이미 끝냈는지까지 적어야 '멈춤'과 구분된다.
+    sec = run_report.no_target_section(
+        stage="collect", kst_date="2026-07-31", enabled_total=152,
+        summary={"date": "2026-07-31", "completed": [f"s{i}" for i in range(152)],
+                 "runs": {"2026-07-31_014858_879": 152}})
+    assert "수집 대상 없음(0종)" in sec and "152/152종" in sec
+    assert "2026-07-31_014858_879" in sec
+    assert "⚠️" not in sec                                   # 전량 설명됨 → 경고 없음
+
+
+def test_no_target_section_flags_unexplained_rest():
+    # 동일자 완료로도 이번 수집으로도 설명 안 되는 잔여 = 상류 스킵 의심 → 경고 문구.
+    sec = run_report.no_target_section(stage="collect", kst_date="2026-07-31", enabled_total=152,
+                                       summary={"completed": [], "runs": {}})
+    assert "⚠️ 나머지 152종" in sec and "완료 run: 없음" in sec
+
+
+def test_no_target_section_recollect_and_lookup_failure():
+    assert "재수집 대상 없음(0종)" in run_report.no_target_section(stage="recollect",
+                                                                   kst_date="2026-07-31")
+    fallback = run_report.no_target_section(stage="collect", kst_date="2026-07-31",
+                                            summary=None, enabled_total=152)
+    assert "수집 대상 없음(0종)" in fallback and "근거 생략" in fallback
+
+
+def test_send_zero_target_collect_with_rest_is_warning(monkeypatch):
+    # 0종이어도 리포트는 나가고, 설명 안 되는 잔여는 ⛔ 미수집·경고색으로 뜬다(초록에 묻지 않는다).
+    sent = []
+    monkeypatch.setattr(run_report, "send_embed",
+                        lambda title, desc, **kw: sent.append((title, desc, kw)) or True)
+    rest = _shorts("food", 2)
+    counts = run_report.send_run_report(
+        dag_id="commerce_collect_raw", run_id="2026-07-31_014858_879",
+        observed_date="2026-07-31", stage="collect", results=[], scope_shorts=rest,
+        extra_sections=[run_report.no_target_section(
+            stage="collect", kst_date="2026-07-31", enabled_total=2,
+            summary={"completed": [], "runs": {}})])
+    assert counts["total"] == 2 and counts["missing"] == 2 and counts["new"] == 0
+    assert len(sent) == 1
+    _title, desc, kw = sent[0]
+    assert kw["color"] == run_report.COLOR_WARN
+    assert "⛔ 미수집" in desc and "수집 대상 없음(0종)" in desc
+
+
 def test_send_empty_results_with_extra_section():
     # bronze finalize 0건 경로 — extra_sections(적재 대상 없음)와 함께 전송돼도 counts 반환.
     counts = run_report.send_run_report(

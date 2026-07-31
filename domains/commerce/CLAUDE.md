@@ -1005,6 +1005,24 @@ Current known rule:
   external alert. Watermark unknown → full-table fallback.
 
 
+## 19.2 D1 서빙 — commerce 자체 관리
+
+commerce gold(Iceberg) → 공유 Cloudflare **D1(SQLite)** 선별 export 는 **commerce 안에서 자체
+규약으로 관리**한다(타 도메인 방식 추종 불필요). 기존 serving Postgres 경로는 폐기(2026-07-14).
+
+- **정본 규약**: gold 모델 `config.meta.serving.serving_tier`(`d1_direct`/`d1_rollup`/`iceberg_api`)
+  + `d1_table`·`publication_mode`(iceberg/rollup)·`product_id`(gold_*). 설계 정본은 dbt
+  `docs/DB/gold/serving-design.md`.
+- **구현(진행 중 — 미구현 아님)**: 계약 ASAC-DBT **#334/PR#335**(`serving_tier`), export ASAC-DAG
+  **#493/PR#494** `commerce_serving_export`(gold Asset 트리거 분리 DAG, `include/gold/serving_export.py`
+  — direct 15 스냅샷, rollup GROUP BY 파생, iceberg_api Trino 직조회, 행수 밴드 게이트, 마커
+  `commerce_serve_state`). 전부 번들 자립(공유 패키지 강제 소비 없음).
+- **org 공통 계약 #478 과는 별개**: ASAC-DAG #478 `meta.serving.enabled/…` 는 별도 org 계약이며
+  commerce 는 자체 `serving_tier` 규약을 쓴다. 단 ASAC-DBT `serving-contract-gate` CI 가
+  `config.meta.serving` 있는 모든 모델을 #478 규격으로 검사하므로 정합 주의 — 결정은 commerce 자체
+  PR(#335 계열)에서. 상세·추적: **[docs/serving-contract-chain.md](docs/serving-contract-chain.md)**.
+
+
 ## 20. Security Gate (recall · apply · check, ongoing)
 
 
