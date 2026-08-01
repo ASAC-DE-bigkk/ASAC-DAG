@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Callable, Protocol
 
 from common.raw_manifest import RAW_MANIFEST_STATUS_COMPLETE, build_raw_manifest
+from common.raw_path import build_raw_run_prefix
 from weather_ingest.kma import KST, parse_kma_response
 from weather_ingest.errors import (
     WeatherCompletenessError,
@@ -21,7 +22,8 @@ from weather_ingest.raw_contract import normalize_kma_checkpoint_raw_object
 
 
 _RAW_OBJECT_KEY = re.compile(
-    r"/load_date=(?P<load_date>\d{4}-\d{2}-\d{2})/nx=(?P<nx>\d+)/ny=(?P<ny>\d+)/"
+    r"/load_date=(?P<load_date>\d{4}-\d{2}-\d{2})/"
+    r"(?:run_id=[^/]+/)?nx=(?P<nx>\d+)/ny=(?P<ny>\d+)/"
     r"(?P<collected>\d{8}T\d{6})KST_base-(?P<base_date>\d{8})"
     r"(?P<base_time>\d{4})_(?P<request_id>[^/]+)\.json$"
 )
@@ -286,10 +288,15 @@ class KmaLanding:
         return self._clock().astimezone(KST).date().isoformat()
 
     def _manifest_key(self, run: RunIdentity, landing_load_date: str) -> str:
-        return (
-            f"{self._raw_prefix}/weather_forecast/kma_vilage_fcst/"
-            f"load_date={landing_load_date}/run_id={self._safe_key_segment(run.run_id)}"
-            "/_manifest.json"
+        return f"{self._raw_run_prefix(run.run_id, landing_load_date)}/_manifest.json"
+
+    def _raw_run_prefix(self, run_id: str, landing_load_date: str) -> str:
+        return build_raw_run_prefix(
+            raw_prefix=self._raw_prefix,
+            domain="weather",
+            source_id="kma_vilage_fcst",
+            load_date=landing_load_date,
+            run_id=run_id,
         )
 
     def _write_manifest(
@@ -396,11 +403,12 @@ class KmaLanding:
         nx: int,
         ny: int,
         landing_load_date: str,
+        run_id: str,
     ) -> str:
         collected_kst = collected_at.astimezone(KST)
         return (
-            f"{self._raw_prefix}/weather_forecast/kma_vilage_fcst/"
-            f"load_date={landing_load_date}/nx={nx}/ny={ny}/"
+            f"{self._raw_run_prefix(run_id, landing_load_date)}/"
+            f"nx={nx}/ny={ny}/"
             f"{collected_kst:%Y%m%dT%H%M%S}KST_"
             f"base-{base_date}{base_time}_{request_id}.json"
         )
@@ -433,7 +441,11 @@ class KmaLanding:
             first_page = checkpoint_pages.get((grid.nx, grid.ny, 1))
             if first_page is None:
                 first_page = self._fetch_page(
-                    request, grid, page_no=1, landing_load_date=landing_load_date
+                    request,
+                    grid,
+                    page_no=1,
+                    landing_load_date=landing_load_date,
+                    run_id=run.run_id,
                 )
                 api_request_count += 1
             else:
@@ -451,6 +463,7 @@ class KmaLanding:
                         grid,
                         page_no=page_no,
                         landing_load_date=landing_load_date,
+                        run_id=run.run_id,
                     )
                     api_request_count += 1
                 else:
@@ -494,6 +507,7 @@ class KmaLanding:
         *,
         page_no: int,
         landing_load_date: str,
+        run_id: str,
     ) -> KmaRawObject:
         collected_at = self._clock()
         request_id = self._request_id()
@@ -516,6 +530,7 @@ class KmaLanding:
             nx=grid.nx,
             ny=grid.ny,
             landing_load_date=landing_load_date,
+            run_id=run_id,
         )
         self._raw_store.write_bytes(
             raw_object_key,
