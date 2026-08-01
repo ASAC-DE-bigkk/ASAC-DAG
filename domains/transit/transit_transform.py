@@ -6,6 +6,12 @@ project (``domains/transit``) as a single ``dbt build`` — seeds, dim snapshots
 silver incrementals, and the contract tests in one DAG-ordered pass — and keeps
 silver retries independent from bronze API collection.
 
+이 파일은 transform DAG 두 개를 담는다(#443 예고 분리):
+- ``transit_transform`` (*/15): 사용자향 '지금' 카드·증분 모델·silver·dim·테스트 —
+  ``--exclude tag:heavy``
+- ``transit_transform_heavy`` (5,35 오프셋 30분): 아카이브 전량 재집계 프로파일 4종 —
+  ``--select tag:heavy``, artifact 는 ``--target-path target_heavy`` 로 격리
+
 dbt 실행 방식은 타 도메인 transform DAG(weather/traffic)의 관례를 그대로 따른다:
 컨테이너 dbt 바이너리(``/home/airflow/dbt-venv/bin/dbt``), 마운트된 dbt 프로젝트
 (``/opt/airflow/dbt/domains/transit``), ``DBT_PROJECT_DIR``/``DBT_PROFILES_DIR``
@@ -58,22 +64,37 @@ from seoul_transit import config  # noqa: E402
 KST = ZoneInfo("Asia/Seoul")
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/transit"
+# 도메인 전용 Trino 직렬화 pool (slot 1, docker-compose airflow-init 에서 생성) —
+# weather/traffic 의 도메인별 heavy pool 관례. fresh/heavy 두 transform 의 dbt_deps·
+# dbt_build 가 같은 pool 을 쓰므로 단일노드 Trino 에서 두 빌드가 절대 겹쳐 돌지 않고
+# (실측: dev 에서 동시 실행 시 heavy 소요 168s → 약 8분), 공유 dbt_packages/ 를
+# 다시 쓰는 deps 가 상대 DAG 의 deps·parse 와 경합하는 것도 함께 차단된다.
+TRANSIT_TRINO_HEAVY_POOL = "trino_transit_heavy"
 # dbt 는 run_results.json 을 프로젝트의 target-path(dbt_project.yml: target) 아래에 쓴다.
 RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, "target", "run_results.json")
+# heavy DAG 는 target-path 를 격리한다 — 두 transform DAG 가 같은 프로젝트를 공유하므로
+# 기본 target/ 을 같이 쓰면 run_results.json 등 artifact 를 서로 덮어써 메트릭이 섞인다.
+HEAVY_TARGET_PATH = "target_heavy"
+HEAVY_RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, HEAVY_TARGET_PATH, "run_results.json")
 
 DOMAIN = os.environ.get("TRANSIT_DOMAIN", "transit")
 
-DEFAULT_PARAMS = {
-    "target": Param(
-        # 배포 env 를 따른다(#575) — dev 박스(DBT_TARGET=dev)에선 기존과 동일한 dev 기본
-        # (실수로 prod 를 치지 않는 안전 게이트 유지), prod 스택에선 자동 prod.
-        # 하드코딩 "dev" 는 prod 컷오버 시 iceberg_dev CATALOG_NOT_FOUND 로 전 런 실패했다.
-        default=os.environ.get("DBT_TARGET", "dev"),
-        type="string",
-        enum=["dev", "prod"],
-        description="dbt target profile name.",
-    )
-}
+def _make_params() -> dict:
+    """DAG 별 params — fresh/heavy 두 DAG 가 Param 인스턴스를 공유하지 않게 매번 새로 만든다."""
+    return {
+        "target": Param(
+            # 배포 env 를 따른다(#575) — dev 박스(DBT_TARGET=dev)에선 기존과 동일한 dev 기본
+            # (실수로 prod 를 치지 않는 안전 게이트 유지), prod 스택에선 자동 prod.
+            # 하드코딩 "dev" 는 prod 컷오버 시 iceberg_dev CATALOG_NOT_FOUND 로 전 런 실패했다.
+            default=os.environ.get("DBT_TARGET", "dev"),
+            type="string",
+            enum=["dev", "prod"],
+            description="dbt target profile name.",
+        )
+    }
+
+
+DEFAULT_PARAMS = _make_params()
 
 # 공통 에러 모듈(#77) — 재시도 소진 후 실패를 RFC 9457 Problem JSON 으로 R2 에 적재.
 # transform 은 단일 외부 소스 API 를 호출하지 않고 subway/bus/parking 브론즈를 함께
@@ -88,12 +109,24 @@ def transform_schedule() -> str:
     @hourly 면 최대 1시간 묵은 값을 보여준다. 실측 dbt build 소요는 344초(2026-07-20,
     dev 전 모델+테스트)라 15분 창에 들어간다.
 
-    ⚠️ 여유가 무한하지 않다: 프로파일 3종(리듬·주차·노선)은 아카이브 전량을 매 런
-    재집계하고 event_access 는 행사×역·주차 거리 계산을 매 런 반복한다 — 아카이브가
-    쌓이면 소요가 늘어난다. build 가 15분에 근접하면 무거운 모델을 별도 주기(tag 선택)로
-    분리할 것. max_active_runs=1 이라 초과분은 큐잉되며 겹쳐 돌지는 않는다.
+    #443 이 예고한 무거운 모델 분리는 시행됨: 아카이브 전량 재집계 프로파일 4종
+    (리듬·주차·노선·event_access, tag:heavy)은 transit_transform_heavy 가 느린 주기로
+    따로 빌드하고, 이 DAG 는 --exclude tag:heavy 로 제외한다. max_active_runs=1 이라
+    초과분은 큐잉되며 겹쳐 돌지는 않는다.
     """
     return config.schedule_for("transit_transform", "*/15 * * * *")
+
+
+def transform_heavy_schedule() -> str:
+    """heavy 프로파일 재빌드 주기 — 5,35분 기본, env TRANSIT_TRANSFORM_HEAVY_SCHEDULE 오버라이드.
+
+    30분 주기이되 */30 이 아니라 5,35 오프셋인 이유: fresh(*/15)와 heavy 를 나눈 목적이
+    단일노드 Trino 상시부하 완화인데, */30 이면 매 :00/:30 에 fresh 런과 반드시 동시
+    트리거되어 순간 부하가 오히려 커진다(dbt deps 의 dbt_packages/ 동시 쓰기 충돌도 회피).
+    fresh 실측 소요(#443: 344초, heavy 4종 빠지면 그 이하)가 5분 오프셋 안에 대체로
+    끝나므로 겹침이 최소화된다.
+    """
+    return config.schedule_for("transit_transform_heavy", "5,35 * * * *")
 
 
 def transform_gate_open(now=None) -> bool:
@@ -130,14 +163,33 @@ def check_transform_gate(**_context) -> None:
         )
 
 
-def dbt_command(args: str) -> str:
-    """dbt 실행 bash — weather/traffic transform 과 동일한 조립(경로·env·target 분기)."""
+def dbt_command(
+    args: str,
+    *,
+    select: str | None = None,
+    exclude: str | None = None,
+    target_path: str | None = None,
+) -> str:
+    """dbt 실행 bash — weather/traffic transform 과 동일한 조립(경로·env·target 분기).
+
+    select/exclude 는 fresh/heavy 분리용 노드 셀렉터(``--select``/``--exclude``).
+    target_path 는 artifact(run_results.json 등) 격리용 ``--target-path`` — 같은 프로젝트를
+    공유하는 두 transform DAG 가 기본 target/ 을 덮어쓰지 않게 한다. 기본값(전부 None)은
+    현행 동작과 동일.
+    """
     project = shlex.quote(DBT_PROJECT)
+    command = f"{shlex.quote(DBT_BIN)} {args}"
+    if select:
+        command += f" --select {shlex.quote(select)}"
+    if exclude:
+        command += f" --exclude {shlex.quote(exclude)}"
+    if target_path:
+        command += f" --target-path {shlex.quote(target_path)}"
     return (
         "set -euo pipefail\n"
         f"cd {project}\n"
         f"export DBT_PROFILES_DIR={project} DBT_PROJECT_DIR={project}\n"
-        f"{shlex.quote(DBT_BIN)} {args} --target '{{{{ params.target }}}}' --no-use-colors"
+        f"{command} --target '{{{{ params.target }}}}' --no-use-colors"
     )
 
 
@@ -178,14 +230,21 @@ with DAG(
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=dbt_command("deps"),
+        pool=TRANSIT_TRINO_HEAVY_POOL,
         on_failure_callback=record_transit_problem,
     )
 
     # 계약 게이트: seed+dim+silver+test 전체를 DAG 순서로 build. dbt 테스트 실패는
     # build 의 비영 종료 → 이 태스크 실패 → DAG 런 실패.
+    # tag:heavy(아카이브 전량 재집계 프로파일 4종)는 transit_transform_heavy 담당이라 제외.
+    # ⚠ fresh 에 남는 forecast_card·parking_full_risk 는 heavy 테이블(dong_rhythm·
+    # parking_profile)을 SELECT 한다 — 신규 환경/골드 드롭 직후엔 첫 heavy 런(:05/:35)
+    # 전까지 이 두 모델이 TABLE_NOT_FOUND 로 실패할 수 있다(1 heavy 주기 내 자가 회복,
+    # 부트스트랩은 1회 수동 full build 권장).
     dbt_build = BashOperator(
         task_id="dbt_build",
-        bash_command=dbt_command("build"),
+        bash_command=dbt_command("build", exclude="tag:heavy"),
+        pool=TRANSIT_TRINO_HEAVY_POOL,
         on_failure_callback=record_transit_problem,
     )
 
@@ -198,3 +257,59 @@ with DAG(
     ).as_teardown(on_failure_fail_dagrun=False)
 
     gate >> dbt_deps >> dbt_build >> publish_metrics
+
+
+# ── heavy: 아카이브 전량 재집계 프로파일 4종을 느린 주기로 분리 ─────────────────────
+# gold_transit_dong_rhythm / parking_profile / bus_route_comfort / event_access 는
+# materialized='table' 전량 재빌드라 transit_transform 이 최대 Trino 소비자가 되는
+# 주범이었다(#443 docstring 이 예고한 분리). 15분 신선도가 불필요한 프로파일이므로
+# 30분 주기(5,35 오프셋)로 뺀다. 사용자향 '지금' 카드·증분 모델은 fresh(*/15) 유지.
+#
+# 의존성: heavy 모델의 상류 silver/dim 은 fresh DAG 가 15분마다 갱신하므로
+# --select tag:heavy (상류 제외)로 기존 silver 를 재사용한다. +tag:heavy(조상 포함)는
+# heavy 런도 무겁게 만들므로 쓰지 않는다 — 최초 배포 시 상류가 비어 있으면 1회 수동
+# full build 로 부트스트랩할 것.
+with DAG(
+    dag_id="transit_transform_heavy",
+    description="Rebuild heavy transit profile golds (tag:heavy) every 30min (#443 follow-up).",
+    start_date=datetime(2026, 1, 1, tzinfo=KST),
+    schedule=transform_heavy_schedule(),
+    catchup=False,
+    max_active_runs=1,
+    default_args={"retries": 1, "retry_delay": timedelta(minutes=2)},
+    params=_make_params(),
+    tags=["ask_seoul", "transit", "transform", "gold", "dbt", "heavy"],
+) as heavy_dag:
+    heavy_gate = PythonOperator(
+        task_id="check_transform_gate",
+        python_callable=check_transform_gate,
+    )
+
+    heavy_dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command=dbt_command("deps"),
+        pool=TRANSIT_TRINO_HEAVY_POOL,
+        on_failure_callback=record_transit_problem,
+    )
+
+    # heavy 4종 + 그 테스트만 build. --target-path 격리로 fresh DAG 의 target/ artifact
+    # (run_results.json)를 덮어쓰지 않는다.
+    heavy_dbt_build = BashOperator(
+        task_id="dbt_build",
+        bash_command=dbt_command(
+            "build", select="tag:heavy", target_path=HEAVY_TARGET_PATH
+        ),
+        pool=TRANSIT_TRINO_HEAVY_POOL,
+        on_failure_callback=record_transit_problem,
+    )
+
+    # 메트릭 적재(#188)·teardown 선언(#526) 은 fresh 와 동일 관례 — 격리된 target_heavy/
+    # 의 run_results.json 을 읽는다.
+    heavy_publish_metrics = PythonOperator(
+        task_id="publish_silver_metrics",
+        python_callable=publish_silver_metrics,
+        op_kwargs={"run_results_path": HEAVY_RUN_RESULTS_PATH},
+        on_failure_callback=record_transit_problem,
+    ).as_teardown(on_failure_fail_dagrun=False)
+
+    heavy_gate >> heavy_dbt_deps >> heavy_dbt_build >> heavy_publish_metrics

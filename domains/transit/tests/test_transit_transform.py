@@ -269,3 +269,104 @@ def test_publish_silver_metrics_skips_when_no_run_results(tmp_path):
     missing = tmp_path / "nope" / "run_results.json"
     result = module.publish_silver_metrics(run_results_path=str(missing), params={"target": "dev"})
     assert result == {"skipped": True, "rows": 0}
+
+
+# ── fresh/heavy 분리 (#443 예고 분리) ────────────────────────────────────────────
+def test_dbt_command_selector_and_target_path_assembly():
+    module = load_transform_module()
+
+    cmd = module.dbt_command("build", select="tag:heavy", target_path="target_heavy")
+    assert "--select tag:heavy" in cmd
+    assert "--target-path target_heavy" in cmd
+
+    cmd = module.dbt_command("build", exclude="tag:heavy")
+    assert "--exclude tag:heavy" in cmd
+    assert "--select" not in cmd
+    assert "--target-path" not in cmd
+
+    # 기본값(셀렉터 없음)은 현행 조립과 동일해야 한다.
+    plain = module.dbt_command("build")
+    assert "--select" not in plain and "--exclude" not in plain
+
+
+def test_fresh_build_excludes_heavy_models():
+    module = load_transform_module()
+    build_cmd = module.dag.task_dict["dbt_build"].bash_command
+    assert "--exclude tag:heavy" in build_cmd
+    # fresh 는 기본 target/ 을 그대로 쓴다(격리는 heavy 쪽 책임).
+    assert "--target-path" not in build_cmd
+
+
+def test_heavy_dag_wiring_mirrors_fresh():
+    module = load_transform_module()
+    dag = module.heavy_dag
+
+    assert dag.dag_id == "transit_transform_heavy"
+    assert dag.kwargs["max_active_runs"] == 1
+    expected = ["check_transform_gate", "dbt_deps", "dbt_build", "publish_silver_metrics"]
+    assert set(expected) <= set(dag.task_ids)
+    for upstream, downstream in zip(expected, expected[1:]):
+        assert dag.task_dict[upstream].downstream_task_ids == {downstream}
+
+
+def test_heavy_build_selects_only_heavy_without_ancestors():
+    module = load_transform_module()
+    build_cmd = module.heavy_dag.task_dict["dbt_build"].bash_command
+
+    # 상류 silver/dim 은 fresh DAG 가 갱신하므로 조상 포함(+tag:heavy)을 쓰면 안 된다 —
+    # heavy 런까지 무거워져 분리 목적이 무너진다.
+    assert "--select tag:heavy" in build_cmd
+    assert "+tag:heavy" not in build_cmd
+    # artifact 격리: fresh 의 target/run_results.json 을 덮어쓰지 않는다.
+    assert "--target-path target_heavy" in build_cmd
+
+
+def test_heavy_publish_reads_isolated_run_results():
+    module = load_transform_module()
+
+    assert module.HEAVY_RUN_RESULTS_PATH.replace("\\", "/") == (
+        "/opt/airflow/dbt/domains/transit/target_heavy/run_results.json"
+    )
+    publish = module.heavy_dag.task_dict["publish_silver_metrics"]
+    assert publish.kwargs["op_kwargs"] == {
+        "run_results_path": module.HEAVY_RUN_RESULTS_PATH
+    }
+    # teardown 관례(#526)도 fresh 와 동일 — 리프 마스킹 방지 + build 실패에서도 적재.
+    assert getattr(publish, "is_teardown", False) is True
+    assert publish.on_failure_fail_dagrun is False
+
+
+def test_heavy_schedule_defaults_offset_not_top_of_hour(monkeypatch):
+    # */30 이면 매 :00/:30 에 fresh(*/15)와 반드시 동시 트리거 — Trino 순간부하 완화라는
+    # 분리 목적에 역행하므로 5,35 오프셋이 기본이다.
+    monkeypatch.delenv("TRANSIT_TRANSFORM_HEAVY_SCHEDULE", raising=False)
+    module = load_transform_module()
+    assert module.transform_heavy_schedule() == "5,35 * * * *"
+    assert module.heavy_dag.kwargs["schedule"] == "5,35 * * * *"
+
+
+def test_heavy_schedule_env_override(monkeypatch):
+    monkeypatch.setenv("TRANSIT_TRANSFORM_HEAVY_SCHEDULE", "*/30 * * * *")
+    module = load_transform_module()
+    assert module.transform_heavy_schedule() == "*/30 * * * *"
+
+
+def test_both_builds_serialize_on_transit_trino_pool():
+    # 단일노드 Trino 보호: fresh/heavy 의 dbt_deps·dbt_build 가 같은 도메인 전용
+    # pool(slot 1)을 써서 빌드끼리도, 공유 dbt_packages/ 를 다시 쓰는 deps 와
+    # 상대 DAG 의 deps·parse 도 절대 겹치지 않는다 (weather/traffic 관례).
+    module = load_transform_module()
+    assert module.TRANSIT_TRINO_HEAVY_POOL == "trino_transit_heavy"
+    for dag in (module.dag, module.heavy_dag):
+        for task_id in ("dbt_deps", "dbt_build"):
+            assert dag.task_dict[task_id].kwargs["pool"] == "trino_transit_heavy"
+
+
+def test_fresh_and_heavy_do_not_share_param_instances():
+    # 두 DAG 가 같은 Param 객체를 공유하면 직렬화/변형이 서로 간섭할 수 있다.
+    module = load_transform_module()
+    fresh_param = module.dag.kwargs["params"]["target"]
+    heavy_param = module.heavy_dag.kwargs["params"]["target"]
+    assert fresh_param is not heavy_param
+    assert heavy_param.value == fresh_param.value
+    assert heavy_param.schema["enum"] == ["dev", "prod"]
