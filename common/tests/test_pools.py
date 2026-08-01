@@ -27,6 +27,11 @@ EXPECTED_POOL_IMPORT_PAYLOAD = {
         "description": "Serialize Traffic transform and Gold writes",
         "include_deferred": False,
     },
+    "trino_transit_heavy": {
+        "slots": 1,
+        "description": "Serialize Transit dbt builds (fresh/heavy transform)",
+        "include_deferred": False,
+    },
     "trino_weather_heavy": {
         "slots": 1,
         "description": "Serialize Weather Trino writes and recovery",
@@ -122,6 +127,7 @@ class PoolRegistryTest(unittest.TestCase):
                 registry.TRINO_TRAFFIC_HEAVY_POOL,
                 registry.TRINO_TRAFFIC_INGEST_POOL,
                 registry.TRINO_TRAFFIC_TRANSFORM_POOL,
+                registry.TRINO_TRANSIT_HEAVY_POOL,
                 registry.TRINO_WEATHER_HEAVY_POOL,
                 registry.TRINO_WEATHER_LEGACY_HEAVY_POOL,
                 registry.TRINO_WEATHER_RECOVERY_HEAVY_POOL,

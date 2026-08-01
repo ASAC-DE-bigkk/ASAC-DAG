@@ -356,7 +356,7 @@ def test_both_builds_serialize_on_transit_trino_pool():
     # pool(slot 1)을 써서 빌드끼리도, 공유 dbt_packages/ 를 다시 쓰는 deps 와
     # 상대 DAG 의 deps·parse 도 절대 겹치지 않는다 (weather/traffic 관례).
     module = load_transform_module()
-    assert module.TRANSIT_TRINO_HEAVY_POOL == "trino_transit_heavy"
+    assert module.TRINO_TRANSIT_HEAVY_POOL == "trino_transit_heavy"
     for dag in (module.dag, module.heavy_dag):
         for task_id in ("dbt_deps", "dbt_build"):
             assert dag.task_dict[task_id].kwargs["pool"] == "trino_transit_heavy"
