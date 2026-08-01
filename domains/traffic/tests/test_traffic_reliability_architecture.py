@@ -55,6 +55,8 @@ OWNERS = {
         "_compact_source",
         "_compact_stage",
         "_is_missing",
+        "_legacy_history_object_keys",
+        "_read_history_snapshot",
         "_unknown_snapshot",
         "_validated_snapshot",
         "compact_history_snapshot",
