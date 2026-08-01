@@ -25,7 +25,7 @@ def test_reliability_history_key_defaults_to_ops_reports_zone(monkeypatch):
     monkeypatch.delenv("WEATHER_RELIABILITY_HISTORY_PREFIX", raising=False)
 
     assert history_object_key(date(2026, 7, 29)).startswith(
-        "ops/reports/weather/type=reliability/date=2026-07-29/"
+        "ops/reports/weather/type=reliability/observed_date=2026-07-29/"
     )
 
 
@@ -33,7 +33,7 @@ def test_reliability_history_key_can_roll_back_via_env(monkeypatch):
     monkeypatch.setenv("WEATHER_RELIABILITY_HISTORY_PREFIX", "reliability")
 
     assert history_object_key(date(2026, 7, 29)).startswith(
-        "reliability/date=2026-07-29/"
+        "reliability/observed_date=2026-07-29/"
     )
 
 

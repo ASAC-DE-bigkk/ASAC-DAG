@@ -50,14 +50,19 @@ raw는 API 응답 XML bytes를 그대로 저장한다. 겉으로 폴더처럼 �
 object key 문자열을 `/`로 나눠 정한 것이다.
 
 ```text
-raw/traffic_incident/seoul_traffic_incident/load_date=YYYY-MM-DD/YYYYMMDDTHHMMSSKST_AccInfo-<start>-<end>_<request_id>.xml
+raw/traffic/seoul_traffic_incident/load_date=YYYY-MM-DD/run_id=<run_id>/YYYYMMDDTHHMMSSKST_AccInfo-<start>-<end>_<request_id>.xml
 ```
 
 예시:
 
 ```text
-raw/traffic_incident/seoul_traffic_incident/load_date=2026-07-01/20260701T105520KST_AccInfo-1-1000_<request_id>.xml
+raw/traffic/seoul_traffic_incident/load_date=2026-07-01/run_id=<run_id>/20260701T105520KST_AccInfo-1-1000_<request_id>.xml
 ```
+
+같은 run에서 생성한 모든 XML을 기록한 뒤 같은 `run_id` prefix에
+`_manifest.json`을 마지막으로 쓴다. 이 manifest가 존재하고 object key·개수가
+일치해야 Bronze 적재를 시작한다. 변경 전 `raw/traffic_incident/...` 객체는
+replay/backfill 입력으로 계속 읽을 수 있지만 새 수집은 위 경로만 사용한다.
 
 ## Bronze row
 

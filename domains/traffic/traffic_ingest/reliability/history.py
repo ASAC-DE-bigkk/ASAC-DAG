@@ -48,9 +48,32 @@ def history_prefix() -> str:
 
 def history_object_key(report_date: date) -> str:
     return (
-        f"{history_prefix()}/date={report_date.isoformat()}/domain={DOMAIN}/"
+        f"{history_prefix()}/observed_date={report_date.isoformat()}/"
         f"{HISTORY_VERSION}.json"
     )
+
+
+def _legacy_history_object_keys(report_date: date) -> tuple[str, ...]:
+    suffix = (
+        f"date={report_date.isoformat()}/domain={DOMAIN}/{HISTORY_VERSION}.json"
+    )
+    prefixes = (history_prefix(), "reliability")
+    return tuple(dict.fromkeys(f"{prefix}/{suffix}" for prefix in prefixes))
+
+
+def _read_history_snapshot(storage: HistoryStorage, report_date: date) -> Any:
+    try:
+        return storage.read_json(history_object_key(report_date))
+    except Exception as exc:
+        if not _is_missing(exc):
+            raise
+    for legacy_key in _legacy_history_object_keys(report_date):
+        try:
+            return storage.read_json(legacy_key)
+        except Exception as exc:
+            if not _is_missing(exc):
+                raise
+    raise FileNotFoundError(history_object_key(report_date))
 
 
 def _compact_stage(stage: Mapping[str, Any]) -> dict[str, Any]:
@@ -183,7 +206,7 @@ def load_recent_history(
     for offset in range(days, 0, -1):
         observed_date = report_date - timedelta(days=offset)
         try:
-            payload = store.read_json(history_object_key(observed_date))
+            payload = _read_history_snapshot(store, observed_date)
         except Exception as exc:
             if _is_missing(exc):
                 history.append(_unknown_snapshot(observed_date, "unobserved"))

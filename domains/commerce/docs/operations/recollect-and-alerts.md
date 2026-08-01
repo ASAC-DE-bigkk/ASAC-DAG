@@ -15,6 +15,7 @@ bronze 저장 구조(run_id 폴더 + 마커)를 기반으로 한 운영 보조 3
      (= incomplete 이거나 미시도). 이력이 없으면(첫 실행) 전체.
 - **당일 수집 대상이 없으면 수집 진행 안 함**: 대상이 빈 리스트면 `ingest_one` 이 0개로 매핑돼
   아무것도 호출하지 않고, `finalize_run` 이 `_RUN` 마커도 쓰지 않아 **run 폴더가 생기지 않는다**.
+  단 **완료 알림은 보낸다**(0종 리포트 — 아래 §1-b). 마커를 안 쓰는 것과 알림을 안 보내는 것은 별개다.
 - 재수집분은 **새 `run_id` 폴더**에 그 API들만 적재(기존 run 폴더는 불변).
 
 ### 1-a. 재수집 규칙 (feat/59)
@@ -31,6 +32,25 @@ bronze 저장 구조(run_id 폴더 + 마커)를 기반으로 한 운영 보조 3
 # 수동 재수집(미완료만)
 docker compose exec airflow-scheduler airflow dags trigger commerce_recollect_raw
 ```
+
+### 1-b. 0종 실행 완료 알림 (run report)
+
+`finalize_run` 은 **대상이 0종이어도 DAG 완료 리포트를 1건 보낸다**(정책: [../PROJECT.md](../PROJECT.md) §2).
+0종은 정상 경로(동일자 성공분 제외)지만, 알림이 없으면 수신자는 "오늘 이미 다 받았다"와 "수집이
+멈췄다"를 구분할 수 없다 — 둘 다 **메시지 없음**으로 관측되기 때문이다.
+
+- 본문은 `신규 0건 · 대상 0종` 요약 + **사유 섹션**:
+  - collect — `동일 KST 일자에 이미 완료 152/152종` + **그 일을 끝낸 run_id**(`완료 run: ...`).
+    다른 Airflow 인스턴스가 같은 마커 존을 쓰는 경우도 이 run_id 로 드러난다.
+  - recollect — `최근 run 에 미완료 API 없음`(또는 KST 일자변경 가드).
+- **동일자 완료로 설명되지 않는 잔여**(예: `check_api_key` 게이트 실패로 수집 자체가 안 돈 경우)는
+  `scope_shorts` 로 넘겨 **⛔ 미수집 + 경고색**으로 뜬다 → 상류 스킵이 초록 0종에 묻히지 않는다.
+- run 마커(`_RUN.*`)는 **여전히 쓰지 않는다** — 수집이 없었으므로 run 폴더도 만들지 않는다.
+  즉 "마커 생략"과 "알림 생략"은 분리돼 있다.
+- 구현: [`commerce_raw.py`](../../commerce_raw.py) `_no_target_reason` / `_send_report`,
+  근거 조회 [`bronze/markers.py`](../../include/bronze/markers.py) `same_day_completed_summary`,
+  문구 [`commerce_core/run_report.py`](../../include/commerce_core/run_report.py) `no_target_section`.
+  근거 조회가 실패해도 알림은 나간다(사유만 축약).
 
 > daily 가 전체를 매번 받으므로 엄밀히는 재수집도 daily 가 흡수한다. recollect 는 **부분 실패를
 > 더 자주(6h) 메우는 경량 보강**이다(전체가 아니라 미완료분만).

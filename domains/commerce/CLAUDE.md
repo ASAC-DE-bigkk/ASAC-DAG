@@ -1005,7 +1005,25 @@ Current known rule:
   external alert. Watermark unknown → full-table fallback.
 
 
-## 19.2 운영 기록 관문 (ops record gate — 경로·형식·값 집합의 단일 통로)
+## 19.2 D1 서빙 — commerce 자체 관리
+
+commerce gold(Iceberg) → 공유 Cloudflare **D1(SQLite)** 선별 export 는 **commerce 안에서 자체
+규약으로 관리**한다(타 도메인 방식 추종 불필요). 기존 serving Postgres 경로는 폐기(2026-07-14).
+
+- **정본 규약**: gold 모델 `config.meta.serving.serving_tier`(`d1_direct`/`d1_rollup`/`iceberg_api`)
+  + `d1_table`·`publication_mode`(iceberg/rollup)·`product_id`(gold_*). 설계 정본은 dbt
+  `docs/DB/gold/serving-design.md`.
+- **구현(진행 중 — 미구현 아님)**: 계약 ASAC-DBT **#334/PR#335**(`serving_tier`), export ASAC-DAG
+  **#493/PR#494** `commerce_serving_export`(gold Asset 트리거 분리 DAG, `include/gold/serving_export.py`
+  — direct 15 스냅샷, rollup GROUP BY 파생, iceberg_api Trino 직조회, 행수 밴드 게이트, 마커
+  `commerce_serve_state`). 전부 번들 자립(공유 패키지 강제 소비 없음).
+- **org 공통 계약 #478 과는 별개**: ASAC-DAG #478 `meta.serving.enabled/…` 는 별도 org 계약이며
+  commerce 는 자체 `serving_tier` 규약을 쓴다. 단 ASAC-DBT `serving-contract-gate` CI 가
+  `config.meta.serving` 있는 모든 모델을 #478 규격으로 검사하므로 정합 주의 — 결정은 commerce 자체
+  PR(#335 계열)에서. 상세·추적: **[docs/serving-contract-chain.md](docs/serving-contract-chain.md)**.
+
+
+## 19.3 운영 기록 관문 (ops record gate — 경로·형식·값 집합의 단일 통로)
 
 저장소·운영 기록 규약(ASK-Seoul#78)은 **`common/ops/contract.py` 하나가 강제**한다. 기록을 남기는
 코드는 이 관문만 통과하면 되고, 규약 문서를 다시 읽을 필요가 없다.
@@ -1035,7 +1053,7 @@ from commerce_core.observability import ops_default_args   # DAG default_args �
 - **저장소 → 조회 DB 적재** → `common/ops/ingest.py`. 중복은 파일 이동이 아니라 `event_id` 로
   가른다(적재 여부 = DB 존재 여부). 적재기는 저장소를 **읽기만** 한다.
 
-상세·판단 근거: `change-log.md` §86 · ASK-Seoul#78.
+상세·판단 근거: `change-log.md` §87·§88 · ASK-Seoul#78.
 
 
 ## 20. Security Gate (recall · apply · check, ongoing)

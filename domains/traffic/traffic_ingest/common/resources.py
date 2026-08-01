@@ -1,14 +1,15 @@
 from enum import Enum
 
+from common.pools import (
+    TRINO_TRAFFIC_HEAVY_POOL as TRINO_HEAVY_POOL,
+    TRINO_TRAFFIC_INGEST_POOL as TRINO_INGEST_POOL,
+    TRINO_TRAFFIC_TRANSFORM_POOL as TRINO_TRANSFORM_POOL,
+)
+
 
 class DbtWorkload(str, Enum):
     LOCAL = "local"
     TRINO = "trino"
-
-
-TRINO_HEAVY_POOL = "trino_traffic_heavy"
-TRINO_INGEST_POOL = "trino_traffic_ingest"
-TRINO_TRANSFORM_POOL = "trino_traffic_transform"
 
 
 __all__ = [

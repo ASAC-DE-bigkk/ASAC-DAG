@@ -189,13 +189,76 @@ def ingest_one(short: str, observed_date: str, bronze_run_id: str, **ctx) -> dic
     return summary
 
 
+def _dag_stage() -> tuple[str, str]:
+    """실행 중인 DAG id + 리포트 stage(collect|recollect)."""
+    dag_id = getattr(get_current_context().get("dag_run"), "dag_id", None) or "commerce_collect_raw"
+    return dag_id, ("recollect" if "recollect" in dag_id else "collect")
+
+
+def _send_report(*, dag_id: str, stage: str, run_id: str, observed_date: str,
+                 summaries: list[dict], scope_shorts: list[str] | None,
+                 extra_sections: list[str] | None = None) -> dict | None:
+    """DAG 단위 완료 리포트 → Discord(common.discord, #218). 리포트 내부는 API(short)·category(한글) 단위.
+
+    best-effort: 알림 실패가 finalize/DAG 상태를 오염시키지 않는다(실패는 로그만, None 반환).
+    """
+    try:
+        from commerce_core import run_report   # 지연 임포트(DAG 파싱 경량 유지)
+
+        # 신규 건수 = increment_count(정렬 파일 diff), 전체 = rows_total(API 호출 전량).
+        rr = [{"short": s.get("short"), "status": s.get("status"),
+               "new": s.get("increment_count", 0), "total": s.get("rows_total", 0),
+               "error": s.get("error"), "task": "ingest_one"} for s in summaries]
+        return run_report.send_run_report(
+            dag_id=dag_id, run_id=run_id, observed_date=observed_date, stage=stage,
+            results=rr, scope_shorts=scope_shorts, extra_sections=extra_sections)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("run report 스킵(무시): %s", type(exc).__name__)
+        return None
+
+
+def _no_target_reason(stage: str) -> tuple[str, list[str] | None]:
+    """0종 실행의 사유 섹션 + 미수집으로 집계할 scope(collect 한정).
+
+    동일자 완료로 설명되지 않는 잔여 API 는 scope 로 넘겨 리포트에 ⛔ 미수집으로 뜨게 한다 —
+    게이트 실패 같은 상류 스킵이 '초록 0종'으로 묻히지 않게.
+    """
+    from commerce_core import run_report   # 지연 임포트(DAG 파싱 경량 유지)
+
+    kst_today = datetime.now(KST).strftime("%Y-%m-%d")
+    if stage == "recollect":     # 재수집 대상 산정은 최근 run 기준이라 잔여 개념이 없다
+        return run_report.no_target_section(stage=stage, kst_date=kst_today), None
+    summary = None
+    try:
+        summary = markers.same_day_completed_summary(
+            get_storage(), get_settings().storage_prefix, kst_today, list(COLLECTIBLE_SHORTS))
+    except Exception as exc:  # noqa: BLE001 — 근거 조회 실패가 알림 자체를 막지 않게
+        log.warning("동일자 완료 현황 조회 실패(근거 생략): %s", type(exc).__name__)
+    section = run_report.no_target_section(stage=stage, kst_date=kst_today, summary=summary,
+                                           enabled_total=len(COLLECTIBLE_SHORTS))
+    if summary is None:
+        return section, None
+    done = set(summary["completed"])
+    return section, [s for s in COLLECTIBLE_SHORTS if s not in done] or None
+
+
 @task(trigger_rule=TriggerRule.ALL_DONE)
 def finalize_run(bronze_run_id: str, observed_date: str, summaries: list[dict]) -> dict:
     summaries = [s for s in (summaries or []) if s]
-    if not summaries:   # 수집 대상 없음(recollect) → run 마커 생략 = run 폴더 미생성
-        log.info("수집 대상 없음 — run 마커 생략(수집 진행 안 함).")
-        return {"bronze_run_id": bronze_run_id, "observed_date": observed_date,
-                "datasets_total": 0, "skipped": True}
+    if not summaries:   # 수집 대상 없음(동일자 완료/recollect) → run 마커 생략 = run 폴더 미생성
+        # 마커는 생략하되 **완료 리포트는 보낸다**: 0종 실행이 침묵하면 수신자가 '정상 0종'과
+        # '수집이 멈춤'을 구분할 수 없다. 사유 섹션에 근거(동일자 완료 run)를 싣는다.
+        log.info("수집 대상 없음 — run 마커 생략(수집 진행 안 함). 0종 완료 리포트는 전송.")
+        dag_id, stage = _dag_stage()
+        section, scope = _no_target_reason(stage)
+        metrics = {"bronze_run_id": bronze_run_id, "observed_date": observed_date,
+                   "datasets_total": 0, "skipped": True}
+        report = _send_report(dag_id=dag_id, stage=stage, run_id=bronze_run_id,
+                              observed_date=observed_date, summaries=[],
+                              scope_shorts=scope, extra_sections=[section])
+        if report is not None:
+            metrics["report"] = report
+        return metrics
     settings = get_settings()
     storage = get_storage()
     ok = [s for s in summaries if s.get("status") == "ok"]
@@ -214,24 +277,13 @@ def finalize_run(bronze_run_id: str, observed_date: str, summaries: list[dict]) 
     if incomplete:
         log.warning("미완료(다음 실행/recollect 재수집): %s", incomplete)
 
-    # DAG 단위 완료 리포트 → Discord(common.discord, #218). 리포트 내부는 API(short)·category(한글) 단위.
-    # best-effort: 알림 실패가 finalize/DAG 상태를 오염시키지 않는다.
-    try:
-        from commerce_core import run_report   # 지연 임포트(DAG 파싱 경량 유지)
-
-        dag_id = getattr(get_current_context().get("dag_run"), "dag_id", None) or "commerce_collect_raw"
-        stage = "recollect" if "recollect" in dag_id else "collect"
-        # 신규 건수 = increment_count(정렬 파일 diff), 전체 = rows_total(API 호출 전량).
-        rr = [{"short": s.get("short"), "status": s.get("status"),
-               "new": s.get("increment_count", 0), "total": s.get("rows_total", 0),
-               "error": s.get("error"), "task": "ingest_one"} for s in summaries]
-        # collect(daily): 전 수집대상(152종) 기준 미수집(결과없음)까지 집계. recollect: 대상분만.
-        scope = list(COLLECTIBLE_SHORTS) if stage == "collect" else None
-        metrics["report"] = run_report.send_run_report(
-            dag_id=dag_id, run_id=bronze_run_id, observed_date=observed_date,
-            stage=stage, results=rr, scope_shorts=scope)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("run report 스킵(무시): %s", type(exc).__name__)
+    dag_id, stage = _dag_stage()
+    # collect(daily): 전 수집대상(152종) 기준 미수집(결과없음)까지 집계. recollect: 대상분만.
+    scope = list(COLLECTIBLE_SHORTS) if stage == "collect" else None
+    report = _send_report(dag_id=dag_id, stage=stage, run_id=bronze_run_id,
+                          observed_date=observed_date, summaries=summaries, scope_shorts=scope)
+    if report is not None:
+        metrics["report"] = report
     return metrics
 
 

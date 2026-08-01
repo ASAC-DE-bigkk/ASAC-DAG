@@ -138,12 +138,21 @@ def test_flow_landing_preserves_raw_json_and_is_stable_for_same_run_link():
     descriptor = result["raw_objects"][0]
 
     assert result["expected_rows"] == 1
+    expected_run_prefix = (
+        "raw/traffic/seoul_traffic_flow/load_date=2026-07-15/"
+        "run_id=manual__flow"
+    )
+    assert descriptor["raw_object_key"] == (
+        f"{expected_run_prefix}/"
+        "20260715T100203KST_TrafficInfo-link_id=1220003800.xml"
+    )
     assert descriptor["raw_object_key"] in store.objects
     assert store.objects[descriptor["raw_object_key"]][0] == _payload(
         rows=[{"LINK_ID": "1220003800"}]
     )
     assert "manual__flow" in descriptor["raw_object_key"]
     assert descriptor["raw_object_key"].endswith(".xml")
+    assert result["manifest_key"] == f"{expected_run_prefix}/_manifest.json"
     assert result["manifest_key"] == store.write_order[-1]
     assert json.loads(store.objects[result["manifest_key"]][0]) == {
         "run_id": "manual__flow",
@@ -153,7 +162,7 @@ def test_flow_landing_preserves_raw_json_and_is_stable_for_same_run_link():
         "expected_count": 1,
         "actual_count": 1,
         "completed_at": "2026-07-15T01:02:03+00:00",
-        "status": "SUCCESS",
+        "status": "complete",
     }
 
 

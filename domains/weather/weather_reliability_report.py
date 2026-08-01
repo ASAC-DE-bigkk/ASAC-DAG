@@ -19,6 +19,7 @@ if DAGS_ROOT_DIR not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.ops.product_observability import record_product_health  # noqa: E402
+from common.pools import TRINO_WEATHER_HEAVY_POOL  # noqa: E402
 from common.runmetrics import track  # noqa: E402
 from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
@@ -306,7 +307,7 @@ with DAG(
     collect_data_plane_task = PythonOperator(
         task_id="collect_weather_data_plane",
         python_callable=collect_pipeline_data_plane,
-        pool="trino_weather_heavy",
+        pool=TRINO_WEATHER_HEAVY_POOL,
         pool_slots=1,
         on_failure_callback=record_weather_problem,
     )

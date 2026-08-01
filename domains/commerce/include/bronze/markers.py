@@ -79,6 +79,25 @@ def completed_shorts_on_date(storage: Storage, prefix: str, date: str,
     return done
 
 
+def same_day_completed_summary(storage: Storage, prefix: str, date: str,
+                               enabled_shorts: list[str]) -> dict:
+    """동일 KST 일자의 completed 현황 — 완료 short 합집합 + run 별 완료 종수.
+
+    수집 대상이 0종으로 끝난 실행이 **왜 0종인지**(어느 run 이 이미 끝냈는지)를 완료 알림에
+    근거로 싣기 위한 조회. 반환: `{"date", "completed": [short...], "runs": {run_id: 종수}}`.
+    """
+    enabled = set(enabled_shorts)
+    done: set[str] = set()
+    runs: dict[str, int] = {}
+    for rid in list_run_ids(storage, prefix):
+        if run_date(rid) != date:
+            continue
+        c = completed_shorts(storage, prefix, rid) & enabled
+        runs[rid] = len(c)
+        done |= c
+    return {"date": date, "completed": sorted(done), "runs": runs}
+
+
 def plan_excluding_same_day_completed(storage: Storage, prefix: str, date: str,
                                       enabled_shorts: list[str]) -> list[str]:
     """동일자(같은 KST 날짜)에 이미 completed 인 API 를 제외한 수집 대상.

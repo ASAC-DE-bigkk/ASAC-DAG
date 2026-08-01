@@ -193,6 +193,14 @@ def test_collect_preserves_kma_raw_lineage_for_one_grid_page():
     assert batch.reused_raw_object_count == 0
     assert len(batch.raw_objects) == 1
     raw_object = batch.raw_objects[0]
+    expected_run_prefix = (
+        "raw/weather/kma_vilage_fcst/load_date=2026-07-14/"
+        "run_id=scheduled__weather"
+    )
+    assert raw_object.raw_object_key == (
+        f"{expected_run_prefix}/nx=60/ny=127/"
+        "20260714T092000KST_base-202607140800_request-1.json"
+    )
     assert raw_object.request_id == "request-1"
     assert raw_object.place_id == "seoul"
     assert raw_object.nx == 60
@@ -205,7 +213,7 @@ def test_collect_preserves_kma_raw_lineage_for_one_grid_page():
         == "application/json; charset=utf-8"
     )
     assert "KMA_SERVICE_KEY" not in raw_object.raw_object_key
-    assert batch.manifest_key is not None
+    assert batch.manifest_key == f"{expected_run_prefix}/_manifest.json"
     assert raw_store.write_order[-1] == batch.manifest_key
     assert json.loads(raw_store.read_bytes(batch.manifest_key)) == {
         "run_id": "scheduled__weather",
@@ -215,7 +223,7 @@ def test_collect_preserves_kma_raw_lineage_for_one_grid_page():
         "expected_count": 1,
         "actual_count": 1,
         "completed_at": "2026-07-14T09:20:00+09:00",
-        "status": "SUCCESS",
+        "status": "complete",
     }
 
 

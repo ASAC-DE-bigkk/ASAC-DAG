@@ -18,6 +18,26 @@ REQUIRED_FIELDS = (
     "status",
 )
 
+RAW_MANIFEST_STATUS_COMPLETE = "complete"
+RAW_MANIFEST_STATUS_COMPLETE_WITH_VIOLATIONS = "complete_with_violations"
+LEGACY_RAW_MANIFEST_STATUS_SUCCESS = "SUCCESS"
+
+_SUPPORTED_STATUSES = frozenset(
+    {
+        RAW_MANIFEST_STATUS_COMPLETE,
+        RAW_MANIFEST_STATUS_COMPLETE_WITH_VIOLATIONS,
+        LEGACY_RAW_MANIFEST_STATUS_SUCCESS,
+        "FAILED",
+        "PARTIAL",
+    }
+)
+_BRONZE_ADMISSION_STATUSES = frozenset(
+    {
+        RAW_MANIFEST_STATUS_COMPLETE,
+        LEGACY_RAW_MANIFEST_STATUS_SUCCESS,
+    }
+)
+
 
 def build_raw_manifest(
     *,
@@ -37,10 +57,10 @@ def build_raw_manifest(
         raise ValueError("raw manifest counts must be non-negative")
     if actual_count != len(keys):
         raise ValueError("raw manifest actual_count must equal object_keys length")
-    if status not in {"SUCCESS", "FAILED", "PARTIAL"}:
+    if status not in _SUPPORTED_STATUSES:
         raise ValueError(f"unsupported raw manifest status: {status}")
-    if status == "SUCCESS" and expected_count != actual_count:
-        raise ValueError("successful raw manifest requires matching counts")
+    if status in _BRONZE_ADMISSION_STATUSES and expected_count != actual_count:
+        raise ValueError("complete raw manifest requires matching counts")
     datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
     return {
         "run_id": run_id,
@@ -68,8 +88,8 @@ def validate_raw_manifest(
     actual_keys = list(dict.fromkeys(str(key) for key in document["object_keys"]))
     if document["run_id"] != run_id or document["dataset"] != dataset:
         raise ValueError("raw manifest run_id or dataset mismatch")
-    if document["status"] != "SUCCESS":
-        raise ValueError("raw manifest is not successful")
+    if document["status"] not in _BRONZE_ADMISSION_STATUSES:
+        raise ValueError("raw manifest is not complete")
     if actual_keys != expected_keys:
         raise ValueError("raw manifest object_keys mismatch")
     if document["actual_count"] != len(actual_keys):

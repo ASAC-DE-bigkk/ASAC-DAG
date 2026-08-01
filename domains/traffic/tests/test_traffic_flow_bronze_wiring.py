@@ -45,7 +45,7 @@ def test_flow_dag_has_two_meaningful_tasks_and_no_independent_cron():
         "AssetTriggeredTimetable",
     }
     assert dag_module.TRAFFIC_INCIDENT_BRONZE_ASSET in repr(
-        dag_module.dag.timetable.dataset_condition
+        dag_module.dag.schedule
     )
 
 

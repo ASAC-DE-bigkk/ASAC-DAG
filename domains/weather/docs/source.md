@@ -62,14 +62,19 @@ raw는 API 응답 JSON bytes를 그대로 저장한다. 겉으로 폴더처럼 �
 object key 문자열을 `/`로 나눠 정한 것이다.
 
 ```text
-raw/weather_forecast/kma_vilage_fcst/load_date=YYYY-MM-DD/nx=<nx>/ny=<ny>/YYYYMMDDTHHMMSSKST_base-<base_date><base_time>_<request_id>.json
+raw/weather/kma_vilage_fcst/load_date=YYYY-MM-DD/run_id=<run_id>/nx=<nx>/ny=<ny>/YYYYMMDDTHHMMSSKST_base-<base_date><base_time>_<request_id>.json
 ```
 
 예시:
 
 ```text
-raw/weather_forecast/kma_vilage_fcst/load_date=2026-07-01/nx=60/ny=127/20260701T105517KST_base-202607010800_<request_id>.json
+raw/weather/kma_vilage_fcst/load_date=2026-07-01/run_id=<run_id>/nx=60/ny=127/20260701T105517KST_base-202607010800_<request_id>.json
 ```
+
+같은 run에서 생성한 모든 JSON을 기록한 뒤 같은 `run_id` prefix에
+`_manifest.json`을 마지막으로 쓴다. 이 manifest가 존재하고 object key·개수가
+일치해야 Bronze 적재를 시작한다. 변경 전 `raw/weather_forecast/...` 객체는
+replay/backfill 입력으로 계속 읽을 수 있지만 새 수집은 위 경로만 사용한다.
 
 ## Bronze row
 

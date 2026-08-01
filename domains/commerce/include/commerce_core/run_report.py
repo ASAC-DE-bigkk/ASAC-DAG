@@ -313,6 +313,33 @@ def send_run_report(*, dag_id: str, run_id: str, observed_date: str, stage: str,
     return rep["counts"]
 
 
+# ── 수집 대상 0종 섹션 — '정상 0종'과 '수집이 멈춤'을 수신자가 구분할 수 있게 사유를 싣는다 ──
+def no_target_section(*, stage: str, kst_date: str, summary: dict | None = None,
+                      enabled_total: int = 0) -> str:
+    """수집 대상 0종으로 끝난 실행의 사유 섹션(0건 리포트 본문에 붙인다).
+
+    0종 자체는 정상 경로(동일자 성공분 제외 = feat/59)지만, 사유가 없으면 알림을 받은 쪽이
+    '오늘 이미 다 받았다'와 '수집이 안 돌았다'를 구분할 수 없다.
+    summary = `markers.same_day_completed_summary()` 결과(조회 실패 시 None → 사유만).
+    """
+    if stage == "recollect":
+        return (f"**재수집 대상 없음(0종)** — 최근 run 에 미완료(incomplete/미시도) API 가 없다. "
+                f"(또는 최근 run 이 오늘({kst_date}) 이전 일자 → KST 일자변경 가드)")
+    if not summary:
+        return (f"**수집 대상 없음(0종)** — 동일 KST 일자({kst_date}) 성공분 제외 규칙으로 대상이 비었다. "
+                "(완료 현황 조회 실패 — 근거 생략)")
+    done = len(summary.get("completed") or [])
+    runs = summary.get("runs") or {}
+    runs_txt = " · ".join(f"`{rid}` {c}종" for rid, c in sorted(runs.items())) or "없음"
+    sec = (f"**수집 대상 없음(0종)** — 동일 KST 일자({kst_date})에 이미 완료 "
+           f"{done}/{enabled_total}종 (동일자 성공분 제외 규칙)\n완료 run: {runs_txt}")
+    rest = enabled_total - done
+    if rest > 0:   # 동일자 완료로도, 이번 수집으로도 설명되지 않는 잔여 → 상류 스킵 의심
+        sec += (f"\n⚠️ 나머지 {rest}종은 동일자 완료도 이번 실행 수집도 아니다 — "
+                "상류(게이트/플랜) 실패·스킵 확인 필요.")
+    return sec
+
+
 # ── 유지보수(#226) 섹션 렌더 — (테이블,op) 단위 성공/실패 + 자원(elapsed/cpu/peak RAM). GPU=Trino 미사용 N/A ──
 def _fmt_ms(ms) -> str:
     return f"{ms / 1000:.1f}s" if ms else "-"
