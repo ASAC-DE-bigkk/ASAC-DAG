@@ -177,7 +177,7 @@ def test_collect_preserves_raw_lineage_for_one_successful_page():
         "expected_count": 1,
         "actual_count": 1,
         "completed_at": "2026-07-14T09:20:00+09:00",
-        "status": "SUCCESS",
+        "status": "complete",
     }
 
 

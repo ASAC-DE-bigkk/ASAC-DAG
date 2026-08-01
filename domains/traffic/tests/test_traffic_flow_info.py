@@ -153,7 +153,7 @@ def test_flow_landing_preserves_raw_json_and_is_stable_for_same_run_link():
         "expected_count": 1,
         "actual_count": 1,
         "completed_at": "2026-07-15T01:02:03+00:00",
-        "status": "SUCCESS",
+        "status": "complete",
     }
 
 

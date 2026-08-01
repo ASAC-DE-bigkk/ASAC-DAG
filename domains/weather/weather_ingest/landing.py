@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Callable, Protocol
 
-from common.raw_manifest import build_raw_manifest
+from common.raw_manifest import RAW_MANIFEST_STATUS_COMPLETE, build_raw_manifest
 from weather_ingest.kma import KST, parse_kma_response
 from weather_ingest.errors import (
     WeatherCompletenessError,
@@ -307,6 +307,7 @@ class KmaLanding:
             expected_count=len(raw_objects),
             actual_count=len(raw_objects),
             completed_at=self._clock().astimezone(KST).isoformat(),
+            status=RAW_MANIFEST_STATUS_COMPLETE,
         )
         self._raw_store.write_bytes(
             key,
