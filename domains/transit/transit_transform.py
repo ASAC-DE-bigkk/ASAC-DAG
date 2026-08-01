@@ -57,6 +57,7 @@ if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
+from common.pools import TRINO_TRANSIT_HEAVY_POOL  # noqa: E402
 from common.runmetrics import dump_dbt_run_results  # noqa: E402
 from seoul_transit import config  # noqa: E402
 
@@ -64,12 +65,11 @@ from seoul_transit import config  # noqa: E402
 KST = ZoneInfo("Asia/Seoul")
 DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 DBT_PROJECT = "/opt/airflow/dbt/domains/transit"
-# 도메인 전용 Trino 직렬화 pool (slot 1, docker-compose airflow-init 에서 생성) —
-# weather/traffic 의 도메인별 heavy pool 관례. fresh/heavy 두 transform 의 dbt_deps·
-# dbt_build 가 같은 pool 을 쓰므로 단일노드 Trino 에서 두 빌드가 절대 겹쳐 돌지 않고
-# (실측: dev 에서 동시 실행 시 heavy 소요 168s → 약 8분), 공유 dbt_packages/ 를
-# 다시 쓰는 deps 가 상대 DAG 의 deps·parse 와 경합하는 것도 함께 차단된다.
-TRANSIT_TRINO_HEAVY_POOL = "trino_transit_heavy"
+# 도메인 전용 Trino 직렬화 pool (slot 1) — 정의는 common/pools.py(단일 진실 공급원,
+# airflow-init 이 pools import 로 생성). weather/traffic 의 도메인별 heavy pool 관례.
+# fresh/heavy 두 transform 의 dbt_deps·dbt_build 가 같은 pool 을 쓰므로 단일노드
+# Trino 에서 두 빌드가 절대 겹쳐 돌지 않고(실측: dev 동시 실행 시 heavy 168s → 약 8분),
+# 공유 dbt_packages/ 를 다시 쓰는 deps 의 교차 경합도 함께 차단된다.
 # dbt 는 run_results.json 을 프로젝트의 target-path(dbt_project.yml: target) 아래에 쓴다.
 RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, "target", "run_results.json")
 # heavy DAG 는 target-path 를 격리한다 — 두 transform DAG 가 같은 프로젝트를 공유하므로
@@ -230,7 +230,7 @@ with DAG(
     dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=dbt_command("deps"),
-        pool=TRANSIT_TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSIT_HEAVY_POOL,
         on_failure_callback=record_transit_problem,
     )
 
@@ -244,7 +244,7 @@ with DAG(
     dbt_build = BashOperator(
         task_id="dbt_build",
         bash_command=dbt_command("build", exclude="tag:heavy"),
-        pool=TRANSIT_TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSIT_HEAVY_POOL,
         on_failure_callback=record_transit_problem,
     )
 
@@ -288,7 +288,7 @@ with DAG(
     heavy_dbt_deps = BashOperator(
         task_id="dbt_deps",
         bash_command=dbt_command("deps"),
-        pool=TRANSIT_TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSIT_HEAVY_POOL,
         on_failure_callback=record_transit_problem,
     )
 
@@ -299,7 +299,7 @@ with DAG(
         bash_command=dbt_command(
             "build", select="tag:heavy", target_path=HEAVY_TARGET_PATH
         ),
-        pool=TRANSIT_TRINO_HEAVY_POOL,
+        pool=TRINO_TRANSIT_HEAVY_POOL,
         on_failure_callback=record_transit_problem,
     )
 
