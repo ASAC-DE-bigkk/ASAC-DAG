@@ -10,15 +10,16 @@ from common.runtime_guard import (
 
 
 def test_accepts_dev_runtime_with_domain_schema_defaults():
+    """자격증명 키는 타깃과 무관하게 canonical ``R2_*`` 한 세트 — 타깃별로 다른 건 **값**이다."""
     validate_dev_runtime(
         "traffic",
         {
             "DBT_TARGET": "dev",
             "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
-            "R2_DEV_BUCKET_NAME": "seoul-dev",
-            "R2_DEV_ENDPOINT": "https://dev.invalid",
-            "R2_DEV_ACCESS_KEY_ID": "dev-access",
-            "R2_DEV_SECRET_ACCESS_KEY": "dev-secret",
+            "R2_BUCKET_NAME": "seoul-dev",
+            "R2_ENDPOINT": "https://dev.invalid",
+            "R2_ACCESS_KEY_ID": "dev-access",
+            "R2_SECRET_ACCESS_KEY": "dev-secret",
         },
     )
 
@@ -37,7 +38,8 @@ def test_accepts_prod_runtime_with_domain_schema_defaults():
     )
 
 
-def test_accepts_prod_runtime_with_dev_r2_keys_when_prod_tuple_is_valid():
+def test_environment_scoped_keys_are_not_credentials():
+    """``R2_DEV_*`` 가 남아 있어도 무시한다 — 이름으로 환경을 고르는 통로를 없앴다(Z-7)."""
     validate_dev_runtime(
         "weather",
         {
@@ -52,17 +54,18 @@ def test_accepts_prod_runtime_with_dev_r2_keys_when_prod_tuple_is_valid():
     )
 
 
-def test_rejects_dev_runtime_when_dev_r2_tuple_is_incomplete():
-    with pytest.raises(RuntimeTargetError, match="R2_DEV_ACCESS_KEY_ID"):
+def test_rejects_runtime_when_canonical_r2_tuple_is_incomplete():
+    """``R2_DEV_*`` 로는 빈 자리를 메울 수 없다 — 누락은 누락으로 드러나야 한다."""
+    with pytest.raises(RuntimeTargetError, match="R2_ACCESS_KEY_ID"):
         validate_dev_runtime(
             "traffic",
             {
                 "DBT_TARGET": "dev",
                 "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
-                "R2_DEV_BUCKET_NAME": "seoul-dev",
-                "R2_DEV_ENDPOINT": "https://dev.invalid",
-                "R2_ACCESS_KEY_ID": "prod-access",
-                "R2_DEV_SECRET_ACCESS_KEY": "dev-secret",
+                "R2_BUCKET_NAME": "seoul-dev",
+                "R2_ENDPOINT": "https://dev.invalid",
+                "R2_DEV_ACCESS_KEY_ID": "dev-access",
+                "R2_SECRET_ACCESS_KEY": "dev-secret",
             },
         )
 

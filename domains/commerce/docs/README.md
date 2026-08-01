@@ -35,7 +35,7 @@ commerce 카테고리 문서 모음. 코드·설정·테스트·문서·규약(C
 docs/
 ├─ architecture/   project_setting.md · architecture.md · storage.md
 ├─ configuration/  configuration.md · environments.md
-├─ operations/     operations.md · deploy-local.md · deploy-dev.md · deploy-prod.md
+├─ operations/     operations.md · ops-records.md · deploy-local.md · deploy-prod.md · deploy-dev.md
 ├─ pipeline/       data-model.md · common_info.md · non-license-datasets.md · (역사: medallion-implementation-plan.md · silver-gold-load-plan.md)
 │  ├─ raw/         api-field-coverage.md · api-call-volume.md · pagination-ordering.md · status-tracking-model.md · incremental-sort-diff.md · uncollectable-datasets.md · resolve-worklist.md · caveats.md
 │  ├─ bronze/      README.md (Iceberg 적재: 테이블·엔진·manifest·유지보수)

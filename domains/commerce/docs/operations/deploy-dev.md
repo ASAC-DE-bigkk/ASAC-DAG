@@ -1,20 +1,29 @@
 # Deploy — dev (레거시, 현재 사용하지 않음)
 
-> ## ⚠️ 이 문서는 폐지된 구성을 설명한다
+> ## ⚠️ 지금 동작 중인 구성이 아니다 — 되돌아갈 지점이다
 >
 > **2026-07-28 전환(change-log §79) 이후 dev 버킷(`seoul-dev`)·dev 카탈로그(`iceberg_dev`)로
-> 가는 신규 쓰기가 없다.** 루트 `.env` 에 `R2_DEV_*`·`TRINO_DEV_ICEBERG_CATALOG` 활성 설정도
-> 없다. `seoul-dev` 는 전환 전 구조가 그대로 남은 **보존본**이며 현행과 저장 구조가 다르다
-> (구 `YYYY/MM/DD` raw 레이아웃, ops 존 밖 루트 `runs/`·`errors/` 등).
+> 가는 신규 쓰기가 없다.** `seoul-dev` 는 전환 직전 상태로 **동결**돼 있고, 운영 이관이 완전히
+> 종결될 때까지 **롤백 지점으로 보존**한다(삭제 대상 아님).
 >
 > - 현행 배포는 [deploy-prod.md](deploy-prod.md), 환경 현황은
 >   [environments.md](../configuration/environments.md) §3.
 > - 자격증명 없이 도는 스모크는 [deploy-local.md](deploy-local.md).
-> - `seoul-dev` 정리는 "쓰는 쪽 되돌리기"가 아니라 **참조 0 확인 후 삭제**(ASK-Seoul#78 `Y-2`)
->   대상이고 별도 이슈에서 다룬다.
 >
-> 아래 절차는 **이력 참고용**이다. 그대로 실행하면 dev 우선 규칙(`common.storage.r2_env`)이
-> 되살아나 운영 기록이 두 버킷으로 갈린다(`Z-7`).
+> **되돌리는 방법이 아래 절차와 다르다.** `R2_DEV_*` 는 폐지됐다(호스트 ENV2 개편 + 코드에서
+> 제거, ASAC-DAG#647). 되돌릴 때는 **키를 바꾸는 게 아니라 값을 바꾼다**:
+>
+> ```bash
+> R2_BUCKET_NAME=seoul-dev
+> R2_ENDPOINT=<dev endpoint>
+> R2_ACCESS_KEY_ID=<dev key>
+> R2_SECRET_ACCESS_KEY=<dev secret>
+> TRINO_ICEBERG_CATALOG=iceberg_dev
+> DBT_TARGET=dev ; ASK_SEOUL_TARGET=dev ; COMMERCE_DBT_TARGET=dev   # 셋을 함께
+> ```
+>
+> `R2_DEV_*` 를 되살리면 같은 날짜 기록이 두 버킷으로 갈린다(ASK-Seoul#78 `Z-7`).
+> 아래 본문의 `R2_DEV_*` 서술은 **이력 참고용**이다.
 
 ## (이력) dev 버킷 배포 절차
 

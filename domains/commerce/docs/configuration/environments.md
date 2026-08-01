@@ -15,10 +15,14 @@
 | 실행 타깃 | **`prod`** | `DBT_TARGET=prod` · `ASK_SEOUL_TARGET=prod` · `COMMERCE_DBT_TARGET=prod` (셋 다 일치) |
 | R2 자격증명·엔드포인트 | 루트 `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | 이름이 같아 `.env.commerce` 매핑 없이 **프로세스 env 를 그대로 상속** |
 
-**`R2_DEV_*` 와 `TRINO_DEV_ICEBERG_CATALOG` 는 활성 설정이 하나도 없다.** 그래서 dev 우선
-해석 규칙(`common.storage.r2_env` — `R2_DEV_<X>` 가 있으면 우선)이 있어도 실제로는 전부
-`R2_*`(=`seoul`)로 수렴한다. 즉 **개발 기록이 운영 지표에 섞이는 경로가 지금은 없다**
-(ASK-Seoul#78 `Z-7` 이 지적한 혼입은 `R2_DEV_*` 를 세팅한 환경의 이야기다).
+**`R2_DEV_*` 는 폐지됐다.** 호스트가 ENV2 개편에서 그 키를 없앴고(Trino 카탈로그 파일도
+canonical `R2_*` 한 세트만 읽는다), 코드에 남아 있던 dev 우선 해석 규칙도 제거했다
+(ASAC-DAG#647). 지금은 **자격증명 키 이름이 배포 환경을 담지 않는다** — `R2_*` 한 벌이고
+어느 버킷을 가리키는지는 그 **값**이 정한다.
+
+> ⚠️ `R2_DEV_*` 를 되살리지 말 것. 채우는 순간 같은 날짜의 운영 기록이 두 버킷으로 갈린다
+> (ASK-Seoul#78 `Z-7`). dev 로 되돌릴 때는 키를 바꾸는 게 아니라 위 4개 키의 **값**을 dev 것으로
+> 채우고 `TRINO_ICEBERG_CATALOG` 를 바꾼다(§3).
 
 ### 타깃 이름이 세 개인 이유
 
@@ -58,16 +62,19 @@ seoul/
 - ops 존 밖 구경로(`runs/`·`errors/`·`metrics/` 루트)도 **0건**.
 - 운영 기록 적재기(`common/ops/ingest.py`)의 경로 판독률 **36,536/36,536 = 100%**.
 
-## 3. dev(`seoul-dev` / `iceberg_dev`)는 레거시다
+## 3. dev(`seoul-dev` / `iceberg_dev`)는 **동결된 롤백 지점**이다
 
 2026-07-28 전환(change-log §79) 이후 **신규 쓰기는 전부 `seoul` 로만** 간다. `seoul-dev` 는
-전환 전 구조가 그대로 남아 있는 보존본이고, **현행과 저장 구조가 다르다**(구 `YYYY/MM/DD`
-raw 레이아웃, ops 존 밖 루트 `runs/`·`errors/` 등). 따라서
+전환 직전 상태가 그대로 남아 있고 **현행과 저장 구조가 다르다**(구 `YYYY/MM/DD` raw 레이아웃,
+ops 존 밖 루트 `runs/`·`errors/` 등).
 
-- 현황 판단·감사·적재의 기준은 **항상 `seoul`** 이다. `seoul-dev` 수치를 현황으로 인용하지 않는다.
-- `seoul-dev` 정리는 "쓰는 쪽을 되돌리는" 문제가 아니라 **참조 0 확인 후 삭제**(ASK-Seoul#78 `Y-2`)
-  대상이며, 별도 이슈에서 다룬다.
-- 문서에서 dev 를 "prod 와 짝을 이루는 현행 환경"으로 서술하지 않는다.
+- **정리·삭제 대상이 아니다.** 운영 이관이 완전히 종결될 때까지 **되돌아갈 지점**으로 보존한다.
+  정리 시점은 이관 종결 후 오너가 정한다.
+- 그렇다고 **현행도 아니다.** 현황 판단·감사·적재의 기준은 항상 `seoul` 이며, `seoul-dev` 수치를
+  현황으로 인용하지 않는다. 문서에서 dev 를 "prod 와 짝을 이루는 동작 중인 환경"으로 쓰지 않는다.
+- 되돌릴 때는 **키 이름이 아니라 값을 바꾼다** — `R2_BUCKET_NAME`·`R2_ENDPOINT`·`R2_ACCESS_KEY_ID`·
+  `R2_SECRET_ACCESS_KEY` 에 dev 값을 넣고 `TRINO_ICEBERG_CATALOG=iceberg_dev` 로 바꾼다.
+  **`R2_DEV_*` 는 되살리지 않는다**(§1 참조 — 두 버킷 동시 기록을 만든다).
 
 `local` 백엔드(`COMMERCE_STORAGE_BACKEND=local`)는 R2 자격증명 없이 도는 **코드 경로**로 남아
 있다(신규 기여자 스모크용). 컨테이너 `/opt/airflow/data` 는 호스트 볼륨 마운트가 없어 산출물이

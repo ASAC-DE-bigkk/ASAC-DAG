@@ -7,6 +7,61 @@
 
 ## 2026-08-01
 
+### 89. R2_DEV_* 폐지(키가 배포 영역을 지정하지 않게) + Y-7 89 GiB 판정 + 운영 기록 흐름 문서
+
+request:
+- "`R2_DEV_*` 는 패치로 이제 접근하지 않는 설정일 텐데? **현재 사용하는 곳이 없다면 혼동하지
+  않도록 완전히 드랍**하고, 사용하는 환경이 있다면 **key 단위에서 배포 영역을 지정하지 않고
+  배포 환경에 따라 key 의 '값'을 따라가도록** 일괄 설정해 달라."
+- "`seoul-dev` 는 **운영 설정이 완전히 종결되면 다시 되돌아갈 곳**이므로, 운영 이관이 완전히
+  종결되면 그때 조치할 것임."
+- "prod 카탈로그에 80기가 있다는 것이 **정말 commerce 소유인지**, 현재 **prod·seoul 환경에
+  영향을 미치는 상태로 잔여**하는지, **다른 도메인 자료는 아닌지** 명확히 확인하고, 모든 게
+  명확하면 드롭 시행할 것."
+- "로그 생성과 적재가 어떻게·어떤 주기로 이뤄지는지 정리해 **문서로 남겨** 달라."
+
+response:
+- **`R2_DEV_*` 는 이미 호스트에서 폐지된 상태였고, `dags/` 코드에만 남아 있었다.** 근거:
+  `docker-compose.yml` 주석에 "ENV2 가 `R2_DEV_*` 를 없애자 dev 카탈로그 파일만 참조 불가가 되어
+  Trino 가 기동 실패했다 → 파일을 하나로 합쳤다"는 이력이 있고, 실제 `trino/iceberg.properties`
+  는 canonical `R2_*`(`R2_DATA_CATALOG_URI`·`R2_ENDPOINT` 등) 한 세트만 읽는다. 루트 `.env` 에도
+  활성 `R2_DEV_*` 가 없다. 즉 **호스트는 이미 사용자가 요구한 형태**(키는 환경 무관, 값이 배포를
+  따라감)였고 코드만 옛 분기를 이고 있었다.
+- **코드에서 환경 지정 키를 제거**(런타임 무변경 — 어차피 그 키가 없어 전부 `R2_*` 로 수렴하고
+  있었다). 분기를 남겨 두면 누가 `R2_DEV_*` 를 채우는 순간 같은 날짜 기록이 두 버킷으로 갈리는
+  통로가 된다(#78 `Z-7`).
+  - `common/storage.py` — `r2_env()` 의 dev 우선 규칙 삭제. `r2_env_for(name, target)` 은 호출측
+    5곳(run_sink·citydata 4개 DAG) 호환을 위해 남기되 **target 으로 분기하지 않는 별칭**으로.
+  - `common/runtime_guard.py` — `_R2_TARGETS`(타깃별 키 세트) → `_R2_CREDENTIAL_KEYS`(canonical
+    한 세트) + `_R2_EXPECTED_BUCKET`(타깃별 **기대 값**). 타깃이 가르는 건 키가 아니라 값이다.
+  - `common_dbt_smoke.py` — `r2_env_name()`(dev 키 치환) 제거, `R2_DEV_RAW_PREFIX` → `R2_RAW_PREFIX`.
+  - 호스트 `.env.example` — `R2_DEV_*` 8줄 삭제 + "되살리지 말 것(Z-7)" 경고와 되돌리는 올바른
+    방법(값 교체) 명시. **호스트 파일 변경이라 사용자 지시에 따라 수행.**
+  - 테스트 갱신: `R2_DEV_*` 가 있어도 무시되고, 그것만으로는 자격증명이 채워지지 않으며,
+    `r2_env_for` 의 target 이 더는 분기하지 않음을 회귀로 고정.
+- **`seoul-dev` 서술 정정.** 직전 §88 에서 "폐기 대상"으로 적었으나 사용자 확인 결과 **운영 이관
+  종결 시까지 보존하는 동결된 롤백 지점**이다. `environments.md` §3 · `deploy-dev.md` 배너 ·
+  `deploy-prod.md` 를 "삭제 대상 아님 / 되돌릴 때는 키가 아니라 값을 바꾼다"로 고쳤다.
+- **Y-7(89 GiB) 판정 — 드롭하지 않는다. prod 에 존재하지 않고 commerce 소유도 아니다.** 실측:
+  - prod 카탈로그 `iceberg` 의 스키마는 citydata·commerce·common·culture·ops_smoke·traffic·
+    transit·weather·weather_traffic_bronze 뿐 — **`ops` 스키마가 없다**(=`ops.run_metadata` 없음).
+  - prod 창고 `seoul/__r2_data_catalog/` **전체가 141,878객체 38.27 GiB** — 89 GiB 객체가 물리적으로
+    존재할 수 없다. 최대는 citydata `bronze_seoul_citydata` 8.67 GiB, commerce 최대는
+    `silver_license_history` 1.34 GiB.
+  - 소유도 commerce 가 아니다. `ops.run_metadata` 는 전 도메인 공통 실행기록 테이블이었고
+    (`citydata_ops_digest` 주석: "과거엔 `ops.run_metadata`(Iceberg)를 읽었으나 citydata DAG 들이
+    `record_run` 으로 옮기며"), commerce 는 이 테이블을 읽거나 쓴 적이 없다(참조 0).
+  - 대상은 dev 카탈로그(`iceberg_dev`/`seoul-dev`)이고, 이 Trino 스택에는 그 카탈로그가 아예
+    등록돼 있지 않다(`SHOW CATALOGS` = iceberg·jmx·memory·system·tpcds·tpch).
+  - → **prod·seoul 에 미치는 영향 0.** seoul-dev 는 롤백 지점으로 보존하기로 했으므로 드롭은
+    운영 이관 종결 후로 미룬다. #78 `Y-7` 의 commerce 배정은 **오배정**이며 #78 에 정정 요청.
+- **운영 기록 흐름 문서 신설**: [docs/operations/ops-records.md](docs/operations/ops-records.md).
+  생성(무엇이 언제 어디에) · 적재(01:30 2태스크 순서·3일 창의 이유·상한·최초 백필) · 주기 표 ·
+  보관 기간 · 중복 방지(파일 이동 없음) · 실패 시 동작 · 관측 공백 표기 · 확인 쿼리.
+  **04~06시 라인의 기록은 다음 날 01:30 에 실린다**는 시점 관계를 명시했다(3일 창의 근거).
+  `docs/operations/README.md` · `docs/README.md` 색인 반영.
+- 검증: 634건 통과 · `python -m security` PASS.
+
 ### 88. 환경 현황 문서를 운영(prod) 기준으로 재작성 + 적재기 결함 2건 수정
 
 request:

@@ -19,39 +19,31 @@ from typing import Any
 def r2_env(name: str) -> str:
     """R2 자격증명 env 해석 — 전 도메인 단일 규약(#230).
 
-    ``R2_DEV_<X>`` 가 있으면 우선(멘티 dev 버킷 분리), 없으면 ``R2_<X>``. prod 는
-    ``R2_DEV_*`` 를 세팅하지 않으므로 ``R2_*`` 로 수렴한다. ``ASK_SEOUL_TARGET`` 유무와
-    무관 — raw 랜딩(admin_dong)·에러(#77)·메트릭(#188)이 같은 버킷으로 일관되게 간다.
-    (과거 errors/metrics 만 ``is_dev_target`` 게이팅해, dev-only env 에서 조용히
-    유실되던 버그를 해소.)
+    **키 이름은 배포 환경을 담지 않는다.** ``R2_<X>`` 한 벌뿐이고, 어느 환경을 가리키는지는
+    그 키의 **값**이 정한다(배포가 값을 채운다). 호스트 컴포즈도 같은 구조다 — Trino 카탈로그
+    파일이 canonical ``R2_*`` 한 세트만 읽고, 타깃 전환은 파일 이름(카탈로그명)으로만 한다.
+
+    과거에는 ``R2_DEV_<X>`` 를 먼저 보는 규칙이 있었으나(멘티 dev 버킷 분리), 호스트가 ENV2
+    개편에서 ``R2_DEV_*`` 를 없앴고 어느 배포에도 설정돼 있지 않다. 그 분기를 남겨 두면
+    누군가 ``R2_DEV_*`` 를 채우는 순간 같은 날짜 기록이 두 버킷으로 갈리므로(ASK-Seoul#78
+    ``Z-7``) 규칙 자체를 제거했다.
 
     name 은 축약형(``ENDPOINT``)·전체형(``R2_ENDPOINT``) 모두 허용(선행 ``R2_`` 정규화).
     """
     base = name.removeprefix("R2_")
-    dev = os.environ.get("R2_DEV_" + base)
-    if dev:
-        return dev
     value = os.environ.get("R2_" + base)
     if not value:
-        raise RuntimeError(f"R2 자격증명 누락 — R2_DEV_{base} 또는 R2_{base}")
+        raise RuntimeError(f"R2 자격증명 누락 — R2_{base}")
     return value
 
 
 def r2_env_for(name: str, target: str) -> str:
-    """target-aware R2 env — prod 컷오버(#556)로 관측(runs/)을 target 별 버킷으로 명시 분기.
+    """``r2_env`` 와 동치. ``target`` 은 더 이상 분기하지 않는다(호출측 호환용으로만 남김).
 
-    ``r2_env``(#230, 항상 dev 우선)와 달리 여기선 target 이 곧 분기 기준이다:
-    target=="prod" → ``R2_*`` 만(R2_DEV_* 미참조), 그 외(dev) → ``R2_DEV_*`` 있으면 우선,
-    없으면 ``R2_*`` 로 폴백(``r2_env`` 와 동일한 dev 동작 — 바이트 단위로 유지).
+    자격증명 키가 환경별로 갈리던 시절의 잔재다. 지금은 배포 하나가 버킷 하나를 가리키므로
+    타깃으로 자격증명을 고를 여지가 없다. 새 코드는 ``r2_env`` 를 쓴다.
     """
-    base = name.removeprefix("R2_")
-    if (target or "dev").lower() == "prod":
-        value = os.environ.get("R2_" + base)
-    else:
-        value = os.environ.get("R2_DEV_" + base) or os.environ.get("R2_" + base)
-    if not value:
-        raise RuntimeError(f"R2 자격증명 누락 — target={target}, {base}")
-    return value
+    return r2_env(name)
 
 
 class Storage(ABC):

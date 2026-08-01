@@ -15,8 +15,9 @@
   (`.env.commerce` 에 해당 줄이 없다)
 - 시크릿: **루트 `.env`**(commerce 값·`JUSO_CONFM_KEY` 이관처)는 `600` 권한·시크릿 매니저 주입 권장, 커밋 금지(gitignore)
 
-> **`seoul-dev` 는 레거시다.** 2026-07-28 전환 이후 신규 쓰기가 없고 저장 구조가 현행과 다르다.
-> 버킷을 되돌리는 운영 시나리오는 없다 — [environments.md](../configuration/environments.md) §3.
+> **`seoul-dev` 는 동결된 롤백 지점이다.** 2026-07-28 전환 이후 신규 쓰기가 없고 저장 구조가
+> 현행과 다르지만, 운영 이관이 완전히 종결될 때까지 보존한다(삭제 대상 아님). 되돌릴 때는
+> 키가 아니라 `R2_*` 의 **값**을 바꾼다 — [environments.md](../configuration/environments.md) §3.
 
 ## 1. 환경 설정
 
