@@ -30,8 +30,7 @@ def required_env(name: str) -> str:
 
 
 def r2_env_name(name: str) -> str:
-    if is_dev_target():
-        return "R2_DEV_" + name.removeprefix("R2_")
+    """canonical 키 이름 그대로 — 배포 환경은 키가 아니라 값이 정한다(ASAC-DAG#647)."""
     return name
 
 
@@ -60,9 +59,9 @@ def checkpoint_prefix() -> str:
 
 
 def trino_catalog() -> str:
-    if is_dev_target():
-        return os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-    return os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
+    # canonical 키 하나 — 값이 배포 환경을 따라간다(미설정 시 기본만 타깃별).
+    return os.environ.get("TRINO_ICEBERG_CATALOG") or (
+        "iceberg_dev" if is_dev_target() else "iceberg")
 
 
 def ask_seoul_schema() -> str:

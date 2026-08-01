@@ -52,25 +52,31 @@ class WarehouseSettings:
     schema: str   # culture (도메인 스키마)
 
 
+#: 창고 논리명. 키가 아니라 **값**이 배포 환경을 가른다(ASAC-DAG#647).
+PROD_CATALOG = "iceberg"
+DEV_CATALOG = "iceberg_dev"
+
+
 def build_warehouse_settings(target: str = "dev", env: dict | None = None) -> WarehouseSettings:
     """target에 맞는 Trino/Iceberg 접속 설정. 값은 환경변수에서.
 
-    카탈로그 논리명은 env 규약에 따라 갈린다(ASK-Seoul#66, :func:`uses_split_dev_keys`):
-    구 규약 dev 는 ``TRINO_DEV_ICEBERG_CATALOG``(기본 ``iceberg_dev``), 신 규약은
-    파일 하나가 한 환경이므로 dev·prod 모두 ``TRINO_ICEBERG_CATALOG``(기본 ``iceberg``).
+    카탈로그 키는 **``TRINO_ICEBERG_CATALOG`` 하나**다(ASAC-DAG#647 — 키 이름이 배포 환경을
+    담지 않는다). 어느 창고를 가리키는지는 그 키의 **값**이 정한다.
 
-    ⚠️ 신 규약 판별 없이 dev 에서 ``TRINO_ICEBERG_CATALOG`` 로 폴백하면 안 된다 —
-    구 규약 박스에는 ``iceberg``(prod 창고)와 ``iceberg_dev``(dev 창고)가 함께 살아
-    있어서, dev 런이 조용히 prod 창고에 쓰게 된다(실측 확인).
+    ⚠️ 다만 구 규약 박스(:func:`uses_split_dev_keys`)에는 ``iceberg``(prod 창고)와
+    ``iceberg_dev``(dev 창고)가 함께 살아 있고 선언값이 prod 를 가리킨다. 그 박스에서 dev 런이
+    선언값을 그대로 따르면 조용히 prod 창고에 쓴다(실측 확인). 그래서 **선언값이 prod 창고
+    이름일 때만** dev 기본(``iceberg_dev``)으로 되돌린다 — 명시적으로 dev 창고를 가리키는
+    선언값은 그대로 존중한다.
     """
     target = normalize_target(target)
     env = env if env is not None else os.environ
     dev = target == "dev" and uses_split_dev_keys(env)
-    catalog = (
-        env.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-        if dev
-        else env.get("TRINO_ICEBERG_CATALOG", "iceberg")
-    )
+    declared = env.get("TRINO_ICEBERG_CATALOG")
+    if dev:
+        catalog = declared if declared and declared != PROD_CATALOG else DEV_CATALOG
+    else:
+        catalog = declared or PROD_CATALOG
     return WarehouseSettings(
         host=env.get("TRINO_HOST", "trino"),
         port=int(env.get("TRINO_PORT", "8080")),

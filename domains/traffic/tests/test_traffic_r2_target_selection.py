@@ -58,12 +58,16 @@ def test_prod_resolver_ignores_present_dev_tuple(monkeypatch):
 
 
 def test_dev_resolver_never_falls_back_to_prod_tuple(monkeypatch):
-    _set_both_r2_tuples(monkeypatch, target="dev")
-    monkeypatch.delenv("R2_DEV_ACCESS_KEY_ID")
+    """canonical 키가 비면 **누락으로 드러난다** — 다른 키로 조용히 메우지 않는다.
 
-    with pytest.raises(
-        TrafficBronzeConfigurationError, match="R2_DEV_ACCESS_KEY_ID"
-    ):
+    옛 계약(``R2_DEV_*`` 우선)에서는 dev 가 prod 튜플로 새는 것을 막는 것이 요점이었다.
+    지금은 키가 하나뿐이라(ASAC-DAG#647) 샐 곳 자체가 없고, 남은 안전 속성은 "빈 자리를
+    다른 이름의 키가 대신 채우지 못한다"이다 — ``R2_DEV_*`` 가 세팅돼 있어도 마찬가지.
+    """
+    _set_both_r2_tuples(monkeypatch, target="dev")
+    monkeypatch.delenv("R2_ACCESS_KEY_ID")
+
+    with pytest.raises(TrafficBronzeConfigurationError, match="R2_ACCESS_KEY_ID"):
         target_runtime.r2_env("R2_ACCESS_KEY_ID")
 
 

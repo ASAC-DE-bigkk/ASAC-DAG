@@ -68,7 +68,7 @@ def build_trino_settings(target: str = "dev", env: dict | None = None) -> TrinoS
     # prod 창고를 가리킨다.
     dev = target == "dev" and uses_split_dev_keys(env)
     catalog = (
-        env.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+        env.get("TRINO_ICEBERG_CATALOG") or "iceberg_dev"
         if dev
         else env.get("TRINO_ICEBERG_CATALOG", "iceberg")
     )

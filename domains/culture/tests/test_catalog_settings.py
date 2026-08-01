@@ -86,7 +86,7 @@ def test_build_catalog_settings_rejects_bad_target(_dev_env):
 # ── build_warehouse 엔진 디스패치 (#203) ─────────────────────────────────────
 
 def test_build_warehouse_default_is_pyiceberg(_dev_env, monkeypatch):
-    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg_dev")
     from culture_ingest.common.warehouse import PyicebergBronzeWarehouse
     from culture_ingest.source.ingest import build_warehouse
     wh = build_warehouse("dev")

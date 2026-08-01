@@ -14,10 +14,11 @@ class RuntimeTargetError(RuntimeError):
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DOMAIN_SCHEMA_DEFAULTS = {"traffic": "traffic", "weather": "weather"}
 _RESERVED_PROD_SCHEMAS = {"ops_smoke", "prod", "production"}
-_TARGET_CATALOGS = {
-    "dev": ("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev"),
-    "prod": ("TRINO_ICEBERG_CATALOG", "iceberg"),
-}
+# 카탈로그 키 이름도 배포 환경을 담지 않는다 — canonical ``TRINO_ICEBERG_CATALOG`` 하나이고,
+# 어느 카탈로그를 가리키는지는 그 값이 정한다(호스트 컴포즈가 이 값으로 카탈로그 파일 이름을
+# 짓는다). 타깃별로 다른 것은 **기대하는 카탈로그 값**이지 키 이름이 아니다.
+_CATALOG_ENV = "TRINO_ICEBERG_CATALOG"
+_EXPECTED_CATALOG = {"dev": "iceberg_dev", "prod": "iceberg"}
 TARGET_CHOICES = ("dev", "prod")
 _TARGET_ALIASES = ("ASK_SEOUL_TARGET", "DBT_TARGET")
 # 자격증명 키 이름은 배포 환경을 담지 않는다 — canonical ``R2_*`` 한 세트뿐이고, 어느 버킷을
@@ -99,17 +100,17 @@ def validate_dev_runtime(
     if len({value for _, value in target_values}) != 1:
         raise RuntimeTargetError("runtime target aliases disagree")
     target = target_values[0][1]
-    if target not in _TARGET_CATALOGS:
+    if target not in _EXPECTED_CATALOG:
         raise RuntimeTargetError("runtime target must be dev or prod")
     if requested_target is not None:
         requested = str(requested_target).strip().lower()
-        if requested not in _TARGET_CATALOGS:
+        if requested not in _EXPECTED_CATALOG:
             raise RuntimeTargetError("requested runtime target must be dev or prod")
         if requested != target:
             raise RuntimeTargetError("requested runtime target disagrees with environment")
 
-    catalog_env, expected_catalog = _TARGET_CATALOGS[target]
-    catalog = str(values.get(catalog_env, "")).strip()
+    expected_catalog = _EXPECTED_CATALOG[target]
+    catalog = str(values.get(_CATALOG_ENV, "")).strip()
     if catalog != expected_catalog:
         raise RuntimeTargetError(f"{target} catalog must be {expected_catalog}")
 

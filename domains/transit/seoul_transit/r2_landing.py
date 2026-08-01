@@ -28,10 +28,11 @@ def _client_and_bucket():
     세션·TLS 핸드셰이크 낭비(리뷰 #369). boto3 클라이언트는 스레드 안전."""
     import boto3
 
-    endpoint = _env("R2_DEV_ENDPOINT", "R2_ENDPOINT", "S3_ENDPOINT")
-    access = _env("R2_DEV_ACCESS_KEY_ID", "R2_ACCESS_KEY_ID", "MINIO_ROOT_USER")
-    secret = _env("R2_DEV_SECRET_ACCESS_KEY", "R2_SECRET_ACCESS_KEY", "MINIO_ROOT_PASSWORD")
-    bucket = _env("R2_DEV_BUCKET_NAME", "R2_BUCKET_NAME", "S3_BUCKET")
+    # canonical 키 한 세트 — 배포 환경은 값이 정한다(ASAC-DAG#647).
+    endpoint = _env("R2_ENDPOINT", "S3_ENDPOINT")
+    access = _env("R2_ACCESS_KEY_ID", "MINIO_ROOT_USER")
+    secret = _env("R2_SECRET_ACCESS_KEY", "MINIO_ROOT_PASSWORD")
+    bucket = _env("R2_BUCKET_NAME", "S3_BUCKET")
     if not all([endpoint, access, secret, bucket]):
         raise RuntimeError(
             "R2/S3 landing 자격증명 누락 (R2_DEV_* / R2_* 또는 MINIO_ROOT_*/S3_*)"

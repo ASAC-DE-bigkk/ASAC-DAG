@@ -64,9 +64,8 @@ def _is_dev() -> bool:
 
 
 def _target_catalog() -> str:
-    if _is_dev():
-        return os.getenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-    return os.getenv("TRINO_ICEBERG_CATALOG", "iceberg")
+    """canonical 키 하나 — 값이 배포 환경을 따라간다(미설정 시 기본만 타깃별)."""
+    return os.getenv("TRINO_ICEBERG_CATALOG") or ("iceberg_dev" if _is_dev() else "iceberg")
 
 
 def _schema() -> str:
@@ -286,17 +285,16 @@ def load_unit_trino(storage: Storage, unit: dict, *, load_date: str) -> int:
 def _pyiceberg_catalog():
     from pyiceberg.catalog.rest import RestCatalog
 
-    def pick(dev: str, prod: str) -> str:
-        if _is_dev() and os.getenv(dev):
-            return os.getenv(dev, "")
-        return os.getenv(prod, "")
+    def pick(name: str) -> str:
+        """canonical 키 하나 — 배포 환경은 값이 정한다(ASAC-DAG#647)."""
+        return os.getenv(name, "")
 
     s = get_settings()
     return RestCatalog(
         "commerce",
-        uri=pick("R2_DEV_DATA_CATALOG_URI", "R2_DATA_CATALOG_URI"),
-        warehouse=pick("R2_DEV_DATA_CATALOG_WAREHOUSE", "R2_DATA_CATALOG_WAREHOUSE"),
-        token=pick("R2_DEV_DATA_CATALOG_TOKEN", "R2_DATA_CATALOG_TOKEN"),
+        uri=pick("R2_DATA_CATALOG_URI"),
+        warehouse=pick("R2_DATA_CATALOG_WAREHOUSE"),
+        token=pick("R2_DATA_CATALOG_TOKEN"),
         **{"s3.endpoint": s.r2_endpoint, "s3.access-key-id": s.r2_access_key_id,
            "s3.secret-access-key": s.r2_secret_access_key, "s3.region": s.r2_region},
     )

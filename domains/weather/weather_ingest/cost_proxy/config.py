@@ -105,9 +105,9 @@ def _target(env: Mapping[str, str] = os.environ) -> str:
 
 
 def _catalog(env: Mapping[str, str] = os.environ) -> str:
-    if _target(env) == "dev":
-        return env.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-    return env.get("TRINO_ICEBERG_CATALOG", "iceberg")
+    # canonical 키 하나 — 값이 배포 환경을 따라간다(미설정 시 기본만 타깃별).
+    return env.get("TRINO_ICEBERG_CATALOG") or (
+        "iceberg_dev" if _target(env) == "dev" else "iceberg")
 
 
 def _schema(env: Mapping[str, str] = os.environ) -> str:

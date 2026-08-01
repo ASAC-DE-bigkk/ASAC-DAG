@@ -93,7 +93,8 @@ def main() -> int:
     load_commerce_env()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="실제 복사(기본 dry-run)")
-    ap.add_argument("--source-bucket", default=os.environ.get("R2_DEV_BUCKET_NAME", "seoul-dev"))
+    # 이 스크립트의 소스는 정의상 전환 전 버킷이다(R2_DEV_BUCKET_NAME 은 폐지된 키 — #647).
+    ap.add_argument("--source-bucket", default="seoul-dev")
     ap.add_argument("--source-raw-prefix", default="raw/commerce",
                     help="소스의 구 raw 레이어 접두(레거시 고정값)")
     ap.add_argument("--workers", type=int, default=12)

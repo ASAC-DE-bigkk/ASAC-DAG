@@ -26,7 +26,8 @@ APPROVED_DEV_CATALOG = "iceberg_dev"
 APPROVED_PROD_CATALOG = "iceberg"
 APPROVED_DEV_SCHEMA = "weather_traffic_bronze"
 _TARGET_CATALOGS = {"dev": APPROVED_DEV_CATALOG, "prod": APPROVED_PROD_CATALOG}
-_TARGET_CATALOG_ENVS = {"dev": "TRINO_DEV_ICEBERG_CATALOG", "prod": "TRINO_ICEBERG_CATALOG"}
+# 카탈로그 키 이름은 배포 환경을 담지 않는다 — 값이 배포를 따라간다(타깃별로 다른 건 기대 값).
+_CATALOG_ENV = "TRINO_ICEBERG_CATALOG"
 FIXED_RETENTION = "7d"
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 OPERATIONS = ("optimize", "expire_snapshots", "remove_orphan_files")
@@ -175,7 +176,7 @@ def resolve_maintenance_plan(
     if target not in _TARGET_CATALOGS:
         raise MaintenancePlanError("maintenance target must be dev or prod")
     expected_catalog = _TARGET_CATALOGS[target]
-    catalog_env = _TARGET_CATALOG_ENVS[target]
+    catalog_env = _CATALOG_ENV
     if str(values.get(catalog_env, "")).strip() != expected_catalog:
         raise MaintenancePlanError(f"maintenance catalog must be the approved {target} catalog")
     if str(values.get("ASK_SEOUL_SCHEMA", "")).strip() != APPROVED_DEV_SCHEMA:

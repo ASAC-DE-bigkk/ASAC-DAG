@@ -61,9 +61,9 @@ def is_dev_target() -> bool:
 
 
 def trino_catalog() -> str:
-    if is_dev_target():
-        return os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-    return os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
+    # canonical 키 하나 — 값이 배포 환경을 따라간다(미설정 시 기본만 타깃별).
+    return os.environ.get("TRINO_ICEBERG_CATALOG") or (
+        "iceberg_dev" if is_dev_target() else "iceberg")
 
 
 def transit_schema() -> str:

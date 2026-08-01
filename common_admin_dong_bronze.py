@@ -58,7 +58,7 @@ def is_dev_target() -> bool:
 
 def trino_catalog() -> str:
     if is_dev_target():
-        return os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+        return os.environ.get("TRINO_ICEBERG_CATALOG") or "iceberg_dev"
     return os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
 
 

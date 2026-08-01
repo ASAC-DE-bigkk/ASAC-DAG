@@ -223,7 +223,7 @@ def test_collect_evidence_queries_only_exact_dev_relation_and_closes_resources(
     monkeypatch,
 ):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
-    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg_dev")
     cursor = FakeCursor(
         snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
         file_rows=[
@@ -269,7 +269,7 @@ def test_trino_connection_uses_the_exact_silver_relation_namespace(monkeypatch):
     captured = {}
     connection = object()
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
-    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg_dev")
 
     monkeypatch.setattr(
         "trino.dbapi.connect",
@@ -283,8 +283,8 @@ def test_trino_connection_uses_the_exact_silver_relation_namespace(monkeypatch):
 
 def test_prod_snapshot_fence_uses_only_the_prod_catalog(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    # 단일 키 규약: 카탈로그는 이 키의 '값'이 정한다. prod 선언이면 dev 창고가 새어들 수 없다.
     monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg")
-    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
     cursor = FakeCursor(
         snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
         file_rows=[],
@@ -301,8 +301,8 @@ def test_prod_trino_connection_uses_the_prod_catalog(monkeypatch):
     captured = {}
     connection = object()
     monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    # 단일 키 규약: 카탈로그는 이 키의 '값'이 정한다. prod 선언이면 dev 창고가 새어들 수 없다.
     monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg")
-    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
     monkeypatch.setattr(
         "trino.dbapi.connect",
         lambda **kwargs: captured.update(kwargs) or connection,

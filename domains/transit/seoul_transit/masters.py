@@ -225,10 +225,7 @@ def load_action(existing_rows: int, landed_rows: int) -> str:
 
 # ── R2 랜딩 (common.storage #109) ────────────────────────────────────────────────
 def _r2_env(name: str) -> str:
-    """R2 자격증명 — R2_DEV_<name> 우선(멘티 dev 게이트), 없으면 R2_<name> 폴백."""
-    dev = os.environ.get("R2_DEV_" + name)
-    if dev:
-        return dev
+    """R2 자격증명 — canonical ``R2_<name>`` 하나. 배포 환경은 값이 정한다(ASAC-DAG#647)."""
     value = os.environ.get("R2_" + name)
     if not value:
         raise RuntimeError(f"R2 자격증명 누락 — R2_DEV_{name} 또는 R2_{name}")
