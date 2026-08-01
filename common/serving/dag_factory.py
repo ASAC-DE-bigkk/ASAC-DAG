@@ -112,12 +112,22 @@ def _load_export_contracts(
     product_ids: Sequence[str],
     *,
     exact_domain_contracts: bool,
+    require_public_projection: bool = False,
 ):
     from common.serving.contract import load_contracts, load_domain_contracts
 
     if exact_domain_contracts:
-        return load_domain_contracts(manifest_path, domain, product_ids)
-    return load_contracts(manifest_path, product_ids)
+        return load_domain_contracts(
+            manifest_path,
+            domain,
+            product_ids,
+            require_public_projection=require_public_projection,
+        )
+    return load_contracts(
+        manifest_path,
+        product_ids,
+        require_public_projection=require_public_projection,
+    )
 
 
 def build_serving_export_dag(
@@ -130,6 +140,7 @@ def build_serving_export_dag(
     target: str = "dev",
     schema: str | None = None,
     exact_domain_contracts: bool = False,
+    require_public_projection: bool = False,
 ):
     """Build a serving-export DAG for one domain. Returns an Airflow ``DAG``."""
     import os
@@ -155,6 +166,7 @@ def build_serving_export_dag(
             domain,
             product_ids,
             exact_domain_contracts=exact_domain_contracts,
+            require_public_projection=require_public_projection,
         )
         if not contracts:
             raise RuntimeError(f"{domain}: product_ids {list(product_ids)} 에 해당하는 enabled 계약이 없다")

@@ -46,6 +46,7 @@ def test_traffic_serving_export_delegates_all_six_products_to_common_publisher(m
             "traffic_flow_anomaly_current",
         ],
         "exact_domain_contracts": True,
+        "require_public_projection": True,
         "schedule": ("asset", "iceberg://traffic/gold/publication-ready"),
         "dag_id": "traffic_serving_export",
         "target": "dev",

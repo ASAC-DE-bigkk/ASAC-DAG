@@ -6,6 +6,7 @@ import pytest
 
 from common.serving import contract as contract_module
 from common.serving import dag_factory
+from common.serving.contract import load_contracts
 
 
 WEATHER_PRODUCTS = [
@@ -57,6 +58,66 @@ def _manifest(tmp_path):
     return path
 
 
+def _projection_manifest(tmp_path, *, projection=None, column_overrides=None):
+    columns = {
+        "product_row_id": {
+            "description": "row id",
+            "data_type": "VARCHAR",
+            "config": {
+                "meta": {
+                    "nullable": False,
+                    "semantic_role": "primary_key",
+                    "unit": "not_applicable",
+                }
+            },
+        },
+        "value": {
+            "description": "measurement",
+            "data_type": " DOUBLE ",
+            "config": {
+                "meta": {
+                    "nullable": True,
+                    "semantic_role": "metric",
+                    "unit": "km/h",
+                    "null_meaning": "not_measured",
+                }
+            },
+        },
+    }
+    if column_overrides:
+        for name, override in column_overrides.items():
+            columns[name] = override
+    serving = {
+        "enabled": True,
+        "external": True,
+        "product_id": "weather_place_current_outlook",
+        "product_question": "current outlook?",
+        "grain": "place row",
+        "publication_mode": "snapshot",
+        "zero_policy": "fail",
+        "primary_key": ["product_row_id"],
+    }
+    if projection is not None:
+        serving["public_projection"] = projection
+    path = tmp_path / "projection_manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "model.project.gold_weather_place_current_outlook": {
+                        "resource_type": "model",
+                        "name": "gold_weather_place_current_outlook",
+                        "columns": columns,
+                        "config": {"meta": {"serving": serving}},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _load_domain_contracts():
     loader = getattr(contract_module, "load_domain_contracts", None)
     assert loader is not None, "domain contract exact-set gate is missing"
@@ -99,6 +160,205 @@ def test_load_contracts_reads_opt_in_upsert_strategy(tmp_path):
     assert contract.upsert_strategy == "exact_set"
 
 
+def test_load_contracts_reads_public_projection_in_order_with_canonical_hash(tmp_path):
+    contract = load_contracts(
+        _projection_manifest(
+            tmp_path,
+            projection={"schema_version": "1.0.0", "columns": ["product_row_id", "value"]},
+        )
+    )[0]
+
+    assert contract.public_projection == ("product_row_id", "value")
+    assert contract.projection_schema_version == "1.0.0"
+    assert contract.projection_schema_hash == "111fb92a950e1d4a7beb1a661c64e1c3f6ab47e602b154287696b7a89db01614"
+
+
+def test_public_projection_hash_ignores_description_but_changes_on_identity_metadata(tmp_path):
+    projection = {"schema_version": "1.0.0", "columns": ["product_row_id", "value"]}
+    baseline = load_contracts(_projection_manifest(tmp_path, projection=projection))[0].projection_schema_hash
+    description_only = load_contracts(
+        _projection_manifest(
+            tmp_path,
+            projection=projection,
+            column_overrides={
+                "value": {
+                    "description": "changed copy",
+                    "data_type": " DOUBLE ",
+                    "config": {
+                        "meta": {
+                            "nullable": True,
+                            "semantic_role": "metric",
+                            "unit": "km/h",
+                        }
+                    },
+                }
+            },
+        )
+    )[0].projection_schema_hash
+    reordered = load_contracts(
+        _projection_manifest(
+            tmp_path,
+            projection={"schema_version": "1.0.0", "columns": ["value", "product_row_id"]},
+        )
+    )[0].projection_schema_hash
+    type_changed = load_contracts(
+        _projection_manifest(
+            tmp_path,
+            projection=projection,
+            column_overrides={
+                "value": {
+                    "description": "measurement",
+                    "data_type": "DECIMAL(10,2)",
+                    "config": {
+                        "meta": {
+                            "nullable": True,
+                            "semantic_role": "metric",
+                            "unit": "km/h",
+                        }
+                    },
+                }
+            },
+        )
+    )[0].projection_schema_hash
+    nullable_changed = load_contracts(
+        _projection_manifest(
+            tmp_path,
+            projection=projection,
+            column_overrides={
+                "value": {
+                    "description": "measurement",
+                    "data_type": "DOUBLE",
+                    "config": {
+                        "meta": {
+                            "nullable": False,
+                            "semantic_role": "metric",
+                            "unit": "km/h",
+                        }
+                    },
+                }
+            },
+        )
+    )[0].projection_schema_hash
+    unit_changed = load_contracts(
+        _projection_manifest(
+            tmp_path,
+            projection=projection,
+            column_overrides={
+                "value": {
+                    "description": "measurement",
+                    "data_type": "DOUBLE",
+                    "config": {
+                        "meta": {
+                            "nullable": True,
+                            "semantic_role": "metric",
+                            "unit": "m/s",
+                        }
+                    },
+                }
+            },
+        )
+    )[0].projection_schema_hash
+    role_changed = load_contracts(
+        _projection_manifest(
+            tmp_path,
+            projection=projection,
+            column_overrides={
+                "value": {
+                    "description": "measurement",
+                    "data_type": "DOUBLE",
+                    "config": {
+                        "meta": {
+                            "nullable": True,
+                            "semantic_role": "analytical_value",
+                            "unit": "km/h",
+                        }
+                    },
+                }
+            },
+        )
+    )[0].projection_schema_hash
+
+    assert description_only == baseline
+    assert reordered != baseline
+    assert type_changed != baseline
+    assert nullable_changed != baseline
+    assert unit_changed != baseline
+    assert role_changed != baseline
+
+
+@pytest.mark.parametrize(
+    "projection,error",
+    [
+        (["product_row_id"], "object"),
+        ({"schema_version": "1.0", "columns": ["product_row_id"]}, "semver"),
+        ({"schema_version": "1.0.0", "columns": []}, "columns"),
+        ({"schema_version": "1.0.0", "columns": ["product_row_id", "product_row_id"]}, "duplicate"),
+        ({"schema_version": "1.0.0", "columns": ["product_row_id as id"]}, "identifier"),
+        ({"schema_version": "1.0.0", "columns": ["*"]}, "identifier"),
+        ({"schema_version": "1.0.0", "columns": ["unknown_column"]}, "unknown"),
+        ({"schema_version": "1.0.0", "columns": ["product_row_id"], "rename_map": {}}, "exactly"),
+    ],
+)
+def test_load_contracts_rejects_malformed_public_projection(tmp_path, projection, error):
+    with pytest.raises(ValueError, match=error):
+        load_contracts(_projection_manifest(tmp_path, projection=projection))
+
+
+def test_load_contracts_rejects_public_projection_with_incomplete_identity_metadata(tmp_path):
+    projection = {"schema_version": "1.0.0", "columns": ["product_row_id", "value"]}
+    incomplete_value = {
+        "description": "measurement",
+        "data_type": "DOUBLE",
+        "config": {"meta": {"nullable": True, "semantic_role": "metric"}},
+    }
+
+    with pytest.raises(ValueError, match="identity metadata"):
+        load_contracts(
+            _projection_manifest(
+                tmp_path,
+                projection=projection,
+                column_overrides={"value": incomplete_value},
+            )
+        )
+
+
+def test_load_contracts_rejects_top_level_meta_only_projection_metadata(tmp_path):
+    projection = {"schema_version": "1.0.0", "columns": ["product_row_id", "value"]}
+    compiled_only_value = {
+        "description": "measurement",
+        "data_type": "DOUBLE",
+        "meta": {
+            "nullable": True,
+            "semantic_role": "metric",
+            "unit": "km/h",
+        },
+    }
+
+    with pytest.raises(ValueError, match="identity metadata"):
+        load_contracts(
+            _projection_manifest(
+                tmp_path,
+                projection=projection,
+                column_overrides={"value": compiled_only_value},
+            )
+        )
+
+
+def test_require_public_projection_rejects_missing_projection_before_runtime(tmp_path):
+    with pytest.raises(ValueError, match="public_projection required"):
+        load_contracts(
+            _projection_manifest(tmp_path, projection=None),
+            require_public_projection=True,
+        )
+
+
+def test_default_contract_loading_accepts_missing_public_projection(tmp_path):
+    contract = load_contracts(_projection_manifest(tmp_path, projection=None))[0]
+
+    assert contract.public_projection is None
+    assert contract.projection_schema_hash is None
+
+
 def test_non_exact_domain_exporter_can_load_its_intended_citydata_subset(tmp_path):
     path = _manifest(tmp_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -124,3 +384,26 @@ def test_non_exact_domain_exporter_can_load_its_intended_citydata_subset(tmp_pat
     assert [contract.product_id for contract in contracts] == ["citydata_place_latest"]
     with pytest.raises(ValueError, match="missing=citydata_ppltn_hourly"):
         loader(path, "citydata", ["citydata_place_latest"], exact_domain_contracts=True)
+
+
+def test_export_contract_loader_keeps_public_projection_requirement_explicit(tmp_path):
+    loader = getattr(dag_factory, "_load_export_contracts", None)
+    assert loader is not None
+
+    legacy = loader(
+        _projection_manifest(tmp_path, projection=None),
+        "weather",
+        ["weather_place_current_outlook"],
+        exact_domain_contracts=False,
+        require_public_projection=False,
+    )
+
+    assert legacy[0].public_projection is None
+    with pytest.raises(ValueError, match="public_projection required"):
+        loader(
+            _projection_manifest(tmp_path, projection=None),
+            "weather",
+            ["weather_place_current_outlook"],
+            exact_domain_contracts=False,
+            require_public_projection=True,
+        )

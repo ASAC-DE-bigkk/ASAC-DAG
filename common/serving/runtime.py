@@ -12,6 +12,7 @@ logged. Account/DB ids are non-secret identifiers passed via ``SERVING_*`` env k
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from common.serving.d1_client import Column, HttpD1Client
@@ -20,6 +21,13 @@ from common.serving.publisher import ReadPlan
 
 APPEND_LOOKBACK_HOURS = 2
 APPEND_LOOKBACK_DAYS = 2
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quote_identifier(identifier: str) -> str:
+    if not isinstance(identifier, str) or not IDENTIFIER_RE.fullmatch(identifier):
+        raise ValueError(f"unsafe projection identifier: {identifier!r}")
+    return f'"{identifier}"'
 
 
 # ── Trino source ──────────────────────────────────────────────────────────────────
@@ -44,19 +52,56 @@ class TrinoSourceReader:
         colnames = [d[0] for d in self._cursor.description]
         return [dict(zip(colnames, row)) for row in self._cursor.fetchall()]
 
+    def _projected_columns(self, contract: ServingContract, physical_columns: list[Column]) -> list[Column] | None:
+        if contract.public_projection is None:
+            return None
+        projection = tuple(contract.public_projection)
+        if len(set(projection)) != len(projection):
+            raise ValueError(f"{contract.model_name}: duplicate public_projection columns")
+        physical_by_name = dict(physical_columns)
+        missing = [column for column in projection if column not in physical_by_name]
+        if missing:
+            raise ValueError(f"{contract.model_name}: missing projected columns {','.join(missing)}")
+
+        projection_set = set(projection)
+        missing_primary_key = [column for column in contract.primary_key if column not in projection_set]
+        if missing_primary_key:
+            raise ValueError(f"{contract.model_name}: primary_key columns missing from public_projection {','.join(missing_primary_key)}")
+        if contract.event_time and contract.event_time not in projection_set:
+            raise ValueError(f"{contract.model_name}: event_time missing from public_projection {contract.event_time}")
+        sample_count_field = (
+            contract.reliability.get("sample_count_field")
+            if isinstance(contract.reliability, dict)
+            else None
+        )
+        if sample_count_field and sample_count_field not in projection_set:
+            raise ValueError(f"{contract.model_name}: reliability sample_count_field missing from public_projection {sample_count_field}")
+
+        for column in projection:
+            _quote_identifier(column)
+        return [(column, physical_by_name[column]) for column in projection]
+
+    def _select_list(self, projected_columns: list[Column] | None) -> str:
+        if projected_columns is None:
+            return "*"
+        return ",".join(_quote_identifier(column) for column, _type in projected_columns)
+
     def read(self, contract: ServingContract, last_good_max: Any | None) -> ReadPlan:
         columns = self._columns(contract.model_name)
         relation = self._relation(contract.model_name)
+        projected_columns = self._projected_columns(contract, columns)
+        select_list = self._select_list(projected_columns)
+        read_columns = projected_columns or columns
 
         if contract.publication_mode != "append" or not contract.event_time:
-            rows = self._select(f"SELECT * FROM {relation}")
-            return ReadPlan(columns=columns, rows=rows)
+            rows = self._select(f"SELECT {select_list} FROM {relation}")
+            return ReadPlan(columns=read_columns, rows=rows)
 
         # append: re-load only the recent window (idempotent) + any new rows.
         column_type = dict(columns).get(contract.event_time, "")
         if last_good_max is None:
-            rows = self._select(f"SELECT * FROM {relation}")  # first run: full backfill
-            return ReadPlan(columns=columns, rows=rows)
+            rows = self._select(f"SELECT {select_list} FROM {relation}")  # first run: full backfill
+            return ReadPlan(columns=read_columns, rows=rows)
 
         import pendulum
 
@@ -67,8 +112,9 @@ class TrinoSourceReader:
         else:
             cutoff = base.subtract(hours=APPEND_LOOKBACK_HOURS).format("YYYY-MM-DD HH:00:00")
             literal = f"timestamp '{cutoff}'"
-        rows = self._select(f'SELECT * FROM {relation} WHERE "{contract.event_time}" >= {literal}')
-        return ReadPlan(columns=columns, rows=rows, delete_column=contract.event_time, delete_literal=f"'{cutoff}'")
+        event_time = _quote_identifier(contract.event_time)
+        rows = self._select(f"SELECT {select_list} FROM {relation} WHERE {event_time} >= {literal}")
+        return ReadPlan(columns=read_columns, rows=rows, delete_column=contract.event_time, delete_literal=f"'{cutoff}'")
 
 
 def _trino_settings(target: str, schema: str) -> dict[str, Any]:

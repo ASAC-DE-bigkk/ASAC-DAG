@@ -20,6 +20,7 @@ dag = build_serving_export_dag(
         "weather_place_forecast_change_daily",
     ],
     exact_domain_contracts=True,
+    require_public_projection=True,
     # Only the terminal marker runs after Gold write and contract test success.
     schedule=Asset(WEATHER_GOLD_PUBLICATION_READY_ASSET),
     dag_id="weather_serving_export",
