@@ -16,7 +16,9 @@
 
 파라미터 (트리거 시 덮어쓰기):
   target           "dev" | "prod"  (기본 dev)
-  retention        스냅샷/고아 보존 기간 (기본 3d; 카탈로그 min-retention 이상이어야 함)
+  retention        스냅샷/고아 보존 기간 (기본 7d; Trino min-retention 기본값 대응 —
+                   타 도메인과 동일. #75로 카탈로그 6h override 소실 후 3d가 7d 하한에
+                   막혀 maintain 전량 실패하던 것을 7d로 정합)
   cleanup_hours    metadata/버려진 디렉터리 보존 시간 (기본 6h; 진행 중 커밋 보호)
   drain_seconds    transform pause 후 진행 중 run 배수 대기 (기본 300s)
 """
@@ -48,7 +50,7 @@ from citydata_ingest.source.maintenance import (  # noqa: E402
 
 KST = "Asia/Seoul"
 
-DEFAULT_PARAMS = {"target": default_target(), "retention": "3d", "cleanup_hours": 6, "drain_seconds": 300}
+DEFAULT_PARAMS = {"target": default_target(), "retention": "7d", "cleanup_hours": 6, "drain_seconds": 300}
 
 # maintenance 의 optimize 가 silver/gold 데이터파일을 재작성하는 동안 transform 의
 # delete+insert 가 같은 행을 지우면 Iceberg 커밋 충돌 → 중복 발생. 그래서 maintenance
