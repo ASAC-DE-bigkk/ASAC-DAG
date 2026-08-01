@@ -20,26 +20,17 @@ _TARGET_CATALOGS = {
 }
 TARGET_CHOICES = ("dev", "prod")
 _TARGET_ALIASES = ("ASK_SEOUL_TARGET", "DBT_TARGET")
-_R2_TARGETS = {
-    "dev": (
-        "seoul-dev",
-        (
-            "R2_DEV_BUCKET_NAME",
-            "R2_DEV_ENDPOINT",
-            "R2_DEV_ACCESS_KEY_ID",
-            "R2_DEV_SECRET_ACCESS_KEY",
-        ),
-    ),
-    "prod": (
-        "seoul",
-        (
-            "R2_BUCKET_NAME",
-            "R2_ENDPOINT",
-            "R2_ACCESS_KEY_ID",
-            "R2_SECRET_ACCESS_KEY",
-        ),
-    ),
-}
+# 자격증명 키 이름은 배포 환경을 담지 않는다 — canonical ``R2_*`` 한 세트뿐이고, 어느 버킷을
+# 가리키는지는 그 값이 정한다. 타깃별로 다른 것은 **기대하는 버킷 값**이지 키 이름이 아니다.
+# (구조: 과거엔 dev 가 ``R2_DEV_*`` 를 요구했으나 호스트 ENV2 개편에서 그 키가 사라져,
+#  키 이름으로 환경을 고르는 규칙만 코드에 남아 있었다.)
+_R2_CREDENTIAL_KEYS = (
+    "R2_BUCKET_NAME",
+    "R2_ENDPOINT",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+)
+_R2_EXPECTED_BUCKET = {"dev": "seoul-dev", "prod": "seoul"}
 
 
 def default_target(env: Mapping[str, str] | None = None) -> str:
@@ -135,13 +126,13 @@ def validate_dev_runtime(
                 f"schema is reserved for another environment: {env_name}"
             )
 
-    expected_bucket, required_r2_keys = _R2_TARGETS[target]
-    for env_name in required_r2_keys:
+    expected_bucket = _R2_EXPECTED_BUCKET[target]
+    for env_name in _R2_CREDENTIAL_KEYS:
         if not str(values.get(env_name, "")).strip():
             raise RuntimeTargetError(
                 f"{target} R2 credential is missing: {env_name}"
             )
-    bucket_name = str(values[required_r2_keys[0]]).strip()
+    bucket_name = str(values[_R2_CREDENTIAL_KEYS[0]]).strip()
     if bucket_name != expected_bucket:
         raise RuntimeTargetError(
             f"{target} R2 bucket must be {expected_bucket}"

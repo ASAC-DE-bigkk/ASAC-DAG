@@ -45,16 +45,14 @@ def required_env(name: str) -> str:
     return value
 
 
-def r2_env_name(name: str) -> str:
-    if is_dev_target():
-        dev_name = "R2_DEV_" + name.removeprefix("R2_")
-        if os.environ.get(dev_name):
-            return dev_name
-    return name
-
-
 def r2_env(name: str) -> str:
-    return required_env(r2_env_name(name))
+    """R2 자격증명 — canonical ``R2_*`` 한 세트. 키 이름이 배포 환경을 담지 않는다.
+
+    과거엔 dev 타깃일 때 ``R2_DEV_*`` 를 먼저 봤으나, 호스트 ENV2 개편에서 그 키가 사라졌다
+    (Trino 카탈로그도 canonical 한 세트만 읽는다). 분기를 남겨 두면 누가 ``R2_DEV_*`` 를
+    채우는 순간 같은 기록이 두 버킷으로 갈린다.
+    """
+    return required_env(name)
 
 
 def trino_catalog() -> str:
@@ -91,10 +89,10 @@ def build_raw_object_key() -> str:
     now = datetime.now(timezone.utc)
     load_date = now.strftime("%Y-%m-%d")
     ts_nodash = now.strftime("%Y%m%dT%H%M%S%f")
-    if is_dev_target():
-        raw_root = os.environ.get("R2_DEV_RAW_PREFIX", f"dev/{smoke_schema()}/raw")
-    else:
-        raw_root = os.environ.get("R2_RAW_PREFIX", "raw")
+    # 존 루트도 canonical 키 하나(``R2_RAW_PREFIX``)로 받는다 — 환경은 값이 정한다.
+    # 미설정 시 기본만 타깃에 따라 다르다(dev 스모크는 개인 샌드박스 아래로).
+    raw_root = os.environ.get("R2_RAW_PREFIX") or (
+        f"dev/{smoke_schema()}/raw" if is_dev_target() else "raw")
     return (
         f"{raw_root.rstrip('/')}/ops_smoke/sample_events"
         f"/load_date={load_date}/sample_events_{ts_nodash}.csv"

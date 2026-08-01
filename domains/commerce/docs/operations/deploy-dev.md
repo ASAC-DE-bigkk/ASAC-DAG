@@ -1,10 +1,34 @@
-# Deploy — dev (스토리지 = Cloudflare R2 dev 버킷)
+# Deploy — dev (레거시, 현재 사용하지 않음)
 
-dev 는 **Cloudflare R2 dev 버킷**(`seoul-dev`)을 쓴다. prod 와 동일한 R2 기반 경로를
-공유하되 버킷/자격증명은 prod 와 분리된다([deploy-prod.md](deploy-prod.md)). local 과의
-차이는 **스토리지 백엔드뿐** — 호스트 컴포즈/명령은 동일하다.
+> ## ⚠️ 지금 동작 중인 구성이 아니다 — 되돌아갈 지점이다
+>
+> **2026-07-28 전환(change-log §79) 이후 dev 버킷(`seoul-dev`)·dev 카탈로그(`iceberg_dev`)로
+> 가는 신규 쓰기가 없다.** `seoul-dev` 는 전환 직전 상태로 **동결**돼 있고, 운영 이관이 완전히
+> 종결될 때까지 **롤백 지점으로 보존**한다(삭제 대상 아님).
+>
+> - 현행 배포는 [deploy-prod.md](deploy-prod.md), 환경 현황은
+>   [environments.md](../configuration/environments.md) §3.
+> - 자격증명 없이 도는 스모크는 [deploy-local.md](deploy-local.md).
+>
+> **되돌리는 방법이 아래 절차와 다르다.** `R2_DEV_*` 는 폐지됐다(호스트 ENV2 개편 + 코드에서
+> 제거, ASAC-DAG#647). 되돌릴 때는 **키를 바꾸는 게 아니라 값을 바꾼다**:
+>
+> ```bash
+> R2_BUCKET_NAME=seoul-dev
+> R2_ENDPOINT=<dev endpoint>
+> R2_ACCESS_KEY_ID=<dev key>
+> R2_SECRET_ACCESS_KEY=<dev secret>
+> TRINO_ICEBERG_CATALOG=iceberg_dev
+> DBT_TARGET=dev ; ASK_SEOUL_TARGET=dev ; COMMERCE_DBT_TARGET=dev   # 셋을 함께
+> ```
+>
+> `R2_DEV_*` 를 되살리면 같은 날짜 기록이 두 버킷으로 갈린다(ASK-Seoul#78 `Z-7`).
+> 아래 본문의 `R2_DEV_*` 서술은 **이력 참고용**이다.
 
-> 클라우드 없이 순수 로컬은 [deploy-local.md](deploy-local.md). 환경 축: [environments.md](../configuration/environments.md).
+## (이력) dev 버킷 배포 절차
+
+dev 는 **Cloudflare R2 dev 버킷**(`seoul-dev`)을 썼다. prod 와 동일한 R2 기반 경로를
+공유하되 버킷/자격증명은 prod 와 분리했다. local 과의 차이는 **스토리지 백엔드뿐**이었다.
 
 ## 1. 환경 설정 (루트 `.env` 의 `commerce 전용값` 블록)
 

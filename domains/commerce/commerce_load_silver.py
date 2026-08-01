@@ -62,6 +62,9 @@ from cosmos import (  # noqa: E402
 )
 from cosmos.constants import ExecutionMode, InvocationMode, LoadMode, TestBehavior  # noqa: E402
 
+from commerce_core.observability import ops_default_args  # noqa: E402
+from common.ops import Layer  # noqa: E402
+
 # dbt 실행 계약(호스트 이미지 env 우선, 없으면 기본값) — common_dbt_smoke 와 동일 형태.
 DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce")
 DBT_BIN = os.getenv("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")
@@ -79,7 +82,8 @@ SILVER_SELECT_STR = " ".join(SILVER_SELECT)
 # 마커/pre_hook 은 include_datasets 스코프를 그대로 존중한다(silver_markers 매크로).
 _DBT_VARS: dict = json.loads(os.getenv("COMMERCE_DBT_VARS") or "{}")
 
-_DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5)}
+_DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5),
+                 **ops_default_args(Layer.SILVER)}
 
 # ── Cosmos 설정 ──────────────────────────────────────────────────────────────
 # 프로필은 기존 profiles.yml 재사용, 실행은 별도 dbt venv(LOCAL). commerce 프로젝트는

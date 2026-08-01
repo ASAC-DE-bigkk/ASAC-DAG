@@ -59,10 +59,12 @@ except ImportError:  # Airflow 2.x
 
 from bronze import bronze_tasks, markers
 from commerce_core import paths, registry
+from commerce_core.observability import ops_default_args
 from commerce_core.schemas import SOURCE_SYSTEM
 from commerce_core.settings import get_settings
 from commerce_core.storage import get_storage
 from common.errors.airflow import problem_failure_callback
+from common.ops import Layer
 
 log = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
@@ -80,8 +82,10 @@ PENDING = registry.pending_for_schedule("daily")
 record_commerce_problem = problem_failure_callback(
     domain="commerce", source_system=SOURCE_SYSTEM)
 
+# 실행 기록(ops/runs) 콜백은 실패 상세(ops/errors) 콜백을 **교체하지 않고 뒤에 붙는다** —
+# 둘은 담는 단위가 다르다(실행 1건 vs 실패 상세 1건, ASK-Seoul#78 V-6).
 _DEFAULT_ARGS = {"owner": "data-eng", "retries": 2, "retry_delay": pendulum.duration(minutes=3),
-                 "on_failure_callback": record_commerce_problem}
+                 **ops_default_args(Layer.RAW, on_failure=record_commerce_problem)}
 _PARAMS = {"observed_date": Param(default="", type="string",
            description="논리 수집일 override (YYYY-MM-DD, silver 파티션). 비우면 run 의 ds.")}
 

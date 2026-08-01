@@ -42,11 +42,14 @@ from cosmos import (  # noqa: E402
 )
 from cosmos.constants import ExecutionMode, InvocationMode, LoadMode, TestBehavior  # noqa: E402
 
+from commerce_core.observability import ops_default_args  # noqa: E402
+from common.ops import Layer  # noqa: E402
 from gold.assets import GOLD_READY_ASSET  # noqa: E402  (분리 DAG commerce_serving_export 트리거)
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5)}
+_DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5),
+                 **ops_default_args(Layer.GOLD)}
 
 DBT_PROJECT_DIR = os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce")
 DBT_BIN = os.getenv("DBT_BIN", "/home/airflow/dbt-venv/bin/dbt")

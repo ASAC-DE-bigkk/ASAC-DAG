@@ -115,7 +115,9 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
         except Exception as exc:               # 정리 실패가 수집 성공을 막지 않게
             log.warning("%s: 잔존 incomplete 정리 실패(무시): %s", short, exc)
 
-    log.info("%s: bronze %s rows=%d/%d incr=%s -> %s (marker=%s)",
+    # 분모는 원천 총계를 모를 때 "?" 가 들어온다(모른다 ≠ 0) — %d 로 두면 포맷 시 TypeError 라
+    # 이 줄이 통째로 유실된다. 값이 숫자든 "?" 든 그대로 찍히게 %s 로 받는다.
+    log.info("%s: bronze %s rows=%d/%s incr=%s -> %s (marker=%s)",
              short, status, rows_total, list_total_count or "?",
              (incr or {}).get("mode", "-"), object_key or "(증분없음/미저장)", marker_type)
     return {**base, "status": status, "collected_at": marker["collected_at"],

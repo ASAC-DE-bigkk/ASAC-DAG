@@ -33,11 +33,14 @@ import pendulum  # noqa: E402
 from airflow.decorators import dag, task  # noqa: E402
 
 from commerce_core import paths  # noqa: E402
+from commerce_core.observability import ops_default_args  # noqa: E402
 from commerce_core.settings import get_settings  # noqa: E402
 from commerce_core.storage import get_storage  # noqa: E402
 from common.discord import COLOR_FAIL, COLOR_OK, send_embed  # noqa: E402
+from common.ops import Layer  # noqa: E402
 
 log = logging.getLogger(__name__)
+_DEFAULT_ARGS = {"owner": "data-eng", **ops_default_args(Layer.RAW)}
 KST = timezone(timedelta(hours=9))
 _DOMAIN = "commerce"
 _COLLECT_DAG = "commerce_collect_raw"
@@ -131,7 +134,8 @@ def check_pipeline() -> dict:
 
 @dag(dag_id="commerce_collect_watchdog", schedule="0 8,12,16,20 * * *",
      start_date=pendulum.datetime(2024, 1, 1, tz="Asia/Seoul"), catchup=False,
-     max_active_runs=1, tags=["seoul", "commerce", "watchdog"], doc_md=__doc__)
+     max_active_runs=1, default_args=_DEFAULT_ARGS,
+     tags=["seoul", "commerce", "watchdog"], doc_md=__doc__)
 def commerce_collect_watchdog():
     check_pipeline()
 

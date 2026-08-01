@@ -35,11 +35,14 @@ import pendulum  # noqa: E402
 from airflow.decorators import dag, task  # noqa: E402
 from airflow.sdk import Asset  # noqa: E402
 
+from commerce_core.observability import ops_default_args  # noqa: E402
+from common.ops import Layer  # noqa: E402
 from gold.assets import GOLD_READY_ASSET  # noqa: E402
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5)}
+_DEFAULT_ARGS = {"owner": "data-eng", "retries": 1, "retry_delay": pendulum.duration(minutes=5),
+                 **ops_default_args(Layer.D1)}
 
 
 @dag(dag_id="commerce_serving_export",

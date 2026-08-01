@@ -51,11 +51,11 @@ env(= 루트 `.env`/compose 가 주입한 값)** 로 치환한다. 그래서 루
 STORAGE_BACKEND=${COMMERCE_STORAGE_BACKEND:-local}
 SCHEMA_VERSION=${COMMERCE_SCHEMA_VERSION:-v1}
 SEOUL_PAGE_SIZE=${COMMERCE_SEOUL_PAGE_SIZE:-1000}
-# R2(공유 인프라): 루트 R2_DEV_* → 코드 이름
-R2_ENDPOINT=${R2_DEV_ENDPOINT}
-R2_BUCKET=${R2_BUCKET_NAME:-seoul}          # 루트는 R2_BUCKET_NAME(프로드), commerce 는 R2_BUCKET
-R2_ACCESS_KEY_ID=${R2_DEV_ACCESS_KEY_ID}
-R2_SECRET_ACCESS_KEY=${R2_DEV_SECRET_ACCESS_KEY}
+# R2(공유 인프라): 이름이 다른 것만 매핑한다
+R2_BUCKET=${R2_BUCKET_NAME:-seoul}          # 루트는 R2_BUCKET_NAME(운영 `seoul`), commerce 는 R2_BUCKET
+R2_REGION=${COMMERCE_R2_REGION:-auto}
+# R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY 는 루트와 이름이 같아
+# 매핑하지 않고 프로세스 env 를 그대로 상속한다(.env.commerce 에 줄이 없다).
 ```
 
 | 형식 | 동작 |
@@ -119,11 +119,13 @@ cp .env.commerce.example .env.commerce     # PowerShell: Copy-Item
 
 | 변수 | `.env.commerce` 의 소스 | 설명 |
 |---|---|---|
-| `R2_ENDPOINT` | `${R2_DEV_ENDPOINT}` | `https://<account-id>.r2.cloudflarestorage.com` |
-| `R2_BUCKET` | `${R2_BUCKET_NAME:-seoul}` | 버킷명(프로드 `seoul`). **루트는 `R2_BUCKET_NAME`, commerce 는 `R2_BUCKET`** — 참조로 이름 매핑 |
-| `R2_ACCESS_KEY_ID` | `${R2_DEV_ACCESS_KEY_ID}` | R2 API 토큰 Access Key ID |
-| `R2_SECRET_ACCESS_KEY` | `${R2_DEV_SECRET_ACCESS_KEY}` | R2 API 토큰 Secret |
+| `R2_BUCKET` | `${R2_BUCKET_NAME:-seoul}` | 버킷명(**운영 `seoul`**). **루트는 `R2_BUCKET_NAME`, commerce 는 `R2_BUCKET`** — 이름이 달라 여기만 매핑 |
 | `R2_REGION` | `${COMMERCE_R2_REGION:-auto}` | boto3 region_name — 루트 `COMMERCE_R2_REGION`(기본 `auto`) |
+| `R2_ENDPOINT` · `R2_ACCESS_KEY_ID` · `R2_SECRET_ACCESS_KEY` | (매핑 없음) | 루트와 **이름이 같아 프로세스 env 를 직접 상속**한다 |
+
+> `R2_DEV_*` 는 활성 설정이 없다. `common.storage.r2_env` 가 `R2_DEV_<X>` 우선 규칙을 갖고
+> 있어도 실제로는 전부 `R2_*`(=`seoul`)로 수렴한다 →
+> [environments.md](environments.md) §1.
 
 ### 2.4 레지스트리
 
@@ -146,7 +148,7 @@ commerce 가 코드에서 읽는 키와, 그 값이 루트 `.env` 어디서 오�
 | `COMMERCE_STORAGE_PREFIX` · `COMMERCE_RAW_LAYER` · `COMMERCE_SILVER_LAYER` · `COMMERCE_SCHEMA` · `COMMERCE_DBT_TARGET` · `COMMERCE_LOAD_LOOKBACK_DAYS` · `COMMERCE_ICEBERG_EXPIRE_DAYS` | 동일 이름 | — (직접 상속) |
 | `COMMERCE_MARKERS_LAYER` · `COMMERCE_BRONZE_STATE_LAYER` · `COMMERCE_SILVER_STATE_LAYER` · `COMMERCE_SERVE_STATE_LAYER` · `COMMERCE_DIFF_TARGET_LAYER` · `COMMERCE_WATCHDOG_STATE_LAYER` · `COMMERCE_LOGS_LAYER` | 동일 이름 — 값 = `ops/control/state/commerce/…`(#60 존 정리: 마커=지시 파일 포함, 오너 해석) | — (직접 상속) |
 | `JUSO_CONFM_KEY` · `JUSO_REQUEST_DELAY_SECONDS` · `JUSO_MAX_ADDRESSES` | 동일 이름 | — (직접 상속) |
-| `R2_BUCKET` | `R2_BUCKET_NAME`(프로드 `seoul`, 2026-07-28 전환) | `${R2_BUCKET_NAME:-seoul}`(이름 매핑) — dev 복귀는 `${R2_DEV_BUCKET_NAME:-seoul-dev}` |
+| `R2_BUCKET` | `R2_BUCKET_NAME`(운영 `seoul`, 2026-07-28 전환) | `${R2_BUCKET_NAME:-seoul}`(이름 매핑). `seoul-dev` 는 레거시 보존본이라 복귀 대상이 아니다 |
 | `R2_ENDPOINT` · `R2_ACCESS_KEY_ID` · `R2_SECRET_ACCESS_KEY` | 동일 이름 | — (직접 상속) |
 
 > generic 이름을 루트에서 `COMMERCE_` 접두로 두는 이유: 루트 `.env` 는 `env_file` 로 **모든 도메인**

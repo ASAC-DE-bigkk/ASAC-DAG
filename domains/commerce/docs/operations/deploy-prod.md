@@ -1,17 +1,23 @@
-# Deploy — prod (스토리지 = Cloudflare R2 prod 버킷)
+# Deploy — prod (현행 운영 구성)
 
-prod 는 dev 와 **버킷·자격증명을 분리**한다(`seoul-prod`, 전용 토큰). 호스트 스택 자체는
-dev 와 동일한 단일 컴포즈이므로, 분리는 **루트 `.env` 의 `R2_*`/`COMMERCE_*` 값**과
-운영 정책(시크릿 관리·백업)으로 보장한다.
+**현재 동작 중인 유일한 구성이다.** 오브젝트 버킷은 **`seoul`**, Iceberg 카탈로그는
+**`iceberg`**, 실행 타깃은 **`prod`**(`DBT_TARGET`·`ASK_SEOUL_TARGET`·`COMMERCE_DBT_TARGET`
+셋 다). 호스트 스택은 단일 컴포즈다.
 
-> 환경 축: [environments.md](../configuration/environments.md). R2 발급: [storage.md](../architecture/storage.md).
-> 전체 변수: [configuration.md](../configuration/configuration.md).
+> 환경 현황·실측: [environments.md](../configuration/environments.md).
+> R2 발급: [storage.md](../architecture/storage.md). 전체 변수: [configuration.md](../configuration/configuration.md).
 
-## 분리 원칙 요약
+## 구성 요약
 
-- 스토리지: R2 **prod 버킷**(루트 `COMMERCE_STORAGE_BACKEND=r2`, 버킷 `seoul-prod`, dev `seoul-dev`와 분리)
-- 자격증명: prod 전용 R2 토큰(권한 최소화), dev 와 분리
+- 스토리지: R2 버킷 **`seoul`** (루트 `COMMERCE_STORAGE_BACKEND=r2` · `R2_BUCKET_NAME=seoul`)
+- Iceberg: `TRINO_ICEBERG_CATALOG=iceberg`
+- 자격증명: 루트 `R2_ENDPOINT`/`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` 를 **이름 그대로 상속**
+  (`.env.commerce` 에 해당 줄이 없다)
 - 시크릿: **루트 `.env`**(commerce 값·`JUSO_CONFM_KEY` 이관처)는 `600` 권한·시크릿 매니저 주입 권장, 커밋 금지(gitignore)
+
+> **`seoul-dev` 는 동결된 롤백 지점이다.** 2026-07-28 전환 이후 신규 쓰기가 없고 저장 구조가
+> 현행과 다르지만, 운영 이관이 완전히 종결될 때까지 보존한다(삭제 대상 아님). 되돌릴 때는
+> 키가 아니라 `R2_*` 의 **값**을 바꾼다 — [environments.md](../configuration/environments.md) §3.
 
 ## 1. 환경 설정
 
@@ -22,19 +28,23 @@ cd dags/domains/commerce
 cp .env.commerce.example .env.commerce      # 매핑만 담김
 ```
 
-prod 용으로 **루트 `.env` 의 `commerce 전용값` 블록**에서 설정:
+**루트 `.env` 의 `commerce 전용값` 블록**에서 설정:
 
 ```bash
 # 루트 .env (호스트 — 600 권한 권장)
 SEOUL_API_KEY_COMM=<발급키>          # #70 이관, 필수
 COMMERCE_STORAGE_BACKEND=r2
+COMMERCE_DBT_TARGET=prod
+R2_BUCKET_NAME=seoul
+TRINO_ICEBERG_CATALOG=iceberg
+DBT_TARGET=prod
+ASK_SEOUL_TARGET=prod
 # JUSO_CONFM_KEY=<도로명주소 승인키>  # silver 지번 보강 쓰면
 ```
 
-prod 버킷/자격증명 분리는 **prod 대상 R2 값**으로 가른다. `.env.commerce` 는 dev 기준으로
-`R2_BUCKET=${R2_DEV_BUCKET_NAME}` 처럼 매핑돼 있으니, prod 는 (a) 루트 `R2_DEV_*` 를 prod 값
-(`seoul-prod`·prod 토큰)으로 채우거나, (b) 배포 환경이 `R2_BUCKET`/`R2_*` 를 프로세스 env 로 직접
-주입(setdefault 우선)한다. 매핑·우선순위 규칙: [configuration.md](../configuration/configuration.md).
+`R2_DEV_*` 는 **채우지 않는다.** 채우면 `common.storage.r2_env` 의 dev 우선 규칙 때문에 일부
+기록기(실패 상세·처리량)가 다른 버킷으로 새어 나가고, 같은 날짜 기록이 두 버킷에 동시에
+들어간다(ASK-Seoul#78 `Z-7`). 매핑·우선순위 규칙: [configuration.md](../configuration/configuration.md).
 
 ## 2. 의존성
 

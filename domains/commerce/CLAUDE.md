@@ -1023,6 +1023,39 @@ commerce gold(Iceberg) → 공유 Cloudflare **D1(SQLite)** 선별 export 는 **
   PR(#335 계열)에서. 상세·추적: **[docs/serving-contract-chain.md](docs/serving-contract-chain.md)**.
 
 
+## 19.3 운영 기록 관문 (ops record gate — 경로·형식·값 집합의 단일 통로)
+
+저장소·운영 기록 규약(ASK-Seoul#78)은 **`common/ops/contract.py` 하나가 강제**한다. 기록을 남기는
+코드는 이 관문만 통과하면 되고, 규약 문서를 다시 읽을 필요가 없다.
+
+```python
+from common.ops import OpsCategory, Grain, Layer, RowsSource, RunStatus, emit_ops_event
+from commerce_core.observability import ops_default_args   # DAG default_args 용
+```
+
+**금지**: `"ops/..."` 문자열로 경로를 조립하는 것. 카테고리·날짜 칸 이름·도메인 위치는
+`ops_key()` 가 정한다(관측 계열 `observed_date=` 필수 / 상태 계열 날짜 금지).
+`common/tests/test_ops_gate_enforcement.py` 가 새 우회를 **테스트에서 막는다** — 그 파일의
+유예 목록이 남은 전환 작업의 정본이다.
+
+**적용 트리거**
+
+- **새 DAG/태스크** → `default_args` 에 `**ops_default_args(Layer.X)`. 그 DAG 의 모든 태스크가
+  `ops/runs/commerce/observed_date=…` 에 실행 기록을 남긴다.
+- **DAG 스케줄 변경** → `include/commerce_core/ops_expectations.py` 표를 같은 커밋에서 고친다
+  (정본은 DAG 선언, 표는 사본 — 테스트가 양방향 대조한다).
+- **행 수를 기록** → 측정했으면 `rows_source` 를 병기, 못 쟀으면 `row_count=None` +
+  `not_observed`. **모른다 ≠ 0** — 0 으로 접으면 빈 실행("초록 위장")과 구분이 사라진다.
+- **API 이름을 기록** → 정규화된 이름만(`seoul.localdata`). URL 은 관문이 거부한다 — 서울
+  열린데이터 API 는 인증키를 URL 경로에 싣는다.
+- **조회 DB(D1) 운영 테이블** → 스키마·문장은 `common/ops/d1_ops.py` 가 단일 출처. `DROP`/전량
+  교체 금지, 자연키 upsert 만.
+- **저장소 → 조회 DB 적재** → `common/ops/ingest.py`. 중복은 파일 이동이 아니라 `event_id` 로
+  가른다(적재 여부 = DB 존재 여부). 적재기는 저장소를 **읽기만** 한다.
+
+상세·판단 근거: `change-log.md` §87·§88 · ASK-Seoul#78.
+
+
 ## 20. Security Gate (recall · apply · check, ongoing)
 
 
