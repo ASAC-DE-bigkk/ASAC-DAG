@@ -157,6 +157,14 @@ def test_collect_preserves_raw_lineage_for_one_successful_page():
     assert batch.parsed_rows == 1
     assert len(batch.raw_objects) == 1
     raw_object = batch.raw_objects[0]
+    expected_run_prefix = (
+        "raw/traffic/seoul_traffic_incident/load_date=2026-07-14/"
+        "run_id=scheduled__2026-07-14T00_20_00Z"
+    )
+    assert raw_object.raw_object_key == (
+        f"{expected_run_prefix}/"
+        "20260714T092000KST_AccInfo-1-1000_request-1.xml"
+    )
     assert raw_object.request_id == "request-1"
     assert raw_object.start_index == 1
     assert raw_object.end_index == 1000
@@ -167,7 +175,7 @@ def test_collect_preserves_raw_lineage_for_one_successful_page():
         == "application/xml; charset=utf-8"
     )
     assert "SEOUL_API_KEY" not in raw_object.raw_object_key
-    assert batch.manifest_key is not None
+    assert batch.manifest_key == f"{expected_run_prefix}/_manifest.json"
     assert raw_store.write_order[-1] == batch.manifest_key
     assert json.loads(raw_store.read_bytes(batch.manifest_key)) == {
         "run_id": "scheduled__2026-07-14T00:20:00Z",

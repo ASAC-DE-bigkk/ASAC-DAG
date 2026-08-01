@@ -100,7 +100,7 @@ def test_replay_writes_a_manifest_for_the_original_snapshot_run():
     )
 
     assert result.manifest_key == (
-        "raw/traffic_incident/seoul_traffic_incident/load_date=2026-07-05/"
+        "raw/traffic/seoul_traffic_incident/load_date=2026-07-05/"
         "run_id=legacy-snapshot/_manifest.json"
     )
     assert json.loads(raw_store.read_bytes(result.manifest_key))["run_id"] == "legacy-snapshot"

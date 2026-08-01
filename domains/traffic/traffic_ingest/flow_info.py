@@ -11,6 +11,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+from common.raw_path import build_raw_run_prefix
 from traffic_ingest.common.runtime import (
     raw_prefix,
     sql_string,
@@ -26,7 +27,7 @@ from traffic_ingest.errors import (
 
 KST = ZoneInfo("Asia/Seoul")
 SOURCE_ID = "seoul_traffic_flow"
-SOURCE_DOMAIN = "traffic_flow"
+SOURCE_DOMAIN = "traffic"
 SERVICE_NAME = "TrafficInfo"
 DEFAULT_API_BASE_URL = "http://openapi.seoul.go.kr:8088"
 LINK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -187,11 +188,16 @@ def build_raw_object_key(
             raise TrafficBronzeConfigurationError(
                 "TrafficInfo landing_load_date must be YYYY-MM-DD"
             ) from exc
-    safe_run_id = re.sub(r"[^A-Za-z0-9_.=-]", "_", dag_run_id)
     safe_link_id = _safe_link_id(link_id)
+    run_prefix = build_raw_run_prefix(
+        raw_prefix=raw_prefix(),
+        domain=SOURCE_DOMAIN,
+        source_id=SOURCE_ID,
+        load_date=load_date,
+        run_id=dag_run_id,
+    )
     return (
-        f"{raw_prefix().rstrip('/')}/{SOURCE_DOMAIN}/{SOURCE_ID}/"
-        f"load_date={load_date}/dag_run_id={safe_run_id}/"
+        f"{run_prefix}/"
         f"{collected_kst:%Y%m%dT%H%M%SKST}_TrafficInfo-link_id={safe_link_id}.xml"
     )
 

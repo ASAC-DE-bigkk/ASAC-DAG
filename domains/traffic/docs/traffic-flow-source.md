@@ -4,6 +4,11 @@
 (`/xml/TrafficInfo/1/1/{link_id}/`)를 호출한다.
 
 - 원문 응답은 R2 raw에 XML로 저장한다.
+- raw key는
+  `raw/traffic/seoul_traffic_flow/load_date=YYYY-MM-DD/run_id=<run_id>/...xml`이고,
+  모든 링크 XML을 쓴 다음 같은 prefix에 `_manifest.json`을 마지막으로 기록한다.
+- 변경 전 `raw/traffic_flow/.../dag_run_id=<run_id>/` 객체는 기존 Bronze lineage로
+  유지하며 새 수집에서는 생성하지 않는다.
 - Bronze table은 `bronze_seoul_traffic_flow`다.
 - 핵심 원천 필드는 `link_id`, `prcs_spd`, `prcs_trv_time`다.
 - `link_id`는 기본적으로 최신 publishable 돌발정보 Bronze snapshot에서

@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Callable, Protocol
 
 from common.raw_manifest import build_raw_manifest
+from common.raw_path import build_raw_run_prefix
 from traffic_ingest.acc_info import (
     KST,
     metadata_total_count,
@@ -37,6 +38,7 @@ from traffic_ingest.landing_contracts import (
 
 _RAW_OBJECT_KEY = re.compile(
     r"/load_date=(?P<load_date>\d{4}-\d{2}-\d{2})/"
+    r"(?:run_id=[^/]+/)?"
     r"(?P<collected>\d{8}T\d{6})KST_AccInfo-(?P<start_index>\d+)-"
     r"(?P<end_index>\d+)_(?P<request_id>[^/]+)\.xml$"
 )
@@ -155,10 +157,15 @@ class TrafficLanding:
         return self._clock().astimezone(KST).date().isoformat()
 
     def _manifest_key(self, run: RunIdentity, landing_load_date: str) -> str:
-        return (
-            f"{self._raw_prefix}/traffic_incident/seoul_traffic_incident/"
-            f"load_date={landing_load_date}/run_id={self._safe_key_segment(run.run_id)}"
-            "/_manifest.json"
+        return f"{self._raw_run_prefix(run.run_id, landing_load_date)}/_manifest.json"
+
+    def _raw_run_prefix(self, run_id: str, landing_load_date: str) -> str:
+        return build_raw_run_prefix(
+            raw_prefix=self._raw_prefix,
+            domain="traffic",
+            source_id="seoul_traffic_incident",
+            load_date=landing_load_date,
+            run_id=run_id,
         )
 
     def _write_manifest(
@@ -287,11 +294,11 @@ class TrafficLanding:
         start_index: int,
         end_index: int,
         landing_load_date: str,
+        run_id: str,
     ) -> str:
         collected_kst = collected_at.astimezone(KST)
         return (
-            f"{self._raw_prefix}/traffic_incident/seoul_traffic_incident/"
-            f"load_date={landing_load_date}/"
+            f"{self._raw_run_prefix(run_id, landing_load_date)}/"
             f"{collected_kst:%Y%m%dT%H%M%S}KST_AccInfo-"
             f"{start_index}-{end_index}_{request_id}.xml"
         )
@@ -392,6 +399,7 @@ class TrafficLanding:
                     start_index=start_index,
                     end_index=end_index,
                     landing_load_date=landing_load_date,
+                    run_id=run.run_id,
                 )
                 self._raw_store.write_bytes(
                     raw_object_key,
