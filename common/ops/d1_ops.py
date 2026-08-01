@@ -256,6 +256,24 @@ def known_event_ids_statement(event_ids: Sequence[str]) -> str | None:
     return f'SELECT event_id FROM "{RUN_EVENT_TABLE}" WHERE event_id IN ({values});'
 
 
+def known_source_keys_statement(dates: Sequence[str]) -> str | None:
+    """이 경로 날짜 구간에서 **이미 적재한 오브젝트 키** 목록 — 읽기 전에 거르기 위한 질의.
+
+    ``event_id`` 는 파일 내용을 읽어야 알 수 있는 경우가 있어(관문 이전 기록), 그것만으로는
+    "안 읽고 건너뛰기"가 성립하지 않는다. 저장 시 남겨 둔 ``source_key`` 를 먼저 받아 오면
+    이미 넣은 파일은 GET 하지 않고 건너뛴다 — 매일 같은 구간을 다시 훑어도 요청이 늘지 않는다.
+    판정 근거는 여전히 **DB 에 그 기록이 있는지**이고 파일은 건드리지 않는다(C-6).
+
+    한계: 같은 키에 내용이 덮어써진 경우를 놓친다. 관측 기록은 append-only 라 실제로는 일어나지
+    않으며, 일어난다면 ``reconcile()`` 의 건수 대조에 드러난다.
+    """
+    if not dates:
+        return None
+    values = ", ".join(sql_literal(value) for value in sorted(set(dates)))
+    return (f'SELECT DISTINCT source_key FROM "{RUN_EVENT_TABLE}" '
+            f'WHERE source_path_date IN ({values}) AND source_key IS NOT NULL;')
+
+
 def event_count_by_source_date_statement(dates: Sequence[str]) -> str | None:
     """저장소↔DB 대조용 — 경로 날짜(``source_path_date``)별 DB 보유 건수(C-4).
 

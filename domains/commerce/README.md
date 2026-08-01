@@ -53,9 +53,9 @@ DAG 임포트 시 [include/commerce_core/env.py](include/commerce_core/env.py) �
 | 변수 | 기본 | 비고 |
 |---|---|---|
 | `SEOUL_API_KEY_COMM` | (없음) | **필수** — 루트 `.env` 에서 주입(#70). 없으면 수집 불가 |
-| `STORAGE_BACKEND` | `local` | `local` \| `r2` |
-| `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | `${R2_DEV_*}` | r2 일 때 — 루트 `.env` 값을 참조 |
-| `R2_BUCKET` | `${R2_DEV_BUCKET_NAME}` | 루트는 `R2_DEV_BUCKET_NAME`/`R2_BUCKET_NAME`, commerce 는 `R2_BUCKET` — 참조로 매핑 |
+| `STORAGE_BACKEND` | `local` | `local` \| `r2` — **운영은 `r2`**(`COMMERCE_STORAGE_BACKEND=r2`) |
+| `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | (루트와 동일 이름) | 매핑 없이 프로세스 env 를 그대로 상속 |
+| `R2_BUCKET` | `${R2_BUCKET_NAME:-seoul}` | 운영 버킷 **`seoul`**. 이름이 달라 여기만 매핑 (`R2_DEV_*` 는 미사용 — [environments.md](docs/configuration/environments.md)) |
 | `SEOUL_PAGE_SIZE` / `SEOUL_MAX_PAGES` | `1000` / (없음) | 페이지 크기 / 비우면 무제한(끝까지 순회) |
 
 > **보안**: 시크릿(인증키·R2 자격증명)이 로그·예외·마커(at-rest)·알림으로 새지 않게 마스킹하고,

@@ -53,6 +53,12 @@ _DATE_KEYS = ("observed_date", "load_date", "date")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _KV = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
+#: 한 실행에서 **새로** 읽어 적재할 오브젝트 상한. 이미 넣은 것은 읽기 전에 걸러지므로
+#: 정상 운영에서는 하루치 신규분만 여기 걸린다. 값의 근거는 운영 버킷 실측(2026-08-01):
+#: ops 관측 계열 전체 36,536건, 최근 일별 8,000~10,000건대. 최초 1회 전량 적재까지 한 번에
+#: 소화하도록 5만으로 둔다. 상한에 걸리면 잘린 건수를 영수증에 남기고 다음 실행이 이어받는다.
+MAX_OBJECTS_PER_RUN = 50_000
+
 
 @dataclass(frozen=True)
 class OpsObject:
@@ -448,13 +454,16 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
            categories: Sequence[OpsCategory] | None = None,
            domains: Sequence[str] | None = None,
            since: str | None = None, until: str | None = None,
-           max_objects: int = 20_000,
+           max_objects: int = MAX_OBJECTS_PER_RUN,
            now: datetime | None = None) -> IngestReceipt:
     """저장소 스캔 → 정규화 → 조회 DB 자연키 적재. 저장소는 **읽기만** 한다.
 
     seam 3개(``list_keys``·``read_json``·``d1_execute``)만 주입받아 네트워크 없이 시험할 수 있다.
-    중복은 파일을 옮겨서가 아니라 ``event_id`` 로 가른다(C-6): 이미 DB 에 있는 것은 내용을 읽지
-    않고 건너뛰므로, 매일 같은 구간을 다시 훑어도 R2 GET 과 D1 쓰기가 늘지 않는다.
+
+    중복은 파일을 옮겨서가 아니라 **DB 가 이미 아는지**로 가른다(C-6). 관문이 2단이다:
+    ① 이 구간에서 이미 적재한 오브젝트 키를 먼저 받아 와 **읽기 전에** 거른다 — 이게 없으면
+    매일 같은 구간(운영 실측 하루 1만여 건)을 통째로 다시 GET 한다. ② 남은 것만 읽어
+    정규화한 뒤 ``event_id`` 로 한 번 더 거른다(원천 발급 id·키 변경 대응).
     """
     from common.ops import d1_ops
 
@@ -468,10 +477,6 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
         keys.extend(list_keys(prefix))
     objects = select_objects(keys, categories=wanted, domains=domains,
                              since=since, until=until, receipt=receipt)
-    if len(objects) > max_objects:
-        # 상한에 걸린 만큼을 영수증에 남긴다 — 조용히 자르면 "전부 봤다"로 읽힌다.
-        receipt.truncated = len(objects) - max_objects
-        objects = objects[:max_objects]
 
     for statement in d1_ops.bootstrap_statements():
         d1_execute(statement)   # security: allow-sql — 상수 DDL(DROP 없음, D-6)
@@ -480,8 +485,24 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
     receipt.log_bundles = len(log_objects)
     candidates = [obj for obj in objects if not obj.is_blob]
 
-    # C-6: 적재 여부는 DB 존재로 판정한다. 다만 event_id 는 내용을 읽어야 알 수 있는 경우가
-    # 있으므로(원천 발급분), 파일을 읽어 정규화한 뒤 한 번에 대조한다.
+    # C-6 1차 관문: **읽기 전에** DB 가 이미 아는 오브젝트 키를 걸러낸다. 이게 없으면 매일
+    # 같은 구간(운영 실측 하루 1만여 건)을 통째로 다시 GET 하게 된다. 판정 근거는 여전히
+    # "DB 에 그 기록이 있는지"이고, 파일은 옮기지도 표식을 남기지도 않는다.
+    window = sorted({obj.source_path_date for obj in candidates if obj.source_path_date})
+    statement = d1_ops.known_source_keys_statement(window)
+    if statement:
+        seen_keys = {str(row.get("source_key")) for row in (d1_execute(statement) or [])}  # security: allow-sql — 공용 빌더(값 이스케이프)
+        before = len(candidates)
+        candidates = [obj for obj in candidates if obj.key not in seen_keys]
+        receipt.skipped_existing += before - len(candidates)
+
+    if len(candidates) > max_objects:
+        # 상한에 걸린 만큼을 영수증에 남긴다 — 조용히 자르면 "전부 봤다"로 읽힌다.
+        # 남은 분은 다음 실행이 이어서 가져간다(1차 관문이 이미 넣은 것을 건너뛰므로 전진한다).
+        receipt.truncated = len(candidates) - max_objects
+        candidates = candidates[:max_objects]
+
+    # C-6 2차 관문: 원천이 event_id 를 발급했거나 키가 바뀐 경우를 위해 내용 기준으로 한 번 더.
     records: list[dict[str, Any]] = []
     for obj in candidates:
         try:
@@ -503,7 +524,7 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
     if statement:
         known = {str(row.get("event_id")) for row in (d1_execute(statement) or [])}  # security: allow-sql — 공용 빌더(값 이스케이프)
     fresh = [record for record in records if record["event_id"] not in known]
-    receipt.skipped_existing = len(records) - len(fresh)
+    receipt.skipped_existing += len(records) - len(fresh)
 
     rows = [d1_ops.to_run_event_row(record, ingested_at=stamp) for record in fresh]
     for statement in d1_ops.run_event_upsert_statements(rows):

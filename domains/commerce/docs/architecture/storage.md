@@ -11,8 +11,8 @@ CLAUDE.md §2의 비협상 데이터 규칙을 구현. 동일한 `key`가 백엔
 
 | 값 | 백엔드 | 위치 | 용도 |
 |---|---|---|---|
-| `local` | `LocalStorage` | `LOCAL_DATA_ROOT`(=`/opt/airflow/data`) | 개발/스모크(자격증명 불필요) |
-| `r2` | `R2Storage`(boto3) | `s3://<R2_BUCKET>/...` | dev/prod |
+| `local` | `LocalStorage` | `LOCAL_DATA_ROOT`(=`/opt/airflow/data`) | 스모크(자격증명 불필요, 비영속) |
+| **`r2`(현행)** | `R2Storage`(boto3) | `s3://seoul/...` | 운영 — `COMMERCE_STORAGE_BACKEND=r2` |
 
 코드는 `get_storage()` 하나만 호출 — 단계 로직은 백엔드를 모른다. 환경변수 전체:
 [configuration.md](../configuration/configuration.md).
@@ -26,9 +26,13 @@ bronze 는 **DAG 실행 1회 = `run_id` 폴더 1개**(스냅샷)을 **`load_date
 
 > **가변 상태는 raw 밖**(#60 약속②): diff-target·적재 워터마크/영수증·watchdog 가드는
 > `ops/control/state/commerce/{diff_target,bronze,silver,serve,watchdog}` (루트 .env 의
-> `COMMERCE_*_LAYER` 값). raw 에는 불변 랜딩(run 폴더)만 남는다. 버킷은 **seoul(프로드)** —
-> 루트 `R2_BUCKET_NAME` 을 `.env.commerce` 가 `R2_BUCKET` 으로 매핑. 구(`YYYY/MM/DD`) 레이아웃
-> 이력은 seoul-dev 에 보존, seoul 에는 신 레이아웃으로 이관됨(scripts/migrate_raw_to_prod_bucket.py).
+> `COMMERCE_*_LAYER` 값). raw 에는 불변 랜딩(run 폴더)만 남는다. 버킷은 **seoul(운영, 단일)** —
+> 루트 `R2_BUCKET_NAME` 을 `.env.commerce` 가 `R2_BUCKET` 으로 매핑.
+>
+> **실측(2026-08-01, `seoul`): `raw/commerce/` 는 `load_date=` 파티션 28개뿐이고 금지 표기
+> (`2026/06/30` 분절 · `20260630` 무구분)는 0건**이다 — ASK-Seoul#78 `P-1`·`P-2` 준수.
+> 구 레이아웃은 전환 전 버킷 `seoul-dev` 에만 남아 있으며 그쪽은 **레거시**다
+> (신규 쓰기 없음 · 현행과 저장 구조가 다름 → [environments.md](../configuration/environments.md) §3).
 
 ```text
 {prefix}/raw/commerce/load_date=<YYYY-MM-DD>/run_id=<YYYY-MM-DD_HHMMSS_mmm>/<short>.jsonl       # API당 1파일(원본 페이지 NDJSON)
@@ -119,12 +123,15 @@ R2_SECRET_ACCESS_KEY=<R2 API 토큰 Secret>
 
 # .env.commerce 매핑(수정 불필요) — 코드가 읽는 이름으로 되돌림
 #   STORAGE_BACKEND=${COMMERCE_STORAGE_BACKEND:-local}
-#   R2_BUCKET=${R2_BUCKET_NAME:-seoul}           # dev 복귀 시 ${R2_DEV_BUCKET_NAME:-seoul-dev}
+#   R2_BUCKET=${R2_BUCKET_NAME:-seoul}
 #   R2_REGION=${COMMERCE_R2_REGION:-auto}
+# 엔드포인트·자격증명(R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY)은 이름이 같아
+# 매핑하지 않고 루트 프로세스 env 를 그대로 상속한다.
 ```
 
 - R2 대시보드 → **R2 → Manage R2 API Tokens**에서 Access Key/Secret 발급, 버킷 최소 권한.
-- 버킷은 dev/prod 분리(`seoul-dev`/`seoul`) — dev 복귀는 R2_BUCKET 매핑 한 줄.
+- 버킷은 **`seoul` 하나**다. `R2_DEV_*` 는 활성 설정이 없고, `seoul-dev` 는 전환 전 보존본
+  (레거시)이다 — [environments.md](../configuration/environments.md) §3.
 - 자격증명은 bronze 페이로드/로그/경로/커밋에 **절대 저장 금지**(CLAUDE.md §2.5).
 - R2 백엔드는 `boto3` 만 필요하며 호스트 이미지에 **이미 포함**(추가 설치 불필요) — [requirements.txt](../../requirements.txt).
 

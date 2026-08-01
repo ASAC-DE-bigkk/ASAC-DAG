@@ -218,14 +218,18 @@ class _Storage:
 
 
 class _D1:
-    def __init__(self, known: set[str] | None = None) -> None:
+    def __init__(self, known: set[str] | None = None,
+                 known_keys: set[str] | None = None) -> None:
         self.statements: list[str] = []
         self.known = known or set()
+        self.known_keys = known_keys or set()
 
     def __call__(self, sql: str):
         self.statements.append(sql)
         if sql.startswith("SELECT event_id"):
             return [{"event_id": value} for value in sorted(self.known)]
+        if sql.startswith("SELECT DISTINCT source_key"):
+            return [{"source_key": value} for value in sorted(self.known_keys)]
         return []
 
 
@@ -250,23 +254,36 @@ def test_ingest_loads_and_never_touches_storage():
     assert inserts and 'ON CONFLICT("event_id") DO UPDATE' in inserts[0]
 
 
-def test_ingest_skips_events_already_in_the_database():
-    """C-6 — 적재 여부는 경로가 아니라 DB 에 그 기록이 있는지로 판단한다."""
+def test_ingest_skips_already_loaded_objects_without_reading_them():
+    """C-6 1차 관문 — 이미 넣은 오브젝트는 **GET 하지 않고** 건너뛴다.
+
+    이게 없으면 매일 같은 구간(운영 실측 하루 1만여 건)을 통째로 다시 읽는다.
+    """
+    keys = {f"ops/runs/commerce/observed_date=2026-08-01/dag_id=d/event_id={i}.json":
+            _run_payload(i) for i in range(3)}
+    storage = _Storage(keys)
+    receipt = ingest(list_keys=storage.list_keys, read_json=storage.read_json,
+                     d1_execute=_D1(known_keys=set(keys)), environment="prod",
+                     categories=[OpsCategory.RUNS])
+    assert receipt.loaded == 0 and receipt.skipped_existing == 3
+    assert storage.reads == []          # 한 건도 읽지 않았다
+
+
+def test_ingest_second_gate_catches_source_issued_event_ids():
+    """C-6 2차 관문 — 키가 바뀌었어도 같은 event_id 면 행이 늘지 않는다."""
     keys = {f"ops/runs/commerce/observed_date=2026-08-01/dag_id=d/event_id={i}.json":
             _run_payload(i) for i in range(3)}
     storage, first = _Storage(keys), _D1()
     receipt = ingest(list_keys=storage.list_keys, read_json=storage.read_json,
                      d1_execute=first, environment="prod", categories=[OpsCategory.RUNS])
-    loaded_ids = {row for row in first.statements if "_ops_run_event" in row}
-    assert receipt.loaded == 3 and loaded_ids
+    assert receipt.loaded == 3 and len(storage.reads) == 3
 
-    # 같은 구간을 다시 훑는다 — DB 가 이미 안다고 답하면 한 행도 늘지 않는다.
     from common.ops.ingest import normalize as _normalize
     known = {
         _normalize(parse_ops_key(key), payload, environment="prod")["event_id"]
         for key, payload in keys.items()
     }
-    second_run = _D1(known=known)
+    second_run = _D1(known=known)       # 키는 처음 보지만 내용의 event_id 는 이미 있다
     again = ingest(list_keys=storage.list_keys, read_json=storage.read_json,
                    d1_execute=second_run, environment="prod", categories=[OpsCategory.RUNS])
     assert again.loaded == 0 and again.skipped_existing == 3
@@ -282,6 +299,14 @@ def test_ingest_reports_truncation_instead_of_silently_capping():
                      d1_execute=_D1(), environment="prod", categories=[OpsCategory.RUNS],
                      max_objects=2)
     assert receipt.truncated == 3 and receipt.loaded == 2
+    assert len(storage.reads) == 2      # 상한 밖은 읽지도 않는다
+
+
+def test_default_object_cap_covers_measured_production_volume():
+    """상한 기본값이 실측 물량보다 낮으면 매일 조용히 잘린다(2026-08-01 실측 36,536건)."""
+    from common.ops.ingest import MAX_OBJECTS_PER_RUN
+
+    assert MAX_OBJECTS_PER_RUN >= 36_536
 
 
 def test_ingest_bootstraps_without_any_drop_statement():

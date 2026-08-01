@@ -1,10 +1,25 @@
-# Deploy — dev (스토리지 = Cloudflare R2 dev 버킷)
+# Deploy — dev (레거시, 현재 사용하지 않음)
 
-dev 는 **Cloudflare R2 dev 버킷**(`seoul-dev`)을 쓴다. prod 와 동일한 R2 기반 경로를
-공유하되 버킷/자격증명은 prod 와 분리된다([deploy-prod.md](deploy-prod.md)). local 과의
-차이는 **스토리지 백엔드뿐** — 호스트 컴포즈/명령은 동일하다.
+> ## ⚠️ 이 문서는 폐지된 구성을 설명한다
+>
+> **2026-07-28 전환(change-log §79) 이후 dev 버킷(`seoul-dev`)·dev 카탈로그(`iceberg_dev`)로
+> 가는 신규 쓰기가 없다.** 루트 `.env` 에 `R2_DEV_*`·`TRINO_DEV_ICEBERG_CATALOG` 활성 설정도
+> 없다. `seoul-dev` 는 전환 전 구조가 그대로 남은 **보존본**이며 현행과 저장 구조가 다르다
+> (구 `YYYY/MM/DD` raw 레이아웃, ops 존 밖 루트 `runs/`·`errors/` 등).
+>
+> - 현행 배포는 [deploy-prod.md](deploy-prod.md), 환경 현황은
+>   [environments.md](../configuration/environments.md) §3.
+> - 자격증명 없이 도는 스모크는 [deploy-local.md](deploy-local.md).
+> - `seoul-dev` 정리는 "쓰는 쪽 되돌리기"가 아니라 **참조 0 확인 후 삭제**(ASK-Seoul#78 `Y-2`)
+>   대상이고 별도 이슈에서 다룬다.
+>
+> 아래 절차는 **이력 참고용**이다. 그대로 실행하면 dev 우선 규칙(`common.storage.r2_env`)이
+> 되살아나 운영 기록이 두 버킷으로 갈린다(`Z-7`).
 
-> 클라우드 없이 순수 로컬은 [deploy-local.md](deploy-local.md). 환경 축: [environments.md](../configuration/environments.md).
+## (이력) dev 버킷 배포 절차
+
+dev 는 **Cloudflare R2 dev 버킷**(`seoul-dev`)을 썼다. prod 와 동일한 R2 기반 경로를
+공유하되 버킷/자격증명은 prod 와 분리했다. local 과의 차이는 **스토리지 백엔드뿐**이었다.
 
 ## 1. 환경 설정 (루트 `.env` 의 `commerce 전용값` 블록)
 
