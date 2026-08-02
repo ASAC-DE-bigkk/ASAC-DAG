@@ -152,6 +152,49 @@ def test_serving_table_enforces_contract_primary_key_and_reports_readback_counts
     assert d1.primary_key_stats(table, ("product_row_id",)) == (1, 1, 0)
 
 
+def test_read_table_rows_selects_exact_ordered_columns_and_orders_by_primary_key():
+    d1 = SqliteCatalogClient()
+    table = "gold_weather_place_current_outlook"
+    columns = [("product_row_id", "varchar"), ("place_id", "varchar"), ("forecast_at", "timestamp")]
+    d1.replace_table(
+        table,
+        columns,
+        [
+            {"product_row_id": "b", "place_id": "p2", "forecast_at": "2026-07-22T00:00:00"},
+            {"product_row_id": "a", "place_id": "p1", "forecast_at": "2026-07-21T00:00:00"},
+        ],
+        ("product_row_id",),
+    )
+
+    rows = d1.read_table_rows(
+        table,
+        [("place_id", "varchar"), ("product_row_id", "varchar")],
+        ("product_row_id",),
+    )
+
+    assert rows == [
+        {"place_id": "p1", "product_row_id": "a"},
+        {"place_id": "p2", "product_row_id": "b"},
+    ]
+    assert d1.queries[-1] == (
+        'SELECT "place_id", "product_row_id" FROM "gold_weather_place_current_outlook" '
+        'ORDER BY "product_row_id";'
+    )
+
+
+def test_read_table_rows_rejects_unsafe_identifiers_before_sql():
+    d1 = SqliteCatalogClient()
+
+    with pytest.raises(ValueError, match="unsafe"):
+        d1.read_table_rows("gold_weather;drop", [("product_row_id", "varchar")], ("product_row_id",))
+    with pytest.raises(ValueError, match="unsafe"):
+        d1.read_table_rows("gold_weather", [("product_row_id as id", "varchar")], ("product_row_id",))
+    with pytest.raises(ValueError, match="unsafe"):
+        d1.read_table_rows("gold_weather", [("product_row_id", "varchar")], ("product_row_id desc",))
+
+    assert not any("gold_weather;drop" in query for query in d1.queries)
+
+
 def test_repeated_snapshot_swaps_keep_a_physical_primary_key_constraint():
     d1 = SqliteCatalogClient()
     table = "gold_weather_place_current_outlook"

@@ -9,6 +9,7 @@ it reads its token/account/db from the environment and never logs the token.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Protocol, Sequence
 
 Column = tuple[str, str]  # (name, trino_type)
@@ -23,6 +24,13 @@ _SQLITE_TYPE = {
 MAX_SQL_STATEMENT_BYTES = 80_000
 MAX_STATEMENTS_PER_API_BATCH = 4
 MAX_API_BATCH_BYTES = 256_000
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def quote_identifier(identifier: str) -> str:
+    if not isinstance(identifier, str) or not IDENTIFIER_RE.fullmatch(identifier):
+        raise ValueError(f"unsafe D1 identifier: {identifier!r}")
+    return f'"{identifier}"'
 
 
 def sqlite_type(trino_type: str) -> str:
@@ -132,6 +140,7 @@ class D1Client(Protocol):
     def upsert_catalog(self, catalog_rows: Sequence[dict[str, Any]]) -> None: ...
     def delete_catalog_row(self, name: str) -> None: ...
     def catalog_domain_count(self, model_names: set[str]) -> int: ...
+    def read_table_rows(self, name: str, ordered_columns: Sequence[Column], primary_key: Sequence[str]) -> list[dict[str, Any]]: ...
     def append_publication_ledger(self, record: dict[str, Any]) -> None: ...
     def publish_product_meta(
         self,
@@ -590,6 +599,21 @@ class HttpD1Client:
         names = ", ".join(sql_literal(n) for n in sorted(model_names))
         out = self._query(f"SELECT count(*) c FROM _catalog WHERE name IN ({names});")
         return int(out[0].get("c", 0)) if out else 0
+
+    def read_table_rows(
+        self,
+        name: str,
+        ordered_columns: Sequence[Column],
+        primary_key: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        if not ordered_columns:
+            raise ValueError(f"{name}: ordered_columns are required for D1 read-back")
+        if not primary_key:
+            raise ValueError(f"{name}: primary_key is required for D1 read-back")
+        table = quote_identifier(name)
+        select_columns = ", ".join(quote_identifier(column) for column, _type in ordered_columns)
+        order_columns = ", ".join(quote_identifier(column) for column in primary_key)
+        return self._query(f"SELECT {select_columns} FROM {table} ORDER BY {order_columns};")
 
     def append_publication_ledger(self, record: dict[str, Any]) -> None:
         self._query(PUBLICATION_LEDGER_DDL)

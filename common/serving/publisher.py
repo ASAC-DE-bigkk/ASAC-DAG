@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol, Sequence
 
 from common.serving import gate as gatelib
+from common.serving.content_identity import d1_content_hash
 from common.serving.contract import ServingContract
 from common.serving.d1_client import Column, D1Client, sqlite_type
 from common.serving.gate import (
@@ -67,6 +68,9 @@ class ProductRecord:
     api_smoke_status: str = "not_evaluated"
     stage: str = "initialized"
     rollback_status: str = "not_needed"
+    projection_schema_hash: str | None = None
+    source_content_hash: str | None = None
+    d1_content_hash: str | None = None
 
 
 @dataclass
@@ -206,12 +210,12 @@ def _write(
     contract: ServingContract,
     plan: ReadPlan,
     rows: Sequence[dict[str, Any]],
-) -> tuple[int, int, int]:
-    """Write ``rows`` per publication_mode and return physical D1 PK statistics."""
+) -> None:
+    """Write ``rows`` per publication_mode; read-back happens after activation."""
     mode = contract.publication_mode
     if _uses_replace_lifecycle(contract):
         d1.replace_table(contract.model_name, plan.columns, rows, contract.primary_key)  # staging swap protects last-good
-        return d1.primary_key_stats(contract.model_name, contract.primary_key)
+        return
     d1.ensure_table(contract.model_name, plan.columns, contract.primary_key)
     if mode == "append":
         if plan.delete_column and plan.delete_literal is not None:
@@ -221,7 +225,19 @@ def _write(
         d1.insert_rows(contract.model_name, plan.columns, rows, replace=True)
     else:
         raise ValueError(f"unknown publication_mode: {mode!r}")
-    return d1.primary_key_stats(contract.model_name, contract.primary_key)
+
+
+def _content_contract_error(contract: ServingContract, plan: ReadPlan) -> str | None:
+    if not contract.public_projection:
+        return "verify_content_parity requires public_projection"
+    if not contract.projection_schema_hash:
+        return "verify_content_parity requires projection_schema_hash"
+    if not contract.primary_key:
+        return "verify_content_parity requires primary_key"
+    plan_columns = tuple(column for column, _type in plan.columns)
+    if plan_columns != tuple(contract.public_projection):
+        return "ReadPlan columns do not match public_projection order"
+    return None
 
 
 def _ledger_row(record: ProductRecord, *, outcome: str) -> dict[str, Any]:
@@ -301,6 +317,7 @@ def publish(
     smoke: SmokeTester,
     *,
     source_run_id: str,
+    verify_content_parity: bool = False,
 ) -> PublicationReport:
     """Publish each contract as one Publication unit. Raises ``PublicationError`` if any fails."""
     report = PublicationReport()
@@ -314,6 +331,8 @@ def publish(
             serving_status=STATUS_FAILED,
             reason="",
         )
+        if verify_content_parity:
+            record.projection_schema_hash = contract.projection_schema_hash
 
         last_good_count = None
         catalog = d1.catalog_row(contract.model_name)
@@ -348,6 +367,16 @@ def publish(
 
         rows, degraded = gatelib.apply_reliability(contract, plan.rows)
         record.source_row_count = len(rows)
+        if verify_content_parity:
+            contract_error = _content_contract_error(contract, plan)
+            if contract_error:
+                record.serving_status = STATUS_FAILED
+                record.stage = "content_contract"
+                record.reason = contract_error
+                report.failures.append(f"{contract.model_name}: {record.reason}")
+                _append_ledger(d1, record, outcome="failed")
+                report.records.append(record)
+                continue
         source_row_count, source_distinct_count, source_null_count = _primary_key_stats(rows, contract.primary_key)
         if source_row_count != source_distinct_count or source_null_count:
             record.serving_status = STATUS_FAILED
@@ -360,9 +389,25 @@ def publish(
             _append_ledger(d1, record, outcome="failed")
             report.records.append(record)
             continue
+        if verify_content_parity:
+            try:
+                record.source_content_hash = d1_content_hash(
+                    namespace=contract.model_name,
+                    columns=plan.columns,
+                    rows=rows,
+                    primary_key=contract.primary_key,
+                )
+            except Exception as exc:  # noqa: BLE001 -- fail before physical write
+                record.serving_status = STATUS_FAILED
+                record.stage = "content_contract"
+                record.reason = f"source content hash 실패: {type(exc).__name__}: {exc}"
+                report.failures.append(f"{contract.model_name}: {record.reason}")
+                _append_ledger(d1, record, outcome="failed")
+                report.records.append(record)
+                continue
         try:
             record.stage = "write"
-            d1_row_count, distinct_primary_key_count, null_primary_key_count = _write(d1, contract, plan, rows)
+            _write(d1, contract, plan, rows)
         except Exception as exc:  # noqa: BLE001 -- record + continue; snapshot last-good is intact
             record.serving_status = STATUS_FAILED
             record.stage = "write"
@@ -370,6 +415,22 @@ def publish(
             report.failures.append(f"{contract.model_name}: {record.reason}")
             _append_ledger(d1, record, outcome="failed")
             report.records.append(record)
+            continue
+        try:
+            record.stage = "read_back"
+            d1_row_count, distinct_primary_key_count, null_primary_key_count = d1.primary_key_stats(
+                contract.model_name,
+                contract.primary_key,
+            )
+        except Exception as exc:  # noqa: BLE001 -- activated replacement must be compensated
+            _fail_after_write(
+                d1,
+                report,
+                record,
+                contract,
+                message=f"D1 primary key read-back 실패: {type(exc).__name__}: {exc}",
+                previous_catalog=catalog,
+            )
             continue
 
         record.d1_row_count = d1_row_count
@@ -390,6 +451,41 @@ def publish(
                 f"distinct={distinct_primary_key_count} null={null_primary_key_count}"
             ), previous_catalog=catalog)
             continue
+
+        if verify_content_parity:
+            try:
+                d1_rows = d1.read_table_rows(contract.model_name, plan.columns, contract.primary_key)
+                record.d1_content_hash = d1_content_hash(
+                    namespace=contract.model_name,
+                    columns=plan.columns,
+                    rows=d1_rows,
+                    primary_key=contract.primary_key,
+                )
+            except Exception as exc:  # noqa: BLE001 -- activated table must be compensated
+                record.stage = "content_parity"
+                _fail_after_write(
+                    d1,
+                    report,
+                    record,
+                    contract,
+                    message=f"content parity read-back 실패: {type(exc).__name__}: {exc}",
+                    previous_catalog=catalog,
+                )
+                continue
+            if record.source_content_hash != record.d1_content_hash:
+                record.stage = "content_parity"
+                _fail_after_write(
+                    d1,
+                    report,
+                    record,
+                    contract,
+                    message=(
+                        "content parity mismatch: "
+                        f"source={record.source_content_hash} d1={record.d1_content_hash}"
+                    ),
+                    previous_catalog=catalog,
+                )
+                continue
 
         record.published_row_count = d1_row_count
         record.published_bytes = len(json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8"))

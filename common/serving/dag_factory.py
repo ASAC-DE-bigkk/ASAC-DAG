@@ -43,6 +43,9 @@ def publication_record_payload(record: ProductRecord) -> dict[str, object]:
         "publication_id": record.publication_id,
         "stage": record.stage,
         "rollback_status": record.rollback_status,
+        "projection_schema_hash": record.projection_schema_hash,
+        "source_content_hash": record.source_content_hash,
+        "d1_content_hash": record.d1_content_hash,
     }
 
 
@@ -141,6 +144,7 @@ def build_serving_export_dag(
     schema: str | None = None,
     exact_domain_contracts: bool = False,
     require_public_projection: bool = False,
+    verify_content_parity: bool = False,
 ):
     """Build a serving-export DAG for one domain. Returns an Airflow ``DAG``."""
     import os
@@ -175,7 +179,14 @@ def build_serving_export_dag(
         smoke = build_smoke_tester_from_env()
 
         try:
-            report = publish(contracts, source, d1, smoke, source_run_id=run_id)
+            report = publish(
+                contracts,
+                source,
+                d1,
+                smoke,
+                source_run_id=run_id,
+                verify_content_parity=verify_content_parity,
+            )
         except PublicationError as exc:
             record_publication_events(context, domain, exc.report.records)
             raise
