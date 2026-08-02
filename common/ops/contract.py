@@ -303,6 +303,26 @@ def ops_key(category: OpsCategory | str, *, domain: str, filename: str,
     return "/".join(parts)
 
 
+def legacy_observation_key(category: OpsCategory | str, *, domain: str, date: str,
+                           subpath: Sequence[str] = (), filename: str) -> str:
+    """전환 전 경로(``load_date=``) — **읽기 전용**. 이미 그 이름으로 올라간 것을 찾을 때만 쓴다.
+
+    전환은 신규 쓰기부터이고(G-1) 읽는 쪽은 과도기 동안 신·구 양쪽을 본다(G-4). 이 함수가
+    관문 안에 있는 이유는, 밖에 두면 경로 문자열을 손으로 조립하는 코드가 다시 생기기 때문이다
+    (그걸 막는 검사가 `common/tests/test_ops_gate_enforcement.py` 다).
+
+    **새로 쓸 때 쓰면 안 된다** — 쓰기는 :func:`ops_key` 만 쓴다.
+    """
+    cat = coerce_category(category)
+    if cat not in OBSERVATION_CATEGORIES:
+        _fail(f"'{cat.value}' 은 관측 계열이 아니라 날짜 칸 자체가 없습니다(P-5)")
+    parts = [OPS_ROOT, cat.value, assert_domain(domain),
+             f"load_date={assert_iso_date(date, field='date')}"]
+    parts.extend(safe_segment(segment) for segment in subpath if str(segment).strip())
+    parts.append(safe_segment(filename))
+    return "/".join(parts)
+
+
 def category_prefix(category: OpsCategory | str, *, domain: str | None = None) -> str:
     """스캔용 접두 — 카테고리 전체 또는 한 도메인. 소비자(적재기·점검)가 쓴다(P-6)."""
     cat = coerce_category(category)

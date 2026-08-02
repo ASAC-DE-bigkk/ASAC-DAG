@@ -16,8 +16,8 @@ commerce 태스크 9개 DAG
   └ 태스크 텍스트 로그 ──▶ 컨테이너 볼륨 ──▶ ops/logs/commerce/         │
         (Airflow 가 기록)      (일시)   01:30   observed_date=…/…tar.gz  │
                                                                         │  매일 01:30
-타 도메인 기록기 4벌                                                     │  commerce_ops_logship
-  ├ run_sink        ──────────▶ ops/runs/…        (citydata)          ─┤  · load_ops_to_d1
+타 도메인 기록기 4벌                                                     │  common_ops_d1_load
+  ├ run_sink        ──────────▶ ops/runs/…        (citydata)          ─┤  (3시간마다)
   ├ runmetrics      ──────────▶ ops/metrics/…     (transit·weather·traffic)
   ├ errors.sink     ──────────▶ ops/errors/…      (전 도메인)          ─┤
   └ product_observability ────▶ ops/product-events, product-health     ─┘
@@ -78,28 +78,37 @@ ops/logs/commerce/observed_date=<run 시작일 KST>/<dag_id>/<run_id>.tar.gz
 
 ## 3. 적재 — 언제 어떻게 실리나
 
-`commerce_ops_logship` 이 **매일 01:30(KST)** 한 번 돈다. 태스크는 둘이고 순서가 있다.
+운영 기록 관련 DAG 는 **둘**이고, 성격이 달라 분리돼 있다.
 
-| 순서 | 태스크 | 하는 일 |
-|---|---|---|
-| 1 | `ship_logs` | 종결 run 텍스트 로그 → `ops/logs/commerce/` 업로드 → 검증 → 로컬 제거 |
-| 2 | `load_ops_to_d1` | `ops/` 관측 계열 **전 도메인** 파일 → 정규화 → 조회 DB 적재 |
+| DAG | 하는 일 | 주기 | 어디서 |
+|---|---|---|---|
+| `common_ops_logship` | 그 인스턴스의 **모든 도메인** 태스크 로그 → `ops/logs/<domain>/` | 매일 02:30 | **인스턴스마다** |
+| `common_ops_d1_load` | R2 **전 도메인** 기록 → 조회 DB | **3시간마다** | 어디서든(겹쳐도 무해) |
 
-`load_ops_to_d1` 의 순서:
+**왜 나눴나** — 로그 이관은 **그 인스턴스의 로컬 디스크 파일**을 다루므로 남의 인스턴스 로그를
+읽을 수 없다. 여러 Airflow 가 같은 저장소를 공유하는 구성이라, 로그는 인스턴스마다 치워야 한다.
+반면 조회 DB 적재는 R2 만 읽으므로 **어디서 돌든 결과가 같다.**
 
-1. **훑는다** — 기본 최근 **3일** 구간(`COMMERCE_OPS_INGEST_LOOKBACK_DAYS`). 도메인 범위는
-   기본 전체(`COMMERCE_OPS_INGEST_DOMAINS` 로 좁힐 수 있다).
-2. **이미 넣은 파일은 읽지 않고 건너뛴다** — DB 에 그 오브젝트 키가 있는지로 판정한다.
+**왜 겹쳐 돌아도 되나** — 중복 판정이 2단이고 적재가 자연키 갱신이라, 두 인스턴스가 동시에 돌아도
+결과가 같다. 낭비되는 것은 목록 조회 몇 번뿐이다.
+
+`common_ops_d1_load` 의 순서:
+
+1. **훑는다** — 기본 최근 **3일** 구간(`OPS_D1_LOOKBACK_DAYS`). 도메인 범위는 기본 전체
+   (`OPS_D1_DOMAINS` 로 좁힐 수 있다).
+2. **이미 넣은 파일은 읽지 않고 건너뛴다** — 조회 DB 에 그 오브젝트 키가 있는지로 판정한다.
    파일을 옮기거나 표식을 남기지 않는다.
 3. 남은 것만 읽어 기록 형식 한 벌로 접고, `event_id` 로 한 번 더 거른 뒤 넣는다.
-4. 건드린 날짜의 **일별 집계를 다시 계산**한다(기록 표에서 재계산 — 나눠 적재해도 값이 같다).
-5. DAG 별 현재 상태와 commerce 기대 주기를 갱신한다.
+4. 건드린 날짜의 **일별 집계를 다시 계산**한다.
+5. DAG 별 현재 상태와 **등록된 도메인의 기대 주기**를 갱신한다.
 
-### 왜 3일인가
+### 왜 3시간마다 / 왜 3일 창인가
 
-logship 은 01:30 인데 적재·변환 라인은 **04:00~06:00** 에 돈다. 그날 04~06시 기록은 **다음 날
-01:30 에** 실린다. 하루만 보면 매일 한 사이클씩 빠지므로 여유를 둔 값이다. 하루 걸러 실패해도
-다음 실행이 따라잡는다.
+**주기** — 하루 1회면 기록이 조회 DB 에 보이기까지 최대 하루가 걸리고, 그 사이 파이프라인이 죽어도
+화면은 조용하다(`C-9`). 이미 넣은 것은 파일을 열지도 않고 건너뛰므로 자주 돌아도 비용이 거의
+없다 — 새로 생긴 것이 없으면 목록 조회와 질의 한 번으로 끝난다.
+
+**창** — 하루 걸러 실패해도 다음 실행이 따라잡도록 여유를 둔 값이다.
 
 ### 한 번에 처리하는 양
 
@@ -133,7 +142,8 @@ python .../scripts/backfill_ops_records.py --since 2026-07-01 --until 2026-07-31
 |---|---|---|
 | `commerce_collect_raw` | 일 1회 00:00 | 태스크마다 `ops/runs` 1건 |
 | `commerce_recollect_raw` | 6시간 | 〃 |
-| **`commerce_ops_logship`** | **일 1회 01:30** | 〃 + **로그 번들 업로드 + 조회 DB 적재** |
+| **`common_ops_logship`** (공용) | **일 1회 02:30** | 전 도메인 로그 번들 업로드·로컬 정리 |
+| **`common_ops_d1_load`** (공용) | **3시간마다** | 전 도메인 기록 → 조회 DB |
 | `commerce_load_bronze` | 일 1회 04:00 | 〃 |
 | `commerce_load_silver` | 일 1회 05:00 | 〃 |
 | `commerce_load_gold` | 일 1회 06:00 | 〃 |
