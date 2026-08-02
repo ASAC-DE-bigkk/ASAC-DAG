@@ -122,5 +122,5 @@ def test_trino_catalog_uses_single_name_on_new_env():
 
 
 def test_split_env_honours_explicit_dev_catalog_override():
-    env = {**SPLIT_ENV, "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev_custom"}
+    env = {**SPLIT_ENV, "TRINO_ICEBERG_CATALOG": "iceberg_dev_custom"}
     assert build_warehouse_settings("dev", env=env).catalog == "iceberg_dev_custom"

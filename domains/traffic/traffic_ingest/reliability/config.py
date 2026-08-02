@@ -102,9 +102,9 @@ def sql_identifier(value: str) -> str:
 
 
 def trino_catalog(env: Mapping[str, str] = os.environ) -> str:
-    if is_dev_target(env):
-        return env.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-    return env.get("TRINO_ICEBERG_CATALOG", "iceberg")
+    # canonical 키 하나 — 값이 배포 환경을 따라간다(미설정 시 기본만 타깃별).
+    return env.get("TRINO_ICEBERG_CATALOG") or (
+        "iceberg_dev" if is_dev_target(env) else "iceberg")
 
 
 def ask_seoul_schema(env: Mapping[str, str] = os.environ) -> str:

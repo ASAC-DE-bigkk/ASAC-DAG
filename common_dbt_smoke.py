@@ -56,15 +56,15 @@ def r2_env(name: str) -> str:
 
 
 def trino_catalog() -> str:
-    if is_dev_target():
-        return os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-    return os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
+    """canonical 키 하나 — 값이 배포 환경을 따라간다(미설정 시 기본만 타깃별)."""
+    return os.environ.get("TRINO_ICEBERG_CATALOG") or (
+        "iceberg_dev" if is_dev_target() else "iceberg")
 
 
 def smoke_schema() -> str:
-    if is_dev_target():
-        return os.environ.get("DEV_SMOKE_SCHEMA", "dev_local")
-    return os.environ.get("SMOKE_SCHEMA", "ops_smoke")
+    """canonical 키 하나 — 값이 배포 환경을 따라간다(미설정 시 기본만 타깃별)."""
+    return os.environ.get("SMOKE_SCHEMA") or (
+        "dev_local" if is_dev_target() else "ops_smoke")
 
 
 def sql_identifier(value: str) -> str:

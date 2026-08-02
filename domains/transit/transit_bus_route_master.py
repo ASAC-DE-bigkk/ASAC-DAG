@@ -75,8 +75,7 @@ def _trino_target() -> tuple[str, str]:
     분리, 스키마는 공용 transit."""
     dev = os.environ.get("ASK_SEOUL_TARGET", os.environ.get("DBT_TARGET", "prod")) == "dev"
     catalog = (
-        os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev") if dev
-        else os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
+        os.environ.get("TRINO_ICEBERG_CATALOG") or ("iceberg_dev" if dev else "iceberg")
     )
     return catalog, os.environ.get("TRANSIT_SCHEMA", "transit")
 

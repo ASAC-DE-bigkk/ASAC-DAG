@@ -73,11 +73,10 @@ class TrinoSourceReader:
 
 def _trino_settings(target: str, schema: str) -> dict[str, Any]:
     dev = target != "prod"
-    catalog = (
-        os.environ.get("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
-        if dev
-        else os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
-    )
+    # 카탈로그 키 이름은 배포 환경을 담지 않는다 — canonical ``TRINO_ICEBERG_CATALOG`` 하나이고
+    # 값이 배포를 따라간다(호스트 컴포즈도 이 값으로 카탈로그 파일 이름을 짓는다).
+    # 미설정 시 기본만 타깃에 따라 다르다.
+    catalog = os.environ.get("TRINO_ICEBERG_CATALOG") or ("iceberg_dev" if dev else "iceberg")
     return {
         "host": os.environ.get("TRINO_HOST", "trino"),
         "port": int(os.environ.get("TRINO_PORT", "8080")),

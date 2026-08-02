@@ -43,7 +43,7 @@ def dev_env():
     return {
         "ASK_SEOUL_TARGET": "dev",
         "DBT_TARGET": "dev",
-        "TRINO_DEV_ICEBERG_CATALOG": APPROVED_DEV_CATALOG,
+        "TRINO_ICEBERG_CATALOG": APPROVED_DEV_CATALOG,
         "ASK_SEOUL_SCHEMA": APPROVED_DEV_SCHEMA,
         "WEATHER_SCHEMA": "weather",
         "R2_DEV_BUCKET_NAME": "seoul-dev",

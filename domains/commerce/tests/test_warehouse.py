@@ -56,7 +56,7 @@ class _FakeConn:
 def trino_env(monkeypatch):
     monkeypatch.setenv("COMMERCE_SCHEMA", "commerce")
     monkeypatch.setenv("DBT_TARGET", "dev")
-    monkeypatch.setenv("TRINO_DEV_ICEBERG_CATALOG", "iceberg_dev")
+    monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg_dev")
     monkeypatch.setenv("SCHEMA_VERSION", "v1")
     monkeypatch.setenv("STORAGE_BACKEND", "local")
 

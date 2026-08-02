@@ -15,7 +15,7 @@ def test_accepts_dev_runtime_with_domain_schema_defaults():
         "traffic",
         {
             "DBT_TARGET": "dev",
-            "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
+            "TRINO_ICEBERG_CATALOG": "iceberg_dev",
             "R2_BUCKET_NAME": "seoul-dev",
             "R2_ENDPOINT": "https://dev.invalid",
             "R2_ACCESS_KEY_ID": "dev-access",
@@ -61,7 +61,7 @@ def test_rejects_runtime_when_canonical_r2_tuple_is_incomplete():
             "traffic",
             {
                 "DBT_TARGET": "dev",
-                "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
+                "TRINO_ICEBERG_CATALOG": "iceberg_dev",
                 "R2_BUCKET_NAME": "seoul-dev",
                 "R2_ENDPOINT": "https://dev.invalid",
                 "R2_DEV_ACCESS_KEY_ID": "dev-access",
@@ -91,7 +91,7 @@ def test_rejects_prod_target_when_catalog_is_dev():
             "weather",
             {
                 "DBT_TARGET": "prod",
-                "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
+                "TRINO_ICEBERG_CATALOG": "iceberg_dev",
             },
         )
 
@@ -128,7 +128,7 @@ def test_rejects_requested_transform_target_mismatch():
             "weather",
             {
                 "DBT_TARGET": "dev",
-                "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
+                "TRINO_ICEBERG_CATALOG": "iceberg_dev",
             },
             requested_target="prod",
         )
@@ -151,7 +151,7 @@ def test_rejects_non_dev_catalog():
             "traffic",
             {
                 "DBT_TARGET": "dev",
-                "TRINO_DEV_ICEBERG_CATALOG": "iceberg",
+                "TRINO_ICEBERG_CATALOG": "iceberg",
             },
         )
 
@@ -162,7 +162,7 @@ def test_rejects_prod_namespace_in_dev_source_schema():
             "traffic",
             {
                 "DBT_TARGET": "dev",
-                "TRINO_DEV_ICEBERG_CATALOG": "iceberg_dev",
+                "TRINO_ICEBERG_CATALOG": "iceberg_dev",
                 "ASK_SEOUL_SCHEMA": "ops_smoke",
             },
         )
