@@ -27,33 +27,22 @@ _TARGET = os.environ.get("DBT_TARGET", "prod")
 _SCHEMA = "citydata" if _TARGET == "prod" else "seoul_citydata"
 
 # 티어 = product_id 묶음. 각 골드의 publication_trigger.schedule_cron(계약)이 아래 스케줄과 정렬돼 있다.
-CRITICAL = [
-    "citydata_place_latest",
-    "citydata_place_scorecard",
-    "citydata_ppltn_trend",
-    "citydata_ppltn_anomaly",
-]
+# 실시간 스냅샷 제거 + 시계열 집중(ASAC-DBT#404) — CRITICAL(5분마다 전량) tier 폐지.
+# 실시간은 PlayMCP 실시간 MCP 가 커버 → citydata 는 시계열·패턴만 서빙.
 FAST = [
-    "citydata_hot_commerce",
-    "citydata_ppltn_x_commerce_dong",
-    "citydata_charger_availability",
-    "citydata_air_trend",
-    "citydata_air_anomaly",
-    "citydata_sbike_availability",
-    "citydata_ppltn_hourly",          # append(시간축)
+    "citydata_ppltn_hourly",               # append(시간축)
+    "citydata_transit_x_incident_hourly",  # 시계열 크로스(선언됐으나 미스케줄이던 것 편입)
+    "citydata_ppltn_x_weather_hourly",     # 시계열 크로스(동상)
 ]
 DAILY = [
-    "citydata_ppltn_forecast",
     "citydata_ppltn_dow_hour",
-    "citydata_ppltn_daily",           # append(일축)
-    "citydata_cmrcl_daily",           # append
+    "citydata_ppltn_daily",             # append(일축)
+    "citydata_cmrcl_daily",             # append
     "citydata_purchasing_power_daily",  # append
     "citydata_ppltn_x_culture_daily",   # append
+    "citydata_sbike_dow_hour",          # 신설: 영역 요일×시간 따릉이 가용
+    "citydata_air_daily",               # 신설: 일별 대기질 추이 (append)
 ]
-
-citydata_serving_export_critical = build_serving_export_dag(
-    domain="citydata", product_ids=CRITICAL, schedule="*/5 * * * *",
-    dag_id="citydata_serving_export_critical", schema=_SCHEMA, target=_TARGET)
 
 citydata_serving_export_fast = build_serving_export_dag(
     domain="citydata", product_ids=FAST, schedule="15 * * * *",
