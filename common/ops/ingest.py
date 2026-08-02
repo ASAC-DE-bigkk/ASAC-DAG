@@ -91,6 +91,7 @@ class IngestReceipt:
     loaded: int = 0
     log_bundles: int = 0
     attached_log_bundles: int = 0
+    backfilled_log_bundles: int = 0
     layer_missing: dict[str, int] = field(default_factory=dict)
     normalize_failed: dict[str, int] = field(default_factory=dict)
     dates_touched: list[str] = field(default_factory=list)
@@ -103,6 +104,7 @@ class IngestReceipt:
             "normalized": self.normalized, "skipped_existing": self.skipped_existing,
             "loaded": self.loaded, "log_bundles": self.log_bundles,
             "attached_log_bundles": self.attached_log_bundles,
+            "backfilled_log_bundles": self.backfilled_log_bundles,
             "layer_missing": dict(sorted(self.layer_missing.items())),
             "normalize_failed": dict(sorted(self.normalize_failed.items())),
             "dates_touched": sorted(set(self.dates_touched)),
@@ -413,14 +415,8 @@ _RUN_ID_SANITIZERS: tuple[Callable[[str], str], ...] = (
 )
 
 
-def attach_log_bundles(records: Sequence[dict[str, Any]],
-                       log_objects: Sequence[OpsObject]) -> int:
-    """로그 번들 키를 같은 (dag_id, run_id) 실행 기록에 붙인다.
-
-    ``ops/logs/`` 는 "태스크 텍스트 로그 압축본"이라 기록 1건이 아니다(R-1). 새 ``grain`` 값을
-    만들어 닫힌 집합(V-5)을 깨는 대신, 실행 기록에 포인터를 얹어 화면에서 실행 → 로그 원문으로
-    바로 갈 수 있게 한다. 항목 추가는 허용된다(F-1·D-3).
-    """
+def bundle_index(log_objects: Sequence[OpsObject]) -> dict[tuple[str, str], str]:
+    """(dag_id, 파일명 run_id) → 번들 키. 파일 목록만으로 만든다(내용을 읽지 않는다)."""
     index: dict[tuple[str, str], str] = {}
     for obj in log_objects:
         matched = _LOG_BUNDLE.match(obj.filename)
@@ -428,21 +424,70 @@ def attach_log_bundles(records: Sequence[dict[str, Any]],
             continue
         dag_id = obj.key.split("/")[-2]
         index[(dag_id, matched.group("run_id"))] = obj.key
+    return index
+
+
+def find_bundle(index: dict[tuple[str, str], str], dag_id: Any, run_id: Any) -> str | None:
+    """run_id 의 예약문자는 저장 시 치환된다. 규칙이 전환 전후로 한 번 바뀌었으므로 양쪽으로 되짚는다."""
+    if not dag_id or not run_id:
+        return None
+    for rule in _RUN_ID_SANITIZERS:
+        found = index.get((str(dag_id), rule(str(run_id))))
+        if found:
+            return found
+    return None
+
+
+def attach_log_bundles(records: Sequence[dict[str, Any]],
+                       log_objects: Sequence[OpsObject]) -> int:
+    """로그 번들 키를 같은 (dag_id, run_id) 실행 기록에 붙인다.
+
+    ``ops/logs/`` 는 "태스크 텍스트 로그 압축본"이라 기록 1건이 아니다(R-1). 새 ``grain`` 값을
+    만들어 닫힌 집합(V-5)을 깨는 대신, 실행 기록에 포인터를 얹어 화면에서 실행 → 로그 원문으로
+    바로 갈 수 있게 한다. 항목 추가는 허용된다(F-1·D-3).
+
+    **여기서 붙는 것은 이번에 새로 읽은 기록뿐이다.** 기록은 태스크 종료 즉시 쓰이고 번들은
+    그 run 이 종결된 뒤 하루 1회 올라가므로, 대개 **기록이 먼저 적재되고 번들이 나중에 생긴다.**
+    이미 적재된 행은 :func:`backfill_log_bundles` 가 뒤늦게 채운다.
+    """
+    index = bundle_index(log_objects)
     attached = 0
     for record in records:
-        dag_id, run_id = record.get("dag_id"), record.get("run_id")
-        if not dag_id or not run_id:
-            continue
-        # run_id 의 예약문자는 저장 시 '-' 로 치환된다. 규칙이 전환 전후로 한 번 바뀌었으므로
-        # (구: '+' 보존 / 신: 관문의 safe_segment) 양쪽으로 되짚는다 — 한쪽만 보면 이미 올라간
-        # 번들을 못 찾는다.
-        for rule in _RUN_ID_SANITIZERS:
-            candidate = index.get((str(dag_id), rule(str(run_id))))
-            if candidate:
-                record["log_bundle_key"] = candidate
-                attached += 1
-                break
+        candidate = find_bundle(index, record.get("dag_id"), record.get("run_id"))
+        if candidate:
+            record["log_bundle_key"] = candidate
+            attached += 1
     return attached
+
+
+def backfill_log_bundles(*, d1_execute: Callable[[str], list[dict[str, Any]]],
+                         log_objects: Sequence[OpsObject]) -> int:
+    """**이미 적재된** 기록에 뒤늦게 로그 번들 포인터를 채운다.
+
+    실행 기록은 태스크가 끝나는 즉시 쓰이고, 텍스트 로그 번들은 그 run 이 종결된 뒤 하루 1회
+    묶여 올라간다. 그래서 기록이 조회 DB 에 먼저 들어가고 번들은 나중에 생긴다 — 적재 시점에만
+    포인터를 붙이면 **영영 비어 있게 된다.**
+
+    번들 목록은 이미 갖고 있으므로(파일 내용은 안 읽는다) 질의 하나 + 배치 UPDATE 로 끝난다.
+    이미 채워진 행은 건드리지 않는다.
+    """
+    from common.ops import d1_ops
+
+    index = bundle_index(log_objects)
+    if not index:
+        return 0
+    dates = sorted({obj.source_path_date for obj in log_objects if obj.source_path_date})
+    statement = d1_ops.rows_missing_log_bundle_statement(dates)
+    if statement is None:
+        return 0
+    pairs: list[tuple[str, str]] = []
+    for row in (d1_execute(statement) or []):  # security: allow-sql — 공용 빌더(값 이스케이프)
+        found = find_bundle(index, row.get("dag_id"), row.get("run_id"))
+        if found:
+            pairs.append((str(row.get("event_id")), found))
+    for update in d1_ops.set_log_bundle_statements(pairs):
+        d1_execute(update)   # security: allow-sql — 공용 빌더(식별자 상수, 값 이스케이프)
+    return len(pairs)
 
 
 # ── 4. 적재 ───────────────────────────────────────────────────────────────────────
@@ -535,6 +580,10 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
     rebuild = d1_ops.daily_metric_rebuild_statement(receipt.dates_touched, updated_at=stamp)
     if rebuild:
         d1_execute(rebuild)     # security: allow-sql — 공용 빌더(값 이스케이프)
+
+    # 기록이 먼저 적재되고 번들이 나중에 생기는 순서라, 이미 넣은 행의 포인터를 여기서 채운다.
+    receipt.backfilled_log_bundles = backfill_log_bundles(
+        d1_execute=d1_execute, log_objects=log_objects)
 
     state_rows = pipeline_state_rows(records, reconciled_through=until, updated_at=stamp)
     for statement in d1_ops.pipeline_state_upsert_statements(state_rows):
