@@ -42,6 +42,7 @@ DAILY = [
     "citydata_ppltn_x_culture_daily",   # append
     "citydata_sbike_dow_hour",          # 신설: 영역 요일×시간 따릉이 가용
     "citydata_air_daily",               # 신설: 일별 대기질 추이 (append)
+    "citydata_charger_dow_hour",        # 신설: 영역 요일×시간 충전소 가용 (as-of 리샘플링)
 ]
 
 citydata_serving_export_fast = build_serving_export_dag(
