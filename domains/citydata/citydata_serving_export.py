@@ -30,10 +30,11 @@ _SCHEMA = "citydata" if _TARGET == "prod" else "seoul_citydata"
 # 실시간 스냅샷 제거 + 시계열 집중(ASAC-DBT#404) — CRITICAL(5분마다 전량) tier 폐지.
 # 실시간은 PlayMCP 실시간 MCP 가 커버 → citydata 는 시계열·패턴만 서빙.
 FAST = [
-    "citydata_ppltn_hourly",               # append(시간축)
-    "citydata_transit_x_incident_hourly",  # 시계열 크로스(선언됐으나 미스케줄이던 것 편입)
-    "citydata_ppltn_x_weather_hourly",     # 시계열 크로스(동상)
+    "citydata_ppltn_hourly",               # append(시간축) — 새 hour 만 게시(저비용)
 ]
+# transit_x_incident_hourly·ppltn_x_weather_hourly 는 선언됐으나 미스케줄 상태 그대로 둔다:
+# 둘 다 증분(성장형) 모델인데 serving publication_mode=snapshot 이라, 매시 게시하면 전량(수만
+# 행)을 시간마다 재기록해 D1 쓰기가 폭증한다. 스케줄하려면 append 전환이 선행돼야 함(별도 이슈).
 DAILY = [
     "citydata_ppltn_dow_hour",
     "citydata_ppltn_daily",             # append(일축)
