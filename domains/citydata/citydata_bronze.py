@@ -66,6 +66,32 @@ record_citydata_problem = problem_failure_callback(
 _run_ok = record_run("citydata", "bronze", status="success")
 _run_fail = record_run("citydata", "bronze", status="failed")
 
+
+def _run_ok_d1(context) -> None:
+    """load_bronze 성공 → ``_ops_run_event`` 에 실시간 한 줄(C-2, ASK-Seoul#78 G-5).
+
+    stall 알림이 조회 DB 를 45분급으로 읽으려면 성공 순간 D1 에 신선한 행이 필요하다.
+    ``load_bronze`` 만 대상(stall 판정 태스크 — report 는 all_done 이라 거짓정상 유발).
+    R2(run_sink)는 그대로 두고 D1 만 추가하며, event_id 가 밤 배치와 일치해 멱등이다.
+    fail-open — 적재 실패가 수집을 죽이지 않는다(C-2)."""
+    ti = context["ti"]
+    if ti.task_id != "load_bronze":
+        return
+    try:
+        from common.ops.contract import (  # noqa: PLC0415
+            Grain, Layer, OpsCategory, RunStatus, build_ops_event)
+        from common.ops.d1_run_event_writer import (  # noqa: PLC0415
+            make_d1_run_event_writer)
+        target = (context.get("params") or {}).get("target", "dev")
+        record = build_ops_event(
+            OpsCategory.RUNS, domain="citydata", layer=Layer.BRONZE,
+            grain=Grain.AIRFLOW_TASK, status=RunStatus.SUCCESS,
+            dag_id=ti.dag_id, task_id=ti.task_id, run_id=ti.run_id,
+            try_number=ti.try_number, environment=target)
+        make_d1_run_event_writer()(record)
+    except Exception as exc:  # noqa: BLE001 — C-2 fail-open
+        print(f"[citydata bronze] D1 run-event 적재 실패(무시): {type(exc).__name__}: {exc}")
+
 DEFAULT_PARAMS = {
     # 단일 env 노브(#556) — DBT_TARGET=prod 로 컷오버, 미설정 시 dev(불변).
     # per-run 오버라이드 유지: 트리거 시 target=prod 를 conf 로 넘기면 이 기본값보다 우선.
@@ -236,7 +262,7 @@ with DAG(
     dagrun_timeout=timedelta(minutes=15),
     default_args={"retries": 1, "retry_delay": timedelta(minutes=1),
                   "execution_timeout": timedelta(minutes=10),
-                  "on_success_callback": _run_ok},
+                  "on_success_callback": [_run_ok, _run_ok_d1]},
     params=DEFAULT_PARAMS,
     tags=["ingest", "citydata", "population", "bronze", "r2", "iceberg"],
 ) as dag:
