@@ -32,18 +32,17 @@ _SCHEMA = "citydata" if _TARGET == "prod" else "seoul_citydata"
 FAST = [
     "citydata_ppltn_hourly",               # append(시간축) — 새 hour 만 게시(저비용)
 ]
-# transit_x_incident_hourly·ppltn_x_weather_hourly 는 선언됐으나 미스케줄 상태 그대로 둔다:
-# 둘 다 증분(성장형) 모델인데 serving publication_mode=snapshot 이라, 매시 게시하면 전량(수만
-# 행)을 시간마다 재기록해 D1 쓰기가 폭증한다. 스케줄하려면 append 전환이 선행돼야 함(별도 이슈).
 DAILY = [
     "citydata_ppltn_dow_hour",
-    "citydata_ppltn_daily",             # append(일축)
-    "citydata_cmrcl_daily",             # append
-    "citydata_purchasing_power_daily",  # append
-    "citydata_ppltn_x_culture_daily",   # append
-    "citydata_sbike_dow_hour",          # 신설: 영역 요일×시간 따릉이 가용
-    "citydata_air_daily",               # 신설: 일별 대기질 추이 (append)
-    "citydata_charger_dow_hour",        # 신설: 영역 요일×시간 충전소 가용 (as-of 리샘플링)
+    "citydata_ppltn_daily",                # append(일축)
+    "citydata_cmrcl_daily",                # append
+    "citydata_purchasing_power_daily",     # append
+    "citydata_ppltn_x_culture_daily",      # append
+    "citydata_transit_x_incident_hourly",  # 시계열 크로스 — append(새 time_bucket만) daily 게시
+    "citydata_ppltn_x_weather_hourly",     # 시계열 크로스 — 동상(snapshot→append 전환 후 편입)
+    "citydata_sbike_dow_hour",             # 신설: 영역 요일×시간 따릉이 가용
+    "citydata_air_daily",                  # 신설: 일별 대기질 추이 (append)
+    "citydata_charger_dow_hour",           # 신설: 영역 요일×시간 충전소 가용 (as-of 리샘플링)
 ]
 
 citydata_serving_export_fast = build_serving_export_dag(
