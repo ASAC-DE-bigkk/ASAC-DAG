@@ -247,6 +247,7 @@ def write_citydata_run_report(report: dict, *, target: str = "dev",
 
     dev(불변): ``{LANDING_ROOT}/_reports/{source_id}/...`` (기존 경로 그대로).
     prod(신규, #556): ``ops/reports/citydata/...`` — ops 존으로 분리(#60).
+        날짜 칸은 ``observed_date=``(P-4, ASK-Seoul#78) — 관측일(KST).
     """
     settings = build_r2_settings(target, env_file)
     missing = missing_r2(settings)
@@ -255,7 +256,7 @@ def write_citydata_run_report(report: dict, *, target: str = "dev",
     if target == "prod":
         key = (
             f"ops/reports/citydata"
-            f"/load_date={report['load_date']}/ingest_ts={report['ingest_ts']}/run_report.json"
+            f"/observed_date={report['load_date']}/ingest_ts={report['ingest_ts']}/run_report.json"
         )
     else:
         key = (
