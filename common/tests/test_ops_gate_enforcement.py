@@ -31,7 +31,7 @@ GRANDFATHERED: dict[str, str] = {
         "구경로(load_date=) 탐색 전용 상수. 신규 쓰기는 관문이 만든다 — dual-read 종료 시 삭제",
     # ── 관측 계열: 날짜 칸 전환(P-4)·축 순서(P-6·P-7)가 남은 곳 ──
     "domains/citydata/citydata_ingest/source/citydata_ingest.py":
-        "ops/reports/citydata — 날짜 칸이 load_date=. observed_date= 전환 대기 @kang-gyeongmin",
+        "ops/reports/citydata — observed_date= 전환 완료(P-4). 관문 배선 전까지 hand-assemble 유지 @kang-gyeongmin",
     "domains/culture/culture_ingest/source/config.py":
         "ops/reports/culture · ops/control/state/culture — 리포트/기준선 분리 반영분 @yooseongjin527",
     "domains/traffic/traffic_ingest/reliability/history.py":
