@@ -77,6 +77,9 @@ def _stall_issues(target: str = "dev") -> list[str]:
     ``load_bronze`` 만 — report(all_done)는 수집 실패에도 성공해 거짓정상을 만든다."""
     if target not in ("dev", "prod"):  # params 유래 — SQL 삽입 전 화이트리스트
         target = "dev"
+    # D1 조회 자체 실패는 fail-open 하지 않는다(하드닝) — [] 를 주면 D1 가 죽어도 "정상"으로
+    # 위장돼 진짜 정체를 놓치고, 인라인 쓰기가 조용히 실패해 stale 해도 안 드러난다. "못 봤음"
+    # 을 별도 경보로 띄운다. 결과 파싱/계산 오류는 fail-open(단발 이상치로 스팸 방지).
     try:
         from common.serving.runtime import build_d1_client_from_env
 
@@ -87,6 +90,10 @@ def _stall_issues(target: str = "dev") -> list[str]:
             "AND task_id='load_bronze' AND status='success' "
             f"AND environment='{target}'"
         )
+    except Exception as exc:  # noqa: BLE001 -- 조회 실패는 "정상"과 구분해 드러낸다
+        print(f"[serving monitor] 정체 체크 D1 조회 실패: {type(exc).__name__}: {exc}")
+        return ["D1 조회 실패 — 정체 알림 신뢰 불가 (서빙 DB/모니터 점검 필요)"]
+    try:
         last = rows[0].get("last") if rows else None
         if not last:
             return ["bronze 성공 기록 없음(_ops_run_event) — 수집 정체 의심"]
@@ -94,8 +101,8 @@ def _stall_issues(target: str = "dev") -> list[str]:
         if mins > STALL_NO_RUN_MIN:
             return [f"bronze 마지막 성공 {mins}분 전 (임계 {STALL_NO_RUN_MIN}) — 수집 정체(좀비) 의심"]
         return []
-    except Exception as exc:  # noqa: BLE001 -- fail-open
-        print(f"[serving monitor] 정체 체크 실패(무시): {exc}")
+    except Exception as exc:  # noqa: BLE001 -- 파싱/계산 오류는 fail-open(스팸 방지)
+        print(f"[serving monitor] 정체 판정 실패(무시): {exc}")
         return []
 
 
