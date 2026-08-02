@@ -97,7 +97,10 @@ def _stall_issues(target: str = "dev") -> list[str]:
                     kw["ContinuationToken"] = token
                 resp = cli.list_objects_v2(**kw)
                 for o in resp.get("Contents", []):
-                    if o["Key"].endswith("__success.json"):
+                    # load_bronze 태스크 성공만 인정 — report 는 trigger_rule=all_done 이라
+                    # 수집 실패(fetch_raw 예외)에도 스킵 후 성공해서, 이걸 세면 장애 중에도
+                    # 정체 알림이 침묵한다(거짓 정상). load_bronze 는 실제 적재 성공 시에만 성공.
+                    if "__load_bronze__" in o["Key"] and o["Key"].endswith("__success.json"):
                         lm = o["LastModified"]
                         if latest is None or lm > latest:
                             latest = lm
