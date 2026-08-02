@@ -170,6 +170,34 @@ class R2Storage(Storage):
                              CopySource={"Bucket": self.bucket, "Key": src_key})
 
 
+def resolve_storage() -> "Storage":
+    """**배포 환경이 정한 저장소를 그대로** 쓴다 — 도메인 무관, 공용 DAG 용.
+
+    도메인 어댑터(예: `commerce_core.storage.get_storage`)는 그 도메인의 env 규약을 따르지만,
+    공용 DAG 는 특정 도메인의 규약에 기댈 수 없다. 그래서 **배포 수준의 canonical 값**만 읽는다.
+
+    백엔드 판정 순서:
+      1. ``STORAGE_BACKEND`` 가 명시돼 있으면 그 값
+      2. 없으면 **canonical R2 자격증명 유무로 추론** — 있으면 ``r2``, 없으면 ``local``
+
+    2번이 있는 이유: 공용 DAG 하나를 위해 새 필수 설정을 만들지 않기 위해서다. R2 자격증명은
+    Trino 카탈로그도 읽는 배포 필수값이라 운영 환경에는 반드시 있고, 없는 박스는 애초에 로컬이다.
+    **환경별로 DAG 를 나누지 않는다** — 키는 하나이고 그 키의 **값**이 환경을 가리킨다(ASAC-DAG#654).
+    """
+    backend = os.environ.get("STORAGE_BACKEND", "").strip().lower()
+    if not backend:
+        has_r2 = all(os.environ.get(f"R2_{part}") for part in
+                     ("BUCKET_NAME", "ENDPOINT", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY"))
+        backend = "r2" if has_r2 else "local"
+    if backend == "local":
+        return build_storage("local",
+                             local_root=os.environ.get("LOCAL_DATA_ROOT", "/opt/airflow/data"))
+    return build_storage(
+        "r2", bucket=r2_env("R2_BUCKET_NAME"), endpoint=r2_env("R2_ENDPOINT"),
+        key=r2_env("R2_ACCESS_KEY_ID"), secret=r2_env("R2_SECRET_ACCESS_KEY"),
+        region=os.environ.get("R2_REGION", "auto"))
+
+
 def build_storage(backend: str, *, local_root: str = "",
                   bucket: str = "", endpoint: str = "", key: str = "",
                   secret: str = "", region: str = "auto") -> Storage:

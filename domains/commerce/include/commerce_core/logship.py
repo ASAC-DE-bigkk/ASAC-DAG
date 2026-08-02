@@ -1,7 +1,7 @@
 """처리로그 존 적재 — 키 구성·적재 대상 선별(순수 헬퍼, airflow 무의존).
 
 commerce DAG 태스크 로그를 R2 ops 존에 옮기고 로컬(도커 볼륨)에서 제거하기 위한 로직.
-실행부는 `commerce_ops_logship` DAG.
+실행부는 공용 DAG `common_ops_logship`(전 도메인). 이 모듈은 commerce 구경로 탐색용으로 남는다.
 
 경로는 **공용 관문**(`common.ops.contract.ops_key`)이 만든다 — 이 모듈이 문자열로 조립하지
 않는다. ASK-Seoul#78 이 commerce 담당분으로 지목한 두 건을 그렇게 해소한다:
