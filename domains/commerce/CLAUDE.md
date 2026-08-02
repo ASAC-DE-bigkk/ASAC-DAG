@@ -868,6 +868,8 @@ Before finalizing, check:
 - Is backfill considered where relevant?
 - Is failure/retry behavior considered?
 - Is the response useful to a working developer?
+- **Decision record (§19)**: did I weigh an alternative, defer something, or abandon an approach?
+  If so, is it in the entry's `decision:` — not just the outcome in `response:`?
 - **Security (§20)**: if you added/changed code where secrets could leak to logs, exceptions, stored
   artifacts (at-rest), or alerts, did you apply `redact()` / input validation? Before finishing, does
   `python -m security` report zero blocking (CRITICAL/HIGH) findings?
@@ -908,14 +910,28 @@ edits) — **append one entry to [change-log.md](change-log.md)** (bundle root).
 
 - Start with the work **date** as `## YYYY-MM-DD` (sections **descending**, latest on top) and a
   short **summary title** as `### N. <title>`.
-- The body is split into two labeled parts:
+- The body is split into three labeled parts:
   - `request:` — what the **user requested or decided** (their asks, confirmed choices, Q&A answers).
   - `response:` — a summary of **what you (the assistant) did** (implementation, verification, files).
-- One consolidated entry per logical change, written as the **final reflected state** (fold superseded
-  intermediate steps). Leave older entries untouched; apply this format going forward.
+  - `decision:` — **what was considered and NOT done, and why.** Rejected alternatives, deferred
+    options, and the reason each lost. Omit only when nothing was weighed; never omit to save space.
+- One consolidated entry per logical change, written as the **final reflected state** — fold
+  superseded intermediate steps **out of `response:`, into `decision:`**. Folding is for narrative
+  tidiness, not for erasing what was tried: a rejected approach and its reason must survive the fold.
+  Leave older entries untouched; apply this format going forward.
 - **Path discovery**: `change-log.md` is indexed in [Share.md](Share.md) §4 and
   [docs/README.md](docs/README.md) so the path is always reachable from the doc chain — follow
   that index, don't hardcode guesses. Keep those two index entries valid if the file moves.
+
+**`decision:` 를 왜 넣었나** — 이력 90건을 전수 회고했더니(`docs/project-retrospective.md` §5-(4)),
+**"고친 기록"은 잘 남았는데 "판단한 기록"은 잘 안 남아 있었다.** 서식이 요청·한 일 두 칸뿐이라
+*무엇을 검토했다 버렸는지*가 들어갈 자리가 없었고, 위의 "중간 단계는 접는다" 지시가 그걸 더
+지웠다. 실제로 회고 28건 중 4건은 원인을 끝내 못 찾았고, 그중 하나는 "기록 방식이 왜 네 벌로
+갈렸나 — 두 번째를 만들 때 통합을 검토했는가"였다. 지금 물어도 답할 사람이 없다.
+
+`decision:` 에 적을 것: 채택하지 않은 대안과 **왜 졌는지**, 나중으로 미룬 것과 **무엇이 충족되면
+다시 볼지**, 실패한 시도와 **무엇을 배웠는지**. §5 Stack Change Rule 로 승인받은 판단도 여기 남긴다
+(그 절은 *제안* 절차이고 이 칸은 *보존* 절차다).
 
 
 Rules to follow when adding or editing pipeline code:
