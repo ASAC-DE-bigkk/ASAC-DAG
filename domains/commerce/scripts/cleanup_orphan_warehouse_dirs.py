@@ -55,6 +55,23 @@ def _parse(path: str) -> tuple[str | None, str | None]:
     return (m.group(1), m.group(2)) if m else (None, None)
 
 
+def _require_catalog() -> str:
+    """감사 대상 카탈로그 — canonical 키 하나. **미설정이면 추측하지 않고 멈춘다.**
+
+    키 이름이 배포 환경을 담지 않는다(#654) — 어느 환경인지는 그 키의 **값**이 정한다.
+    기본값으로 dev 를 채우면 prod 박스에서 조용히 dev 카탈로그를 감사하게 되고, 그 결과
+    살아 있는 디렉터리가 orphan 으로 분류된다. 삭제 후보를 고르는 스크립트라 추측이 곧 사고다.
+    """
+    import os
+
+    value = (os.environ.get("TRINO_ICEBERG_CATALOG") or "").strip()
+    if not value:
+        raise SystemExit(
+            "TRINO_ICEBERG_CATALOG 가 설정되지 않았습니다. 이 스크립트는 삭제 후보를 고르므로 "
+            "카탈로그를 추측하지 않습니다 — 감사할 카탈로그를 명시하세요(운영: iceberg).")
+    return value
+
+
 def _all_table_names(schema: str) -> list[str]:
     """전체 테이블 목록 — Trino information_schema(BASE TABLE) 정본.
 
@@ -69,15 +86,12 @@ def _all_table_names(schema: str) -> list[str]:
             host=os.environ.get("TRINO_HOST", "trino"),
             port=int(os.environ.get("TRINO_PORT", "8080")),
             user=os.environ.get("TRINO_USER", "airflow"),
-            # 타깃 정합(#60 감사 B9): 적재와 같은 카탈로그를 감사 — COMMERCE_DBT_TARGET 우선
-            # (warehouse._is_dev 와 동일 규약). 구 코드는 무조건 dev 를 우선해 prod 감사 시
-            # 목록(dev)과 로드(prod)가 어긋나 라이브 디렉터리를 orphan 으로 오분류했다.
-            catalog=(
-                os.environ.get("TRINO_ICEBERG_CATALOG") or "iceberg_dev"
-                if (os.environ.get("COMMERCE_DBT_TARGET")
-                    or os.environ.get("DBT_TARGET", "dev")).strip().lower() == "dev"
-                else os.environ.get("TRINO_ICEBERG_CATALOG", "iceberg")
-            ),
+            # 타깃 정합(#60 감사 B9): 적재와 같은 카탈로그를 감사한다. 구 코드는 무조건 dev 를
+            # 우선해 prod 감사 시 목록(dev)과 로드(prod)가 어긋나 라이브 디렉터리를 orphan 으로
+            # 오분류했다. 지금은 canonical 키 하나만 읽고 **미설정이면 추측하지 않고 멈춘다** —
+            # 이 스크립트는 "지울 것"을 고르므로 카탈로그를 잘못 짚으면 살아 있는 디렉터리가
+            # orphan 이 된다. dev 로 조용히 떨어지는 기본값이 그 사고의 통로였다(#654).
+            catalog=_require_catalog(),
         )
         cur = conn.cursor()
         cur.execute(
