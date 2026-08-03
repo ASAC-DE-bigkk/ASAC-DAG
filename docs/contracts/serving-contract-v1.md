@@ -57,6 +57,8 @@
 | `reliability` | object | rollup 전용, [§5.3](#53-reliability-rollup-전용) | 없음 | 표본 신뢰도 정책 |
 | `upsert_strategy` | enum | `merge` \| `exact_set` (`publication_mode: upsert`에서만) | `merge` | `exact_set`은 전체 Gold 결과로 staging 교체·복구를 수행 |
 | `public_projection` | object | `schema_version` + ordered `columns` | 없음 | [§3.5](#35-public_projection-v14-선택-필드) — D1/public 물리 컬럼 allowlist |
+| `source_evidence` | list[object] | [§3.6](#36-source_evidence-v15-선택-필드) 7개 필드 | 없음 | 공개 소스 URL·이용허락·재배포 범위·출처표시의 정적 증거 |
+| `quality_coverage` | object | [§3.7](#37-quality_coverage-v16-선택-필드) 3개 필드 | 없음 | 공개 축의 기대 distinct 집합과 최소 커버리지 비율 |
 
 ### 3.3 YAML에서 제외 — 실측·타 소유
 
@@ -67,9 +69,9 @@
 
 ### 3.4 런타임 실측값 — Export가 기록 (YAML 아님)
 
-Publisher가 `_catalog`/publication 테이블에 매 게시마다 기록한다.
+Publisher가 `_catalog`/publication 테이블 및 `d1_product_quality`에 매 게시마다 기록한다.
 
-`publication_id` · `source_run_id` · `source_row_count` · `published_row_count` · `published_bytes` · `freshness` · `published_at` · `serving_status`
+`publication_id` · `source_run_id` · `source_row_count` · `published_row_count` · `d1_row_count` · `duplicate_primary_key_count` · `null_primary_key_count` · `published_bytes` · `freshness` · `published_at` · `serving_status` · `projection_schema_version` · `projection_schema_hash`
 
 ### 3.5 `public_projection` (v1.4 선택 필드)
 
@@ -91,6 +93,47 @@ public_projection:
 - projection에는 `primary_key`, 선언된 `event_time`, `reliability.sample_count_field`가 모두 포함돼야 한다.
 - projection identity hash는 `schema_version`과 각 컬럼의 `name`, 정규화된 `data_type`, `nullable`, `semantic_role`, `unit`만으로 계산한다. `description`과 `null_meaning`은 identity에서 제외한다.
 - ASAC-DBT validator schema `v1.4`가 정적 계약을 검증하고, Export DAG는 opt-in 계약에서 Trino `SHOW COLUMNS` 후 실제 물리 컬럼 존재와 필수 컬럼 포함을 다시 확인한 뒤 explicit quoted select list만 사용한다.
+
+### 3.6 `source_evidence` (v1.5 선택 필드)
+
+`source_evidence`는 공개 데이터 제품의 권리·출처 증거 정본이다. 하위 호환을 위해 미선언 legacy 계약은 허용하지만, **V1 live bundle 후보는 모든 원천을 선언해야 한다.** 선언한 제품은 빈 목록을 둘 수 없고, 아래 7개 필드 외의 키도 허용하지 않는다.
+
+```yaml
+source_evidence:
+  - source_id: kma_vilage_fcst
+    source_url: https://www.data.go.kr/data/15084084/openapi.do
+    license: 공공누리 제1유형(출처표시)
+    license_url: https://www.kogl.or.kr/info/licenseType1.do
+    redistribution: allowed_with_attribution
+    attribution: 기상청
+    rights_checked_at: "2026-08-04"
+```
+
+규칙:
+
+- `source_id`는 제품 안에서 유일한 물리 식별자다. `source_url`, `license_url`은 인증정보가 없는 public HTTPS URL이어야 한다.
+- `license`, `attribution`은 비어 있지 않아야 하며, `rights_checked_at`은 `YYYY-MM-DD` ISO 날짜여야 한다.
+- `redistribution`은 `allowed_with_attribution` · `prohibited` · `unknown` 중 하나다. `unknown`과 `prohibited`는 기록은 가능하지만 live-bundle eligibility를 통과시키지 않는다.
+- ASAC-DBT validator의 source-evidence 규칙(v1.5 도입)이 정적 형식·오타·중복을 차단한다. Publisher는 성공 publication의 `d1_catalog_sources`에 source 행과 같은 `publication_id`를 기록한다.
+- 이 필드는 이용조건 확인에 필요한 출처를 재현 가능하게 남기는 데이터 계약이지 법률 자문이나 원 소스의 정확성 보증이 아니다. 원 소스 이용조건 변경 시 `rights_checked_at`과 증거를 갱신한다.
+
+### 3.7 `quality_coverage` (v1.6 선택 필드)
+
+`quality_coverage`는 “이번 publication이 공통 축을 얼마나 덮었는가”를 정적 기대값과 런타임 실측으로 분리하는 선택 필드다. 손으로 쓴 현재 행수나 통과 결과를 YAML에 넣지 않는다.
+
+```yaml
+quality_coverage:
+  field: admin_dong_code
+  expected_distinct_count: 426
+  minimum_ratio: 1.0
+```
+
+규칙:
+
+- 정확히 `field`, `expected_distinct_count`, `minimum_ratio`만 선언한다. `field`는 모델의 물리 컬럼이며 `public_projection`을 선언했다면 그 allowlist 안에 포함돼야 한다.
+- `expected_distinct_count`는 1 이상 정수, `minimum_ratio`는 0 초과 1 이하다.
+- Publisher는 reliability 적용 뒤 source 행에서 `field`의 NULL이 아닌 distinct 수·ratio·pass/fail을 계산하고, 기준 미달이면 **D1 write 전에 publication을 실패**시킨다.
+- 통과한 측정값은 `d1_product_quality.coverage_json`에 source/right·catalog와 같은 `publication_id`로 기록한다. coverage 미선언/미측정은 K-Skill live-bundle eligibility에서 통과로 해석하지 않는다.
 
 ## 4. `publication_mode`
 
@@ -170,9 +213,10 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 1. Contract Load     — meta.serving 로드·검증 (Validator 통과 계약 신뢰)
 2. Publication Gate   — zero_policy / partial_policy / reliability 적용
 3. D1 Write           — publication_mode 대로 적재 (snapshot=원자 전환)
-4. Row-count Verify   — published_row_count 확인
-5. _catalog Upsert    — 자기 도메인 행만 INSERT OR REPLACE (DROP 금지)
-6. API Smoke Test     — 대표 product_id 1건 조회 200 확인
+4. Row-count Verify   — published_row_count·PK read-back 확인
+5. API Smoke Test     — 대표 물리 테이블 조회 확인 (실패 시 snapshot 복구)
+6. _catalog Upsert    — 자기 도메인 행만 INSERT OR REPLACE (DROP 금지)
+7. Product Evidence   — source 권리 증거 + 품질 실측을 publication_id로 결속
 ```
 
 ### 7.1 성공 조건 (모두 충족)
@@ -180,6 +224,7 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 - 게이트 통과 (게시 스킵은 게이트 정책에 따른 정상 종료)
 - `published_row_count`가 검증 기준 충족
 - `_catalog` upsert 완료, **쓴 테이블 수 == `_catalog` 내 도메인 행 수** (#477 ③ 자기검증)
+- `source_evidence` 선언 제품은 `d1_catalog_sources`와 `d1_product_quality`가 같은 `publication_id`로 게시됨
 - 대표 API Smoke Test 200
 
 ### 7.2 실패 조건 → 직전 정상본 보호
@@ -211,6 +256,8 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 
 **개정 이력**
 
+- **v1.6** (2026-08-04): 선택 필드 `quality_coverage` 추가. 기대 distinct 집합과 최소 비율만 정적으로 선언하고, Publisher가 현재 source 행으로 측정·차단·기록한다. ASAC-DBT validator schema `v1.6`와 lockstep.
+- **v1.5** (2026-08-04): 선택 필드 `source_evidence` 추가. V1 live bundle 후보는 모든 원천의 source URL·이용허락·재배포 범위·출처표시·확인일을 선언하고, Publisher는 source와 현재 품질 실측을 동일 publication_id로 D1에 게시한다.
 - **v1.4** (2026-08-02): 선택 필드 `public_projection` 추가. Weather/Traffic 공개 제품은 ordered physical allowlist를 명시 opt-in하고, 미선언 legacy 도메인은 기존 full-source read 동작을 유지한다. ASAC-DBT validator schema `v1.4`와 lockstep.
 - **v1.2** (2026-07-30): 선택 필드 `upsert_strategy` 추가. `exact_set`은 명시 opt-in한 upsert 제품에만 staging 교체·last-known-good 복구를 적용하며, 미선언 제품과 다른 도메인의 upsert 동작은 `merge`로 유지.
 - **v1.1** (2026-07-24, [보강 결정](https://github.com/ASAC-DE-bigkk/ASAC-DAG/issues/478#issuecomment-5065980055)): `freshness_slo_minutes` 조건부 필수 승격(§3.1) + §7.4 운영 감시 책임 신설. 필수 규칙 변경이지만 **채택 전 amend**(당시 `meta.serving` 채택 도메인 0, 마이그레이션 비용 0)라 v2가 아닌 v1.1로 처리. Pilot 채택 이후부터는 본 §8을 엄격 적용한다.

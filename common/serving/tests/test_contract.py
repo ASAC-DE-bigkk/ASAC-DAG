@@ -160,6 +160,96 @@ def test_load_contracts_reads_opt_in_upsert_strategy(tmp_path):
     assert contract.upsert_strategy == "exact_set"
 
 
+def test_load_contracts_reads_source_evidence_and_freshness_slo(tmp_path):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["event_time"] = "observed_at"
+    serving["freshness_slo_minutes"] = 90
+    serving["source_evidence"] = [{
+        "source_id": "kma_vilage_fcst",
+        "source_url": "https://example.test/kma",
+        "license": "KOGL-1",
+        "license_url": "https://example.test/kogl",
+        "redistribution": "allowed_with_attribution",
+        "attribution": "기상청",
+        "rights_checked_at": "2026-08-04",
+    }]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_contracts(path)[0]
+
+    assert contract.freshness_slo_minutes == 90
+    assert contract.source_evidence == (
+        {
+            "source_id": "kma_vilage_fcst",
+            "source_url": "https://example.test/kma",
+            "license": "KOGL-1",
+            "license_url": "https://example.test/kogl",
+            "redistribution": "allowed_with_attribution",
+            "attribution": "기상청",
+            "rights_checked_at": "2026-08-04",
+        },
+    )
+
+
+def test_load_contracts_reads_quality_coverage_gate(tmp_path):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["quality_coverage"] = {
+        "field": "value",
+        "expected_distinct_count": 427,
+        "minimum_ratio": 1.0,
+    }
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_contracts(path)[0]
+
+    assert contract.quality_coverage == {
+        "field": "value",
+        "expected_distinct_count": 427,
+        "minimum_ratio": 1.0,
+    }
+
+
+def test_load_contracts_rejects_source_evidence_missing_attribution(tmp_path):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["source_evidence"] = [{
+        "source_id": "kma_vilage_fcst",
+        "source_url": "https://example.test/kma",
+        "license": "KOGL-1",
+        "license_url": "https://example.test/kogl",
+        "redistribution": "allowed_with_attribution",
+        "rights_checked_at": "2026-08-04",
+    }]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source_evidence.*attribution"):
+        load_contracts(path)
+
+
+def test_load_contracts_rejects_source_evidence_url_with_credentials(tmp_path):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["source_evidence"] = [{
+        "source_id": "kma_vilage_fcst",
+        "source_url": "https://user:password@example.test/kma",
+        "license": "KOGL-1",
+        "license_url": "https://example.test/kogl",
+        "redistribution": "allowed_with_attribution",
+        "attribution": "기상청",
+        "rights_checked_at": "2026-08-04",
+    }]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source_url and license_url"):
+        load_contracts(path)
+
+
 def test_load_contracts_reads_public_projection_in_order_with_canonical_hash(tmp_path):
     contract = load_contracts(
         _projection_manifest(

@@ -12,11 +12,24 @@ import json
 import hashlib
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SOURCE_EVIDENCE_FIELDS = (
+    "source_id",
+    "source_url",
+    "license",
+    "license_url",
+    "redistribution",
+    "attribution",
+    "rights_checked_at",
+)
+SOURCE_EVIDENCE_REDISTRIBUTION = frozenset({"allowed_with_attribution", "prohibited", "unknown"})
+QUALITY_COVERAGE_FIELDS = ("field", "expected_distinct_count", "minimum_ratio")
 
 
 @dataclass(frozen=True)
@@ -42,6 +55,13 @@ class ServingContract:
     public_projection: tuple[str, ...] | None = None
     projection_schema_version: str | None = None
     projection_schema_hash: str | None = None
+    freshness_slo_minutes: int | None = None
+    # V1 evidence contract (#678): absent means legacy product, not an empty source list.
+    # The Publisher preserves existing evidence for absent legacy declarations.
+    source_evidence: tuple[dict[str, Any], ...] | None = None
+    # Optional reproducible distinct-coverage gate. Its result is runtime evidence,
+    # not a declared measured value.
+    quality_coverage: dict[str, Any] | None = None
     # ── 핸드오프 메타(#638) — d1_catalog_columns/ext·d1_usage_patterns 게시 원천 ──
     grain: str | None = None
     serving_tier: str | None = None      # 물리 게시 확장 — 미선언 도메인은 None(#638 §2.2)
@@ -149,6 +169,96 @@ def _load_public_projection(
     return public_columns, schema_version, _projection_schema_hash(schema_version, public_columns, manifest_columns)
 
 
+def _load_source_evidence(product_id: str, serving: dict[str, Any]) -> tuple[dict[str, Any], ...] | None:
+    """Load source/right records without silently accepting incomplete evidence.
+
+    ``None`` means the legacy contract has not adopted the evidence extension and
+    tells the Publisher to preserve any existing source rows. A declared value,
+    however, is an immutable readiness input: malformed or empty values stop the
+    publication rather than degrading into an apparently source-less product.
+    """
+    raw_evidence = serving.get("source_evidence")
+    if raw_evidence is None:
+        return None
+    if not isinstance(raw_evidence, list) or not raw_evidence:
+        raise ValueError(f"{product_id}: source_evidence must be a non-empty list")
+
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, raw_source in enumerate(raw_evidence):
+        label = f"{product_id}: source_evidence[{index}]"
+        if not isinstance(raw_source, dict):
+            raise ValueError(f"{label} must be an object")
+        unknown = sorted(set(raw_source) - set(SOURCE_EVIDENCE_FIELDS))
+        if unknown:
+            raise ValueError(f"{label} has unsupported fields: {','.join(unknown)}")
+        row: dict[str, Any] = {}
+        for field in SOURCE_EVIDENCE_FIELDS:
+            value = raw_source.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{label}: {field} must be a non-empty string")
+            row[field] = value.strip()
+        if not IDENTIFIER_RE.fullmatch(row["source_id"]):
+            raise ValueError(f"{label}: source_id must be an identifier")
+        if row["source_id"] in seen_ids:
+            raise ValueError(f"{label}: source_id is duplicated")
+        seen_ids.add(row["source_id"])
+        if not _is_public_https_url(row["source_url"]) or not _is_public_https_url(row["license_url"]):
+            raise ValueError(f"{label}: source_url and license_url must use https")
+        if row["redistribution"] not in SOURCE_EVIDENCE_REDISTRIBUTION:
+            raise ValueError(f"{label}: unsupported redistribution={row['redistribution']!r}")
+        try:
+            date.fromisoformat(row["rights_checked_at"])
+        except ValueError as exc:
+            raise ValueError(f"{label}: rights_checked_at must be YYYY-MM-DD") from exc
+        rows.append(row)
+    return tuple(rows)
+
+
+def _is_public_https_url(value: str) -> bool:
+    """Reject credentials or ambiguous non-HTTPS references before they reach D1 metadata."""
+    parsed = urlparse(value)
+    return parsed.scheme == "https" and bool(parsed.netloc) and not parsed.username and not parsed.password
+
+
+def _load_quality_coverage(
+    product_id: str,
+    serving: dict[str, Any],
+    node: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Load a small, reproducible distinct-coverage declaration (#678).
+
+    The expected count is a contract input; observed count and gate result are only
+    computed by the Publisher from the exact publication source rows.
+    """
+    raw = serving.get("quality_coverage")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != set(QUALITY_COVERAGE_FIELDS):
+        raise ValueError(f"{product_id}: quality_coverage must contain exactly {','.join(QUALITY_COVERAGE_FIELDS)}")
+    field = raw.get("field")
+    if not isinstance(field, str) or not IDENTIFIER_RE.fullmatch(field):
+        raise ValueError(f"{product_id}: quality_coverage field must be a physical identifier")
+    columns = node.get("columns") if isinstance(node.get("columns"), dict) else {}
+    if field not in columns:
+        raise ValueError(f"{product_id}: quality_coverage field is not a model column: {field}")
+    expected = raw.get("expected_distinct_count")
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+        raise ValueError(f"{product_id}: quality_coverage expected_distinct_count must be a positive integer")
+    minimum_ratio = raw.get("minimum_ratio")
+    if (
+        isinstance(minimum_ratio, bool)
+        or not isinstance(minimum_ratio, (int, float))
+        or not 0 < float(minimum_ratio) <= 1
+    ):
+        raise ValueError(f"{product_id}: quality_coverage minimum_ratio must be in (0, 1]")
+    return {
+        "field": field,
+        "expected_distinct_count": expected,
+        "minimum_ratio": float(minimum_ratio),
+    }
+
+
 def load_contracts(
     manifest_path: str | Path,
     product_ids: Iterable[str] | None = None,
@@ -216,6 +326,14 @@ def load_contracts(
                   public_projection=public_projection,
                   projection_schema_version=projection_schema_version,
                   projection_schema_hash=projection_schema_hash,
+                  freshness_slo_minutes=(
+                      int(serving["freshness_slo_minutes"])
+                      if isinstance(serving.get("freshness_slo_minutes"), int)
+                      and not isinstance(serving.get("freshness_slo_minutes"), bool)
+                      else None
+                  ),
+                  source_evidence=_load_source_evidence(str(product_id), serving),
+                  quality_coverage=_load_quality_coverage(str(product_id), serving, node),
                   grain=serving.get("grain"),
                   # commerce 로컬 키(serving_tier/d1_rollup)와 #638 §1 스펙 키(tier/rollup_rule) 겸용
                   serving_tier=serving.get("serving_tier") or serving.get("tier"),

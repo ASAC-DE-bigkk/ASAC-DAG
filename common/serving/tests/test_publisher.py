@@ -34,6 +34,7 @@ class FakeD1:
         self.replace_calls = 0
         self.read_table_rows_calls: list[tuple[str, list[Column], tuple[str, ...]]] = []
         self.product_meta: dict[str, dict[str, Any]] = {}  # 핸드오프 메타(#638) 게시 기록
+        self.product_evidence: dict[str, dict[str, Any]] = {}  # V1 source/quality evidence (#678)
 
     def table_row_count(self, name: str) -> int:
         return len(self.tables.get(name, []))
@@ -123,6 +124,13 @@ class FakeD1:
             "patterns": [dict(row) for row in pattern_rows],
         }
 
+    def publish_product_evidence(self, product_id, publication_id, sources, quality) -> None:
+        self.product_evidence[product_id] = {
+            "publication_id": publication_id,
+            "sources": None if sources is None else [dict(source) for source in sources],
+            "quality": dict(quality),
+        }
+
 
 class ForgetfulCatalogD1(FakeD1):
     """Writes tables but 'forgets' to register _catalog — reproduces the #477 bug."""
@@ -143,6 +151,13 @@ class ExplodingMetaD1(FakeD1):
 
     def publish_product_meta(self, *args, **kwargs) -> None:
         raise RuntimeError("simulated product meta write failure")
+
+
+class ExplodingEvidenceD1(FakeD1):
+    """Fails after catalog/meta publication to exercise the #678 rollback boundary."""
+
+    def publish_product_evidence(self, *args, **kwargs) -> None:
+        raise RuntimeError("simulated product evidence write failure")
 
 
 class CorruptingReadBackD1(FakeD1):
@@ -437,8 +452,104 @@ def test_snapshot_publish_writes_product_meta_rows():
     assert patterns[0]["publication_id"] == report.records[0].publication_id
 
 
+def test_snapshot_publish_writes_source_and_quality_evidence():
+    contract = _contract(
+        freshness_slo_minutes=240,
+        source_evidence=(
+            {
+                "source_id": "kma_vilage_fcst",
+                "source_url": "https://example.test/kma",
+                "license": "KOGL-1",
+                "license_url": "https://example.test/kogl",
+                "redistribution": "allowed_with_attribution",
+                "attribution": "기상청",
+                "rights_checked_at": "2026-08-04",
+            },
+        ),
+    )
+    d1 = FakeD1()
+
+    report = publish(
+        [contract],
+        FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))}),
+        d1,
+        FakeSmoke(status="passed"),
+        source_run_id="run-evidence",
+    )
+
+    evidence = d1.product_evidence[contract.product_id]
+    assert evidence["publication_id"] == report.records[0].publication_id
+    assert evidence["sources"] == [dict(contract.source_evidence[0])]
+    assert evidence["quality"] == {
+        "source_row_count": 3,
+        "d1_row_count": 3,
+        "duplicate_primary_key_count": 0,
+        "null_primary_key_count": 0,
+        "freshness_as_of": "2026-07-22T00:00:00",
+        "freshness_slo_minutes": 240,
+        "serving_status": STATUS_PUBLISHED,
+        "measured_at": report.records[0].published_at,
+        "coverage": None,
+        "projection_schema_version": None,
+        "projection_schema_hash": None,
+    }
+
+
+def test_snapshot_publish_records_passing_distinct_coverage_gate():
+    contract = _contract(
+        quality_coverage={
+            "field": "place_id",
+            "expected_distinct_count": 1,
+            "minimum_ratio": 1.0,
+        }
+    )
+    d1 = FakeD1()
+
+    publish(
+        [contract],
+        FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))}),
+        d1,
+        FakeSmoke(status="passed"),
+        source_run_id="coverage-passing",
+    )
+
+    assert d1.product_evidence[contract.product_id]["quality"]["coverage"] == {
+        "field": "place_id",
+        "expected_distinct_count": 1,
+        "observed_distinct_count": 1,
+        "minimum_ratio": 1.0,
+        "ratio": 1.0,
+        "status": "passed",
+    }
+
+
+def test_snapshot_publish_rejects_coverage_below_contract_threshold_before_write():
+    contract = _contract(
+        quality_coverage={
+            "field": "place_id",
+            "expected_distinct_count": 2,
+            "minimum_ratio": 1.0,
+        }
+    )
+    d1 = FakeD1()
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract],
+            FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))}),
+            d1,
+            FakeSmoke(status="passed"),
+            source_run_id="coverage-failing",
+        )
+
+    assert d1.replace_calls == 0
+    record = excinfo.value.report.records[0]
+    assert record.stage == "quality_coverage"
+    assert "observed=1" in record.reason
+
+
 def test_skip_retain_does_not_touch_product_meta():
-    """스킵 제품은 upsert 자체를 건너뛴다(#638 §3) — 직전 메타 행이 자연 보존."""
+    """스킵 제품은 upsert 자체를 건너뛴다 — 직전 메타·권리 증거가 자연 보존."""
     contract = _contract(zero_policy="retain_last_good")
     d1 = FakeD1()
     d1.tables[contract.model_name] = _rows(5)
@@ -449,6 +560,7 @@ def test_skip_retain_does_not_touch_product_meta():
 
     assert report.records[0].serving_status == STATUS_SKIPPED
     assert contract.product_id not in d1.product_meta
+    assert contract.product_id not in d1.product_evidence
 
 
 def test_product_meta_failure_restores_snapshot_and_catalog():
@@ -470,6 +582,31 @@ def test_product_meta_failure_restores_snapshot_and_catalog():
     assert d1.ledger[-1]["stage"] == "product_meta"
     assert d1.ledger[-1]["rollback_status"] == "restored"
     assert any("product_meta 실패" in failure for failure in excinfo.value.report.failures)
+
+
+def test_product_evidence_failure_restores_snapshot_and_catalog():
+    """권리/품질 게시 실패는 새 snapshot을 live로 남기지 않는다."""
+    contract = _contract()
+    d1 = ExplodingEvidenceD1()
+    old_rows = _rows(2)
+    old_catalog = {"name": contract.model_name, "row_count": 2, "publication_id": "old"}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract],
+            FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))}),
+            d1,
+            FakeSmoke(status="passed"),
+            source_run_id="evidence-failure",
+        )
+
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert d1.ledger[-1]["stage"] == "product_evidence"
+    assert d1.ledger[-1]["rollback_status"] == "restored"
+    assert any("product_evidence 실패" in failure for failure in excinfo.value.report.failures)
 
 
 def test_zero_rows_retain_last_good_keeps_previous():

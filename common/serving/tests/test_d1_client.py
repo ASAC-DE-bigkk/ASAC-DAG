@@ -439,6 +439,135 @@ def test_publisher_meta_rows_round_trip_through_real_sqlite_schema():
         {"pattern_id": "p1", "requires": '["sort"]', "allow_empty": 0}]
 
 
+def test_product_evidence_upserts_sources_and_current_quality_by_publication():
+    d1 = SqliteCatalogClient()
+    sources = [{
+        "source_id": "kma_vilage_fcst",
+        "source_url": "https://example.test/kma",
+        "license": "KOGL-1",
+        "license_url": "https://example.test/kogl",
+        "redistribution": "allowed_with_attribution",
+        "attribution": "기상청",
+        "rights_checked_at": "2026-08-04",
+    }]
+    quality = {
+        "source_row_count": 427,
+        "d1_row_count": 427,
+        "duplicate_primary_key_count": 0,
+        "null_primary_key_count": 0,
+        "freshness_as_of": "2026-08-04T11:00:00+09:00",
+        "freshness_slo_minutes": 240,
+        "serving_status": "published",
+        "measured_at": "2026-08-04T11:03:00+09:00",
+        "coverage": {"observed": 61, "expected": 61, "unit": "place"},
+        "projection_schema_version": "1.1.0",
+        "projection_schema_hash": "fixture-projection-hash",
+    }
+
+    d1.publish_product_evidence("weather_place_forecast_change_daily", "pub-1", sources, quality)
+
+    assert d1._query(
+        "SELECT source_id, attribution, publication_id FROM d1_catalog_sources;"
+    ) == [{
+        "source_id": "kma_vilage_fcst",
+        "attribution": "기상청",
+        "publication_id": "pub-1",
+    }]
+    assert d1._query(
+        "SELECT source_row_count, d1_row_count, duplicate_primary_key_count, coverage_json, "
+        "projection_schema_version, projection_schema_hash, publication_id "
+        "FROM d1_product_quality;"
+    ) == [{
+        "source_row_count": 427,
+        "d1_row_count": 427,
+        "duplicate_primary_key_count": 0,
+        "coverage_json": '{"expected":61,"observed":61,"unit":"place"}',
+        "projection_schema_version": "1.1.0",
+        "projection_schema_hash": "fixture-projection-hash",
+        "publication_id": "pub-1",
+    }]
+
+
+def test_legacy_evidence_publish_retains_prior_source_rows_but_refreshes_quality():
+    """미온보딩 계약은 기존 권리 증거를 지우지 않고, 런타임 품질만 현재 게시본으로 갱신한다."""
+    d1 = SqliteCatalogClient()
+    sources = [{
+        "source_id": "kma_vilage_fcst",
+        "source_url": "https://example.test/kma",
+        "license": "KOGL-1",
+        "license_url": "https://example.test/kogl",
+        "redistribution": "allowed_with_attribution",
+        "attribution": "기상청",
+        "rights_checked_at": "2026-08-04",
+    }]
+    quality = {
+        "source_row_count": 427,
+        "d1_row_count": 427,
+        "duplicate_primary_key_count": 0,
+        "null_primary_key_count": 0,
+        "freshness_as_of": "2026-08-04T11:00:00+09:00",
+        "freshness_slo_minutes": 240,
+        "serving_status": "published",
+        "measured_at": "2026-08-04T11:03:00+09:00",
+        "coverage": None,
+    }
+    d1.publish_product_evidence("weather_place_forecast_change_daily", "pub-1", sources, quality)
+
+    d1.publish_product_evidence(
+        "weather_place_forecast_change_daily",
+        "pub-2",
+        None,
+        dict(quality, measured_at="2026-08-04T12:03:00+09:00"),
+    )
+
+    assert d1._query(
+        "SELECT source_id, publication_id FROM d1_catalog_sources "
+        "WHERE product_id = 'weather_place_forecast_change_daily';"
+    ) == [{"source_id": "kma_vilage_fcst", "publication_id": "pub-1"}]
+    assert d1._query(
+        "SELECT publication_id FROM d1_product_quality "
+        "WHERE product_id = 'weather_place_forecast_change_daily';"
+    ) == [{"publication_id": "pub-2"}]
+
+
+def test_evidence_quality_schema_migrates_missing_projection_identity_without_losing_other_product():
+    """v1 evidence 초기 배포본도 projection identity 추가 시 행 보존 이행한다."""
+    d1 = SqliteCatalogClient()
+    d1._query(
+        "CREATE TABLE d1_product_quality ("
+        "product_id TEXT NOT NULL PRIMARY KEY, source_row_count INTEGER NOT NULL, d1_row_count INTEGER NOT NULL, "
+        "duplicate_primary_key_count INTEGER NOT NULL, null_primary_key_count INTEGER NOT NULL, freshness_as_of TEXT, "
+        "freshness_slo_minutes INTEGER, serving_status TEXT NOT NULL, measured_at TEXT NOT NULL, coverage_json TEXT, "
+        "publication_id TEXT NOT NULL);"
+    )
+    d1._query(
+        "INSERT INTO d1_product_quality VALUES ('other_product', 2, 2, 0, 0, '2026-08-03T00:00:00Z', 60, "
+        "'published', '2026-08-03T00:01:00Z', NULL, 'old-pub');"
+    )
+    quality = {
+        "source_row_count": 427,
+        "d1_row_count": 427,
+        "duplicate_primary_key_count": 0,
+        "null_primary_key_count": 0,
+        "freshness_as_of": "2026-08-04T11:00:00+09:00",
+        "freshness_slo_minutes": 240,
+        "serving_status": "published",
+        "measured_at": "2026-08-04T11:03:00+09:00",
+        "coverage": None,
+        "projection_schema_version": "1.1.0",
+        "projection_schema_hash": "new-projection-hash",
+    }
+
+    d1.publish_product_evidence("weather_place_forecast_change_daily", "pub-new", [], quality)
+
+    assert d1._query(
+        "SELECT product_id, publication_id, projection_schema_hash FROM d1_product_quality ORDER BY product_id;"
+    ) == [
+        {"product_id": "other_product", "publication_id": "old-pub", "projection_schema_hash": None},
+        {"product_id": "weather_place_forecast_change_daily", "publication_id": "pub-new", "projection_schema_hash": "new-projection-hash"},
+    ]
+
+
 def test_product_meta_upsert_prunes_stale_rows_within_product_scope_only():
     """#638 §3 ② — 잔여 정리는 그 제품 스코프만. 타 제품(=타 도메인) 행은 무접촉."""
     d1 = SqliteCatalogClient()
