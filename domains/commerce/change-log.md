@@ -9,6 +9,48 @@
 
 ---
 
+## 2026-08-04
+
+### 94. 운영 적재가 매 실행 실패하던 두 결함 + commerce DAG 편성 점검 (#677)
+
+request:
+- ASAC-DAG#677 — `_ops_daily_metric` 이 0행. "실질적 문제인지, 특정 DAG 비활성화 문제인지" 판정.
+- 후속 — 맥미니에서 안 도는 commerce DAG 의 구현부를 보고, 현 시점에 불필요하면 Airflow 가
+  감지하지 않게 처리. 제외 사유를 주석·이슈에 남기고, commerce 가 공용으로 돌려야 할 DAG 정리.
+
+response:
+- **비활성화 문제가 아니었다.** 운영(맥미니)에서 `common_ops_d1_load` 는 ACTIVE 이고 3시간마다
+  도는데 **모든 실행이 실패**하고 있었다. 로컬 PC 가 아니라 맥미니에 직접 접속해 확인했다.
+  `RuntimeError: D1 API 실패: statement too long: SQLITE_TOOBIG` (ingest.py:570, 2차 중복 관문).
+- 결함 ① 긴 IN 목록 — `known_event_ids_statement` 가 event_id 전체를 한 문장에 넣었다.
+  sha256 hex 라 1건 ≈ 68바이트, 3일 창 실측 2만여 건 → 약 1.5MB 문장. **사실상 항상 실패**.
+  500개씩 나눠 묻도록 복수형(`known_event_ids_statements`)으로 교체.
+- 결함 ② 인라인 기록이 영영 집계되지 않는다 — ①을 고쳐도 남는다. 재계산 대상을 "이번 배치가
+  새로 넣은 날짜"로만 잡았는데, C-2 인라인 경로(citydata 가 이미 배선)로 들어온 기록은 배치
+  입장에서 늘 "이미 있는 것"이라 재계산이 호출되지 않는다. `dates_needing_metric_rebuild_statement()`
+  로 **기록 표 기준** 뒤처진 날짜를 찾아 합집합 재계산. 앞서 고친 `log_bundle_key` 와 같은 구조다.
+- 실측 근거: 운영 D1 188행 중 `source_key` NULL 137행(인라인 경로) · 있음 51행(배치, 8/1 수동
+  실행분). 인라인분은 `ingested_at ≈ observed_at + 0.2초` 로 태스크 종료 즉시 기록.
+- DAG 편성 점검(맥미니): 파일 7개가 dag_id 8개 선언, DB 등록 9개 → **고아 1건**
+  (`commerce_ops_logship`, #658 에서 파일 삭제). `airflow dags delete` 로 정리(10행 제거).
+
+decision:
+- **Airflow 감지에서 제외한 commerce DAG 는 없다.** 정지된 3개를 구현부까지 보고 판정한 결과
+  모두 현 시점에 쓸모가 있어, `.airflowignore` 에 아무것도 추가하지 않았다.
+  - `commerce_collect_watchdog` — 지금 **유일한 알림 경로**다. 운영 콘솔이 `_ops_*` 를 읽도록
+    붙었으나 집계표가 비어 배너 상태라(ASK-Seoul-Serving#33), 지금 빼면 알림 공백이 생긴다.
+    → 은퇴 조건: 콘솔이 `_ops_pipeline_expectation` 기준 지연 판정 알림을 실제로 내보내면 그때.
+  - `commerce_recollect_raw` — 미완료 API 재수집 안전망. 8/3 정상 성공 이력 있음.
+  - `commerce_load_gold_refresh` — 트리거 전용 복구 도구(dbt full-refresh + detail 전량 재적재 +
+    카탈로그 재생성을 한 번에). 스키마 개편 시 필요하고, 직접 명령으로 대체하려면 다단계를
+    수기로 재구성해야 한다. 다만 **일시정지 상태에서는 트리거해도 실행되지 않아** 도구로서
+    무용이다 — 제외가 아니라 **켜는 것**이 맞다.
+- **`common_dbt_smoke` 는 손대지 않았다.** 0회 실행이고 실 파이프라인이 도는 지금 스모크
+  프로젝트의 값이 낮아 보이지만, 마지막 기능 커밋이 @codingpoppy94 이라 **타 도메인 소유**다.
+  남의 도메인을 내 판단으로 지우지 않는다 — 이슈에 현황만 표기하고 판단을 넘긴다.
+- **정지 DAG 를 내가 켜지 않았다.** 켜는 순간 운영에서 실제 수집·알림이 도는 변경이라
+  운영 판단이다. 이슈에 근거와 함께 권고만 남겼다.
+
 ## 2026-08-03
 
 ### 93. commerce_flow_monthly D1 게시 증거 통합 — 정합 실측 + 공유 원장 기록 편입 (#668)
