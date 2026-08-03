@@ -328,7 +328,10 @@ def _handoff_rows(spec, m: dict, col_defs: list, publication_id: str) -> tuple[l
     """
     pid = "commerce_" + spec.d1_table[3:]
     sv = m.get("serving") or {}
-    descs = m.get("columns") or {}
+    # 롤업이 만들어 내는 파생 컬럼(예: uptae_rollup.share)은 gold 에 없어 dbt columns: 로 선언할 수
+    # 없다(contract.enforced 가 gold 실출력과 대조한다). 그래서 meta.serving.d1_derived_columns 를
+    # 별도로 두고 여기서 합친다 — 정본은 여전히 dbt yml 이고, 없으면 그 컬럼만 설명이 빈다.
+    descs = {**(m.get("columns") or {}), **(sv.get("d1_derived_columns") or {})}
     col_rows = [{"product_id": pid, "table_name": spec.d1_table, "ordinal": i,
                  "column_name": c, "type": _sqlite_type(t),
                  "description_ko": descs.get(c) or None, "publication_id": publication_id}
