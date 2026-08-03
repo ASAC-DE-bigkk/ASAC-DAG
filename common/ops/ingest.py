@@ -95,6 +95,7 @@ class IngestReceipt:
     layer_missing: dict[str, int] = field(default_factory=dict)
     normalize_failed: dict[str, int] = field(default_factory=dict)
     dates_touched: list[str] = field(default_factory=list)
+    dates_rebuilt: list[str] = field(default_factory=list)
     truncated: int = 0
 
     def as_dict(self) -> dict[str, Any]:
@@ -108,6 +109,7 @@ class IngestReceipt:
             "layer_missing": dict(sorted(self.layer_missing.items())),
             "normalize_failed": dict(sorted(self.normalize_failed.items())),
             "dates_touched": sorted(set(self.dates_touched)),
+            "dates_rebuilt": sorted(set(self.dates_rebuilt)),
             "truncated": self.truncated,
         }
 
@@ -565,9 +567,11 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
     receipt.attached_log_bundles = attach_log_bundles(records, log_objects)
 
     known: set[str] = set()
-    statement = d1_ops.known_event_ids_statement([record["event_id"] for record in records])
-    if statement:
-        known = {str(row.get("event_id")) for row in (d1_execute(statement) or [])}  # security: allow-sql — 공용 빌더(값 이스케이프)
+    # 목록이 길면 나눠서 묻는다 — D1 이 긴 문장을 거부한다(SQLITE_TOOBIG). 한 문장으로 묻던
+    # 시절엔 창이 조금만 커져도 매 실행이 여기서 통째로 죽었다(ASAC-DAG#677).
+    for statement in d1_ops.known_event_ids_statements(
+            [record["event_id"] for record in records]):
+        known |= {str(row.get("event_id")) for row in (d1_execute(statement) or [])}  # security: allow-sql — 공용 빌더(값 이스케이프)
     fresh = [record for record in records if record["event_id"] not in known]
     receipt.skipped_existing += len(records) - len(fresh)
 
@@ -576,8 +580,15 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
         d1_execute(statement)   # security: allow-sql — 공용 빌더(식별자 상수, 값 이스케이프)
     receipt.loaded = len(rows)
 
+    # 재계산 대상 = 이번에 넣은 날짜 ∪ **집계가 기록보다 뒤처진 날짜**.
+    # 뒤엣것이 없으면 C-2 인라인 경로로 들어온 기록(배치 입장에선 늘 "이미 있는 것")은
+    # 영영 집계되지 않는다 — 규약은 두 경로를 함께 쓰도록 설계돼 있다(ASAC-DAG#677).
+    stale = {str(row.get("d")) for row
+             in (d1_execute(d1_ops.dates_needing_metric_rebuild_statement()) or [])  # security: allow-sql — 상수 질의
+             if row.get("d")}
     receipt.dates_touched = sorted({str(record["observed_date_kst"]) for record in fresh})
-    rebuild = d1_ops.daily_metric_rebuild_statement(receipt.dates_touched, updated_at=stamp)
+    receipt.dates_rebuilt = sorted(set(receipt.dates_touched) | stale)
+    rebuild = d1_ops.daily_metric_rebuild_statement(receipt.dates_rebuilt, updated_at=stamp)
     if rebuild:
         d1_execute(rebuild)     # security: allow-sql — 공용 빌더(값 이스케이프)
 

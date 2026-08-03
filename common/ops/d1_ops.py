@@ -245,15 +245,46 @@ def daily_metric_rebuild_statement(dates: Sequence[str], *, updated_at: str) -> 
     )
 
 
-def known_event_ids_statement(event_ids: Sequence[str]) -> str | None:
+#: 한 문장에 넣을 IN 목록 최대 개수. event_id 는 sha256 hex(64자)라 한 개가 약 68바이트이고,
+#: D1 은 긴 문장을 SQLITE_TOOBIG(code 7500)으로 거부한다. 500개면 약 34KB 로 안전 범위다.
+#: 나누지 않으면 창이 조금만 커져도 **매 실행이 통째로 실패**한다(운영 실측: ASAC-DAG#677).
+MAX_IN_LIST = 500
+
+
+def known_event_ids_statements(event_ids: Sequence[str], *,
+                               batch: int = MAX_IN_LIST) -> list[str]:
     """이 event_id 들 중 **이미 DB 에 있는 것**을 묻는다 — C-6 의 "적재 여부는 DB 로 판단".
 
-    파일을 옮기거나 표식을 남기지 않는 대신 이 한 번의 질의로 중복을 가른다.
+    파일을 옮기거나 표식을 남기지 않는 대신 이 질의로 중복을 가른다. 목록이 길면 **나눠서**
+    묻는다 — D1 이 문장 길이를 제한하기 때문이다(그래서 반환이 리스트다).
     """
-    if not event_ids:
-        return None
-    values = ", ".join(sql_literal(value) for value in sorted(set(event_ids)))
-    return f'SELECT event_id FROM "{RUN_EVENT_TABLE}" WHERE event_id IN ({values});'
+    unique = sorted(set(event_ids))
+    out: list[str] = []
+    for start in range(0, len(unique), batch):
+        values = ", ".join(sql_literal(v) for v in unique[start:start + batch])
+        out.append(f'SELECT event_id FROM "{RUN_EVENT_TABLE}" WHERE event_id IN ({values});')
+    return out
+
+
+def dates_needing_metric_rebuild_statement() -> str:
+    """집계가 **기록보다 뒤처진** 날짜를 찾는다 — 누가 기록을 넣었든 상관없이.
+
+    재계산 대상을 "이번 배치가 새로 넣은 날짜"로만 잡으면, **C-2 인라인 경로**(태스크가 끝나며
+    직접 조회 DB 에 쓰는 길)로 들어온 기록은 배치 입장에서 늘 "이미 있는 것"이라 집계가 영영
+    만들어지지 않는다. 규약은 두 경로를 함께 쓰도록 설계돼 있으므로(C-2 실시간 + C-3 점검이
+    빠진 것 보충), 재계산은 **기록 표를 기준으로** 판단해야 한다(운영 실측: ASAC-DAG#677).
+    """
+    # HAVING 두 줄: 집계 행이 아예 없거나(신규 날짜), 그 날짜에 집계 이후 들어온 기록이 있으면
+    # 다시 센다. 뒤엣것이 인라인 경로(C-2)로 늦게 도착한 기록을 잡는다.
+    return f'''SELECT e.observed_date_kst AS d
+FROM "{RUN_EVENT_TABLE}" e
+LEFT JOIN "{DAILY_METRIC_TABLE}" m
+  ON m.observed_date_kst = e.observed_date_kst
+  AND m.domain = e.domain AND m.layer = e.layer
+WHERE e.layer IS NOT NULL
+GROUP BY e.observed_date_kst
+HAVING sum(CASE WHEN m.observed_date_kst IS NULL THEN 1 ELSE 0 END) > 0
+    OR max(e.ingested_at) > max(coalesce(m.updated_at, ''));'''
 
 
 def known_source_keys_statement(dates: Sequence[str]) -> str | None:
