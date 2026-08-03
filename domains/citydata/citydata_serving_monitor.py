@@ -34,6 +34,7 @@ from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import default_target  # noqa: E402
 
 from citydata_ingest.common.trino import build_trino_settings, connect  # noqa: E402
+from citydata_ingest.source.serving_verify import verify_citydata_serving  # noqa: E402
 
 KST = pendulum.timezone("Asia/Seoul")
 _TARGET = default_target()
@@ -133,17 +134,49 @@ def _monitor(**context) -> None:
     _report_serving_health(issues)
 
 
+def _verify(**context) -> None:
+    """게시본 usage_pattern 실측 + gold→D1 중복적재 확인 (#638 verified_*, 각자 구현).
+
+    게시본 게이트로 **게시당 1회**만 실측 → verified_rows/at/publication_id 를 D1 에 UPDATE.
+    중복적재(행수 ≠ distinct PK)면 경보. 배포 전(D1 미게시)이면 대상 0 → no-op. fail-open.
+    """
+    report = verify_citydata_serving(context["params"].get("target", "dev"))
+    print(f"[serving verify] verified={report['verified']} backfilled={report['backfilled']} "
+          f"already_current={report['already_current']} dup_load={len(report['dup_load'])} "
+          f"skipped={len(report['skipped'])} failed={len(report['failed'])}")
+    for f in report["failed"][:10]:
+        print(f"  ⚠ {f}")
+    if not report["dup_load"]:
+        return
+    lines = ["🔴 citydata 서빙 중복적재 의심 (행수 ≠ distinct PK):"]
+    lines += [f" • {d['table']}: 행 {d['rows']} vs distinct PK {d['distinct_pk']}"
+              f"{' · PK NULL ' + str(d['null_pk']) if d['null_pk'] else ''}"
+              for d in report["dup_load"]]
+    msg = "\n".join(lines)
+    print(msg)
+    try:
+        from common.discord import resolve_webhook, send_text
+        if resolve_webhook("citydata"):
+            send_text(msg, domain="citydata")
+    except Exception as exc:  # noqa: BLE001 -- 경보 실패가 검증을 죽이지 않게
+        print(f"[serving verify] 경보 전송 실패(무시): {exc}")
+
+
 with DAG(
     dag_id="citydata_serving_monitor",
-    description="citydata 서빙 신선도(발표지연)·정체 감시 — 발행과 분리(#478). fail-open 경보.",
+    description="citydata 서빙 감시 — 신선도(발표지연)·정체 + 게시본 검증(verified_*·중복적재). fail-open.",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
-    schedule="*/15 * * * *",  # 15분마다 상류 신선도/정체 점검 (발행 티어와 독립)
+    schedule="*/15 * * * *",  # 15분마다 상류 신선도/정체 점검 + 게시본 검증(게이트로 게시당 1회)
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 0, "execution_timeout": timedelta(minutes=10)},
     params={"target": os.environ.get("DBT_TARGET", "prod")},  # prod 컷오버 env 노브(#556). 기본 dev.
-    tags=["serving", "citydata", "monitor", "freshness"],
+    tags=["serving", "citydata", "monitor", "freshness", "verify"],
 ) as dag:
     PythonOperator(
         task_id="check_serving_health", python_callable=_monitor,
+        on_failure_callback=record_citydata_problem)
+    # 게시본 검증(#638 verified_* + 중복적재) — 신선도 점검과 독립. 게시본 게이트로 게시당 1회.
+    PythonOperator(
+        task_id="verify_serving", python_callable=_verify,
         on_failure_callback=record_citydata_problem)
