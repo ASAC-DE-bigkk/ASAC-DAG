@@ -6,8 +6,8 @@
 - ``record_run_metadata`` (Iceberg via Trino) 를 대체 — 콜백 자리는 그대로, 타겟만 R2 파일.
 - ``errors/`` (실패 상세·Discord 알림) 와 ``_reports`` (bronze 수집 감사) 는 **별개로 유지**.
 
-경로: ``runs/observed_date=YYYY-MM-DD(KST)/domain=<d>/dag_id=<dag>/<run>__<task>__try<N>.json``
-(prod 컷오버(#556) 이후: prod 는 ``ops/runs/...`` + seoul 버킷 — ``runs_prefix``/``r2_env_for`` 참고)
+경로: ``ops/runs/domain=<d>/observed_date=YYYY-MM-DD(KST)/dag_id=<dag>/<run>__<task>__try<N>.json``
+(ASK-Seoul#78 P-7 도메인→날짜 축 · P-8 dev·prod 공통 ops/ · 버킷은 ``r2_env_for`` — dev=seoul-dev/prod=seoul)
 R2 자격증명·put 은 common.errors.sink 의 것을 재활용(같은 R2 버킷, dev 전용 — prod 는 r2_env_for 직접 사용).
 """
 
@@ -19,14 +19,15 @@ from datetime import datetime, timedelta, timezone
 
 LOGGER = logging.getLogger(__name__)
 
-RUNS_PREFIX = "runs"  # dev(불변) — prod 는 runs_prefix() 사용
+RUNS_PREFIX = "ops/runs"  # dev·prod 공통 (ASK-Seoul#78 P-8)
 _KST = timezone(timedelta(hours=9))
 
 
 def runs_prefix(target: str) -> str:
-    """target-aware runs/ prefix. dev→'runs'(seoul-dev 중앙집중 유지, #230),
-    prod→'ops/runs'(ops 존 분리, #60 · prod 컷오버 #556)."""
-    return "ops/runs" if (target or "dev").lower() == "prod" else RUNS_PREFIX
+    """runs/ prefix — dev·prod 모두 ``ops/runs`` (ASK-Seoul#78 P-8: 개발 기록도 ops/ 안,
+    개발 전용 최상위 ``runs/`` 제거). 과거 dev→'runs'(#230 중앙집중)는 P-8 로 폐기.
+    target 은 시그니처 유지용 — 버킷 선택(dev=seoul-dev/prod=seoul)은 _put_r2 가 별도 처리."""
+    return "ops/runs"
 
 
 def _safe(value: object) -> str:
@@ -105,8 +106,8 @@ def build_run_record(context: dict, *, domain: str, layer: str, status: str,
         "error": (str(exc)[:500] if exc else None),  # 짧은 요약 — 전체 상세는 errors/
     }
     object_key = (
-        f"{prefix}/observed_date={obs_date}"
-        f"/domain={_safe(domain)}/dag_id={_safe(dag_id)}"
+        f"{prefix}/domain={_safe(domain)}"
+        f"/observed_date={obs_date}/dag_id={_safe(dag_id)}"
         f"/{_safe(run_id)}__{_safe(task_id)}__try{try_number}__{_safe(status)}.json"
     )
     return object_key, record
