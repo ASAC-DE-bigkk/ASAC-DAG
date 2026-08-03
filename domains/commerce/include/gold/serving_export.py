@@ -10,7 +10,8 @@ PROJECT.md §4(서빙 = D1 선별 export) · docs/DB/gold/opus-serving-build-ins
 
 서빙 대상 D1 = 공유 **`ask-seoul-dev-d1`** (citydata·transit 와 동일 DB, ASAC-DAG#475 단일
 브랜치 통합). commerce 소유 **데이터** 테이블만 DROP+CREATE 로 교체하고, **공유
-`_catalog`/`_request_log`/`d1_meta` 는 upsert(DROP 금지)** — 타 도메인 행 보존(transit 규약 승계).
+`_catalog`/`d1_meta` 는 upsert(DROP 금지)** — 타 도메인 행 보존(transit 규약 승계).
+(`_request_log` 는 게이트웨이 소유라 여기서 만들지도 쓰지도 않는다 — #681.)
 핸드오프 보조 4종(`d1_catalog_columns`/`d1_catalog_ext`/`d1_usage_patterns`/`d1_catalog_glossary`)은
 #638 공통 규약으로 **전 도메인 공용 테이블**이 됐다 — 자연키 upsert 만(전량 교체 금지),
 스키마 정본은 `common/serving/d1_client.HANDOFF_COLUMN_TYPES`.
@@ -543,9 +544,14 @@ def _ensure_shared_tables(token: str, catalog_ddl: str) -> None:
     # d1_publish_state 만 commerce 소유(그 외는 공유) — 다만 **DROP 금지**다. 게시 지문 상태를
     # 잃으면 다음 run 이 전량 재기록한다(fail-open 이라 안전하되 절감이 사라진다).
     # 공유 `d1_meta` 는 positional `INSERT OR REPLACE ... VALUES` 로 쓰므로 컬럼을 늘리지 않는다.
+    # `_request_log` 는 여기서 만들지 않는다(ASAC-DAG#681). 요청 로그는 게이트웨이
+    # (ASK-Seoul-Serving)의 표이고 정본 스키마는 그쪽 마이그레이션이다. commerce 는 이 표를
+    # 읽지도 쓰지도 않으면서 3컬럼짜리 DDL 만 갖고 있었는데, 빈 D1 에서 이쪽이 먼저 돌면
+    # 3컬럼 표가 생기고 게이트웨이의 정본 마이그레이션은 `IF NOT EXISTS` 라 조용히 넘어간다 —
+    # 그 뒤 게이트웨이가 없는 컬럼에 INSERT 하다 실패하고, 그 쓰기는 응답 경로 밖이라
+    # **요청 로그가 조용히 전량 버려진다.** 안 만드는 것이 유일하게 안전하다.
     _d1(  # security: allow-sql — 상수 DDL(IF NOT EXISTS)
         catalog_ddl + ' '
-        'CREATE TABLE IF NOT EXISTS _request_log (ts TEXT, path TEXT, query TEXT); '
         'CREATE TABLE IF NOT EXISTS d1_meta (source_table TEXT PRIMARY KEY, snapshot_at TEXT, '
         'row_count INTEGER, build_status TEXT, source_max_event_date TEXT); '
         'CREATE TABLE IF NOT EXISTS d1_publish_state (table_name TEXT PRIMARY KEY, '
@@ -678,7 +684,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     - rollup: 화면 축 GROUP BY 파생(§1.3) 스냅샷.
     - 행수 밴드 밖(0행/2배 초과)이면 **스왑 스킵 + d1_meta.build_status='stale'**(직전 유지).
     - payload 지문이 직전 게시와 같으면 **행 재기록만 생략**(무변경 스킵) — 메타는 그대로 갱신.
-    - commerce 소유 **데이터** 테이블만 DROP+CREATE. 공유 `_catalog`/`_request_log`/`d1_meta` 와
+    - commerce 소유 **데이터** 테이블만 DROP+CREATE. 공유 `_catalog`/`d1_meta` 와
       핸드오프 보조 4종(#638 공용)은 upsert — 보조 4종은 자연키 upsert + 제품/어휘 스코프 잔여 정리.
     - 데이터 정합은 테이블 단위로 안전하다: 지문 커밋이 파괴적 쓰기를 감싸므로 어느 지점에서
       죽어도 **커밋된 지문 ⊆ D1 실물**이 유지되고, 다음 run 이 미완료분을 반드시 재기록한다.
