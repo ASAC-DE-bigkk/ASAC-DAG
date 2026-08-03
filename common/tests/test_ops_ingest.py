@@ -475,3 +475,33 @@ def test_inline_written_rows_still_get_aggregated():
     assert receipt.dates_rebuilt == ["2026-08-03"]    # 그 날짜를 다시 계산한다
     rebuilds = [s for s in d1.statements if s.startswith('INSERT INTO "_ops_daily_metric"')]
     assert rebuilds and "'2026-08-03'" in rebuilds[0]
+
+
+def test_every_generated_statement_stays_under_the_d1_limit():
+    """**개수가 아니라 길이**로 나눈다 — 행마다 값 길이가 달라 행수로는 못 막는다.
+
+    운영에서 200행 배치가 D1 한계를 넘어 적재가 매 실행 통째로 실패했다(#677). 첫 수정은
+    조회 문장만 나눠 실패 지점이 한 줄 뒤로 밀렸을 뿐이었다 — 삽입/갱신도 같이 나눠야 한다.
+    """
+    limit = d1_ops.MAX_STATEMENT_CHARS
+    long_key = "ops/runs/citydata/observed_date=2026-08-03/dag_id=citydata_bronze/" + "k" * 80
+    rows = [{c: (long_key if c in ("source_key", "log_bundle_key") else f"v{i}")
+             for c in d1_ops.RUN_EVENT_COLUMNS} for i in range(3_000)]
+
+    produced = [
+        *d1_ops.run_event_upsert_statements(rows),
+        *d1_ops.known_event_ids_statements([f"{i:064x}" for i in range(3_000)]),
+        *d1_ops.set_log_bundle_statements([(f"{i:064x}", long_key) for i in range(3_000)]),
+    ]
+    assert produced
+    oversize = [len(s) for s in produced if len(s) > limit]
+    assert not oversize, f"D1 한계({limit})를 넘는 문장이 있습니다: {oversize[:3]}"
+
+
+def test_batching_does_not_drop_rows():
+    """나눠도 하나도 빠지지 않는다 — 조용한 유실이 가장 나쁘다."""
+    rows = [{**{c: "v" for c in d1_ops.RUN_EVENT_COLUMNS}, "event_id": f"{i:064x}"}
+            for i in range(1_500)]
+    joined = " ".join(d1_ops.run_event_upsert_statements(rows))
+    assert all(f"{i:064x}" in joined for i in range(0, 1_500, 97))
+    assert joined.count("INSERT INTO") > 1        # 실제로 나뉘었다
