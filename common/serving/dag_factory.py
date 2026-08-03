@@ -43,6 +43,9 @@ def publication_record_payload(record: ProductRecord) -> dict[str, object]:
         "publication_id": record.publication_id,
         "stage": record.stage,
         "rollback_status": record.rollback_status,
+        "projection_schema_hash": record.projection_schema_hash,
+        "source_content_hash": record.source_content_hash,
+        "d1_content_hash": record.d1_content_hash,
     }
 
 
@@ -112,12 +115,22 @@ def _load_export_contracts(
     product_ids: Sequence[str],
     *,
     exact_domain_contracts: bool,
+    require_public_projection: bool = False,
 ):
     from common.serving.contract import load_contracts, load_domain_contracts
 
     if exact_domain_contracts:
-        return load_domain_contracts(manifest_path, domain, product_ids)
-    return load_contracts(manifest_path, product_ids)
+        return load_domain_contracts(
+            manifest_path,
+            domain,
+            product_ids,
+            require_public_projection=require_public_projection,
+        )
+    return load_contracts(
+        manifest_path,
+        product_ids,
+        require_public_projection=require_public_projection,
+    )
 
 
 def build_serving_export_dag(
@@ -130,6 +143,8 @@ def build_serving_export_dag(
     target: str = "dev",
     schema: str | None = None,
     exact_domain_contracts: bool = False,
+    require_public_projection: bool = False,
+    verify_content_parity: bool = False,
 ):
     """Build a serving-export DAG for one domain. Returns an Airflow ``DAG``."""
     import os
@@ -155,6 +170,7 @@ def build_serving_export_dag(
             domain,
             product_ids,
             exact_domain_contracts=exact_domain_contracts,
+            require_public_projection=require_public_projection,
         )
         if not contracts:
             raise RuntimeError(f"{domain}: product_ids {list(product_ids)} 에 해당하는 enabled 계약이 없다")
@@ -163,7 +179,14 @@ def build_serving_export_dag(
         smoke = build_smoke_tester_from_env()
 
         try:
-            report = publish(contracts, source, d1, smoke, source_run_id=run_id)
+            report = publish(
+                contracts,
+                source,
+                d1,
+                smoke,
+                source_run_id=run_id,
+                verify_content_parity=verify_content_parity,
+            )
         except PublicationError as exc:
             record_publication_events(context, domain, exc.report.records)
             raise

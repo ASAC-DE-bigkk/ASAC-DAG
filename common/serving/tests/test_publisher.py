@@ -32,6 +32,7 @@ class FakeD1:
         self.ledger: list[dict[str, Any]] = []
         self.previous_tables: dict[str, list[dict[str, Any]]] = {}
         self.replace_calls = 0
+        self.read_table_rows_calls: list[tuple[str, list[Column], tuple[str, ...]]] = []
         self.product_meta: dict[str, dict[str, Any]] = {}  # 핸드오프 메타(#638) 게시 기록
 
     def table_row_count(self, name: str) -> int:
@@ -103,6 +104,17 @@ class FakeD1:
     def catalog_domain_count(self, model_names: set[str]) -> int:
         return sum(1 for n in model_names if n in self.catalog)
 
+    def read_table_rows(self, name, ordered_columns, primary_key):
+        self.read_table_rows_calls.append((name, list(ordered_columns), tuple(primary_key)))
+        rows = sorted(
+            self.tables.get(name, []),
+            key=lambda row: tuple(row.get(column) for column in primary_key),
+        )
+        return [
+            {column: row.get(column) for column, _type in ordered_columns}
+            for row in rows
+        ]
+
     def publish_product_meta(self, product_id, publication_id, columns_rows, ext_rows, pattern_rows) -> None:
         self.product_meta[product_id] = {
             "publication_id": publication_id,
@@ -131,6 +143,26 @@ class ExplodingMetaD1(FakeD1):
 
     def publish_product_meta(self, *args, **kwargs) -> None:
         raise RuntimeError("simulated product meta write failure")
+
+
+class CorruptingReadBackD1(FakeD1):
+    def read_table_rows(self, name, ordered_columns, primary_key):
+        rows = super().read_table_rows(name, ordered_columns, primary_key)
+        rows[0]["place_id"] = "corrupted"
+        return rows
+
+
+class ExplodingReadBackD1(FakeD1):
+    def read_table_rows(self, name, ordered_columns, primary_key):
+        super().read_table_rows(name, ordered_columns, primary_key)
+        raise RuntimeError("simulated D1 read-back failure")
+
+
+class ExplodingPrimaryKeyStatsD1(FakeD1):
+    def primary_key_stats(self, name: str, primary_key) -> tuple[int, int, int]:
+        if name in self.previous_tables:
+            raise RuntimeError("simulated activated read-back failure")
+        return super().primary_key_stats(name, primary_key)
 
 
 class FakeSource:
@@ -170,6 +202,14 @@ def _contract(**overrides: Any) -> ServingContract:
     return ServingContract(**base)
 
 
+def _projected_contract(**overrides: Any) -> ServingContract:
+    return _contract(
+        public_projection=("product_row_id", "place_id", "forecast_at"),
+        projection_schema_hash="projection-hash-1",
+        **overrides,
+    )
+
+
 def _rows(n: int) -> list[dict[str, Any]]:
     return [{"product_row_id": f"r{i}", "place_id": "p", "forecast_at": f"2026-07-2{i}T00:00:00"} for i in range(n)]
 
@@ -198,6 +238,136 @@ def test_snapshot_publish_success_records_metadata():
     cat = d1.catalog_row(contract.model_name)
     assert cat["product_id"] == "weather_place_current_outlook" and cat["serving_status"] == STATUS_PUBLISHED
     assert smoke.checked == [contract.model_name]  # external => smoke ran
+
+
+def test_opted_in_snapshot_records_matching_source_and_d1_content_hashes():
+    contract = _projected_contract()
+    d1 = FakeD1()
+    rows = list(reversed(_rows(3)))  # source order must not matter
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=rows)})
+
+    report = publish(
+        [contract],
+        source,
+        d1,
+        FakeSmoke(status="passed"),
+        source_run_id="content-ok",
+        verify_content_parity=True,
+    )
+
+    record = report.records[0]
+    assert record.serving_status == STATUS_PUBLISHED
+    assert record.projection_schema_hash == "projection-hash-1"
+    assert record.source_content_hash
+    assert record.source_content_hash == record.d1_content_hash
+    assert d1.read_table_rows_calls == [(contract.model_name, COLUMNS, ("product_row_id",))]
+
+
+def test_opted_in_content_mismatch_restores_lkg_before_smoke_catalog_or_meta():
+    contract = _projected_contract()
+    d1 = CorruptingReadBackD1()
+    old_rows = _rows(2)
+    old_catalog = {"name": contract.model_name, "row_count": 2, "publication_id": "old"}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+    smoke = FakeSmoke(status="passed")
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract],
+            FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))}),
+            d1,
+            smoke,
+            source_run_id="content-mismatch",
+            verify_content_parity=True,
+        )
+
+    record = excinfo.value.report.records[0]
+    assert record.stage == "content_parity"
+    assert record.rollback_status == "restored"
+    assert record.source_content_hash and record.d1_content_hash
+    assert record.source_content_hash != record.d1_content_hash
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert d1.product_meta == {}
+    assert smoke.checked == []
+    assert d1.ledger[-1]["stage"] == "content_parity"
+
+
+def test_opted_in_d1_row_read_exception_after_activation_restores_lkg():
+    contract = _projected_contract()
+    d1 = ExplodingReadBackD1()
+    old_rows = _rows(2)
+    old_catalog = {"name": contract.model_name, "row_count": 2, "publication_id": "old"}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract],
+            FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))}),
+            d1,
+            FakeSmoke(status="passed"),
+            source_run_id="content-read-failure",
+            verify_content_parity=True,
+        )
+
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert excinfo.value.report.records[0].stage == "content_parity"
+    assert any("content parity" in failure for failure in excinfo.value.report.failures)
+
+
+@pytest.mark.parametrize(
+    "contract,error",
+    [
+        (_contract(projection_schema_hash="projection-hash-1"), "public_projection"),
+        (_contract(public_projection=("product_row_id", "place_id", "forecast_at")), "projection_schema_hash"),
+        (
+            _contract(
+                public_projection=("product_row_id", "place_id", "forecast_at"),
+                projection_schema_hash="projection-hash-1",
+                primary_key=(),
+            ),
+            "primary_key",
+        ),
+    ],
+)
+def test_content_parity_requires_projection_hash_and_primary_key_before_physical_write(contract, error):
+    d1 = FakeD1()
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract],
+            FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(1))}),
+            d1,
+            FakeSmoke(status="passed"),
+            source_run_id="missing-projection-hash",
+            verify_content_parity=True,
+        )
+
+    assert d1.replace_calls == 0
+    assert d1.read_table_rows_calls == []
+    assert excinfo.value.report.records[0].stage == "content_contract"
+    assert error in excinfo.value.report.records[0].reason
+
+
+def test_default_legacy_publication_does_not_read_full_d1_content_rows():
+    contract = _contract()
+    d1 = FakeD1()
+
+    report = publish(
+        [contract],
+        FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(1))}),
+        d1,
+        FakeSmoke(status="passed"),
+        source_run_id="legacy-no-content-read",
+    )
+
+    assert report.ok
+    assert d1.read_table_rows_calls == []
+    assert report.records[0].source_content_hash is None
+    assert report.records[0].d1_content_hash is None
 
 
 def test_snapshot_catalog_carries_static_contract_and_runtime_publication_id():
@@ -443,6 +613,26 @@ def test_snapshot_catalog_registration_failure_restores_last_good_and_records_le
     assert d1.catalog[contract.model_name] == old_catalog
     assert d1.ledger[-1]["outcome"] == "failed"
     assert d1.ledger[-1]["rollback_status"] == "restored"
+
+
+def test_snapshot_pk_readback_exception_after_activation_restores_last_good():
+    contract = _contract()
+    d1 = ExplodingPrimaryKeyStatsD1()
+    old_rows = _rows(2)
+    old_catalog = {"name": contract.model_name, "row_count": 2, "publication_id": "old"}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))})
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="pk-readback-failure")
+
+    record = excinfo.value.report.records[0]
+    assert record.stage == "read_back"
+    assert record.rollback_status == "restored"
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert any("primary key read-back" in failure for failure in excinfo.value.report.failures)
 
 
 def test_exact_set_upsert_catalog_failure_restores_last_good_and_records_ledger():

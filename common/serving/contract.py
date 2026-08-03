@@ -9,9 +9,14 @@ tests without Trino/Airflow.
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+
+SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,9 @@ class ServingContract:
     tests: tuple[str, ...] = ()
     public_gold: dict[str, Any] | None = None
     mcp_projection: dict[str, Any] | None = None
+    public_projection: tuple[str, ...] | None = None
+    projection_schema_version: str | None = None
+    projection_schema_hash: str | None = None
     # ── 핸드오프 메타(#638) — d1_catalog_columns/ext·d1_usage_patterns 게시 원천 ──
     grain: str | None = None
     serving_tier: str | None = None      # 물리 게시 확장 — 미선언 도메인은 None(#638 §2.2)
@@ -61,11 +69,92 @@ def _gates_by_model(manifest: dict[str, Any]) -> dict[str, list[str]]:
     return {uid: sorted(names) for uid, names in gates.items()}
 
 
+def _column_identity_meta(column: dict[str, Any]) -> dict[str, Any]:
+    config_meta = ((column.get("config") or {}).get("meta") or {}) if isinstance(column, dict) else {}
+    meta = config_meta if isinstance(config_meta, dict) else {}
+    return {
+        "data_type": str(column.get("data_type", "")).strip().lower(),
+        "nullable": meta.get("nullable"),
+        "semantic_role": meta.get("semantic_role"),
+        "unit": meta.get("unit"),
+    }
+
+
+def _projection_schema_hash(
+    schema_version: str,
+    projection_columns: tuple[str, ...],
+    manifest_columns: dict[str, Any],
+) -> str:
+    payload = {
+        "schema_version": schema_version,
+        "columns": [
+            {
+                "name": column_name,
+                **_column_identity_meta(manifest_columns[column_name]),
+            }
+            for column_name in projection_columns
+        ],
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _load_public_projection(
+    *,
+    product_id: str,
+    serving: dict[str, Any],
+    node: dict[str, Any],
+    require_public_projection: bool,
+) -> tuple[tuple[str, ...] | None, str | None, str | None]:
+    projection = serving.get("public_projection")
+    if projection is None:
+        if require_public_projection:
+            raise ValueError(f"{product_id}: public_projection required")
+        return None, None, None
+    if not isinstance(projection, dict):
+        raise ValueError(f"{product_id}: public_projection must be object")
+    if set(projection) != {"schema_version", "columns"}:
+        raise ValueError(f"{product_id}: public_projection must contain exactly schema_version and columns")
+    schema_version = projection.get("schema_version")
+    if not isinstance(schema_version, str) or not SEMVER_RE.fullmatch(schema_version):
+        raise ValueError(f"{product_id}: public_projection schema_version must be semver")
+    raw_columns = projection.get("columns")
+    if not isinstance(raw_columns, list) or not raw_columns:
+        raise ValueError(f"{product_id}: public_projection columns must be a non-empty list")
+
+    seen: set[str] = set()
+    columns: list[str] = []
+    for column in raw_columns:
+        if not isinstance(column, str) or not IDENTIFIER_RE.fullmatch(column):
+            raise ValueError(f"{product_id}: public_projection column must be physical identifier")
+        if column in seen:
+            raise ValueError(f"{product_id}: public_projection duplicate column {column}")
+        seen.add(column)
+        columns.append(column)
+
+    manifest_columns = node.get("columns") if isinstance(node.get("columns"), dict) else {}
+    for column in columns:
+        if column not in manifest_columns:
+            raise ValueError(f"{product_id}: public_projection unknown column {column}")
+        identity = _column_identity_meta(manifest_columns[column])
+        missing = [
+            key
+            for key, value in identity.items()
+            if value in ("", None) or (key == "nullable" and not isinstance(value, bool))
+        ]
+        if missing:
+            raise ValueError(f"{product_id}: public_projection identity metadata missing for {column}: {','.join(missing)}")
+
+    public_columns = tuple(columns)
+    return public_columns, schema_version, _projection_schema_hash(schema_version, public_columns, manifest_columns)
+
+
 def load_contracts(
     manifest_path: str | Path,
     product_ids: Iterable[str] | None = None,
     *,
     enabled_only: bool = True,
+    require_public_projection: bool = False,
 ) -> list[ServingContract]:
     """Parse a dbt manifest into ``ServingContract`` records.
 
@@ -92,6 +181,12 @@ def load_contracts(
         if enabled_only and not bool(serving.get("enabled", False)):
             continue
         partial = serving.get("partial_policy") or {}
+        public_projection, projection_schema_version, projection_schema_hash = _load_public_projection(
+            product_id=str(product_id),
+            serving=serving,
+            node=node,
+            require_public_projection=require_public_projection,
+        )
         contracts.append(
             ServingContract(
                 product_id=str(product_id),
@@ -118,6 +213,9 @@ def load_contracts(
                       if isinstance(serving.get("mcp_projection"), dict)
                       else None
                   ),
+                  public_projection=public_projection,
+                  projection_schema_version=projection_schema_version,
+                  projection_schema_hash=projection_schema_hash,
                   grain=serving.get("grain"),
                   # commerce 로컬 키(serving_tier/d1_rollup)와 #638 §1 스펙 키(tier/rollup_rule) 겸용
                   serving_tier=serving.get("serving_tier") or serving.get("tier"),
@@ -145,6 +243,8 @@ def load_domain_contracts(
     manifest_path: str | Path,
     domain: str,
     product_ids: Iterable[str],
+    *,
+    require_public_projection: bool = False,
 ) -> list[ServingContract]:
     """Load one wrapper's complete enabled domain contract set.
 
@@ -160,7 +260,10 @@ def load_domain_contracts(
     prefix = f"gold_{domain}_"
     enabled_domain_contracts = [
         contract
-        for contract in load_contracts(manifest_path)
+        for contract in load_contracts(
+            manifest_path,
+            require_public_projection=require_public_projection,
+        )
         if contract.model_name.startswith(prefix)
     ]
     enabled_ids = {contract.product_id for contract in enabled_domain_contracts}
