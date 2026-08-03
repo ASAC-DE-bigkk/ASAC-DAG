@@ -150,6 +150,13 @@ class D1Client(Protocol):
         ext_rows: Sequence[dict[str, Any]],
         pattern_rows: Sequence[dict[str, Any]],
     ) -> None: ...
+    def publish_product_evidence(
+        self,
+        product_id: str,
+        publication_id: str,
+        sources: Sequence[dict[str, Any]] | None,
+        quality: dict[str, Any],
+    ) -> None: ...
 
 
 # ---- catalog schema (single source for both real client and Worker) -----------------
@@ -244,6 +251,107 @@ HANDOFF_STALE_MARKERS: dict[str, str] = {
 }
 HANDOFF_PRODUCT_TABLES = ("d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns")
 HANDOFF_COLUMNS = {table: tuple(name for name, _ in cols) for table, cols in HANDOFF_COLUMN_TYPES.items()}
+
+
+# ---- V1 evidence schema (#678) -----------------------------------------------------
+# Source/right records and runtime quality are intentionally separate from the #638
+# metadata tables. A product can have multiple sources while it has exactly one active
+# quality snapshot per publication. The D1 tables are published copies; dbt manifest
+# fields remain the source of truth and D1 is never hand-edited.
+EVIDENCE_COLUMN_TYPES: dict[str, tuple[tuple[str, str], ...]] = {
+    "d1_catalog_sources": (
+        ("product_id", "TEXT NOT NULL"), ("source_id", "TEXT NOT NULL"),
+        ("source_url", "TEXT NOT NULL"), ("license", "TEXT NOT NULL"),
+        ("license_url", "TEXT NOT NULL"), ("redistribution", "TEXT NOT NULL"),
+        ("attribution", "TEXT NOT NULL"), ("rights_checked_at", "TEXT NOT NULL"),
+        ("publication_id", "TEXT NOT NULL"),
+    ),
+    "d1_product_quality": (
+        ("product_id", "TEXT NOT NULL"), ("source_row_count", "INTEGER NOT NULL"),
+        ("d1_row_count", "INTEGER NOT NULL"), ("duplicate_primary_key_count", "INTEGER NOT NULL"),
+        ("null_primary_key_count", "INTEGER NOT NULL"), ("freshness_as_of", "TEXT"),
+        ("freshness_slo_minutes", "INTEGER"), ("serving_status", "TEXT NOT NULL"),
+        ("measured_at", "TEXT NOT NULL"), ("coverage_json", "TEXT"),
+        ("projection_schema_version", "TEXT"), ("projection_schema_hash", "TEXT"),
+        ("publication_id", "TEXT NOT NULL"),
+    ),
+}
+EVIDENCE_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
+    "d1_catalog_sources": ("product_id", "source_id"),
+    "d1_product_quality": ("product_id",),
+}
+EVIDENCE_COLUMNS = {table: tuple(name for name, _ in columns) for table, columns in EVIDENCE_COLUMN_TYPES.items()}
+# The first #678 quality schema had no public-projection identity. Only this exact,
+# additive predecessor can be migrated automatically; every other mismatch must stop
+# for an explicit reviewed migration rather than guessing at user data.
+_EVIDENCE_MIGRATABLE_PREDECESSORS: dict[str, tuple[str, ...]] = {
+    "d1_product_quality": tuple(
+        name for name in EVIDENCE_COLUMNS["d1_product_quality"]
+        if name not in {"projection_schema_version", "projection_schema_hash"}
+    ),
+}
+
+
+def evidence_ddl(table: str) -> str:
+    cols = ", ".join(f'"{name}" {column_type}' for name, column_type in EVIDENCE_COLUMN_TYPES[table])
+    key_columns = '", "'.join(EVIDENCE_PRIMARY_KEYS[table])
+    return f'CREATE TABLE IF NOT EXISTS "{table}" ({cols}, PRIMARY KEY ("{key_columns}"));'
+
+
+def evidence_schema_is_current(table: str, pragma_rows: Sequence[dict[str, Any]]) -> bool:
+    if not pragma_rows:
+        return False
+    names = {str(row.get("name")) for row in pragma_rows}
+    key_rows = [row for row in pragma_rows if int(row.get("pk") or 0) > 0]
+    key_columns = tuple(
+        str(row.get("name")) for row in sorted(key_rows, key=lambda row: int(row.get("pk") or 0))
+    )
+    return names == set(EVIDENCE_COLUMNS[table]) and key_columns == EVIDENCE_PRIMARY_KEYS[table]
+
+
+def evidence_schema_is_migratable(table: str, pragma_rows: Sequence[dict[str, Any]]) -> bool:
+    """Allow exactly the additive #678 v1 predecessor; reject all unknown shapes."""
+    predecessor = _EVIDENCE_MIGRATABLE_PREDECESSORS.get(table)
+    if not predecessor:
+        return False
+    names = {str(row.get("name")) for row in pragma_rows}
+    key_rows = [row for row in pragma_rows if int(row.get("pk") or 0) > 0]
+    key_columns = tuple(
+        str(row.get("name")) for row in sorted(key_rows, key=lambda row: int(row.get("pk") or 0))
+    )
+    return names == set(predecessor) and key_columns == EVIDENCE_PRIMARY_KEYS[table]
+
+
+def evidence_migrate_statements(table: str, existing_columns: Sequence[str]) -> str:
+    """Row-preserving one-time migration for the known additive evidence predecessor."""
+    if table not in _EVIDENCE_MIGRATABLE_PREDECESSORS:
+        raise ValueError(f"{table}: no automatic evidence migration is defined")
+    legacy = f"{table}__migrate"
+    present = set(existing_columns)
+    target_columns = EVIDENCE_COLUMNS[table]
+    select_exprs = [f'"{name}"' if name in present else "NULL" for name in target_columns]
+    quoted_columns = '", "'.join(target_columns)
+    return (
+        f'DROP TABLE IF EXISTS "{legacy}"; '
+        f'ALTER TABLE "{table}" RENAME TO "{legacy}"; '
+        + evidence_ddl(table) + " "
+        f'INSERT OR REPLACE INTO "{table}" ("{quoted_columns}") '
+        f'SELECT {", ".join(select_exprs)} FROM "{legacy}"; '
+        f'DROP TABLE IF EXISTS "{legacy}";'
+    )
+
+
+def evidence_upsert_statements(table: str, rows: Sequence[dict[str, Any]]) -> list[str]:
+    columns: list[Column] = [(name, column_type) for name, column_type in EVIDENCE_COLUMN_TYPES[table]]
+    return build_insert_statements(table, columns, rows, replace=True)
+
+
+def evidence_source_prune_statement(product_id: str, source_ids: Sequence[str]) -> str:
+    base = f'DELETE FROM "d1_catalog_sources" WHERE "product_id" = {sql_literal(product_id)}'
+    if not source_ids:
+        return base + ";"
+    identifiers = ", ".join(sql_literal(source_id) for source_id in source_ids)
+    return f'{base} AND "source_id" NOT IN ({identifiers});'
 
 
 def handoff_ddl(table: str) -> str:
@@ -388,6 +496,7 @@ class HttpD1Client:
         self._api_url = api_url
         self._token = token  # never logged
         self._handoff_ready: set[str] = set()  # per-run schema check cache
+        self._evidence_ready: set[str] = set()  # #678 evidence schema cache
 
     def _request(self, body: dict[str, Any]) -> dict[str, Any]:
         import requests  # lazy import so tests never need it
@@ -634,6 +743,21 @@ class HttpD1Client:
             self._query(handoff_ddl(table))
         self._handoff_ready.add(table)
 
+    def _ensure_evidence_schema(self, table: str) -> None:
+        """Create #678 tables once; never infer a destructive migration at runtime."""
+        if table in self._evidence_ready:
+            return
+        pragma_rows = self._query(f'PRAGMA table_info("{table}");')
+        if not pragma_rows:
+            self._query(evidence_ddl(table))
+        elif evidence_schema_is_migratable(table, pragma_rows):
+            self._query(evidence_migrate_statements(table, [str(row["name"]) for row in pragma_rows]))
+        elif not evidence_schema_is_current(table, pragma_rows):
+            raise RuntimeError(
+                f"{table}: evidence schema mismatch; explicit row-preserving migration is required"
+            )
+        self._evidence_ready.add(table)
+
     def publish_product_meta(
         self,
         product_id: str,
@@ -660,5 +784,59 @@ class HttpD1Client:
         statements.append(handoff_stale_delete_statement("d1_catalog_ext", product_id, publication_id))
         statements.append(handoff_prune_statement(
             "d1_usage_patterns", product_id, [str(row["pattern_id"]) for row in pattern_rows]))
+        for batch in group_api_batches(statements):
+            self._query_batch(batch)
+
+    def publish_product_evidence(
+        self,
+        product_id: str,
+        publication_id: str,
+        sources: Sequence[dict[str, Any]] | None,
+        quality: dict[str, Any],
+    ) -> None:
+        """Publish V1 source/right and runtime quality evidence for one active product.
+
+        ``sources is None`` represents a legacy manifest which has not adopted #678;
+        it must leave any previously known source rows untouched. A declared list
+        replaces only this product's source scope. Quality is calculated by the
+        Publisher for every successful publication and is always replaced with the
+        same active ``publication_id``.
+        """
+        self._ensure_evidence_schema("d1_catalog_sources")
+        self._ensure_evidence_schema("d1_product_quality")
+        statements: list[str] = []
+        if sources is not None:
+            source_rows = [
+                {
+                    "product_id": product_id,
+                    **source,
+                    "publication_id": publication_id,
+                }
+                for source in sources
+            ]
+            statements.extend(evidence_upsert_statements("d1_catalog_sources", source_rows))
+            statements.append(evidence_source_prune_statement(
+                product_id, [str(source["source_id"]) for source in sources]
+            ))
+        quality_row = {
+            "product_id": product_id,
+            "source_row_count": quality["source_row_count"],
+            "d1_row_count": quality["d1_row_count"],
+            "duplicate_primary_key_count": quality["duplicate_primary_key_count"],
+            "null_primary_key_count": quality["null_primary_key_count"],
+            "freshness_as_of": quality.get("freshness_as_of"),
+            "freshness_slo_minutes": quality.get("freshness_slo_minutes"),
+            "serving_status": quality["serving_status"],
+            "measured_at": quality["measured_at"],
+            "coverage_json": (
+                json.dumps(quality["coverage"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                if quality.get("coverage") is not None
+                else None
+            ),
+            "projection_schema_version": quality.get("projection_schema_version"),
+            "projection_schema_hash": quality.get("projection_schema_hash"),
+            "publication_id": publication_id,
+        }
+        statements.extend(evidence_upsert_statements("d1_product_quality", [quality_row]))
         for batch in group_api_batches(statements):
             self._query_batch(batch)

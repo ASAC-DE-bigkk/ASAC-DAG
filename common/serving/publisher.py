@@ -71,6 +71,7 @@ class ProductRecord:
     projection_schema_hash: str | None = None
     source_content_hash: str | None = None
     d1_content_hash: str | None = None
+    coverage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -191,12 +192,67 @@ def _product_meta_rows(
     return columns_rows, ext_rows, pattern_rows
 
 
+def _product_evidence(
+    contract: ServingContract,
+    record: ProductRecord,
+) -> tuple[tuple[dict[str, Any], ...] | None, dict[str, Any]]:
+    """Build the product-level source and runtime evidence for the active publication.
+
+    A missing ``source_evidence`` is intentionally distinct from an empty declaration.
+    Legacy contracts must not erase source records that another approved publisher has
+    already placed in D1.  New contracts are required to declare at least one source
+    record by the contract validator.
+    """
+    return contract.source_evidence, {
+        "source_row_count": record.source_row_count,
+        "d1_row_count": record.d1_row_count,
+        "duplicate_primary_key_count": record.d1_row_count - record.distinct_primary_key_count,
+        "null_primary_key_count": record.null_primary_key_count,
+        "freshness_as_of": record.freshness,
+        "freshness_slo_minutes": contract.freshness_slo_minutes,
+        "serving_status": record.serving_status,
+        "measured_at": record.published_at,
+        # NULL is deliberately not interpreted as passing by the K-Skill Worker.
+        "coverage": record.coverage,
+        # Non-empty only for an explicit public projection. The Worker fails closed
+        # for legacy full-source publications so internal lineage columns never leak.
+        "projection_schema_version": contract.projection_schema_version,
+        "projection_schema_hash": contract.projection_schema_hash,
+    }
+
+
 def _primary_key_stats(rows: Sequence[dict[str, Any]], primary_key: Sequence[str]) -> tuple[int, int, int]:
     if not primary_key:
         raise ValueError("primary_key is required for publication")
     values = [tuple(row.get(column) for column in primary_key) for row in rows]
     null_count = sum(1 for value in values if any(part is None for part in value))
     return len(rows), len(set(values)), null_count
+
+
+def _coverage_evidence(contract: ServingContract, rows: Sequence[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
+    """Compute the declared distinct coverage and return a precise pre-write failure reason."""
+    declaration = contract.quality_coverage
+    if declaration is None:
+        return None, None
+    field = declaration["field"]
+    expected = declaration["expected_distinct_count"]
+    minimum_ratio = declaration["minimum_ratio"]
+    observed = len({row.get(field) for row in rows if row.get(field) is not None})
+    ratio = observed / expected
+    coverage = {
+        "field": field,
+        "expected_distinct_count": expected,
+        "observed_distinct_count": observed,
+        "minimum_ratio": minimum_ratio,
+        "ratio": ratio,
+        "status": "passed" if ratio >= minimum_ratio else "failed",
+    }
+    if ratio < minimum_ratio:
+        return coverage, (
+            f"coverage validation failed: field={field} observed={observed} "
+            f"expected={expected} ratio={ratio:.6f} minimum_ratio={minimum_ratio:.6f}"
+        )
+    return coverage, None
 
 
 def _uses_replace_lifecycle(contract: ServingContract) -> bool:
@@ -389,6 +445,15 @@ def publish(
             _append_ledger(d1, record, outcome="failed")
             report.records.append(record)
             continue
+        record.coverage, coverage_error = _coverage_evidence(contract, rows)
+        if coverage_error:
+            record.serving_status = STATUS_FAILED
+            record.stage = "quality_coverage"
+            record.reason = coverage_error
+            report.failures.append(f"{contract.model_name}: {coverage_error}")
+            _append_ledger(d1, record, outcome="failed")
+            report.records.append(record)
+            continue
         if verify_content_parity:
             try:
                 record.source_content_hash = d1_content_hash(
@@ -531,6 +596,16 @@ def publish(
             columns_rows, ext_rows, pattern_rows = _product_meta_rows(contract, plan.columns, record)
             d1.publish_product_meta(
                 contract.product_id, record.publication_id, columns_rows, ext_rows, pattern_rows
+            )
+            # 권리/품질 증거(#678)는 이번 publication_id에 결속한다. 여기서 실패하면
+            # catalog와 스냅샷을 복원하고, Worker는 publication 불일치/누락으로 계속 차단한다.
+            record.stage = "product_evidence"
+            sources, quality = _product_evidence(contract, record)
+            d1.publish_product_evidence(
+                contract.product_id,
+                record.publication_id,
+                sources,
+                quality,
             )
         except Exception as exc:  # noqa: BLE001 -- restore snapshot after any post-write catalog/meta failure
             _fail_after_write(
