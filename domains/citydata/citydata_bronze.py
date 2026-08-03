@@ -80,7 +80,7 @@ def _run_ok_d1(context) -> None:
     try:
         from common.ops.contract import (  # noqa: PLC0415
             Grain, Layer, OpsCategory, RunStatus, build_ops_event)
-        from common.ops.d1_run_event_writer import (  # noqa: PLC0415
+        from citydata_ingest.source.d1_run_event_writer import (  # noqa: PLC0415
             make_d1_run_event_writer)
         target = (context.get("params") or {}).get("target", "dev")
         record = build_ops_event(
