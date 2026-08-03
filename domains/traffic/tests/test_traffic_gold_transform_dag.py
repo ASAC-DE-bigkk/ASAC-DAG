@@ -550,13 +550,34 @@ def test_gold_success_marker_uses_fresh_evidence_and_heavy_pool(monkeypatch):
         lambda: module.SilverOutputEvidence(43, "b" * 64),
     )
 
-    module.mark_traffic_gold_success(ti=ti)
+    outlet_event = types.SimpleNamespace(extra=None)
+    module.mark_traffic_gold_success(
+        ti=ti,
+        run_id="gold-run-1",
+        outlet_events={module.TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF: outlet_event},
+    )
 
     marker = module.TransformSuccessMarker.from_json(
         FakeVariable.values[module.GOLD_SUCCESS_MARKER_KEY]
     )
     assert marker.output_snapshot_id == 43
+    assert outlet_event.extra[module.TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY] == list(
+        module.TRAFFIC_INCIDENT_PUBLICATION_PRODUCT_IDS
+    )
     task = module.dag.task_dict["mark_traffic_gold_success"]
     assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
     assert task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
     assert task.kwargs["weight_rule"] == "absolute"
+
+
+def test_gold_publication_scope_includes_flow_products_only_when_flow_is_pinned():
+    module = load_gold_transform_module()
+    ti = types.SimpleNamespace(
+        xcom_pull=lambda *, task_ids, key=None: (
+            "flow-1" if key == module.FLOW_SNAPSHOT_XCOM_KEY else "incident-1"
+        )
+    )
+
+    assert module._publication_product_ids(ti=ti) == (
+        module.TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS
+    )

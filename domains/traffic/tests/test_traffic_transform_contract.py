@@ -984,7 +984,7 @@ def test_flow_silver_resolver_pins_only_matching_publishable_pair(monkeypatch):
     assert pushed["traffic_flow_snapshot_dag_run_id"] == "flow-42"
 
 
-def test_flow_silver_resolver_fails_closed_for_mismatched_parent():
+def test_flow_silver_resolver_skips_until_an_exact_parent_pair_arrives():
     load_transform_module()
     from traffic_ingest import transform_dag_support
     from traffic_ingest.assets import (
@@ -992,7 +992,7 @@ def test_flow_silver_resolver_fails_closed_for_mismatched_parent():
         TRAFFIC_INCIDENT_SILVER_ASSET,
     )
 
-    with pytest.raises(FakeAirflowFailException, match="matching"):
+    with pytest.raises(FakeAirflowSkipException, match="exact matching"):
         transform_dag_support.resolve_traffic_flow_silver_snapshot_run(
             context={
                 "triggering_asset_events": {
@@ -1011,6 +1011,61 @@ def test_flow_silver_resolver_fails_closed_for_mismatched_parent():
         )
 
 
+def test_flow_silver_resolver_selects_an_exact_pair_from_coalesced_generations():
+    load_transform_module()
+    from traffic_ingest import transform_dag_support
+    from traffic_ingest.assets import (
+        TRAFFIC_FLOW_BRONZE_ASSET,
+        TRAFFIC_INCIDENT_SILVER_ASSET,
+    )
+
+    flow_calls = []
+    pushed = {}
+
+    class FlowManifest:
+        def require_publishable(self, run_id):
+            flow_calls.append(run_id)
+            return run_id
+
+    incident_run_id = transform_dag_support.resolve_traffic_flow_silver_snapshot_run(
+        context={
+            "ti": types.SimpleNamespace(
+                xcom_push=lambda *, key, value: pushed.update({key: value})
+            ),
+            "triggering_asset_events": {
+                TRAFFIC_INCIDENT_SILVER_ASSET: [
+                    _incident_silver_event(
+                        incident_run_id="incident-old",
+                        event_at="2026-07-16T00:05:00+00:00",
+                    ),
+                    _incident_silver_event(
+                        incident_run_id="incident-new",
+                        event_at="2026-07-16T00:10:00+00:00",
+                    ),
+                ],
+                TRAFFIC_FLOW_BRONZE_ASSET: [
+                    _flow_event(
+                        flow_run_id="flow-old",
+                        parent_incident_run_id="incident-old",
+                        event_at="2026-07-16T00:06:00+00:00",
+                    ),
+                    _flow_event(
+                        flow_run_id="flow-unmatched",
+                        parent_incident_run_id="incident-missing",
+                        event_at="2026-07-16T00:11:00+00:00",
+                    ),
+                ],
+            },
+        },
+        flow_manifest_factory=FlowManifest,
+        flow_xcom_key="traffic_flow_snapshot_dag_run_id",
+    )
+
+    assert incident_run_id == "incident-old"
+    assert flow_calls == ["flow-old"]
+    assert pushed["traffic_flow_snapshot_dag_run_id"] == "flow-old"
+
+
 def test_flow_silver_resolver_skips_stale_flow_event_for_newer_incident_parent():
     load_transform_module()
     from traffic_ingest import transform_dag_support
@@ -1019,7 +1074,7 @@ def test_flow_silver_resolver_skips_stale_flow_event_for_newer_incident_parent()
         TRAFFIC_INCIDENT_SILVER_ASSET,
     )
 
-    with pytest.raises(FakeAirflowSkipException, match="awaiting Flow Bronze"):
+    with pytest.raises(FakeAirflowSkipException, match="exact matching"):
         transform_dag_support.resolve_traffic_flow_silver_snapshot_run(
             context={
                 "triggering_asset_events": {

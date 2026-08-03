@@ -26,6 +26,15 @@ def test_traffic_serving_export_delegates_all_six_products_to_common_publisher(m
     monkeypatch.setitem(sys.modules, "common.serving.dag_factory", factory_module)
     asset_module = types.ModuleType("traffic_ingest.assets")
     asset_module.TRAFFIC_GOLD_PUBLICATION_READY_ASSET = "iceberg://traffic/gold/publication-ready"
+    asset_module.TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY = "product_ids"
+    asset_module.TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS = (
+        "traffic_incident_x_weather_current_hourly",
+        "traffic_flow_congestion_hotspots_hourly",
+        "traffic_flow_link_latest",
+        "traffic_flow_change_latest",
+        "traffic_flow_link_time_profile",
+        "traffic_flow_anomaly_current",
+    )
     asset_module.schedule_asset = lambda asset: ("asset", asset)
     monkeypatch.setitem(sys.modules, "traffic_ingest.assets", asset_module)
 
@@ -48,6 +57,7 @@ def test_traffic_serving_export_delegates_all_six_products_to_common_publisher(m
         "exact_domain_contracts": True,
         "require_public_projection": True,
         "verify_content_parity": True,
+        "publication_scope_metadata_key": "product_ids",
         "schedule": ("asset", "iceberg://traffic/gold/publication-ready"),
         "dag_id": "traffic_serving_export",
         "target": "dev",
