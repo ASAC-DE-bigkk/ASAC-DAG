@@ -18,7 +18,8 @@ DAGS_ROOT = Path(__file__).resolve().parents[2]
 #: 전환은 각 오너가 자기 도메인에서 한다 — 이 목록이 그 남은 일의 정본이다.
 GRANDFATHERED: dict[str, str] = {
     "common/ops/run_sink.py":
-        "ops/runs — citydata 단독 기록기. 축 순서 전환(P-7)·개발환경 편입(P-8) 대기 @kang-gyeongmin",
+        "ops/runs — citydata 단독 기록기. 도메인→날짜 축순서(P-7)·dev·prod 공통 ops/ 편입(P-8) "
+        "완료. 관문 배선 전까지 hand-assemble 유지 @kang-gyeongmin",
     "common/ops/product_observability.py":
         "ops/product-events·product-health — 관문의 event_id 규칙 계보. 경로 전환은 후속",
     "common/runmetrics.py":

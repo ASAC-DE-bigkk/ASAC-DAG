@@ -1,6 +1,6 @@
 """Airflow DAG: R2 ``runs/`` → D1 (데이터 품질 대시보드 집계, 팀 전체·매시·Trino무관).
 
-전 도메인 run 파일(``runs/observed_date=/domain=/dag_id=/…``)을 집계해 Cloudflare D1 로 쓴다.
+전 도메인 run 파일(``ops/runs/domain=/observed_date=/dag_id=/…``)을 집계해 Cloudflare D1 로 쓴다.
 관측이 Trino 와 분리됨: OOM 으로 Trino 가 죽어도 ``runs/`` 는 남아 집계가 정확(맹점 해소).
 
 생성 테이블:
@@ -72,7 +72,7 @@ def _layer_of(dag_id: str | None) -> str:
 
 
 def _parse_run_key(key: str):
-    """``runs/observed_date=D/domain=X/dag_id=Y/<run>__<task>__try<N>__<status>.json``
+    """``ops/runs/domain=X/observed_date=D/dag_id=Y/<run>__<task>__try<N>__<status>.json``
     → (date, domain, dag_id, try_number, status, run_key). 실패 시 None.
 
     run_key = ``<type>__<timestamp>`` (앞 2토큰) — DAG run 식별(완전성 distinct 카운트용).

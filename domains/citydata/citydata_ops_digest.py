@@ -5,7 +5,7 @@
 그 테이블에 더 이상 쓰지 않아 digest 가 매일 빈 리포트를 냈다(소비자 미이전 버그). 이제
 DAG 들이 실제로 기록하는 R2 ``runs/`` 를 직접 집계한다(Trino 무관, 데이터 품질 대시보드와 동일 소스).
 
-경로: ``runs/observed_date=YYYY-MM-DD(KST)/domain=citydata/dag_id=<dag>/<run>__<task>__try<N>__<status>.json``
+경로: ``ops/runs/domain=citydata/observed_date=YYYY-MM-DD(KST)/dag_id=<dag>/<run>__<task>__try<N>__<status>.json``
 집계는 **파일명·경로만 파싱(list-only)** — 성공률·레이어별·실패상위. body GET 없음(값싸다).
 ⚠ ``expected_raw_objects`` 는 run 레코드에 없어 '수집 완전성 121장소' 는 제외(run 레코드 보강 시 부활 가능).
 
@@ -76,7 +76,7 @@ def _list_keys(cli, prefix: str, target: str = "dev") -> list[str]:
 def summary_from_runs(domain: str, dt: str, target: str = "dev") -> dict:
     """R2 ``runs/`` 하루치 집계 — 성공률·레이어별·실패상위 (파일명/경로만 파싱)."""
     cli = _r2_client(target)
-    prefix = f"{runs_prefix(target)}/observed_date={dt}/domain={domain}/"
+    prefix = f"{runs_prefix(target)}/domain={domain}/observed_date={dt}/"
     keys = _list_keys(cli, prefix, target)
 
     total = failed = 0
