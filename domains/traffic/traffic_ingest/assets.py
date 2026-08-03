@@ -20,6 +20,21 @@ TRAFFIC_INCIDENT_SILVER_ASSET = "iceberg://traffic/incident/silver"
 TRAFFIC_FLOW_BRONZE_ASSET = "iceberg://traffic/flow/bronze"
 TRAFFIC_FLOW_SILVER_ASSET = "iceberg://traffic/flow/silver"
 TRAFFIC_GOLD_PUBLICATION_READY_ASSET = "iceberg://traffic/gold/publication-ready"
+TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY = "product_ids"
+TRAFFIC_INCIDENT_PUBLICATION_PRODUCT_IDS = (
+    "traffic_incident_x_weather_current_hourly",
+)
+TRAFFIC_FLOW_PUBLICATION_PRODUCT_IDS = (
+    "traffic_flow_congestion_hotspots_hourly",
+    "traffic_flow_link_latest",
+    "traffic_flow_change_latest",
+    "traffic_flow_link_time_profile",
+    "traffic_flow_anomaly_current",
+)
+TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS = (
+    *TRAFFIC_INCIDENT_PUBLICATION_PRODUCT_IDS,
+    *TRAFFIC_FLOW_PUBLICATION_PRODUCT_IDS,
+)
 
 TRAFFIC_INCIDENT_RAW_ASSET_REF = Asset(TRAFFIC_INCIDENT_RAW_ASSET)
 TRAFFIC_INCIDENT_BRONZE_ASSET_REF = Asset(TRAFFIC_INCIDENT_BRONZE_ASSET)

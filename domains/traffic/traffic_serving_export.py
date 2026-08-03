@@ -14,22 +14,21 @@ for path in (DIR, os.path.dirname(DIR), os.path.dirname(os.path.dirname(DIR))):
 
 from common.runtime_guard import default_target
 from common.serving.dag_factory import build_serving_export_dag
-from traffic_ingest.assets import TRAFFIC_GOLD_PUBLICATION_READY_ASSET, schedule_asset
+from traffic_ingest.assets import (
+    TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS,
+    TRAFFIC_GOLD_PUBLICATION_READY_ASSET,
+    TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY,
+    schedule_asset,
+)
 
 
 dag = build_serving_export_dag(
     domain="traffic",
-    product_ids=[
-        "traffic_incident_x_weather_current_hourly",
-        "traffic_flow_congestion_hotspots_hourly",
-        "traffic_flow_link_latest",
-        "traffic_flow_change_latest",
-        "traffic_flow_link_time_profile",
-        "traffic_flow_anomaly_current",
-    ],
+    product_ids=list(TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS),
     exact_domain_contracts=True,
     require_public_projection=True,
     verify_content_parity=True,
+    publication_scope_metadata_key=TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY,
     # Only the terminal marker runs after Gold write and contract test success.
     schedule=schedule_asset(TRAFFIC_GOLD_PUBLICATION_READY_ASSET),
     dag_id="traffic_serving_export",

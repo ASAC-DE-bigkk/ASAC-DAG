@@ -18,8 +18,8 @@ for unit tests.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Sequence
 
 from common.ops.product_observability import record_product_event
 from common.serving.publisher import ProductRecord, PublicationError
@@ -109,6 +109,59 @@ def _manifest_path(domain: str, dbt_project: str | None) -> str:
     return f"/opt/airflow/dbt/domains/{project}/target/manifest.json"
 
 
+def resolve_publication_product_ids(
+    context: Mapping[str, object],
+    configured_product_ids: Sequence[str],
+    *,
+    metadata_key: str | None,
+) -> tuple[str, ...]:
+    """Resolve a validated subset from the latest triggering terminal Asset."""
+
+    configured = tuple(configured_product_ids)
+    if metadata_key is None:
+        return configured
+
+    triggering = context.get("triggering_asset_events")
+    if not isinstance(triggering, Mapping) or not triggering:
+        raise RuntimeError("serving publication scope requires a triggering Asset event")
+
+    events: list[object] = []
+    for values in triggering.values():
+        if isinstance(values, Sequence) and not isinstance(
+            values, (str, bytes, bytearray)
+        ):
+            events.extend(values)
+        else:
+            events.append(values)
+    if not events:
+        raise RuntimeError("serving publication scope requires a triggering Asset event")
+
+    metadata = getattr(events[-1], "extra", None)
+    if not isinstance(metadata, Mapping):
+        raise RuntimeError("serving publication scope metadata is unavailable")
+    raw_scope = metadata.get(metadata_key)
+    if not isinstance(raw_scope, Sequence) or isinstance(
+        raw_scope, (str, bytes, bytearray)
+    ):
+        raise RuntimeError("serving publication scope must be a product ID list")
+
+    selected = tuple(raw_scope)
+    if not selected or any(
+        not isinstance(product_id, str) or not product_id.strip()
+        for product_id in selected
+    ):
+        raise RuntimeError("serving publication scope contains an invalid product ID")
+    if len(set(selected)) != len(selected):
+        raise RuntimeError("serving publication scope contains duplicate product IDs")
+    unexpected = sorted(set(selected) - set(configured))
+    if unexpected:
+        raise RuntimeError(
+            "serving publication scope contains unknown product IDs: "
+            + ",".join(unexpected)
+        )
+    return selected
+
+
 def _load_export_contracts(
     manifest_path: str,
     domain: str,
@@ -145,6 +198,7 @@ def build_serving_export_dag(
     exact_domain_contracts: bool = False,
     require_public_projection: bool = False,
     verify_content_parity: bool = False,
+    publication_scope_metadata_key: str | None = None,
 ):
     """Build a serving-export DAG for one domain. Returns an Airflow ``DAG``."""
     import os
@@ -174,6 +228,19 @@ def build_serving_export_dag(
         )
         if not contracts:
             raise RuntimeError(f"{domain}: product_ids {list(product_ids)} 에 해당하는 enabled 계약이 없다")
+        publication_product_ids = resolve_publication_product_ids(
+            context,
+            product_ids,
+            metadata_key=publication_scope_metadata_key,
+        )
+        selected_ids = set(publication_product_ids)
+        contracts = [
+            contract for contract in contracts if contract.product_id in selected_ids
+        ]
+        if not contracts:
+            raise RuntimeError(
+                f"{domain}: 게시 신호의 product_ids {list(publication_product_ids)} 에 해당하는 계약이 없다"
+            )
         source = build_trino_source_reader(context["params"].get("target", target), resolved_schema)
         d1 = build_d1_client_from_env()
         smoke = build_smoke_tester_from_env()

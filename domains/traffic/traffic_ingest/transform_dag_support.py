@@ -556,10 +556,12 @@ def resolve_traffic_flow_silver_snapshot_run(
         raise AirflowFailException(
             "Traffic Flow Silver requires an Incident Silver asset event"
         )
-    incident_run_id, _, incident_event_at = max(
-        (_silver_materialization_from_event(event) for event in silver_events),
-        key=lambda item: (item[2], item[0]),
-    )
+    incident_run_ids = {
+        incident_run_id
+        for incident_run_id, _, _ in (
+            _silver_materialization_from_event(event) for event in silver_events
+        )
+    }
     try:
         flow_events = flow_bronze_events(context)
     except TrafficAssetContractError as exc:
@@ -567,25 +569,15 @@ def resolve_traffic_flow_silver_snapshot_run(
     compatible_flow_events = [
         event
         for event in flow_events
-        if str(event["parent_incident_run_id"]) == incident_run_id
+        if str(event["parent_incident_run_id"]) in incident_run_ids
     ]
     if not compatible_flow_events:
-        latest_flow_event_at = datetime.fromisoformat(
-            str(flow_events[-1]["event_at"]).replace("Z", "+00:00")
+        raise AirflowSkipException(
+            "Traffic Flow Silver awaiting an exact matching Incident parent"
         )
-        # Asset runs can coalesce a Flow event that waited behind
-        # max_active_runs/pool pressure with a newer Incident Silver event.
-        # No pair is safe to write in that case; skip so the next matching
-        # Flow Bronze event converges naturally. A newer mismatched Flow is
-        # still a lineage violation and remains fail-closed below.
-        if latest_flow_event_at < incident_event_at:
-            raise AirflowSkipException(
-                "Traffic Flow Silver awaiting Flow Bronze for newer Incident parent"
-            )
-        raise AirflowFailException(
-            "Traffic Flow Silver requires a matching Incident parent"
-        )
-    flow_run_id = str(compatible_flow_events[-1]["flow_dag_run_id"])
+    selected_flow_event = compatible_flow_events[-1]
+    incident_run_id = str(selected_flow_event["parent_incident_run_id"])
+    flow_run_id = str(selected_flow_event["flow_dag_run_id"])
     # Bronze 미publish(빈 응답 실패 포함)는 이 DAG의 존재 이유(Flow Silver 생성)가
     # 아직 준비되지 않았다는 정상 신호다 — skip(다음 5분 asset 트리거가 재수렴)으로
     # 처리해 실패 아닌 것으로 남기고, manifest 조회 자체가 깨진 경우만 fail 로 알린다.

@@ -1,3 +1,7 @@
+import types
+
+import pytest
+
 from common.serving import dag_factory
 from common.serving.dag_factory import publication_record_payload
 from common.serving.publisher import ProductRecord
@@ -57,6 +61,47 @@ def test_serving_export_factory_keeps_content_parity_opt_in_default_false():
     assert inspect.signature(dag_factory.build_serving_export_dag).parameters[
         "verify_content_parity"
     ].default is False
+
+
+def test_publication_scope_uses_the_latest_terminal_asset_subset():
+    configured = ("incident", "flow-latest", "flow-profile")
+    context = {
+        "triggering_asset_events": {
+            "terminal": [
+                types.SimpleNamespace(extra={"product_ids": ["incident"]}),
+                types.SimpleNamespace(
+                    extra={"product_ids": ["flow-latest", "flow-profile"]}
+                ),
+            ]
+        }
+    }
+
+    assert dag_factory.resolve_publication_product_ids(
+        context,
+        configured,
+        metadata_key="product_ids",
+    ) == ("flow-latest", "flow-profile")
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {},
+        {"triggering_asset_events": {"terminal": []}},
+        {
+            "triggering_asset_events": {
+                "terminal": [types.SimpleNamespace(extra={"product_ids": ["unknown"]})]
+            }
+        },
+    ],
+)
+def test_publication_scope_fails_closed_without_a_valid_subset(context):
+    with pytest.raises(RuntimeError):
+        dag_factory.resolve_publication_product_ids(
+            context,
+            ("incident", "flow"),
+            metadata_key="product_ids",
+        )
 
 
 def test_non_target_serving_wrappers_do_not_opt_into_content_parity(monkeypatch):

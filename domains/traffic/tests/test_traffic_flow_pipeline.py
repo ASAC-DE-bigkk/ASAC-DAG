@@ -6,16 +6,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-def _pipeline(events, *, latest_incident="incident-1"):
+def _pipeline(events):
     from traffic_ingest.flow_pipeline import TrafficFlowPipeline
 
     class IncidentManifest:
         def require_publishable(self, run_id):
             events.append(("require_incident", run_id))
             return run_id
-
-        def latest_publishable_run_id(self):
-            return latest_incident
 
     class FlowManifest:
         def start(self, run, **metrics):
@@ -109,9 +106,9 @@ def test_flow_pipeline_uses_explicit_load_date_for_backfill_partition():
     assert ("land", ("1220003800",), "manual__flow-backfill", "2026-07-10") in events
 
 
-def test_flow_pipeline_keeps_success_bronze_but_suppresses_stale_parent_asset():
+def test_flow_pipeline_revalidates_and_publishes_the_exact_pinned_parent():
     events = []
-    pipeline = _pipeline(events, latest_incident="incident-2")
+    pipeline = _pipeline(events)
     raw_result = pipeline.land(
         parent_incident_run_id="incident-1",
         flow_run_id="asset__flow-1",
@@ -124,6 +121,7 @@ def test_flow_pipeline_keeps_success_bronze_but_suppresses_stale_parent_asset():
     )
 
     assert outcome.row_count == 1
-    assert outcome.asset_metadata is None
+    assert outcome.asset_metadata["parent_incident_run_id"] == "incident-1"
+    assert events.count(("require_incident", "incident-1")) == 2
     assert any(event[0:2] == ("flow_publish", "asset__flow-1") for event in events)
     assert not any(event[0] == "flow_fail" for event in events)

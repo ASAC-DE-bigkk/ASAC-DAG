@@ -133,6 +133,12 @@ class TrafficFlowPipeline:
             verified_rows = self._verify(load_result, flow_run_id)
             page_count = int(load_result.get("page_count", raw_object_count))
             is_publishable = bool(load_result.get("is_publishable", True))
+            if is_publishable:
+                verified_parent = self._incident_manifest.require_publishable(
+                    parent_incident_run_id
+                )
+                if str(verified_parent) != parent_incident_run_id:
+                    raise ValueError("Traffic Flow Incident parent identity mismatch")
             self._flow_manifest.publish(
                 run,
                 expected_rows=int(
@@ -143,11 +149,8 @@ class TrafficFlowPipeline:
                 actual_raw_objects=len(load_result.get("raw_object_keys") or []),
                 is_publishable=is_publishable,
             )
-            latest_incident_run_id = (
-                self._incident_manifest.latest_publishable_run_id()
-            )
             metadata = None
-            if is_publishable and latest_incident_run_id == parent_incident_run_id:
+            if is_publishable:
                 metadata = flow_asset_metadata(
                     raw_result=raw_result,
                     flow_run_id=flow_run_id,

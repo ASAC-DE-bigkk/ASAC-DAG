@@ -41,7 +41,10 @@ from traffic_ingest import transform_runtime  # noqa: E402
 from traffic_ingest.transform_runtime import PREFLIGHT_SNAPSHOT_DAG_RUN_ID  # noqa: E402, F401
 from traffic_ingest.assets import (  # noqa: E402
     TRAFFIC_FLOW_SILVER_ASSET,
+    TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS,
     TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF,
+    TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY,
+    TRAFFIC_INCIDENT_PUBLICATION_PRODUCT_IDS,
     TRAFFIC_INCIDENT_SILVER_ASSET,
     schedule_asset,
 )
@@ -160,6 +163,16 @@ def _gold_identity(*, ti) -> TransformIdentity:
     )
 
 
+def _publication_product_ids(*, ti) -> tuple[str, ...]:
+    flow_run_id = ti.xcom_pull(
+        task_ids=SNAPSHOT_TASK_ID,
+        key=FLOW_SNAPSHOT_XCOM_KEY,
+    )
+    if isinstance(flow_run_id, str) and flow_run_id.strip():
+        return TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS
+    return TRAFFIC_INCIDENT_PUBLICATION_PRODUCT_IDS
+
+
 def admit_traffic_gold_snapshot(**context) -> dict[str, object]:
     ti = context["ti"]
     return admit_transform(
@@ -184,6 +197,9 @@ def mark_traffic_gold_success(**context) -> dict[str, object]:
         outlet_events[TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF].extra = {
             "gold_dag_run_id": str(context.get("run_id") or ""),
             "gold_success_marker": serialized,
+            TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY: list(
+                _publication_product_ids(ti=ti)
+            ),
         }
     return {"marker": serialized}
 
