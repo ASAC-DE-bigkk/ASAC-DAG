@@ -28,8 +28,6 @@ EXPECTATIONS = (
     # 상류 이벤트형은 고정 주기 대신 트리거·상류·최대 허용 지연으로 등록한다(S-3).
     Expectation("commerce_serving_export", "asset",
                 upstream="commerce_load_gold (gold 완료 Asset)", max_delay_minutes=3 * 60),
-    # 수동 실행 전용은 감시에서 뺀다(S-4) — 안 도는 것이 정상이라 알림이 소음이 된다.
-    Expectation("commerce_load_gold_refresh", "manual", monitored=False),
 )
 
 register(DOMAIN, owner=OWNER, confirmed_on=OWNER_CONFIRMED_ON, items=EXPECTATIONS)

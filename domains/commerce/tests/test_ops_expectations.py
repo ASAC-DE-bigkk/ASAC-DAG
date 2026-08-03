@@ -48,11 +48,20 @@ def test_no_expectation_points_at_a_dag_that_no_longer_exists():
     assert not stale, f"사라진 DAG 의 기대치가 남아 있습니다: {stale}"
 
 
-def test_manual_only_dag_is_excluded_from_monitoring():
-    """수동 실행 전용은 감시 대상에서 뺀다(S-4) — 안 도는 것이 정상이라 알림이 소음이 된다."""
-    row = _registered()["commerce_load_gold_refresh"]
-    assert row["monitored"] == 0 and row["trigger_type"] == "manual"
-    assert _declared_schedules()["commerce_load_gold_refresh"] == "None"
+def test_no_manual_only_dag_remains():
+    """수동 전용 DAG 는 두지 않는다 — 파괴적 재구축은 운영자 명령(스크립트)으로 뺐다.
+
+    `commerce_load_gold_refresh` 는 detail 테이블을 DELETE 후 재적재하는데, 운영에서 **한 번도
+    실행된 적이 없어**(0회) 그 경로가 검증된 적이 없었다. 화면 버튼으로 누를 성질이 아니라
+    `scripts/rebuild_gold_full.py`(dry-run 기본)로 옮겼다(change-log §95).
+
+    감시에서 빼야 할 수동 DAG 가 다시 생기면 S-4 판단을 다시 해야 하므로 여기서 잡는다.
+    """
+    manual = {dag_id for dag_id, row in _registered().items()
+              if row["trigger_type"] == "manual"}
+    assert not manual, (
+        "수동 실행 전용 DAG 가 생겼습니다. 안 도는 것이 정상인 DAG 는 감시 대상에서 빼야 하고"
+        f"(S-4), 파괴적 작업이면 스크립트가 맞는지 먼저 판단하세요: {sorted(manual)}")
 
 
 def test_asset_triggered_dag_declares_upstream_and_max_delay():
