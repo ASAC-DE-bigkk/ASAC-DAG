@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -341,7 +342,8 @@ def test_no_module_statement_ever_drops_or_truncates():
         *d1_ops.pipeline_state_upsert_statements([{"dag_id": "d"}]),
         *d1_ops.pipeline_expectation_upsert_statements([{"dag_id": "d"}]),
         d1_ops.daily_metric_rebuild_statement(["2026-08-01"], updated_at="now"),
-        d1_ops.known_event_ids_statement(["a"]),
+        *d1_ops.known_event_ids_statements(["a"]),
+        d1_ops.dates_needing_metric_rebuild_statement(),
         d1_ops.event_count_by_source_date_statement(["2026-08-01"]),
     ]
     joined = " ".join(s for s in statements if s).upper()
@@ -434,3 +436,72 @@ def test_backfill_does_nothing_without_bundles():
     d1 = _D1()
     ingest(list_keys=lambda _p: [], read_json=lambda _k: {}, d1_execute=d1, environment="prod")
     assert not [s for s in d1.statements if s.startswith("SELECT event_id, dag_id, run_id")]
+
+
+# ── 긴 목록·인라인 기록 (#677) ────────────────────────────────────────────
+
+def test_known_event_ids_are_asked_in_chunks():
+    """D1 은 긴 문장을 SQLITE_TOOBIG 으로 거부한다 — 한 문장으로 묻지 않는다.
+
+    운영에서 이 한 줄 때문에 3시간마다 도는 적재가 **매번 통째로 실패**했다(#677).
+    """
+    ids = [f"{i:064x}" for i in range(1_200)]
+    statements = d1_ops.known_event_ids_statements(ids)
+    assert len(statements) == 3                       # 500 + 500 + 200
+    assert all(len(s) < 60_000 for s in statements)   # 한 문장이 과도하게 길지 않다
+    asked = set()
+    for s in statements:
+        asked |= set(re.findall(r"'([0-9a-f]{64})'", s))
+    assert asked == set(ids)                          # 나눠도 하나도 빠지지 않는다
+
+
+def test_inline_written_rows_still_get_aggregated():
+    """C-2 인라인 경로로 들어온 기록도 집계된다 — 배치가 새로 넣은 것이 없어도.
+
+    인라인 기록은 배치 입장에서 늘 "이미 있는 것"이라, 재계산 대상을 '이번에 넣은 날짜'로만
+    잡으면 그 날짜의 집계가 영영 안 만들어진다(운영 실측: _ops_daily_metric 0행).
+    """
+    class _D1WithStale(_D1):
+        def __call__(self, sql: str):
+            self.statements.append(sql)
+            if sql.startswith("SELECT e.observed_date_kst AS d"):
+                return [{"d": "2026-08-03"}]      # 인라인으로 들어와 집계가 뒤처진 날짜
+            return []
+
+    d1 = _D1WithStale()
+    receipt = ingest(list_keys=lambda _p: [], read_json=lambda _k: {},
+                     d1_execute=d1, environment="prod")
+    assert receipt.loaded == 0                        # 새로 넣은 것은 없는데
+    assert receipt.dates_rebuilt == ["2026-08-03"]    # 그 날짜를 다시 계산한다
+    rebuilds = [s for s in d1.statements if s.startswith('INSERT INTO "_ops_daily_metric"')]
+    assert rebuilds and "'2026-08-03'" in rebuilds[0]
+
+
+def test_every_generated_statement_stays_under_the_d1_limit():
+    """**개수가 아니라 길이**로 나눈다 — 행마다 값 길이가 달라 행수로는 못 막는다.
+
+    운영에서 200행 배치가 D1 한계를 넘어 적재가 매 실행 통째로 실패했다(#677). 첫 수정은
+    조회 문장만 나눠 실패 지점이 한 줄 뒤로 밀렸을 뿐이었다 — 삽입/갱신도 같이 나눠야 한다.
+    """
+    limit = d1_ops.MAX_STATEMENT_CHARS
+    long_key = "ops/runs/citydata/observed_date=2026-08-03/dag_id=citydata_bronze/" + "k" * 80
+    rows = [{c: (long_key if c in ("source_key", "log_bundle_key") else f"v{i}")
+             for c in d1_ops.RUN_EVENT_COLUMNS} for i in range(3_000)]
+
+    produced = [
+        *d1_ops.run_event_upsert_statements(rows),
+        *d1_ops.known_event_ids_statements([f"{i:064x}" for i in range(3_000)]),
+        *d1_ops.set_log_bundle_statements([(f"{i:064x}", long_key) for i in range(3_000)]),
+    ]
+    assert produced
+    oversize = [len(s) for s in produced if len(s) > limit]
+    assert not oversize, f"D1 한계({limit})를 넘는 문장이 있습니다: {oversize[:3]}"
+
+
+def test_batching_does_not_drop_rows():
+    """나눠도 하나도 빠지지 않는다 — 조용한 유실이 가장 나쁘다."""
+    rows = [{**{c: "v" for c in d1_ops.RUN_EVENT_COLUMNS}, "event_id": f"{i:064x}"}
+            for i in range(1_500)]
+    joined = " ".join(d1_ops.run_event_upsert_statements(rows))
+    assert all(f"{i:064x}" in joined for i in range(0, 1_500, 97))
+    assert joined.count("INSERT INTO") > 1        # 실제로 나뉘었다
