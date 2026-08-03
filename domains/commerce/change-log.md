@@ -9,6 +9,53 @@
 
 ---
 
+## 2026-08-03
+
+### 93. commerce_flow_monthly D1 게시 증거 통합 — 정합 실측 + 공유 원장 기록 편입 (#668)
+
+request:
+- ASAC-DAG#668(seoul-datahub V1 6개 제품의 D1 게시 증거 통합)에서 commerce 몫 확인:
+  "Gold와 D1의 rollup grain 차이를 보존한 reconciliation 기준으로 게시 정합성을 검증.
+  `sum(cnt)` 등 정의된 Gold→D1 reconciliation, schema/projection identity, 동일 publication
+  증거가 남습니다." 작업 타당성 검토 포함.
+
+response:
+- **정합 실측(2026-08-03, prod)** — 전 항목 일치:
+  - grain 보존 reconciliation: Gold 1,341,668행(원 grain) → rollup grain distinct **181,835**
+    = D1 행수 **181,835**. `sum(cnt)` **4,629,343 = 4,629,343**(opened 2,898,621 · closed
+    1,730,722 양측 동일).
+  - schema/projection identity: D1 컬럼 = rollup SELECT 투영(ym·event_type·major·category·
+    gu_code·cnt) 정확 일치.
+  - publication identity: `_catalog`(product_id=commerce_flow_monthly, pub=9f4b7e78…) =
+    `d1_catalog_columns`(6행) = `d1_catalog_ext`(1행) = `d1_usage_patterns`(16행) =
+    `d1_publish_state` — **전부 동일 publication_id, distinct 1**.
+  - 원천 최신성: gold `max(src_collected_at)` = silver 최신 수집시각(#603 워터마크 정합 유지).
+- **갭 2건 발견, 1건 코드 보강**:
+  1. `_publication_ledger` 에 commerce 행 0건(타 도메인은 수백 건) — 자체 export 가 공용 원장을
+     안 썼다. `_append_ledger()` 신설: published(=_catalog 와 동일 publication_id)·
+     skipped_retained(밴드 게이트, LKG 사유 동봉) 시도를 공용 정본 컬럼·어휘 그대로 남긴다.
+     fail-open(원장은 증거이지 게이트가 아니다). 회귀 3건(test_serving_ledger.py).
+  2. live `d1_catalog_glossary` 가 아직 구 스키마(field/code/…) — #638 행 보존 이행 코드는
+     export 에 있으나 병합 후 서빙 run 이 없어 미실행. 다음 run 에서 1회 자동 이행된다.
+- 검증: 645 통과(신규 3 포함) · `python -m security` PASS · export_to_d1 를 가짜 seam 으로
+  끝까지 돌려 published/skipped_retained 양 경로의 원장 SQL 실물 확인.
+
+decision:
+- **무변경 스킵 run 은 원장에 기록하지 않는다.** 원장 PK 가 publication_id(=시도 식별자)인데
+  무변경 스킵은 serving publication_id 를 재사용하므로(#601) 매 run 넣으면 PK 충돌한다.
+  가짜 신규 id 를 발급하면 원장과 `_catalog` 의 id 가 갈라져 "동일 publication 증거"라는
+  목적 자체가 깨진다. 무변경 증거는 `d1_publish_state.checked_at`·`_catalog.exported_at`
+  전진이 맡는다(회귀로 고정).
+- **제품별 실패(failed) 원장 기록은 이번에 넣지 않았다.** 현재 export 는 per-spec try/except
+  가 없어 실패 시 run 전체가 던져진다(기존 구조, docstring 에 후속 명시). 실패 행을 남기려면
+  그 리팩터가 선행이라 범위 밖으로 뒀다. → 다시 볼 조건: per-spec 격리 도입 시 함께.
+- **glossary 이행을 수동으로 실행하지 않았다.** 다음 서빙 run 이 자동으로 1회 이행하며,
+  서빙 경로 밖에서 공유 D1 스키마를 손대는 것은 이행 코드의 전제(런타임 PRAGMA 판정)를
+  우회한다. 이행 코드 자체는 #638 회귀 테스트가 이미 덮는다.
+- **이슈의 공통 완료 조건 중 "glossary 도 같은 publication_id" 는 문면대로 충족 불가** —
+  glossary 는 설계상(#638 §2.4) 제품 스코프가 아니라 publication_id 컬럼이 없고 exported_at
+  (같은 run 발행)으로 묶인다. 조건 재해석을 #668 에 코멘트로 제기.
+
 ## 2026-08-02
 
 ### 92. 운영 기록 백필 경로 신설 — 과거분은 넣지 않고 이관용 통로만 (#655)
