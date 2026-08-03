@@ -378,3 +378,59 @@ def test_sql_values_stay_inside_one_quoted_literal():
     assert "('a''; DROP TABLE x; --', NULL" in statements[0]
     # 이스케이프된 리터럴 밖에는 세미콜론이 문장 끝 하나뿐이다(문장 분리 불가).
     assert statements[0].count(";") == statements[0].count("; DROP TABLE x; --") * 2 + 1
+
+
+# ── 로그 번들 포인터는 뒤늦게 채워진다 (실행 기록이 먼저, 번들이 나중) ───────────────
+
+def test_log_bundle_pointer_is_backfilled_after_the_bundle_appears():
+    """기록이 먼저 적재되고 번들이 나중에 생기는 **실제 순서**를 재현한다.
+
+    실행 기록은 태스크 종료 즉시 쓰이고, 텍스트 로그는 그 run 이 종결된 뒤 하루 1회 묶여
+    올라간다. 적재 시점에만 포인터를 붙이면 이미 넣은 행은 다시 안 보므로 영영 비어 있게 된다.
+    """
+    run_id = "manual__2026-08-01T04:19:26.775811+00:00"
+    record_key = "ops/runs/commerce/observed_date=2026-08-01/dag_id=d/event_id=x.json"
+    payload = {"domain": "commerce", "layer": "raw", "dag_id": "commerce_load_bronze",
+               "task_id": "t", "run_id": run_id, "try_number": 1, "status": "success",
+               "started_at": "2026-08-01T00:00:00+00:00",
+               "ended_at": "2026-08-01T00:01:00+00:00"}
+
+    # 1일차: 기록만 있고 번들은 아직 없다 → 포인터가 비어야 한다.
+    storage = _Storage({record_key: payload})
+    first = _D1()
+    r1 = ingest(list_keys=storage.list_keys, read_json=storage.read_json, d1_execute=first,
+                environment="prod", since="2026-08-01", until="2026-08-01")
+    assert r1.loaded == 1 and r1.attached_log_bundles == 0
+
+    # 2일차: 번들이 올라왔다. 기록은 이미 D1 에 있어 다시 읽히지 않는다.
+    bundle = ("ops/logs/commerce/observed_date=2026-08-01/commerce_load_bronze/"
+              "manual__2026-08-01T04-19-26.775811-00-00.tar.gz")
+    storage.objects[bundle] = {}
+    from common.ops.ingest import normalize as _normalize
+    event_id = _normalize(parse_ops_key(record_key), payload, environment="prod")["event_id"]
+
+    class _D1WithRow(_D1):
+        def __call__(self, sql: str):
+            self.statements.append(sql)
+            if sql.startswith("SELECT DISTINCT source_key"):
+                return [{"source_key": record_key}]          # 이미 적재됨 → 읽지 않는다
+            if sql.startswith("SELECT event_id, dag_id, run_id"):
+                return [{"event_id": event_id, "dag_id": "commerce_load_bronze",
+                         "run_id": run_id}]                  # 포인터가 빈 행
+            return []
+
+    second = _D1WithRow()
+    r2 = ingest(list_keys=storage.list_keys, read_json=storage.read_json, d1_execute=second,
+                environment="prod", since="2026-08-01", until="2026-08-01")
+    assert r2.loaded == 0                       # 새로 넣은 것은 없고
+    assert r2.backfilled_log_bundles == 1       # 포인터만 뒤늦게 채워졌다
+    updates = [s for s in second.statements if s.startswith('UPDATE "_ops_run_event"')]
+    assert updates and bundle in updates[0]
+    assert "log_bundle_key IS NULL" in updates[0]   # 이미 채워진 행은 덮지 않는다
+
+
+def test_backfill_does_nothing_without_bundles():
+    """번들이 없으면 질의조차 하지 않는다 — 매 실행 공짜로 돌 수 있어야 한다."""
+    d1 = _D1()
+    ingest(list_keys=lambda _p: [], read_json=lambda _k: {}, d1_execute=d1, environment="prod")
+    assert not [s for s in d1.statements if s.startswith("SELECT event_id, dag_id, run_id")]

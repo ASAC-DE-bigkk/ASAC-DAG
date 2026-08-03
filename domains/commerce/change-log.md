@@ -9,7 +9,85 @@
 
 ---
 
+## 2026-08-03
+
+### 93. commerce_flow_monthly D1 게시 증거 통합 — 정합 실측 + 공유 원장 기록 편입 (#668)
+
+request:
+- ASAC-DAG#668(seoul-datahub V1 6개 제품의 D1 게시 증거 통합)에서 commerce 몫 확인:
+  "Gold와 D1의 rollup grain 차이를 보존한 reconciliation 기준으로 게시 정합성을 검증.
+  `sum(cnt)` 등 정의된 Gold→D1 reconciliation, schema/projection identity, 동일 publication
+  증거가 남습니다." 작업 타당성 검토 포함.
+
+response:
+- **정합 실측(2026-08-03, prod)** — 전 항목 일치:
+  - grain 보존 reconciliation: Gold 1,341,668행(원 grain) → rollup grain distinct **181,835**
+    = D1 행수 **181,835**. `sum(cnt)` **4,629,343 = 4,629,343**(opened 2,898,621 · closed
+    1,730,722 양측 동일).
+  - schema/projection identity: D1 컬럼 = rollup SELECT 투영(ym·event_type·major·category·
+    gu_code·cnt) 정확 일치.
+  - publication identity: `_catalog`(product_id=commerce_flow_monthly, pub=9f4b7e78…) =
+    `d1_catalog_columns`(6행) = `d1_catalog_ext`(1행) = `d1_usage_patterns`(16행) =
+    `d1_publish_state` — **전부 동일 publication_id, distinct 1**.
+  - 원천 최신성: gold `max(src_collected_at)` = silver 최신 수집시각(#603 워터마크 정합 유지).
+- **갭 2건 발견, 1건 코드 보강**:
+  1. `_publication_ledger` 에 commerce 행 0건(타 도메인은 수백 건) — 자체 export 가 공용 원장을
+     안 썼다. `_append_ledger()` 신설: published(=_catalog 와 동일 publication_id)·
+     skipped_retained(밴드 게이트, LKG 사유 동봉) 시도를 공용 정본 컬럼·어휘 그대로 남긴다.
+     fail-open(원장은 증거이지 게이트가 아니다). 회귀 3건(test_serving_ledger.py).
+  2. live `d1_catalog_glossary` 가 아직 구 스키마(field/code/…) — #638 행 보존 이행 코드는
+     export 에 있으나 병합 후 서빙 run 이 없어 미실행. 다음 run 에서 1회 자동 이행된다.
+- 검증: 645 통과(신규 3 포함) · `python -m security` PASS · export_to_d1 를 가짜 seam 으로
+  끝까지 돌려 published/skipped_retained 양 경로의 원장 SQL 실물 확인.
+
+decision:
+- **무변경 스킵 run 은 원장에 기록하지 않는다.** 원장 PK 가 publication_id(=시도 식별자)인데
+  무변경 스킵은 serving publication_id 를 재사용하므로(#601) 매 run 넣으면 PK 충돌한다.
+  가짜 신규 id 를 발급하면 원장과 `_catalog` 의 id 가 갈라져 "동일 publication 증거"라는
+  목적 자체가 깨진다. 무변경 증거는 `d1_publish_state.checked_at`·`_catalog.exported_at`
+  전진이 맡는다(회귀로 고정).
+- **제품별 실패(failed) 원장 기록은 이번에 넣지 않았다.** 현재 export 는 per-spec try/except
+  가 없어 실패 시 run 전체가 던져진다(기존 구조, docstring 에 후속 명시). 실패 행을 남기려면
+  그 리팩터가 선행이라 범위 밖으로 뒀다. → 다시 볼 조건: per-spec 격리 도입 시 함께.
+- **glossary 이행을 수동으로 실행하지 않았다.** 다음 서빙 run 이 자동으로 1회 이행하며,
+  서빙 경로 밖에서 공유 D1 스키마를 손대는 것은 이행 코드의 전제(런타임 PRAGMA 판정)를
+  우회한다. 이행 코드 자체는 #638 회귀 테스트가 이미 덮는다.
+- **이슈의 공통 완료 조건 중 "glossary 도 같은 publication_id" 는 문면대로 충족 불가** —
+  glossary 는 설계상(#638 §2.4) 제품 스코프가 아니라 publication_id 컬럼이 없고 exported_at
+  (같은 run 발행)으로 묶인다. 조건 재해석을 #668 에 코멘트로 제기.
+
 ## 2026-08-02
+
+### 92. 운영 기록 백필 경로 신설 — 과거분은 넣지 않고 이관용 통로만 (#655)
+
+request:
+- "과거 9일치는 직접 포기하되, 추후 시스템 데이터 이관 시 **로그 파일을 통해서 적재 가능하도록만**
+  세팅 진행."
+
+response:
+- `scripts/backfill_ops_records.py` 신설 — 저장된 `ops/` 기록 파일을 **하루씩 끊어** 조회 DB 에
+  넣는다. dry-run 기본(`--apply` 로 실행), `--domain`·`--category` 한정 가능, 하루가 실패해도 나머지
+  날짜를 계속한다. 중복은 기존 2단 관문이 그대로 처리하므로 재실행이 안전하다.
+- 날짜 단위로 확정하는 이유: 적재기가 **주어진 창을 전부 읽은 뒤에 한 번에 쓰기** 때문에 창이
+  크면 진행이 안 보이고 중단 시 통째로 버려진다(실측 3일 창 22,589건 → 30분 넘게 0행).
+- 운영 확인: prod dry-run 실동작 — 대상 8건을 훑어 **이미 넣은 2건을 정확히 기존으로 판정**.
+- `docs/operations/ops-records.md` 에 백필 절차와 "정기 실행 창을 키우는 방식은 쓰지 않는다"를
+  명시하고, 과거분 미적재 결정을 근거와 함께 적었다.
+
+decision:
+- **과거 9일치(36,536건) 백필을 하지 않기로.** 관문 이전에 쓰인 기록에는 단계(`layer`) 정보가
+  없어 **날짜×도메인×단계 집계에 들어가지 않고 상세 조회만 된다.** 조회 DB 의 주 용도가 화면·알림의
+  집계축인데 그 축이 안 채워지므로 값이 낮다고 판단했다. 조회 DB 는 2026-08-02 이후분부터 쌓인다.
+  → 다시 볼 조건: 과거 구간의 **상세 조회** 수요가 실제로 생기거나, 각 도메인이 관문으로 옮겨
+  단계 정보가 붙은 뒤 그 구간을 다시 넣고 싶을 때.
+- **적재기 코어의 날짜 분할 커밋 구현은 하지 않기로.** #655 에서 권장안으로 올렸으나, 백필을
+  안 하기로 하면서 **정기 실행(최근 3일)에서는 현재 구조로 무해**해졌다. 호출측 루프(이 스크립트)로
+  같은 효과를 얻으면서 코어는 건드리지 않는 쪽을 택했다.
+  → 다시 볼 조건: 도메인이 늘거나 일별 물량이 커져 **정기 실행 3일 창에서도** 같은 증상이 나면
+  그때는 코어에 넣어야 한다(현재 일별 8,000~10,000건 기준으로는 여유가 있다).
+- **스크립트를 DAG 태스크로 만들지 않았다.** 백필은 상시가 아니라 이관·복구 같은 사건에만 쓰는
+  일회성 작업이라, 스케줄에 올리면 "안 도는 게 정상"인 DAG 가 하나 더 늘어난다 — 감시 대상에서
+  빼야 하는 항목이 늘어난다(ASK-Seoul#78 `S-4`).
 
 ### 91. change-log 서식에 `decision:` 칸 신설 — "안 하기로 한 것과 이유"를 남긴다
 

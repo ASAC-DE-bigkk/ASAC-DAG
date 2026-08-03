@@ -69,52 +69,40 @@ def _publish_delay_issues(cur, schema_prefix: str) -> list[str]:
 
 
 def _stall_issues(target: str = "dev") -> list[str]:
-    """(b) 정체 — R2 runs/ 의 bronze 마지막 성공 기록이 임계보다 오래됐으면 경보. fail-open.
+    """(b) 정체 — 조회 DB(``_ops_run_event``)의 bronze ``load_bronze`` 마지막 성공이
+    임계보다 오래됐으면 경보. fail-open. (ASK-Seoul#78 G-5 — R2 파일뒤지기에서 전환)
 
-    prod 컷오버(#556): target=prod → seoul 버킷 + ``ops/runs`` prefix, dev → 기존(seoul-dev/``runs``)."""
+    C-2 인라인 쓰기(``citydata_bronze._run_ok_d1``)가 성공 순간 D1 에 신선한 행을 남겨
+    45분 SLA 를 조회로 판정한다. dev/prod 는 한 DB 를 공유하니 ``environment`` 로 가른다.
+    ``load_bronze`` 만 — report(all_done)는 수집 실패에도 성공해 거짓정상을 만든다."""
+    if target not in ("dev", "prod"):  # params 유래 — SQL 삽입 전 화이트리스트
+        target = "dev"
+    # D1 조회 자체 실패는 fail-open 하지 않는다(하드닝) — [] 를 주면 D1 가 죽어도 "정상"으로
+    # 위장돼 진짜 정체를 놓치고, 인라인 쓰기가 조용히 실패해 stale 해도 안 드러난다. "못 봤음"
+    # 을 별도 경보로 띄운다. 결과 파싱/계산 오류는 fail-open(단발 이상치로 스팸 방지).
     try:
-        import boto3
-        from common.ops.run_sink import runs_prefix
-        from common.storage import r2_env_for
+        from common.serving.runtime import build_d1_client_from_env
 
-        cli = boto3.client(
-            "s3",
-            endpoint_url=r2_env_for("R2_ENDPOINT", target),
-            aws_access_key_id=r2_env_for("R2_ACCESS_KEY_ID", target),
-            aws_secret_access_key=r2_env_for("R2_SECRET_ACCESS_KEY", target),
-            region_name="auto",
+        client = build_d1_client_from_env()
+        rows = client.execute(
+            "SELECT max(observed_at) AS last FROM \"_ops_run_event\" "
+            "WHERE domain='citydata' AND dag_id='citydata_bronze' "
+            "AND task_id='load_bronze' AND status='success' "
+            f"AND environment='{target}'"
         )
-        bucket = r2_env_for("R2_BUCKET_NAME", target)
-        _prefix = runs_prefix(target)
-        now_kst = pendulum.now(KST)
-        latest = None
-        for d in (now_kst.format("YYYY-MM-DD"), now_kst.subtract(days=1).format("YYYY-MM-DD")):
-            prefix = f"{_prefix}/observed_date={d}/domain=citydata/dag_id=citydata_bronze/"
-            token = None
-            while True:
-                kw = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
-                if token:
-                    kw["ContinuationToken"] = token
-                resp = cli.list_objects_v2(**kw)
-                for o in resp.get("Contents", []):
-                    if o["Key"].endswith("__success.json"):
-                        lm = o["LastModified"]
-                        if latest is None or lm > latest:
-                            latest = lm
-                if resp.get("IsTruncated"):
-                    token = resp.get("NextContinuationToken")
-                else:
-                    break
-            if latest is not None:
-                break
-        if latest is None:
-            return ["bronze 성공 기록 없음(runs/) — 수집 정체 의심"]
-        mins = (pendulum.now("UTC") - pendulum.instance(latest)).in_minutes()
+    except Exception as exc:  # noqa: BLE001 -- 조회 실패는 "정상"과 구분해 드러낸다
+        print(f"[serving monitor] 정체 체크 D1 조회 실패: {type(exc).__name__}: {exc}")
+        return ["D1 조회 실패 — 정체 알림 신뢰 불가 (서빙 DB/모니터 점검 필요)"]
+    try:
+        last = rows[0].get("last") if rows else None
+        if not last:
+            return ["bronze 성공 기록 없음(_ops_run_event) — 수집 정체 의심"]
+        mins = (pendulum.now("UTC") - pendulum.parse(last)).in_minutes()
         if mins > STALL_NO_RUN_MIN:
             return [f"bronze 마지막 성공 {mins}분 전 (임계 {STALL_NO_RUN_MIN}) — 수집 정체(좀비) 의심"]
         return []
-    except Exception as exc:  # noqa: BLE001 -- fail-open
-        print(f"[serving monitor] 정체 체크 실패(무시): {exc}")
+    except Exception as exc:  # noqa: BLE001 -- 파싱/계산 오류는 fail-open(스팸 방지)
+        print(f"[serving monitor] 정체 판정 실패(무시): {exc}")
         return []
 
 

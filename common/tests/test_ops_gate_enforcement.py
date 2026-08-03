@@ -18,7 +18,8 @@ DAGS_ROOT = Path(__file__).resolve().parents[2]
 #: 전환은 각 오너가 자기 도메인에서 한다 — 이 목록이 그 남은 일의 정본이다.
 GRANDFATHERED: dict[str, str] = {
     "common/ops/run_sink.py":
-        "ops/runs — citydata 단독 기록기. 축 순서 전환(P-7)·개발환경 편입(P-8) 대기 @kang-gyeongmin",
+        "ops/runs — citydata 단독 기록기. 도메인→날짜 축순서(P-7)·dev·prod 공통 ops/ 편입(P-8) "
+        "완료. 관문 배선 전까지 hand-assemble 유지 @kang-gyeongmin",
     "common/ops/product_observability.py":
         "ops/product-events·product-health — 관문의 event_id 규칙 계보. 경로 전환은 후속",
     "common/runmetrics.py":
@@ -31,7 +32,7 @@ GRANDFATHERED: dict[str, str] = {
         "구경로(load_date=) 탐색 전용 상수. 신규 쓰기는 관문이 만든다 — dual-read 종료 시 삭제",
     # ── 관측 계열: 날짜 칸 전환(P-4)·축 순서(P-6·P-7)가 남은 곳 ──
     "domains/citydata/citydata_ingest/source/citydata_ingest.py":
-        "ops/reports/citydata — 날짜 칸이 load_date=. observed_date= 전환 대기 @kang-gyeongmin",
+        "ops/reports/citydata — observed_date= 전환 완료(P-4). 관문 배선 전까지 hand-assemble 유지 @kang-gyeongmin",
     "domains/culture/culture_ingest/source/config.py":
         "ops/reports/culture · ops/control/state/culture — 리포트/기준선 분리 반영분 @yooseongjin527",
     "domains/traffic/traffic_ingest/reliability/history.py":

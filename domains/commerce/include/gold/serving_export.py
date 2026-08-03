@@ -246,6 +246,36 @@ def _payload_fingerprint(ddl: str, colnames: list[str], rows: list) -> str:
 
 
 # ── dbt manifest 의 서빙 계약(선언·검증 소스) ────────────────────────────────
+def _append_ledger(token: str, *, publication_id: str, product_id: str, model_name: str,
+                   source_run_id: str, attempted_at: str, outcome: str, stage: str,
+                   source_rows: int, published_rows: int, d1_rows: int, reason: str) -> None:
+    """공유 `_publication_ledger` 에 게시 시도 1건을 남긴다(#668 — 전 도메인 공통 증거 자리).
+
+    타 도메인(공용 Publisher)은 여기 남는데 commerce 자체 export 는 안 남아, 게시 증거가
+    `_catalog`/`d1_publish_state` 에만 있었다. 스키마·컬럼 순서는 공용 정본을 그대로 쓴다.
+    원장 PK 는 publication_id(=시도 식별자)라 **상태가 바뀐 시도만** 남긴다 — 무변경 스킵은
+    serving publication_id 를 재사용하므로(#601) 매 run 넣으면 PK 충돌이고, 그 증거는
+    `d1_publish_state.checked_at`/`_catalog.exported_at` 전진이 맡는다.
+    증거 기록 실패가 게시를 죽이면 안 되므로 fail-open(경고만).
+    """
+    from common.serving.d1_client import PUBLICATION_LEDGER_COLUMNS, PUBLICATION_LEDGER_DDL
+
+    row = {
+        "publication_id": publication_id, "product_id": product_id, "model_name": model_name,
+        "source_run_id": source_run_id, "attempted_at": attempted_at, "outcome": outcome,
+        "stage": stage, "source_row_count": source_rows, "published_row_count": published_rows,
+        "d1_row_count": d1_rows, "api_smoke_status": "not_evaluated",
+        "rollback_status": "not_needed", "reason": reason,
+    }
+    columns = '", "'.join(PUBLICATION_LEDGER_COLUMNS)
+    values = ", ".join(_lit(row[c]) for c in PUBLICATION_LEDGER_COLUMNS)
+    try:
+        _d1(f'{PUBLICATION_LEDGER_DDL} INSERT INTO _publication_ledger ("{columns}") '  # security: allow-sql — 공용 상수 DDL + 식별자 상수, 값은 _lit 이스케이프
+            f"VALUES ({values});", token)
+    except Exception as exc:  # noqa: BLE001 — 원장은 증거이지 게이트가 아니다
+        log.warning("[serving export] 원장 기록 실패(무시): %s — %s", model_name, type(exc).__name__)
+
+
 def _load_serving_meta() -> dict[str, dict]:
     """dbt manifest → {model: {description, serving(계약 전체), tests}}. 부재 시 {}(경고).
 
@@ -703,6 +733,13 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                           source=spec.source, rows=n, band=[lo, hi])
                 meta_rows.append((spec.d1_table, now, n, "stale", None))
                 skipped.append(spec.d1_table)
+                _append_ledger(token, publication_id=uuid.uuid4().hex,
+                               product_id="commerce_" + spec.d1_table[3:], model_name=spec.source,
+                               source_run_id=source_run_id, attempted_at=now,
+                               outcome="skipped_retained", stage="gate", source_rows=n,
+                               published_rows=0, d1_rows=_d1_row_count(spec.d1_table, token),
+                               reason=f"row-count band {n} outside [{lo}, {hi or 'inf'}] — "
+                                      "직전 게시 유지(LKG)")
                 # 핸드오프 upsert 대상에서 제외 — 직전 메타 행이 자연 보존된다(#638 §3)
                 continue
 
@@ -741,6 +778,13 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                 _upsert_publish_state(
                     [(spec.d1_table, fingerprint, n, publication_id, now, now)], token)
                 exported.append((spec.d1_table, n))
+                _append_ledger(token, publication_id=publication_id,
+                               product_id="commerce_" + spec.d1_table[3:], model_name=spec.source,
+                               source_run_id=source_run_id, attempted_at=now,
+                               outcome="published", stage="completed", source_rows=n,
+                               published_rows=n, d1_rows=n,
+                               reason="full-replace snapshot"
+                                      + (" (rollup)" if spec.tier == "d1_rollup" else ""))
 
             m = meta.get(spec.source, {})
             sv = m.get("serving") or {}   # dbt meta.serving(#478 확정 필드 + commerce 확장)

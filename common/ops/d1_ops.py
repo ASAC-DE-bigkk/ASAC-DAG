@@ -274,6 +274,41 @@ def known_source_keys_statement(dates: Sequence[str]) -> str | None:
             f'WHERE source_path_date IN ({values}) AND source_key IS NOT NULL;')
 
 
+def rows_missing_log_bundle_statement(dates: Sequence[str]) -> str | None:
+    """로그 번들 포인터가 아직 비어 있는 행 — 나중에 채우기 위해 찾는다.
+
+    **왜 필요한가**: 실행 기록은 태스크가 끝나는 즉시 쓰이고, 텍스트 로그 번들은 그 run 이
+    종결된 뒤 하루 1회 묶여 올라간다. 그래서 **기록이 조회 DB 에 먼저 들어가고 번들은 나중에
+    생긴다.** 적재 시점에만 포인터를 붙이면 이미 넣은 행은 다시 안 보므로 **영영 비어 있게
+    된다.** 이 질의로 뒤늦게 채운다.
+    """
+    if not dates:
+        return None
+    values = ", ".join(sql_literal(value) for value in sorted(set(dates)))
+    return (f'SELECT event_id, dag_id, run_id FROM "{RUN_EVENT_TABLE}" '
+            f"WHERE observed_date_kst IN ({values}) AND log_bundle_key IS NULL "
+            f"AND dag_id IS NOT NULL AND run_id IS NOT NULL;")
+
+
+def set_log_bundle_statements(pairs: Sequence[tuple[str, str]], *,
+                              batch_rows: int = 200) -> list[str]:
+    """``(event_id, log_bundle_key)`` 목록 → 배치 UPDATE.
+
+    자연키(``event_id``)로만 좁히고 ``log_bundle_key IS NULL`` 조건을 유지한다 — 이미 채워진
+    행을 덮지 않는다(F-1 "빼거나 바꾸지 않는다, 추가만 한다").
+    """
+    statements: list[str] = []
+    for start in range(0, len(pairs), batch_rows):
+        chunk = pairs[start:start + batch_rows]
+        cases = " ".join(
+            f"WHEN {sql_literal(event_id)} THEN {sql_literal(key)}" for event_id, key in chunk)
+        ids = ", ".join(sql_literal(event_id) for event_id, _ in chunk)
+        statements.append(
+            f'UPDATE "{RUN_EVENT_TABLE}" SET log_bundle_key = CASE event_id {cases} END '
+            f"WHERE event_id IN ({ids}) AND log_bundle_key IS NULL;")
+    return statements
+
+
 def event_count_by_source_date_statement(dates: Sequence[str]) -> str | None:
     """저장소↔DB 대조용 — 경로 날짜(``source_path_date``)별 DB 보유 건수(C-4).
 

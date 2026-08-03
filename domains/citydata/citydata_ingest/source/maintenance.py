@@ -47,9 +47,8 @@ CITYDATA_TABLES: tuple[str, ...] = (
     "silver_citydata_air",
     "gold_citydata_ppltn_by_time",
     "gold_citydata_ppltn_daily",
-    "gold_citydata_place_latest",
     "gold_citydata_cmrcl_daily",
-)
+)  # place_latest 제거(ASAC-DBT#404 — 실시간 스냅샷 제거). 없는 테이블 유지보수 방지.
 MAINTAINED_TABLES: tuple[str, ...] = CITYDATA_TABLES
 
 CITYDATA_SCHEMA_ENV = "SEOUL_CITYDATA_SCHEMA"
