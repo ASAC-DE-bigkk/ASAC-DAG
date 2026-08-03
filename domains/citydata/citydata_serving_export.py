@@ -34,6 +34,7 @@ FAST = [
 ]
 DAILY = [
     "citydata_ppltn_dow_hour",
+    "citydata_ppltn_demographics",         # 신설: 성별·나이대 패턴 — incremental upsert(바뀐 버킷만 D1 갱신)
     "citydata_ppltn_daily",                # append(일축)
     "citydata_cmrcl_daily",                # append
     "citydata_purchasing_power_daily",     # append

@@ -55,7 +55,7 @@
 | `freshness_slo_minutes` | int | > 0 | — | `event_time` 최신값 지연 임계. **v1.1: `event_time` 선언 제품은 조건부 필수** (§3.1 참조) |
 | `shape` | enum | `wide` \| `rollup` \| `event` | 없음 | 서빙 형태 분류 |
 | `reliability` | object | rollup 전용, [§5.3](#53-reliability-rollup-전용) | 없음 | 표본 신뢰도 정책 |
-| `upsert_strategy` | enum | `merge` \| `exact_set` (`publication_mode: upsert`에서만) | `merge` | `exact_set`은 전체 Gold 결과로 staging 교체·복구를 수행 |
+| `upsert_strategy` | enum | `merge` \| `exact_set` \| `incremental` (`publication_mode: upsert`에서만) | `merge` | `exact_set`은 staging 교체·복구, `incremental`은 워터마크(`event_time`) 이후 바뀐 그레인만 부분 upsert(§3.6) |
 | `public_projection` | object | `schema_version` + ordered `columns` | 없음 | [§3.5](#35-public_projection-v14-선택-필드) — D1/public 물리 컬럼 allowlist |
 | `source_evidence` | list[object] | [§3.6](#36-source_evidence-v15-선택-필드) 7개 필드 | 없음 | 공개 소스 URL·이용허락·재배포 범위·출처표시의 정적 증거 |
 | `quality_coverage` | object | [§3.7](#37-quality_coverage-v16-선택-필드) 3개 필드 | 없음 | 공개 축의 기대 distinct 집합과 최소 커버리지 비율 |
@@ -146,6 +146,8 @@ quality_coverage:
 `snapshot`은 DROP→CREATE 중간 상태를 외부에 노출하지 않도록 staging 적재 후 pointer를 마지막에 전환한다(원자 게시). 게시할 것이 없으면(0행 등) [§5.1](#51-zero_policy)에 따른다.
 
 `upsert_strategy: exact_set`은 `upsert`의 제품 식별·PK 의미는 유지하되, 이번 실행의 전체 Gold 결과를 정본으로 간주한다. Publisher는 staging 적재 후 원자 전환하고, read-back·catalog·smoke 실패 시 직전 정상본을 복구한다. 미선언 `upsert`는 기존 `merge` 방식으로 유지된다.
+
+`upsert_strategy: incremental` (v1.7)은 Gold를 매 실행 전량 재계산하되 **D1 쓰기만 증분화**한다. Reader가 D1의 현재 `max(event_time)`(워터마크) 이후 바뀐 그레인만 읽어 그 PK만 INSERT OR REPLACE로 덮고 나머지 D1 행은 보존한다(delete 윈도우 없음). 부분 소스라 **전체-테이블 read-back parity(d1_row_count == source_row_count)를 면제**하되 PK 유일성·비-NULL은 그대로 강제한다(`append`와 동일한 안전 자세). 따라서 `event_time`(워터마크 컬럼) 선언이 필수이며, 부분 소스와 전체 D1을 비교하는 `verify_content_parity`와는 조합할 수 없다. 요일×시간처럼 PK가 고정 반복되는 대형 패턴 테이블(예: `citydata_ppltn_demographics`)에서 매일 전량 대신 바뀐 버킷만 써 D1 쓰기를 줄이는 용도다.
 
 ## 5. 데이터 품질 게이트
 
@@ -256,6 +258,7 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 
 **개정 이력**
 
+- **v1.7** (2026-08-04): `upsert_strategy` 허용값에 `incremental` 추가(허용값 추가라 하위 호환 v1 유지). 워터마크(`event_time`) 이후 바뀐 그레인만 부분 upsert해 D1 쓰기를 줄인다(§4). 전체-테이블 parity 면제·`verify_content_parity` 비호환. 미선언·`merge`·`exact_set` 동작은 불변. ASAC-DBT validator schema `v1.7`와 lockstep.
 - **v1.6** (2026-08-04): 선택 필드 `quality_coverage` 추가. 기대 distinct 집합과 최소 비율만 정적으로 선언하고, Publisher가 현재 source 행으로 측정·차단·기록한다. ASAC-DBT validator schema `v1.6`와 lockstep.
 - **v1.5** (2026-08-04): 선택 필드 `source_evidence` 추가. V1 live bundle 후보는 모든 원천의 source URL·이용허락·재배포 범위·출처표시·확인일을 선언하고, Publisher는 source와 현재 품질 실측을 동일 publication_id로 D1에 게시한다.
 - **v1.4** (2026-08-02): 선택 필드 `public_projection` 추가. Weather/Traffic 공개 제품은 ordered physical allowlist를 명시 opt-in하고, 미선언 legacy 도메인은 기존 full-source read 동작을 유지한다. ASAC-DBT validator schema `v1.4`와 lockstep.

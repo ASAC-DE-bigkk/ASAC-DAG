@@ -169,3 +169,37 @@ def test_legacy_contract_preserves_select_star_read_plan_behavior():
     ]
     assert plan.columns == [("product_row_id", "varchar"), ("place_id", "varchar"), ("raw_key", "varchar")]
     assert plan.rows == [{"product_row_id": "row-1", "place_id": "place-1", "raw_key": "raw-1"}]
+
+
+def test_incremental_upsert_read_is_watermark_bound_without_delete_window():
+    """incremental upsert: 워터마크 없으면 전량 백필, 있으면 last_event_at>=워터마크 만 읽고
+    delete 윈도우는 두지 않는다(부분 INSERT OR REPLACE — append 아님)."""
+    contract = _contract(
+        product_id="citydata_ppltn_demographics",
+        model_name="gold_citydata_ppltn_demographics",
+        publication_mode="upsert",
+        upsert_strategy="incremental",
+        primary_key=("area_cd", "dow", "hour", "segment_type", "segment"),
+        event_time="last_event_at",
+        public_projection=None,
+        projection_schema_version=None,
+        projection_schema_hash=None,
+    )
+    cols = [("area_cd", "varchar"), ("dow", "bigint"), ("hour", "bigint"),
+            ("segment_type", "varchar"), ("segment", "varchar"), ("last_event_at", "timestamp(6)")]
+
+    # 최초(워터마크 없음) → 전량 SELECT * (WHERE 없음)
+    full = FakeCursor(cols, [("A", 6, 14, "age", "20", "2026-08-03 12:00:00")])
+    full_plan = TrinoSourceReader(full, "iceberg_dev", "citydata").read(contract, last_good_max=None)
+    assert full.statements[-1] == "SELECT * FROM iceberg_dev.citydata.gold_citydata_ppltn_demographics"
+    assert full_plan.delete_column is None and full_plan.delete_literal is None
+
+    # 이후(워터마크 있음) → last_event_at >= 워터마크(초 단위) 만, delete 없음
+    inc = FakeCursor(cols, [("A", 6, 14, "age", "20", "2026-08-03 12:00:00")])
+    inc_plan = TrinoSourceReader(inc, "iceberg_dev", "citydata").read(
+        contract, last_good_max="2026-08-03 03:10:00")
+    assert inc.statements[-1] == (
+        "SELECT * FROM iceberg_dev.citydata.gold_citydata_ppltn_demographics "
+        "WHERE \"last_event_at\" >= timestamp '2026-08-03 03:10:00'"
+    )
+    assert inc_plan.delete_column is None and inc_plan.delete_literal is None

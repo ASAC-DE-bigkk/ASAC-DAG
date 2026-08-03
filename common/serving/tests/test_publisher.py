@@ -889,3 +889,117 @@ def test_load_contracts_filters_enabled_and_product_ids():
     ]
     assert contract.usage_patterns[0]["verified_at"] == "2026-07-30T09:00:00Z"
     assert contract.serving_tier is None and contract.rollup_rule is None
+
+
+# ── incremental upsert (부분 쓰기 — D1 절약) ─────────────────────────────────────────
+
+def _seed_full_table(d1: "FakeD1", model: str, rows: list[dict[str, Any]]) -> None:
+    """직전-정상(전체) 테이블을 D1 에 미리 심는다 — incremental 은 이 위에 부분 upsert 한다."""
+    d1.tables[model] = [dict(r) for r in rows]
+    d1.primary_keys[model] = ("product_row_id",)
+    d1.columns_by_table[model] = list(COLUMNS)
+    d1.catalog[model] = {"name": model, "row_count": len(rows)}
+
+
+def test_incremental_upsert_partial_write_passes_and_merges():
+    """incremental upsert: 바뀐 그레인(2행)만 써도 전체-테이블 parity 로 실패하지 않고,
+    나머지 D1 행은 보존한 채 해당 PK 만 덮인다(부분 INSERT OR REPLACE)."""
+    contract = _contract(
+        publication_mode="upsert",
+        upsert_strategy="incremental",
+        zero_policy="retain_last_good",
+        event_time="forecast_at",
+    )
+    model = contract.model_name
+    d1 = FakeD1()
+    # 직전본 3행(오래된 forecast_at) — 워터마크 = max = 2026-07-22T00:00:00
+    _seed_full_table(d1, model, [
+        {"product_row_id": "r0", "place_id": "p", "forecast_at": "2026-07-20T00:00:00"},
+        {"product_row_id": "r1", "place_id": "p", "forecast_at": "2026-07-21T00:00:00"},
+        {"product_row_id": "r2", "place_id": "p", "forecast_at": "2026-07-22T00:00:00"},
+    ])
+    # 소스는 바뀐 것만: r1 갱신(place_id 변경) + r3 신규 — 둘 다 워터마크보다 최신
+    changed = [
+        {"product_row_id": "r1", "place_id": "UPDATED", "forecast_at": "2026-07-25T00:00:00"},
+        {"product_row_id": "r3", "place_id": "p", "forecast_at": "2026-07-25T00:00:00"},
+    ]
+    source = FakeSource({model: ReadPlan(columns=COLUMNS, rows=changed)})
+
+    report = publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="inc-1")
+
+    assert report.ok
+    rec = report.records[0]
+    assert rec.serving_status == STATUS_PUBLISHED
+    # 부분 소스(2) ≠ 전체 D1(4) 인데도 통과 — incremental 은 전체-parity 면제
+    assert rec.source_row_count == 2
+    assert rec.d1_row_count == 4
+    assert rec.distinct_primary_key_count == 4 and rec.null_primary_key_count == 0
+    # 워터마크(=직전 max event_time)가 reader 로 전달됐다
+    assert source.seen_last_good_max[model] == "2026-07-22T00:00:00"
+    # 부분 경로 — 전체 교체(replace_table) 는 호출되지 않았다
+    assert d1.replace_calls == 0
+    # 병합 결과: r0/r2 보존, r1 갱신, r3 추가
+    by_id = {r["product_row_id"]: r for r in d1.tables[model]}
+    assert set(by_id) == {"r0", "r1", "r2", "r3"}
+    assert by_id["r1"]["place_id"] == "UPDATED"
+    assert by_id["r0"]["place_id"] == "p"
+
+
+def test_incremental_upsert_first_run_backfills_full_when_no_watermark():
+    """최초 실행(D1 빈 테이블 → 워터마크 없음): reader 가 전량 읽어 백필하고 정상 게시."""
+    contract = _contract(
+        publication_mode="upsert",
+        upsert_strategy="incremental",
+        zero_policy="retain_last_good",
+        event_time="forecast_at",
+    )
+    model = contract.model_name
+    d1 = FakeD1()
+    source = FakeSource({model: ReadPlan(columns=COLUMNS, rows=_rows(3))})
+
+    report = publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="inc-backfill")
+
+    assert report.ok
+    assert source.seen_last_good_max[model] is None  # 빈 테이블 → 워터마크 없음
+    assert d1.table_row_count(model) == 3
+    assert report.records[0].serving_status == STATUS_PUBLISHED
+
+
+def test_incremental_upsert_rejects_content_parity():
+    """incremental upsert 는 verify_content_parity 와 조합 불가(부분 소스 vs 전체 D1)."""
+    contract = _contract(
+        publication_mode="upsert",
+        upsert_strategy="incremental",
+        zero_policy="retain_last_good",
+        event_time="forecast_at",
+    )
+    d1 = FakeD1()
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(2))})
+
+    with pytest.raises(PublicationError) as exc:
+        publish(
+            [contract], source, d1, FakeSmoke(status="passed"),
+            source_run_id="inc-parity", verify_content_parity=True,
+        )
+    assert "verify_content_parity" in str(exc.value)
+
+
+def test_plain_upsert_still_enforces_full_parity():
+    """비-incremental upsert(전량)는 종전대로 전체-테이블 parity 를 강제한다(회귀 방지)."""
+    contract = _contract(
+        publication_mode="upsert",
+        zero_policy="retain_last_good",
+        event_time="forecast_at",
+    )
+    model = contract.model_name
+    d1 = FakeD1()
+    _seed_full_table(d1, model, [
+        {"product_row_id": "r0", "place_id": "p", "forecast_at": "2026-07-20T00:00:00"},
+        {"product_row_id": "r1", "place_id": "p", "forecast_at": "2026-07-21T00:00:00"},
+    ])
+    # 부분 소스(1행)를 전량 upsert 로 쓰면 D1(2행) ≠ source(1) → parity 실패해야 정상
+    source = FakeSource({model: ReadPlan(
+        columns=COLUMNS, rows=[{"product_row_id": "r0", "place_id": "X", "forecast_at": "2026-07-25T00:00:00"}])})
+
+    with pytest.raises(PublicationError):
+        publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="plain-upsert")
