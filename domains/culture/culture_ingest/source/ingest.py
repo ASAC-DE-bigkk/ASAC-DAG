@@ -547,7 +547,7 @@ def write_run_report(
     report: dict,
     *,
     ctx: RunContext,
-    target: str = "dev",
+    target: str | None = None,
     env_file: str | None = None,
     dry_run: bool = False,
     local_dir: str = "./_dryrun",
@@ -599,7 +599,7 @@ def write_volume_hwm(
     report: dict,
     *,
     ctx: RunContext,
-    target: str = "dev",
+    target: str | None = None,
     env_file: str | None = None,
     dry_run: bool = False,
     local_dir: str = "./_dryrun",
@@ -635,7 +635,7 @@ def write_volume_hwm(
 
 # --- 런타임 빌더 ---------------------------------------------------------------
 
-def build_r2_sink(target: str = "dev", env_file: str | None = None) -> R2Sink:
+def build_r2_sink(target: str | None = None, env_file: str | None = None) -> R2Sink:
     """R2 설정을 검증해 싱크를 만든다 — 누락 필드는 이름을 적어 즉시 실패(사전 점검).
 
     write_run_report·build_landing·load_bronze 가 각자 복붙하던 3중 사전점검의 단일
@@ -794,7 +794,7 @@ def build_clients(env_file: str | None = None) -> Clients:
 def build_landing(
     ctx: RunContext,
     *,
-    target: str = "dev",
+    target: str | None = None,
     env_file: str | None = None,
     dry_run: bool = False,
     local_dir: str = "./_dryrun",
@@ -809,7 +809,7 @@ def build_landing(
 ENGINES = ("pyiceberg", "trino")  # trino = 전환기 롤백 레버(#203) — 일몰 계획은 operations.md
 
 
-def build_warehouse(target: str = "dev", engine: str = "pyiceberg") -> BronzeWarehouse | PyicebergBronzeWarehouse:
+def build_warehouse(target: str | None = None, engine: str = "pyiceberg") -> BronzeWarehouse | PyicebergBronzeWarehouse:
     """bronze Iceberg 적재 웨어하우스. 기본 pyiceberg(커밋 1회), trino 는 롤백 레버."""
     if engine not in ENGINES:
         raise ValueError(f"engine must be one of {ENGINES}, got {engine!r}")
@@ -870,7 +870,7 @@ def load_bronze(
     ctx: RunContext,
     summaries: list[dict],
     *,
-    target: str = "dev",
+    target: str | None = None,
     env_file: str | None = None,
     engine: str = "pyiceberg",
 ) -> dict[str, int]:
@@ -885,7 +885,7 @@ def run_batch(
     names: list[str] | None,
     *,
     opts: IngestOptions,
-    target: str = "dev",
+    target: str | None = None,
     env_file: str | None = None,
     dry_run: bool = False,
     local_dir: str = "./_dryrun",
@@ -904,7 +904,7 @@ def ingest_one(
     *,
     ctx: RunContext,
     opts: IngestOptions,
-    target: str = "dev",
+    target: str | None = None,
     env_file: str | None = None,
     dry_run: bool = False,
     local_dir: str = "./_dryrun",
