@@ -119,6 +119,10 @@ class DatasetResult:
     # 않았기** 때문이다(#619 확정안 NULL≠0). 0 으로 두면 적재가 돌기도 전의 요약이
     # "0행 적재"를 주장하고, load 태스크가 죽은 run 은 전 데이터셋이 그 주장을 단다.
     iceberg_rows: int | None = None
+    # 랜딩한 페이지 본문의 누적 sha256 (ASK-Seoul#78 `M-7` 권장 필드 `hash`).
+    # 페이지를 쓴 순서대로 이어 해싱한 값이라, 같은 랜딩을 다시 만들면 같은 값이 나온다.
+    # 빈 문자열 = 아직 계산 전(페이지 0건이면 계산할 내용 자체가 없다).
+    content_sha256: str = ""
     duration_sec: float = 0.0  # 이 데이터셋 적재 소요(초)
     finished_ts: str = ""  # 이 데이터셋 적재 완료 시각 (UTC YYYYMMDDTHHMMSSZ)
 

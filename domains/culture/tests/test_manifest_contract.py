@@ -114,3 +114,37 @@ def test_existing_consumer_fields_are_untouched(tmp_path):
     _, man = _run(tmp_path, rows=max(ds.min_rows, 1) * 10, baseline=None)
     for field in ("object_keys", "rows", "pages", "bytes", "checks", "ingest_ts", "load_pattern"):
         assert field in man, f"기존 필드 {field} 가 사라졌다 — 추가만 하기로 한 변경이다"
+
+
+# ── ASK-Seoul#78 M-7 권장 3필드 ────────────────────────────────────────────────
+
+def test_manifest_carries_recommended_fields():
+    from culture_ingest.source.ingest import _manifest
+    from culture_ingest.common.config import RunContext
+    from culture_ingest.common.landing import DatasetResult
+    from culture_ingest.source.datasets import ALL_DATASETS
+
+    ds = ALL_DATASETS[0]
+    ctx = RunContext(load_date="2026-08-04", ingest_ts="20260804T030000Z", run_id="r1")
+    result = DatasetResult(name=ds.name, source=ds.source, endpoint=ds.endpoint, prefix="p")
+    result.rows = 3
+    result.content_sha256 = "a" * 64
+    m = _manifest(ds, ctx, result, {})
+    assert m["hash"] == {"algorithm": "sha256", "value": "a" * 64,
+                         "scope": "object_bodies_in_order"}
+    assert m["load_date_timezone"] == "Asia/Seoul"
+    assert m["path_contract_version"] == "v1"
+
+
+def test_manifest_hash_is_null_when_nothing_landed():
+    """페이지 0건이면 해싱할 내용이 없다 — 빈 문자열의 sha256 을 적으면 거짓말이다."""
+    from culture_ingest.source.ingest import _manifest
+    from culture_ingest.common.config import RunContext
+    from culture_ingest.common.landing import DatasetResult
+    from culture_ingest.source.datasets import ALL_DATASETS
+
+    ds = ALL_DATASETS[0]
+    ctx = RunContext(load_date="2026-08-04", ingest_ts="20260804T030000Z", run_id="r1")
+    m = _manifest(ds, ctx, DatasetResult(name=ds.name, source=ds.source,
+                                         endpoint=ds.endpoint, prefix="p"), {})
+    assert m["hash"]["value"] is None

@@ -12,6 +12,7 @@ fetch(원본 박제)와 load(bronze 적재)를 분리한 두 계열의 진입점
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -149,6 +150,19 @@ def _manifest(ds: Dataset, ctx: RunContext, result: DatasetResult, params: dict,
         "status": "complete" if not violations else "complete_with_violations",
         "expected_count": {"rows_min": ds.min_rows, "rows_baseline": baseline_rows},
         "actual_count": {"rows": result.rows, "objects": len(result.object_keys)},
+        # ── M-7 권장 3필드 ──
+        # `hash` — 페이지 본문을 쓴 순서대로 이은 sha256. `checks` 와 겹치지 않는다:
+        # checks 는 "행이 충분한가·스키마가 드리프트했나"를 보고, 이건 **이 랜딩의 내용이
+        # 그때 그것인가**를 본다(사후 변조·부분 덮어쓰기 판별). 페이지 0건이면 계산할
+        # 내용이 없으므로 0 이 아니라 None(F-3 NULL≠0).
+        "hash": {"algorithm": "sha256", "value": result.content_sha256 or None,
+                 "scope": "object_bodies_in_order"},
+        # `load_date_timezone` — 위 load_date 가 어느 시간대로 접힌 날짜인지. 이게 없으면
+        # 소비자가 UTC 로 읽어 하루가 밀린다.
+        "load_date_timezone": "Asia/Seoul",
+        # `path_contract_version` — 이 확인서가 따르는 경로·필드 규약 판. ASK-Seoul#78 이
+        # "적용 규약 v1" 이라 v1. 규약이 개정되면 이 값이 옛 랜딩과 새 랜딩을 가른다.
+        "path_contract_version": "v1",
         "checks": result.checks,  # 수집 검증 결과(완전성·드리프트·freshness)
     }
 
@@ -358,6 +372,9 @@ def ingest_dataset(
     result = DatasetResult(name=ds.name, source=ds.source, endpoint=ds.endpoint, prefix=prefix)
     t0 = time.monotonic()
     sample_body: bytes | None = None  # 첫 페이지 = 드리프트(관측 스키마) 점검용 샘플
+    # 확인서의 `hash`(M-7) — 쓰는 김에 굴린다. 나중에 다시 읽어 계산하면 랜딩 페이지를
+    # 전부 재다운로드해야 하고, 그 사이 객체가 바뀌면 확인서가 거짓말을 하게 된다.
+    content_hash = hashlib.sha256()
 
     def _append_page(key: str, page) -> None:
         """페이지 1건의 계측(pages/rows/bytes/object_keys)을 누적하고 드리프트 샘플로 기록."""
@@ -366,6 +383,8 @@ def ingest_dataset(
         result.rows += page.row_count
         result.bytes_written += len(page.body)
         result.object_keys.append(key)
+        content_hash.update(page.body)
+        result.content_sha256 = content_hash.hexdigest()
         sample_body = sample_body or page.body
 
     try:
@@ -493,6 +512,13 @@ def build_run_report(
         # ops.record_spec 모듈 docstring 참조 — 재시도가 기록을 늘리면 이중 집계가 된다.
         "event_id": build_event_id(
             domain="culture", layer="bronze", record_kind="run_report",
+            # 환경을 식별에 넣는다(#78 Z-7). 스케줄 run 의 run_id 는
+            # ``scheduled__2026-08-04T…`` 라 dev 인스턴스와 prod 인스턴스가 **같은 값**이고,
+            # ingest_ts 도 data interval 에서 유도돼 같다. 환경이 빠지면 두 환경의 기록이
+            # 같은 고유키를 갖고, 한 조회 DB 에 모이면 upsert 가 하나를 조용히 덮어쓴다
+            # (자연키가 event_id 이므로). 공통 `event_id_for` 도 같은 구멍이 있어 #78 에
+            # 확인 요청해 뒀다 — 합의되면 여기 값도 그 규칙을 따른다.
+            environment=environment,
             load_date=ctx.load_date, ingest_ts=ctx.ingest_ts, run_id=ctx.run_id,
         ),
         "record_count": 1,

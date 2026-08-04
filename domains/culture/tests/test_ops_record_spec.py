@@ -203,11 +203,29 @@ def test_report_identity_is_null_when_unknown_not_guessed():
     assert report["task_id"] is None
 
 
-def test_identity_fields_do_not_change_event_id():
-    """F-1 추가만 — 식별 필드가 붙어도 기존 기록의 고유키는 그대로다."""
+def test_dag_identity_is_metadata_not_part_of_the_key():
+    """`dag_id`·`task_id` 는 기록의 설명이지 정체성이 아니다 — 붙어도 고유키는 그대로."""
     plain = build_run_report([_summary()], CTX, expected_total=1)
     tagged = build_run_report(
-        [_summary()], CTX, expected_total=1,
-        environment="prod", dag_id="culture_bronze", task_id="report",
+        [_summary()], CTX, expected_total=1, dag_id="culture_bronze", task_id="report",
     )
     assert plain["event_id"] == tagged["event_id"]
+
+
+def test_environment_is_part_of_the_key():
+    """🔴 dev·prod 가 같은 고유키를 가지면 한 조회 DB 에서 서로를 덮어쓴다.
+
+    스케줄 run 의 `run_id`(``scheduled__…``)와 `ingest_ts`(data interval 유도)는 두
+    인스턴스가 같은 값이라, 환경이 빠지면 같은 스케줄의 dev 기록과 prod 기록이 구분되지
+    않는다. `_ops_run_event` 의 자연키가 event_id 라 upsert 가 조용히 하나를 지운다.
+    """
+    dev = build_run_report([_summary()], CTX, expected_total=1, environment="dev")
+    prod = build_run_report([_summary()], CTX, expected_total=1, environment="prod")
+    assert dev["event_id"] != prod["event_id"]
+
+
+def test_same_environment_still_idempotent():
+    """환경이 같으면 몇 번을 다시 써도 같은 키 — 재시도가 기록을 늘리지 않는다."""
+    a = build_run_report([_summary()], CTX, expected_total=1, environment="prod")
+    b = build_run_report([_summary()], CTX, expected_total=1, environment="prod")
+    assert a["event_id"] == b["event_id"]
