@@ -258,10 +258,14 @@ def test_land_master_path_convention_and_manifest():
     assert manifest["rows"] == 3
     assert manifest["run_id"] == "run-xyz"
     assert manifest["object_keys"] == result["object_keys"]
-    # 완결 확인서 필드(ASK-Seoul#60 약속③, #547).
-    assert manifest["status"] == "ok"
+    # 완결 확인서 필드(ASK-Seoul#60 약속③, #547 · #78 M-6·M-8·M-9 정렬 #689).
+    assert manifest["status"] == "complete"
     assert manifest["completed_at"]  # ISO8601 존재만 — 시각 자체는 실행 시점 의존
     assert manifest["expected_rows"] == 3  # _SPEC.expected_rows 실값 전달 확인
+    # M-6 필드명 쌍 + 단위 자기 선언 — 행 단위, 기대치는 spec 계약 하한.
+    assert manifest["expected_count"] == 3
+    assert manifest["actual_count"] == 3
+    assert manifest["count_unit"] == "rows"
     # R1 순서 — 확인서가 마지막 쓰기여야 한다(쓰다 만 랜딩에 확인서가 없도록).
     assert list(store.objects)[-1] == result["manifest_key"]
 

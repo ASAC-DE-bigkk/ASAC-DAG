@@ -303,7 +303,13 @@ def land_master(
         "load_date": load_date,
         "ingest_ts": ingest_ts,
         "object_keys": object_keys,
-        "status": "ok",
+        # 기대/실측 쌍(ASK-Seoul#78 M-6·M-8) — 행 단위, 기대치는 spec 계약 하한.
+        # rows/expected_rows 는 기존 소비 계약이라 유지하고 M-6 필드명을 추가만 한다(F-1).
+        "expected_count": spec.expected_rows,
+        "actual_count": total_rows,
+        "count_unit": "rows",
+        # M-9 값 집합 {complete, complete_with_violations} — transit 은 complete 만 사용(#689)
+        "status": "complete",
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     manifest_key = f"{base}/_manifest.json"
