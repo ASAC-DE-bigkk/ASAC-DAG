@@ -52,7 +52,8 @@ import json  # noqa: E402
 import os  # noqa: E402
 
 import pendulum  # noqa: E402
-from airflow.decorators import dag, task  # noqa: E402
+from airflow.decorators import dag, task
+from airflow.exceptions import AirflowException  # noqa: E402
 from cosmos import (  # noqa: E402
     DbtTaskGroup,
     ExecutionConfig,
@@ -320,7 +321,22 @@ def commerce_load_silver():
         dr = ctx.get("dag_run")
         start = getattr(dr, "start_date", None) if dr else None
         elapsed = ((datetime.now(timezone.utc) - start).total_seconds() if start else None)
-        return quality_tasks.report_silver_run(elapsed_seconds=elapsed, run_started_at=start)
+        result = quality_tasks.report_silver_run(elapsed_seconds=elapsed, run_started_at=start)
+
+        # 리포트를 보낸 뒤 **상류 실패를 그대로 드러낸다**.
+        # 이 태스크는 all_done 이라 앞이 실패해도 돌고, 이 DAG 의 **유일한 말단**이다.
+        # 그래서 이게 성공하면 Airflow 가 DagRun 을 success 로 마킹해 **실패가 통째로 가려진다**
+        # (실측: build_detail_catalog 실패 → load_details 미실행 → detail 0건인데 DAG 는 초록).
+        # 리포트는 실패해도 나가야 하므로 all_done 은 유지하고, 보고 후 예외로 상태를 바로잡는다.
+        failed = sorted(
+            ti.task_id for ti in (dr.get_task_instances() if dr else [])
+            if ti.task_id != "report_silver" and ti.state in ("failed", "upstream_failed")
+        )
+        if failed:
+            raise AirflowException(
+                "silver 실행 중 실패한 태스크가 있습니다(리포트는 발송됨) — "
+                f"{', '.join(failed)}")
+        return result
 
     # Cosmos: silver 모델 run+test(모델당 태스크). 증분은 여기서, 전량 빌드는 seed 가 선처리.
     dbt_silver = DbtTaskGroup(
