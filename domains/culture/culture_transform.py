@@ -38,6 +38,8 @@ if _DAGS_ROOT not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
+from common.ops import Layer  # noqa: E402
+from common.ops.observability import ops_default_args  # noqa: E402
 
 from culture_ingest.common.config import CULTURE_BRONZE_ASSET  # noqa: E402
 
@@ -80,7 +82,15 @@ with DAG(
     schedule=[Asset(CULTURE_BRONZE_ASSET)],
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 1, "retry_delay": timedelta(minutes=5)},
+    default_args={
+        "retries": 1, "retry_delay": timedelta(minutes=5),
+        # ASK-Seoul#78 — 이 DAG 의 모든 태스크가 실행 기록을 남긴다. 실패 상세
+        # (RFC 9457 Problem JSON)를 밀어내지 않고 뒤에 붙는다(교체가 아니라 추가).
+        # layer 는 DAG 하나에 값 하나인데 이 DAG 은 silver·gold 를 `dbt run` 한 태스크로
+        # 만든다. 태스크 단위(V-6 runs)로는 둘을 가를 수 없으므로 산출물 기준 gold 로
+        # 등록하고, 모델별 단계 구분은 dbt 노드 단위(metrics 계열)의 몫으로 둔다.
+        **ops_default_args("culture", Layer.GOLD, on_failure=record_culture_problem),
+    },
     params=DEFAULT_PARAMS,
     tags=["transform", "culture", "silver", "gold", "dbt"],
 ) as dag:
@@ -89,25 +99,20 @@ with DAG(
     # installed`) freshness 부터 test 까지 전부 시작조차 못 한다. 두 경로로 어긋난다:
     # ① packages.yml 에 패키지를 추가하는 PR(ASAC-DBT#347 의 dbt_utils) ② dbt_packages 유실
     # (gitignore 대상 — git clean·컨테이너 재생성). citydata·traffic 은 이미 매 런 돌린다.
-    deps = BashOperator(task_id="dbt_deps", bash_command=_dbt("deps"),
-                        on_failure_callback=record_culture_problem)
+    deps = BashOperator(task_id="dbt_deps", bash_command=_dbt("deps"))
 
     # bronze 신선도 게이트 — 48h 넘게 낡았으면 여기서 멈추고 수집부터 고치게 한다.
     freshness = BashOperator(task_id="dbt_source_freshness",
-                             bash_command=_dbt("source freshness"),
-                             on_failure_callback=record_culture_problem)
+                             bash_command=_dbt("source freshness"))
 
-    seed = BashOperator(task_id="dbt_seed", bash_command=_dbt("seed"),
-                        on_failure_callback=record_culture_problem)
+    seed = BashOperator(task_id="dbt_seed", bash_command=_dbt("seed"))
 
     # asac_axes 패키지 자체 모델(dim_admin_dong)은 타 레포 로더(#154) 의존이라 이 환경에서 ERROR —
     # culture 변환은 자기 모델만 빌드/테스트한다 (패키지 seed·매크로·제네릭 테스트는 계속 사용).
     run_models = BashOperator(task_id="dbt_run",
-                              bash_command=_dbt("run --exclude package:asac_axes tag:slo"),
-                              on_failure_callback=record_culture_problem)
+                              bash_command=_dbt("run --exclude package:asac_axes tag:slo"))
 
     test_models = BashOperator(task_id="dbt_test",
-                               bash_command=_dbt("test --exclude package:asac_axes tag:slo"),
-                               on_failure_callback=record_culture_problem)
+                               bash_command=_dbt("test --exclude package:asac_axes tag:slo"))
 
     deps >> freshness >> seed >> run_models >> test_models

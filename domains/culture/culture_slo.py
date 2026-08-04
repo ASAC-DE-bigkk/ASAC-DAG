@@ -23,6 +23,8 @@ if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
+from common.ops import Layer  # noqa: E402
+from common.ops.observability import ops_default_args  # noqa: E402
 
 KST = "Asia/Seoul"
 record_culture_problem = problem_failure_callback(domain="culture")
@@ -68,18 +70,22 @@ with DAG(
     schedule="0 5 * * *",
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},
+    default_args={
+        "retries": 2, "retry_delay": timedelta(minutes=2),
+        # ASK-Seoul#78 — 이 DAG 의 모든 태스크가 실행 기록을 남긴다. 실패 상세
+        # (RFC 9457 Problem JSON)를 밀어내지 않고 뒤에 붙는다(교체가 아니라 추가).
+        # SLO bronze 적재를 앞세우지만 이 DAG 의 산출물은 SLO 마트라 gold 로 등록한다.
+        **ops_default_args("culture", Layer.GOLD, on_failure=record_culture_problem),
+    },
     params=DEFAULT_PARAMS,
     tags=["culture", "slo", "observability"],
 ) as dag:
     load_slo_bronze = PythonOperator(
         task_id="load_slo_bronze",
         python_callable=_load_slo_bronze,
-        on_failure_callback=record_culture_problem,
     )
     dbt_slo = BashOperator(
         task_id="dbt_slo",
         bash_command=_dbt("build --select tag:slo"),
-        on_failure_callback=record_culture_problem,
     )
     load_slo_bronze >> dbt_slo

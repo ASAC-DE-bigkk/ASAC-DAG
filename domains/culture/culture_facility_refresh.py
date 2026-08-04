@@ -35,6 +35,8 @@ if _DAGS_ROOT not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
+from common.ops import Layer  # noqa: E402
+from common.ops.observability import ops_default_args  # noqa: E402
 
 from culture_ingest.source.datasets import WEEKLY_FACILITY_REFRESH_CONF  # noqa: E402
 
@@ -49,7 +51,12 @@ with DAG(
     schedule="30 5 * * 0",  # 매주 일요일 05:30 KST — 자정 400 창(#201)·maintenance(04:30)와 시차
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 1, "retry_delay": timedelta(minutes=5)},
+    default_args={
+        "retries": 1, "retry_delay": timedelta(minutes=5),
+        # ASK-Seoul#78 — 이 DAG 의 모든 태스크가 실행 기록을 남긴다. 실패 상세
+        # (RFC 9457 Problem JSON)를 밀어내지 않고 뒤에 붙는다(교체가 아니라 추가).
+        **ops_default_args("culture", Layer.BRONZE, on_failure=record_culture_problem),
+    },
     # 배포 env 를 따른다(ASK-Seoul#66). 이 값은 아래 conf 로 culture_bronze 에 그대로 전달되므로
     # 하드코딩 "dev" 였으면 prod 스택에서 주간 전수 재크롤이 dev 버킷에 쓰려다 실패한다.
     params={
@@ -67,5 +74,4 @@ with DAG(
         trigger_dag_id="culture_bronze",
         # conf 는 culture_bronze 의 params 를 run 단위로 덮어쓴다(수동 트리거와 동일 경로).
         conf={**WEEKLY_FACILITY_REFRESH_CONF, "target": "{{ params.target }}"},
-        on_failure_callback=record_culture_problem,
     )
