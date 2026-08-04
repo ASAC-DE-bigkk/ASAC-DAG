@@ -345,18 +345,28 @@ def test_non_prod_gets_a_visible_badge_in_the_title(monkeypatch, sent):
     assert "env=dev" in embed["footer"]["text"]
 
 
-def test_prod_has_no_badge_but_still_carries_provenance(monkeypatch, sent):
-    """운영에는 표식을 붙이지 않는다 — 대부분이 운영이라 전부 달면 소음이 된다.
+def test_prod_is_labelled_too_not_left_blank(monkeypatch, sent):
+    """운영도 표식을 단다 — "표식 없음"에서 운영을 추론하게 만들지 않는다.
 
-    다만 footer 의 출처는 운영에도 남는다. 표식 없음이 "운영"인지 "표기 누락"인지
-    구분되어야 하기 때문이다.
+    한쪽만 비우면 그 공백이 '운영'인지 '이 변경 이전 메시지'인지 '표기 누락'인지 갈리지
+    않는다. 미설정을 prod 로 채우지 않는 것과 같은 이유다.
     """
     monkeypatch.setenv("DBT_TARGET", "prod")
     monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
     assert send_embed("수집 완료", "본문", webhook=_WEBHOOK)
     embed = sent[-1]["embeds"][0]
-    assert embed["title"] == "수집 완료"
+    assert embed["title"] == "[PROD] 수집 완료"
     assert "env=prod" in embed["footer"]["text"]
+
+
+def test_every_environment_gets_a_badge(monkeypatch, sent):
+    """어느 환경이든 같은 자리에 표식이 있다 — 읽는 사람이 형식을 하나만 기억하면 된다."""
+    cases = {"dev": "[DEV] ", "prod": "[PROD] ", "stage": "[STAGE] "}
+    for target, badge in cases.items():
+        monkeypatch.setenv("DBT_TARGET", target)
+        monkeypatch.setenv("ASK_SEOUL_TARGET", target)
+        assert send_embed("t", "d", webhook=_WEBHOOK)
+        assert sent[-1]["embeds"][0]["title"].startswith(badge), target
 
 
 def test_unset_environment_is_unknown_not_prod(monkeypatch, sent):
