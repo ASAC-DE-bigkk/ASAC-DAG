@@ -495,6 +495,34 @@ def test_snapshot_publish_writes_source_and_quality_evidence():
     }
 
 
+def test_snapshot_publish_uses_declared_freshness_field_not_event_time():
+    contract = _contract(
+        freshness_field="collected_at",
+        freshness_slo_minutes=240,
+    )
+    columns = [*COLUMNS, ("collected_at", "timestamp")]
+    rows = [{
+        "product_row_id": "r1",
+        "place_id": "p1",
+        "forecast_at": "2026-08-05T12:00:00",
+        "collected_at": "2026-08-04T09:30:00",
+    }]
+    d1 = FakeD1()
+
+    report = publish(
+        [contract],
+        FakeSource({contract.model_name: ReadPlan(columns=columns, rows=rows)}),
+        d1,
+        FakeSmoke(status="passed"),
+        source_run_id="run-distinct-freshness-axis",
+    )
+
+    assert report.records[0].freshness == "2026-08-04T09:30:00"
+    assert d1.catalog[contract.model_name]["time_axis"] == "forecast_at"
+    assert d1.catalog[contract.model_name]["freshness"] == "2026-08-04T09:30:00"
+    assert d1.product_evidence[contract.product_id]["quality"]["freshness_as_of"] == "2026-08-04T09:30:00"
+
+
 def test_snapshot_publish_records_passing_distinct_coverage_gate():
     contract = _contract(
         quality_coverage={

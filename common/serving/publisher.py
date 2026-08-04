@@ -99,9 +99,10 @@ def _now_iso() -> str:
 
 
 def _freshness(contract: ServingContract, rows: Sequence[dict[str, Any]]) -> str | None:
-    if not contract.event_time or not rows:
+    freshness_field = contract.freshness_field or contract.event_time
+    if not freshness_field or not rows:
         return None
-    values = [row.get(contract.event_time) for row in rows if row.get(contract.event_time) is not None]
+    values = [row.get(freshness_field) for row in rows if row.get(freshness_field) is not None]
     return str(max(values)) if values else None
 
 

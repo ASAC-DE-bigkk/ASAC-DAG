@@ -42,17 +42,18 @@
 | `zero_policy` | enum | `fail` \| `retain_last_good` \| `allow` \| `warn` | `retain_last_good` | [§5.1](#51-zero_policy) |
 | `publication_trigger` | object | `schedule_cron` 또는 `trigger_type: asset` | — | [§6](#6-publication_trigger) |
 
-> **조건부 필수 (v1.1)**: `event_time`을 선언한 제품은 `freshness_slo_minutes`도 필수다. 미선언 시 Validator FAIL. `event_time`이 없는 명부성 제품은 면제 — 신선도를 잴 시간축이 없는데 강제하면 죽은 메타데이터만 늘어난다(§3.3의 `estimated_*` 제외와 같은 철학). 모든 제품의 "게시 지연" 감시는 이미 필수인 `publication_trigger`가 담당한다.
+> **조건부 필수**: `event_time` 또는 `freshness_field`를 선언한 제품은 `freshness_slo_minutes`도 필수다. 미선언 시 Validator FAIL. 시간축이 없는 명부성 제품은 면제 — 신선도를 잴 축이 없는데 강제하면 죽은 메타데이터만 늘어난다(§3.3의 `estimated_*` 제외와 같은 철학). 모든 제품의 "게시 지연" 감시는 이미 필수인 `publication_trigger`가 담당한다.
 
 ### 3.2 선택 필드 — 없으면 폴백
 
 | 필드 | 타입 | 허용값 / 형식 | 폴백 | 설명 |
 |---|---|---|---|---|
 | `contract_version` | string | `v1` | `v1` | 계약 버전 |
-| `event_time` | string | 모델의 실제 컬럼 | 없음(시간축 없음) | Worker `from`/`to` 필터축, freshness 기준 컬럼 |
+| `event_time` | string | 모델의 실제 컬럼 | 없음(시간축 없음) | Worker `from`/`to` 필터축 및 append/incremental 워터마크 |
+| `freshness_field` | string | 모델의 실제 컬럼 | `event_time` | 실제 데이터 신선도를 나타내는 품질 시간축. 예보 발표축과 수집축처럼 `event_time`과 의미가 다를 때 명시 |
 | `retention_or_horizon` | string | 자유 서술 (예: `최근 2일`, `+3일 예보`) | 무제한 | 보존·예보 범위 |
 | `partial_policy` | object | `min_publish_ratio`: 0~1 | 검사 안 함 | [§5.2](#52-partial_policy) |
-| `freshness_slo_minutes` | int | > 0 | — | `event_time` 최신값 지연 임계. **v1.1: `event_time` 선언 제품은 조건부 필수** (§3.1 참조) |
+| `freshness_slo_minutes` | int | > 0 | — | `freshness_field`(미선언 시 `event_time`) 최신값의 wall-clock 지연 임계 (§3.1 참조) |
 | `shape` | enum | `wide` \| `rollup` \| `event` | 없음 | 서빙 형태 분류 |
 | `reliability` | object | rollup 전용, [§5.3](#53-reliability-rollup-전용) | 없음 | 표본 신뢰도 정책 |
 | `upsert_strategy` | enum | `merge` \| `exact_set` \| `incremental` (`publication_mode: upsert`에서만) | `merge` | `exact_set`은 staging 교체·복구, `incremental`은 워터마크(`event_time`) 이후 바뀐 그레인만 부분 upsert(§3.6) |
@@ -70,7 +71,7 @@
 
 ### 3.4 런타임 실측값 — Export가 기록 (YAML 아님)
 
-Publisher가 `_catalog`/publication 테이블 및 `d1_product_quality`에 매 게시마다 기록한다.
+Publisher가 `_catalog`/publication 테이블 및 `d1_product_quality`에 매 게시마다 기록한다. `freshness`/`freshness_as_of`는 `freshness_field`의 최댓값이며, 필드가 없으면 기존처럼 `event_time` 최댓값이다.
 
 `publication_id` · `source_run_id` · `source_row_count` · `published_row_count` · `d1_row_count` · `duplicate_primary_key_count` · `null_primary_key_count` · `published_bytes` · `freshness` · `published_at` · `serving_status` · `projection_schema_version` · `projection_schema_hash`
 
@@ -91,7 +92,7 @@ public_projection:
 
 - `public_projection.schema_version`은 공개 물리 projection identity 버전이다. D1 handoff schema도 아니고, `contract_version: v1`을 대체하지도 않는다.
 - `columns`는 순서가 있는 물리 컬럼 식별자 allowlist다. 표현식, alias, wildcard, rename, quoted SQL fragment는 허용하지 않는다.
-- projection에는 공개 물리키(`public_primary_key`, 없으면 `primary_key`), 선언된 `event_time`, `reliability.sample_count_field`가 모두 포함돼야 한다. Gold 원천보다 거친 rollup으로 일부 원천 PK 컬럼을 의도적으로 제거할 때만 `public_primary_key`를 별도로 선언한다.
+- projection에는 공개 물리키(`public_primary_key`, 없으면 `primary_key`), 선언된 `event_time`, `freshness_field`, `reliability.sample_count_field`가 모두 포함돼야 한다. Gold 원천보다 거친 rollup으로 일부 원천 PK 컬럼을 의도적으로 제거할 때만 `public_primary_key`를 별도로 선언한다.
 - projection identity hash는 `schema_version`과 각 컬럼의 `name`, 정규화된 `data_type`, `nullable`, `semantic_role`, `unit`만으로 계산한다. `description`과 `null_meaning`은 identity에서 제외한다.
 - ASAC-DBT validator schema `v1.4`가 정적 계약을 검증하고, Export DAG는 opt-in 계약에서 Trino `SHOW COLUMNS` 후 실제 물리 컬럼 존재와 필수 컬럼 포함을 다시 확인한 뒤 explicit quoted select list만 사용한다.
 
@@ -256,8 +257,9 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 
 - **export DAG 밖의 독립 관찰자(watchdog)** 가 다음 검사쌍 2개를 주기적으로 대조한다:
   1. `_catalog.published_at` ↔ `publication_trigger` 주기(cron 간격 / `max_interval_minutes`) — **D1 미갱신·죽은 DAG** 탐지
-  2. `_catalog.freshness` ↔ `freshness_slo_minutes` — **제때 게시됐지만 낡은 데이터** 탐지
+  2. `_catalog.freshness` ↔ `freshness_slo_minutes` — `freshness_field`(미선언 시 `event_time`) 기준으로 **제때 게시됐지만 낡은 데이터** 탐지
 - 위반 시 경보를 발생시킨다. (`serving_status` 소비자 노출 연계는 후속 검토)
+- K-Skill Worker 같은 공개 소비 게이트도 요청 시점 wall clock과 같은 SLO를 대조해 초과 제품을 fail-closed 한다. 이는 요청이 없으면 침묵하므로 독립 watchdog을 대체하지 않는다.
 - 이 조항은 **책임과 검사 대상만** 규정한다. watchdog 구현(위치·소유·알림 경로)은 별도 후속 이슈.
 - 계약에 이미 있는 선언·기록만 읽으므로 이 조항으로 인한 추가 스키마 변경은 없다.
 
@@ -270,6 +272,7 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 
 **개정 이력**
 
+- **v1.9** (2026-08-04): 조회·워터마크용 `event_time`과 실제 품질 신선도 축이 다른 제품을 위한 선택 필드 `freshness_field`를 추가했다. 미선언 계약은 기존처럼 `event_time`을 사용한다. 공개 projection 포함·실제 모델 컬럼 검증과 Worker wall-clock SLO fail-closed 책임을 명시했다. ASAC-DBT validator schema `v1.9`와 lockstep.
 - **v1.8** (2026-08-04): Gold보다 거친 공개 rollup을 위한 `public_primary_key`, projection 밖 Gold 축을 재현 가능하게 실측하는 `quality_coverage.measurement_scope: source_relation`, 동적 모집단용 명시적 `not_applicable_reason`을 추가했다. 미선언 계약의 기존 PK·published-row 측정 동작은 유지한다. ASAC-DBT validator schema `v1.8`와 lockstep.
 - **v1.7** (2026-08-04): `upsert_strategy` 허용값에 `incremental` 추가(허용값 추가라 하위 호환 v1 유지). 워터마크(`event_time`) 이후 바뀐 그레인만 부분 upsert해 D1 쓰기를 줄인다(§4). 전체-테이블 parity 면제·`verify_content_parity` 비호환. 미선언·`merge`·`exact_set` 동작은 불변. ASAC-DBT validator schema `v1.7`와 lockstep.
 - **v1.6** (2026-08-04): 선택 필드 `quality_coverage` 추가. 기대 distinct 집합과 최소 비율만 정적으로 선언하고, Publisher가 현재 source 행으로 측정·차단·기록한다. ASAC-DBT validator schema `v1.6`와 lockstep.

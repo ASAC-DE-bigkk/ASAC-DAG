@@ -50,6 +50,9 @@ class ServingContract:
     partial_min_ratio: float | None = None
     reliability: dict[str, Any] | None = None
     event_time: str | None = None
+    # Optional quality-time axis. When absent, Publisher preserves the v1 behavior
+    # and measures freshness from event_time.
+    freshness_field: str | None = None
     description: str = ""
     product_question: str = ""
     tests: tuple[str, ...] = ()
@@ -91,6 +94,8 @@ class ServingContract:
                 raise ValueError(
                     f"{self.product_id}: upsert_strategy=incremental 은 event_time(워터마크 컬럼) 선언이 필요"
                 )
+        if self.freshness_field is not None and not IDENTIFIER_RE.fullmatch(self.freshness_field):
+            raise ValueError(f"{self.product_id}: freshness_field must be a physical identifier")
 
 
 def _merged_meta(node: dict[str, Any]) -> dict[str, Any]:
@@ -222,6 +227,26 @@ def _load_public_primary_key(
         if missing:
             raise ValueError(f"{product_id}: public_primary_key columns missing from public_projection {','.join(missing)}")
     return tuple(raw)
+
+
+def _load_freshness_field(
+    product_id: str,
+    serving: dict[str, Any],
+    node: dict[str, Any],
+    public_projection: tuple[str, ...] | None,
+) -> str | None:
+    """Load an explicit quality-time axis without changing legacy event_time behavior."""
+    raw = serving.get("freshness_field")
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not IDENTIFIER_RE.fullmatch(raw):
+        raise ValueError(f"{product_id}: freshness_field must be a physical identifier")
+    manifest_columns = node.get("columns") if isinstance(node.get("columns"), dict) else {}
+    if raw not in manifest_columns:
+        raise ValueError(f"{product_id}: freshness_field unknown column {raw}")
+    if public_projection is not None and raw not in public_projection:
+        raise ValueError(f"{product_id}: freshness_field missing from public_projection: {raw}")
+    return raw
 
 
 def _load_source_evidence(product_id: str, serving: dict[str, Any]) -> tuple[dict[str, Any], ...] | None:
@@ -373,6 +398,9 @@ def load_contracts(
         public_primary_key = _load_public_primary_key(
             str(product_id), serving, node, public_projection
         )
+        freshness_field = _load_freshness_field(
+            str(product_id), serving, node, public_projection
+        )
         contracts.append(
             ServingContract(
                 product_id=str(product_id),
@@ -386,6 +414,7 @@ def load_contracts(
                 partial_min_ratio=partial.get("min_publish_ratio") if isinstance(partial, dict) else None,
                 reliability=serving.get("reliability") if isinstance(serving.get("reliability"), dict) else None,
                   event_time=serving.get("event_time"),
+                  freshness_field=freshness_field,
                   description=str(node.get("description", "")),
                   product_question=str(serving.get("product_question", "")),
                   tests=tuple(gates.get(uid, [])),
