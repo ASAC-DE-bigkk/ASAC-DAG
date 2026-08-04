@@ -34,7 +34,10 @@ from culture_ingest.source.ingest import (  # noqa: E402
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="culture 원본 적재 -> R2 raw/culture")
-    p.add_argument("--target", default="dev", choices=["dev", "prod"])
+    # 기본값을 두지 않는다(#78 `Z-7`) — 사람이 손으로 돌리는 스크립트라 어느 박스에서
+    # 도는지 스크립트가 추측하면 안 된다. "dev" 기본은 운영 박스에서 조용히 dev 버킷을,
+    # env 기본은 반대로 운영을 건드린다. 둘 다 물어보는 편이 낫다.
+    p.add_argument("--target", required=True, choices=["dev", "prod"])
     p.add_argument("--env-file", default=None, help="dotenv 폴백 (예: ../../../sample/.env)")
     p.add_argument("--datasets", nargs="*", default=None, help="슬러그들 또는 'all' (기본: 활성 전체)")
     p.add_argument("--date-from", default="", help="날짜창 엔드포인트용 시작일 YYYYMMDD")

@@ -59,7 +59,7 @@ _RETENTION_RE = re.compile(r"^[0-9]+[dhm]$")
 
 
 def run_maintenance(
-    target: str = "dev",
+    target: str | None = None,
     *,
     tables: tuple[str, ...] = MAINTAINED_TABLES,
     retention: str = "7d",
@@ -143,7 +143,7 @@ def _collect_live_state(client: TrinoClient, catalog: str, schema: str) -> tuple
 
 
 def run_storage_cleanup(
-    target: str = "dev",
+    target: str | None = None,
     *,
     retention_hours: int = 6,
     dry_run: bool = False,

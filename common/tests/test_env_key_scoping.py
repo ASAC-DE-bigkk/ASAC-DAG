@@ -37,8 +37,6 @@ GRANDFATHERED: dict[str, str] = {
     "domains/citydata/citydata_ingest/common/config.py":
         "SPLIT_DEV_PROBE/r2_prefix — 구 규약 박스(두 키 세트 공존) 지원. 전환 시 자격증명 해석이"
         " 바뀌므로 도메인 오너 판단 @kang-gyeongmin",
-    "domains/culture/culture_ingest/common/config.py":
-        "SPLIT_DEV_PROBE/r2_prefix — 위와 동일 구조 @yooseongjin527",
 }
 
 #: 테스트는 대상이 아니다 — 옛 키가 **무시되는지** 증명하려면 그 상태를 만들어야 한다.

@@ -59,40 +59,32 @@ class R2Settings:
 
 VALID_TARGETS = ("dev", "prod")
 
-# ── env 규약 2종 (ASK-Seoul#66) ────────────────────────────────────────────────
-# 구 규약(`sample/.env`): 한 파일에 dev·prod 를 함께 담고 접두어로 갈랐다.
-#   dev  -> ``R2_DEV_*`` / ``R2_DEV_DATA_CATALOG_*`` / ``TRINO_DEV_ICEBERG_CATALOG``
-#   prod -> ``R2_*``     / ``R2_DATA_CATALOG_*``     / ``TRINO_ICEBERG_CATALOG``
-# 신 규약(`sample/.env.dev`, `sample/.env.prod`): **파일 하나가 한 환경**이라
-#   접두어 없는 한 벌(``R2_*`` 등)만 두고, 그 값이 dev 창고냐 prod 창고냐를 가른다.
-#   즉 `_DEV_` 계열 키가 아예 없다.
+# ── env 키 규약 (ASK-Seoul#78 `Z-7` · ASAC-DAG#647) ───────────────────────────
+# **키 이름은 배포 환경을 담지 않는다.** canonical 한 벌(``R2_*``·``R2_DATA_CATALOG_*``·
+# ``TRINO_ICEBERG_CATALOG``)만 읽고, 어느 버킷·창고를 가리키는지는 그 키의 **값**이
+# 정한다. dev 로 되돌릴 때도 키를 바꾸는 게 아니라 값을 바꾼다.
 #
-# 그래서 접두어를 target 만으로 정하면 안 된다 — 신 규약 dev 에서 `R2_DEV_*` 를 찾다가
-# 자격증명이 통째로 비어 적재가 죽는다(실측: 4키 누락). 어느 규약인지는 `_DEV_` 키
-# 세트의 존재로 판별한다. 이 한 규칙을 R2·Data Catalog·Trino 카탈로그에 같이 적용한다.
-SPLIT_DEV_PROBE = "R2_DEV_BUCKET_NAME"
+# 예전엔 여기에 구 규약(`sample/.env` 한 파일에 dev·prod 를 담고 ``R2_DEV_*`` 접두어로
+# 가르던 방식)을 함께 지원하는 분기가 있었다(#66). 호스트 ENV2 개편이 그 키들을 없애
+# 분기는 이미 발동하지 않는 상태였고, 남겨 두면 **누가 그 키를 채우는 순간 같은 날짜
+# 기록이 두 버킷으로 갈린다.** 되살아날 통로 자체를 없앤다.
+# 공통 `common/tests/test_env_key_scoping.py` 가 이 규약을 전 도메인에서 막는다.
+R2_PREFIX = "R2_"
+CATALOG_PREFIX = "R2_DATA_CATALOG_"
 
 
-def uses_split_dev_keys(env: dict[str, str] | None = None) -> bool:
-    """구 규약(`_DEV_` 접두어로 dev/prod 를 가르는 env)인지 여부.
+def resolve_target(target: str | None = None) -> str:
+    """명시값이 없으면 런타임 env 를 따른다 — 기본값 ``"dev"`` 를 두지 않는다.
 
-    신 규약에서 `_DEV_` 로 폴백하지 않게 하고, 반대로 구 규약에서 접두어 없는 키
-    (=prod 창고)로 새지 않게 하는 게 목적이다. 후자를 놓치면 dev 런이 조용히
-    prod 버킷·카탈로그에 쓴다 — 되돌리기 어려운 종류의 사고다.
+    함수 기본값이 ``"dev"`` 면 호출 경로 하나가 target 을 빠뜨렸을 때 **운영에서 조용히
+    dev 자격증명을 본다**(`Z-7`). 환경을 아는 것은 호출자가 아니라 배포이므로, 모르면
+    추측하지 말고 배포가 선언한 값(``ASK_SEOUL_TARGET``→``DBT_TARGET``)을 읽는다.
     """
-    return bool(pick(SPLIT_DEV_PROBE, env or {}))
+    if target is None:
+        from common.runtime_guard import default_target  # 지연 import — CLI 경로 보호
 
-
-def r2_prefix(target: str, env: dict[str, str] | None = None) -> str:
-    """R2 자격증명 env 접두어."""
-    return "R2_DEV_" if target == "dev" and uses_split_dev_keys(env) else "R2_"
-
-
-def catalog_prefix(target: str, env: dict[str, str] | None = None) -> str:
-    """R2 Data Catalog env 접두어."""
-    if target == "dev" and uses_split_dev_keys(env):
-        return "R2_DEV_DATA_CATALOG_"
-    return "R2_DATA_CATALOG_"
+        target = default_target()
+    return normalize_target(target)
 
 
 def normalize_target(target: str) -> str:
@@ -104,15 +96,16 @@ def normalize_target(target: str) -> str:
     return target
 
 
-def build_r2_settings(target: str = "dev", env_file: str | None = None) -> R2Settings:
-    """``target``에 맞는 R2 설정을 해석.
+def build_r2_settings(target: str | None = None, env_file: str | None = None) -> R2Settings:
+    """``target``에 맞는 R2 설정을 해석. 생략하면 런타임 env 를 따른다.
 
-    구 규약: dev -> ``R2_DEV_*`` (버킷 ``seoul-dev``), prod -> ``R2_*`` (버킷 ``seoul``).
-    신 규약(`_DEV_` 키 없음): 양쪽 모두 ``R2_*`` — 값이 환경을 가른다. :func:`r2_prefix` 참고.
+    키는 canonical ``R2_*`` 한 벌뿐이고 dev/prod 는 그 **값**(버킷 ``seoul-dev`` /
+    ``seoul``)이 가른다 — `Z-7`. ``target`` 은 여전히 필요하다: 이 값이 R2 밖의
+    선택(창고·경로 규칙·게이트)까지 함께 가르기 때문이다.
     """
-    target = normalize_target(target)
+    target = resolve_target(target)
     env = load_env_file(env_file)
-    prefix = r2_prefix(target, env)
+    prefix = R2_PREFIX
     return R2Settings(
         target=target,
         endpoint=pick(prefix + "ENDPOINT", env),
@@ -182,19 +175,18 @@ class CatalogSettings:
     s3_region: str
 
 
-def build_catalog_settings(target: str = "dev", env_file: str | None = None) -> CatalogSettings:
+def build_catalog_settings(target: str | None = None, env_file: str | None = None) -> CatalogSettings:
     """``target``에 맞는 R2 Data Catalog 설정을 해석하고 시크릿을 redactor에 등록.
 
-    구 규약: dev -> ``R2_DEV_DATA_CATALOG_*``, prod -> ``R2_DATA_CATALOG_*``.
-    신 규약(`_DEV_` 키 없음): 양쪽 모두 ``R2_DATA_CATALOG_*`` (:func:`catalog_prefix`).
+    키는 canonical ``R2_DATA_CATALOG_*`` 한 벌 — 어느 카탈로그냐는 그 값이 정한다(`Z-7`).
     s3 자격은 ``build_r2_settings``와 동일 원천을 재사용한다. 필수값이 비면 이름을 적어
     RuntimeError — 자정런이 원인 불명으로 죽지 않게 사전 점검이 즉시 말해준다.
     """
     from common.security.redaction import register_secret
 
-    target = normalize_target(target)
+    target = resolve_target(target)
     env = load_env_file(env_file)
-    prefix = catalog_prefix(target, env)
+    prefix = CATALOG_PREFIX
     r2 = build_r2_settings(target, env_file)
     settings = CatalogSettings(
         target=target,

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from culture_ingest.common.config import normalize_target, uses_split_dev_keys
+from culture_ingest.common.config import resolve_target
 
 # 안전한 SQL 식별자(카탈로그/스키마/테이블)만 허용 — 인젝션 방지.
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -57,26 +57,19 @@ PROD_CATALOG = "iceberg"
 DEV_CATALOG = "iceberg_dev"
 
 
-def build_warehouse_settings(target: str = "dev", env: dict | None = None) -> WarehouseSettings:
-    """target에 맞는 Trino/Iceberg 접속 설정. 값은 환경변수에서.
+def build_warehouse_settings(target: str | None = None, env: dict | None = None) -> WarehouseSettings:
+    """target에 맞는 Trino/Iceberg 접속 설정. 값은 환경변수에서. 생략하면 런타임 env.
 
-    카탈로그 키는 **``TRINO_ICEBERG_CATALOG`` 하나**다(ASAC-DAG#647 — 키 이름이 배포 환경을
-    담지 않는다). 어느 창고를 가리키는지는 그 키의 **값**이 정한다.
+    카탈로그 키는 **``TRINO_ICEBERG_CATALOG`` 하나**다(`Z-7`·ASAC-DAG#647 — 키 이름이 배포
+    환경을 담지 않는다). 어느 창고를 가리키는지는 그 키의 **값**이 정한다: dev 로 돌리려면
+    키를 바꾸는 게 아니라 값을 ``iceberg_dev`` 로 둔다.
 
-    ⚠️ 다만 구 규약 박스(:func:`uses_split_dev_keys`)에는 ``iceberg``(prod 창고)와
-    ``iceberg_dev``(dev 창고)가 함께 살아 있고 선언값이 prod 를 가리킨다. 그 박스에서 dev 런이
-    선언값을 그대로 따르면 조용히 prod 창고에 쓴다(실측 확인). 그래서 **선언값이 prod 창고
-    이름일 때만** dev 기본(``iceberg_dev``)으로 되돌린다 — 명시적으로 dev 창고를 가리키는
-    선언값은 그대로 존중한다.
+    선언값이 없을 때만 ``iceberg`` 로 떨어진다 — 미설정 시 dev 를 추측하면 그게 `Z-7` 이
+    막으려는 "키/코드가 환경을 고르는" 자리가 되고, 반대로 운영에서 조용히 dev 창고를 본다.
     """
-    target = normalize_target(target)
+    target = resolve_target(target)
     env = env if env is not None else os.environ
-    dev = target == "dev" and uses_split_dev_keys(env)
-    declared = env.get("TRINO_ICEBERG_CATALOG")
-    if dev:
-        catalog = declared if declared and declared != PROD_CATALOG else DEV_CATALOG
-    else:
-        catalog = declared or PROD_CATALOG
+    catalog = env.get("TRINO_ICEBERG_CATALOG") or PROD_CATALOG
     return WarehouseSettings(
         host=env.get("TRINO_HOST", "trino"),
         port=int(env.get("TRINO_PORT", "8080")),

@@ -1,55 +1,60 @@
-"""ASK-Seoul#66 — env 규약 2종에서 R2·Data Catalog·Trino 카탈로그가 어디를 가리키는지.
+"""env 키 규약 — 키 이름은 배포 환경을 담지 않는다 (ASK-Seoul#78 `Z-7` · ASAC-DAG#647).
 
-구 규약(`sample/.env`)은 한 파일에 dev/prod 를 `_DEV_` 접두어로 갈라 담았고,
-신 규약(`sample/.env.dev`, `sample/.env.prod`)은 파일 하나가 한 환경이라 접두어 없는
-한 벌만 둔다. 접두어를 target 만으로 정하면 신 규약 dev 에서 자격증명이 통째로 비고,
-반대로 구 규약에서 접두어 없는 키로 폴백하면 **dev 런이 prod 창고에 쓴다**.
+canonical 한 벌(``R2_*``·``R2_DATA_CATALOG_*``·``TRINO_ICEBERG_CATALOG``)만 읽고, 어느
+버킷·창고냐는 그 키의 **값**이 정한다. dev 로 되돌릴 때도 키가 아니라 값을 바꾼다.
 
-여기서 고정하는 건 그 두 사고가 다시 나지 않는다는 것이다.
+예전엔 구 규약(`sample/.env` 한 파일에 dev·prod 를 ``R2_DEV_`` 접두어로 갈라 담던 방식)을
+함께 지원하는 분기가 있었고, 이 파일은 그 분기를 잠그고 있었다. 호스트 ENV2 개편이 그
+키들을 없애 분기는 이미 발동하지 않는 상태였고(#78 실측: 운영 맥미니·로컬 dev 박스 모두
+``R2_DEV_BUCKET_NAME`` 미설정), 남겨 두면 누가 그 키를 채우는 순간 같은 날짜 기록이 두
+버킷으로 갈린다. 그래서 통로 자체를 없애고, 이 파일이 잠그는 대상도 새 규약으로 바꾼다.
 """
 from __future__ import annotations
 
 import pytest
 
 from culture_ingest.common.config import (
+    CATALOG_PREFIX,
+    R2_PREFIX,
     build_r2_settings,
-    catalog_prefix,
     missing_r2,
-    r2_prefix,
-    uses_split_dev_keys,
+    resolve_target,
 )
-from culture_ingest.common.warehouse import build_warehouse_settings
+from culture_ingest.common.warehouse import DEV_CATALOG, PROD_CATALOG, build_warehouse_settings
 
-# 구 규약: dev(_DEV_)·prod(무접두어)를 한 파일에. 값은 전부 가짜.
-SPLIT_ENV = {
-    "R2_DEV_ENDPOINT": "https://dev.example",
-    "R2_DEV_ACCESS_KEY_ID": "dev-access",
-    "R2_DEV_SECRET_ACCESS_KEY": "dev-secret",
-    "R2_DEV_BUCKET_NAME": "seoul-dev",
-    "R2_ENDPOINT": "https://prod.example",
-    "R2_ACCESS_KEY_ID": "prod-access",
-    "R2_SECRET_ACCESS_KEY": "prod-secret",
-    "R2_BUCKET_NAME": "seoul",
-    "TRINO_ICEBERG_CATALOG": "iceberg",
-}
-
-# 신 규약: 접두어 없는 한 벌만. 값이 dev 창고를 가리킨다.
-SINGLE_ENV = {
+# 값이 dev 창고를 가리키는 env. 키에는 환경 표시가 없다. 값은 전부 가짜.
+DEV_ENV = {
     "R2_ENDPOINT": "https://dev.example",
     "R2_ACCESS_KEY_ID": "dev-access",
     "R2_SECRET_ACCESS_KEY": "dev-secret",
     "R2_BUCKET_NAME": "seoul-dev",
-    "TRINO_ICEBERG_CATALOG": "iceberg",
+    "TRINO_ICEBERG_CATALOG": DEV_CATALOG,
+}
+
+PROD_ENV = {
+    "R2_ENDPOINT": "https://prod.example",
+    "R2_ACCESS_KEY_ID": "prod-access",
+    "R2_SECRET_ACCESS_KEY": "prod-secret",
+    "R2_BUCKET_NAME": "seoul",
+    "TRINO_ICEBERG_CATALOG": PROD_CATALOG,
+}
+
+# 폐지된 키만 채워진 env — 자격증명으로 인정되면 안 된다.
+LEGACY_ONLY_ENV = {
+    "R2_DEV_ENDPOINT": "https://dev.example",
+    "R2_DEV_ACCESS_KEY_ID": "dev-access",
+    "R2_DEV_SECRET_ACCESS_KEY": "dev-secret",
+    "R2_DEV_BUCKET_NAME": "seoul-dev",
 }
 
 
 @pytest.fixture(autouse=True)
 def _clean_process_env(monkeypatch):
-    """``pick`` 은 os.environ 을 우선하므로, 실행 환경의 R2_*/TRINO_* 를 걷어낸다."""
+    """``pick`` 은 os.environ 을 우선하므로, 실행 환경의 R2_*/TRINO_*/타깃을 걷어낸다."""
     import os
 
     for key in list(os.environ):
-        if key.startswith(("R2_", "TRINO_")):
+        if key.startswith(("R2_", "TRINO_")) or key in ("ASK_SEOUL_TARGET", "DBT_TARGET"):
             monkeypatch.delenv(key, raising=False)
 
 
@@ -59,44 +64,21 @@ def _load(env: dict[str, str], tmp_path, name: str) -> str:
     return str(path)
 
 
-def test_split_env_is_detected_and_single_env_is_not():
-    assert uses_split_dev_keys(SPLIT_ENV) is True
-    assert uses_split_dev_keys(SINGLE_ENV) is False
-    assert uses_split_dev_keys({}) is False
+# ── 자격증명: canonical 한 벌만 ────────────────────────────────────────────────
+
+def test_credentials_come_from_canonical_keys_on_both_targets(tmp_path):
+    dev = build_r2_settings("dev", env_file=_load(DEV_ENV, tmp_path, ".env.dev"))
+    prod = build_r2_settings("prod", env_file=_load(PROD_ENV, tmp_path, ".env.prod"))
+    assert (dev.prefix, prod.prefix) == (R2_PREFIX, R2_PREFIX)
+    assert (dev.bucket, prod.bucket) == ("seoul-dev", "seoul")
 
 
-@pytest.mark.parametrize(
-    ("env", "target", "expected_r2", "expected_catalog"),
-    [
-        (SPLIT_ENV, "dev", "R2_DEV_", "R2_DEV_DATA_CATALOG_"),
-        (SPLIT_ENV, "prod", "R2_", "R2_DATA_CATALOG_"),
-        (SINGLE_ENV, "dev", "R2_", "R2_DATA_CATALOG_"),
-        (SINGLE_ENV, "prod", "R2_", "R2_DATA_CATALOG_"),
-    ],
-)
-def test_prefix_follows_env_convention(env, target, expected_r2, expected_catalog):
-    assert r2_prefix(target, env) == expected_r2
-    assert catalog_prefix(target, env) == expected_catalog
+def test_deprecated_keys_are_not_credentials(tmp_path):
+    """``R2_DEV_*`` 만 채워진 박스는 '자격증명 있음'이 아니라 **누락**으로 보고돼야 한다.
 
-
-def test_single_env_dev_resolves_credentials_instead_of_failing(tmp_path):
-    """신 규약 dev 에서 `R2_DEV_*` 를 찾다가 4키가 비던 회귀(실측)."""
-    settings = build_r2_settings("dev", env_file=_load(SINGLE_ENV, tmp_path, ".env.dev"))
-    assert missing_r2(settings) == []
-    assert settings.bucket == "seoul-dev"
-    assert settings.prefix == "R2_"
-
-
-def test_split_env_dev_still_uses_dev_bucket(tmp_path):
-    """구 규약에서 dev 가 prod 버킷으로 새지 않는다 — 되돌리기 어려운 사고 방지."""
-    settings = build_r2_settings("dev", env_file=_load(SPLIT_ENV, tmp_path, ".env"))
-    assert settings.bucket == "seoul-dev"
-    assert settings.prefix == "R2_DEV_"
-
-
-def test_missing_keys_are_reported_with_the_prefix_actually_used(tmp_path):
-    """에러 메시지가 '채워야 할 키'를 가리켜야 한다 — 신 규약이면 무접두어 이름."""
-    settings = build_r2_settings("dev", env_file=_load({"TRINO_ICEBERG_CATALOG": "iceberg"}, tmp_path, ".env.dev"))
+    폴백으로 인정하면 그 키를 채운 사람이 어느 버킷을 쓰는지 모른 채 계속 쓰게 된다.
+    """
+    settings = build_r2_settings("dev", env_file=_load(LEGACY_ONLY_ENV, tmp_path, ".env.dev"))
     assert missing_r2(settings) == [
         "R2_ENDPOINT",
         "R2_ACCESS_KEY_ID",
@@ -105,22 +87,47 @@ def test_missing_keys_are_reported_with_the_prefix_actually_used(tmp_path):
     ]
 
 
-def test_trino_catalog_never_falls_back_to_prod_on_split_env():
-    """🔴 핵심 안전선: 구 규약 박스에는 iceberg(prod)·iceberg_dev(dev)가 함께 산다.
+def test_catalog_prefix_is_single_set():
+    assert (R2_PREFIX, CATALOG_PREFIX) == ("R2_", "R2_DATA_CATALOG_")
 
-    dev 가 ``TRINO_ICEBERG_CATALOG``(=iceberg) 로 폴백하면 prod 창고에 쓴다.
-    ``TRINO_DEV_ICEBERG_CATALOG`` 미설정이어도 기본 ``iceberg_dev`` 를 유지해야 한다.
+
+# ── 창고: 선언된 '값'이 정한다 ─────────────────────────────────────────────────
+
+def test_warehouse_follows_the_declared_value():
+    assert build_warehouse_settings("dev", env=DEV_ENV).catalog == DEV_CATALOG
+    assert build_warehouse_settings("prod", env=PROD_ENV).catalog == PROD_CATALOG
+
+
+def test_warehouse_never_guesses_dev_when_unset():
+    """미설정 시 dev 를 추측하면 그게 곧 '코드가 환경을 고르는' 자리다(`Z-7`)."""
+    assert build_warehouse_settings("dev", env={}).catalog == PROD_CATALOG
+
+
+def test_declared_value_wins_even_when_it_contradicts_the_target():
+    """⚠️ 값 오설정(target=dev 인데 선언값이 prod 창고)은 여기서 안 막는다.
+
+    키 이름으로 되돌리면 `Z-7` 을 다시 어기는 것이라, 이 조합을 거르는 것은 **값 기반
+    게이트**(`common.runtime_guard.validate_dev_runtime` — weather·traffic 참고 구현)의
+    몫이다. culture 는 아직 그 게이트를 안 부르고, 로컬 dev 박스가 실제로 이 조합이다
+    (#78 에 확인 요청). 이 테스트는 그 사실을 눈에 보이게 두려고 있다.
     """
-    assert build_warehouse_settings("dev", env=SPLIT_ENV).catalog == "iceberg_dev"
-    assert build_warehouse_settings("prod", env=SPLIT_ENV).catalog == "iceberg"
+    assert build_warehouse_settings("dev", env=PROD_ENV).catalog == PROD_CATALOG
 
 
-def test_trino_catalog_uses_single_name_on_new_env():
-    """신 규약은 논리명을 ``iceberg`` 하나로 통일하고, 값이 환경을 가른다."""
-    assert build_warehouse_settings("dev", env=SINGLE_ENV).catalog == "iceberg"
-    assert build_warehouse_settings("prod", env=SINGLE_ENV).catalog == "iceberg"
+# ── target 해석: 모르면 추측하지 않고 배포 선언을 읽는다 ──────────────────────
+
+def test_target_defaults_to_the_runtime_declaration(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    assert resolve_target() == "prod"
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    assert resolve_target() == "dev"
 
 
-def test_split_env_honours_explicit_dev_catalog_override():
-    env = {**SPLIT_ENV, "TRINO_ICEBERG_CATALOG": "iceberg_dev_custom"}
-    assert build_warehouse_settings("dev", env=env).catalog == "iceberg_dev_custom"
+def test_explicit_target_still_wins(monkeypatch):
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    assert resolve_target("dev") == "dev"
+
+
+def test_typo_target_is_rejected():
+    with pytest.raises(ValueError):
+        resolve_target("prd")

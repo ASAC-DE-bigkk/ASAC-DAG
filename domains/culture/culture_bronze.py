@@ -9,7 +9,7 @@ raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 
 
 시크릿은 컨테이너 환경변수에서 온다(compose의 ``env_file: .env``가
 ``KOPIS_SERVICE_KEY``, ``SEOUL_API_KEY_CULT``, ``PUBLIC_DATA_API_KEY_CULT``(KCISA),
-``KOBIS_SERVICE_KEY``, ``R2_DEV_*``를 주입) -- 값은 여기 없다. 네 소스 키는 모두 필수
+``KOBIS_SERVICE_KEY``, ``R2_*``를 주입) -- 값은 여기 없다. 네 소스 키는 모두 필수
 (하나라도 없으면 전 적재 실패).
 
 파라미터 (트리거 시 덮어쓰기 가능):
@@ -87,9 +87,9 @@ KST = "Asia/Seoul"
 record_culture_problem = problem_failure_callback(domain="culture")
 
 DEFAULT_PARAMS = {
-    # 배포 env 를 따른다(ASK-Seoul#66) — 하드코딩 "dev" 는 prod 스택에서 dev 키(R2_DEV_*·
-    # iceberg_dev)를 찾다가 스케줄 런마다 실패한다. dev 박스에선 env 가 dev 라 기존과 동일.
-    # traffic·weather #561 · transit #575 와 같은 패턴.
+    # 배포 env 를 따른다(ASK-Seoul#66·#78 `Z-7`) — 하드코딩 "dev" 는 운영에서 조용히 dev
+    # 버킷·창고를 본다. 키 이름은 환경을 담지 않으므로(canonical `R2_*` 한 벌) 환경을
+    # 가르는 것은 이 target 과 각 키의 값뿐이다. traffic·weather #561 · transit #575 와 같은 패턴.
     "target": Param(
         default=default_target(),
         type="string",

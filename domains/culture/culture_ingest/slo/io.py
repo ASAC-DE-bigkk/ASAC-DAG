@@ -34,7 +34,7 @@ _DAG_RUNS_DATASET = "culture_dag_runs"  # -> bronze_culture_dag_runs
 METADB_CONN_ID = "airflow_metadb"
 
 
-def load_run_reports(*, target: str = "dev") -> int:
+def load_run_reports(*, target: str | None = None) -> int:
     """R2 _reports 스캔 → bronze_culture_run_report 적재. 반환: 신규 적재 행수."""
     sink = build_r2_sink(target)
     wh = build_warehouse(target, engine="trino")
@@ -97,7 +97,7 @@ def _int(value) -> str:
 
 def load_dag_runs(
     *,
-    target: str = "dev",
+    target: str | None = None,
     dag_ids: tuple[str, ...] = CULTURE_SLO_DAG_IDS,
     window_days: int = 14,
     domain: str = "culture",

@@ -1,4 +1,7 @@
-"""#203 — R2 Data Catalog 설정(dev/prod 분기·누락 에러·redaction)과 엔진 디스패치.
+"""#203 — R2 Data Catalog 설정(누락 에러·redaction)과 엔진 디스패치.
+
+키는 dev·prod 가 같다(canonical 한 벌) — 무엇이 갈리는지는 그 **값**이다(#78 `Z-7`).
+그래서 아래 두 env 는 키가 같고 값만 다르다.
 
 pyiceberg 불필요(설정·디스패치는 lazy import 밖) — 로컬에서도 돈다.
 """
@@ -12,13 +15,13 @@ FAKE_TOKEN = "FAKECATALOGTOKEN1234567890"
 FAKE_SECRET = "FAKER2SECRETKEY0987654321"
 
 CATALOG_ENV = {
-    "R2_DEV_DATA_CATALOG_URI": "https://catalog.example/dev",
-    "R2_DEV_DATA_CATALOG_WAREHOUSE": "acct_seoul-dev",
-    "R2_DEV_DATA_CATALOG_TOKEN": FAKE_TOKEN,
-    "R2_DEV_ENDPOINT": "https://r2.example",
-    "R2_DEV_ACCESS_KEY_ID": "fake-access",
-    "R2_DEV_SECRET_ACCESS_KEY": FAKE_SECRET,
-    "R2_DEV_BUCKET_NAME": "seoul-dev",
+    "R2_DATA_CATALOG_URI": "https://catalog.example/dev",
+    "R2_DATA_CATALOG_WAREHOUSE": "acct_seoul-dev",
+    "R2_DATA_CATALOG_TOKEN": FAKE_TOKEN,
+    "R2_ENDPOINT": "https://r2.example",
+    "R2_ACCESS_KEY_ID": "fake-access",
+    "R2_SECRET_ACCESS_KEY": FAKE_SECRET,
+    "R2_BUCKET_NAME": "seoul-dev",
 }
 
 
@@ -33,7 +36,7 @@ def _dev_env(monkeypatch):
             red._literals.remove(s)
 
 
-def test_build_catalog_settings_dev_prefix(_dev_env):
+def test_build_catalog_settings_dev_values(_dev_env):
     from culture_ingest.common.config import build_catalog_settings
     s = build_catalog_settings("dev")
     assert s.uri == "https://catalog.example/dev"
@@ -45,7 +48,7 @@ def test_build_catalog_settings_dev_prefix(_dev_env):
     assert s.s3_region == "auto"
 
 
-def test_build_catalog_settings_prod_prefix(monkeypatch):
+def test_build_catalog_settings_prod_values(monkeypatch):
     monkeypatch.setenv("R2_DATA_CATALOG_URI", "https://catalog.example/prod")
     monkeypatch.setenv("R2_DATA_CATALOG_WAREHOUSE", "acct_seoul")
     monkeypatch.setenv("R2_DATA_CATALOG_TOKEN", "FAKEPRODTOKEN123456")
@@ -63,9 +66,9 @@ def test_build_catalog_settings_prod_prefix(monkeypatch):
 
 
 def test_build_catalog_settings_missing_raises(monkeypatch, _dev_env):
-    monkeypatch.delenv("R2_DEV_DATA_CATALOG_URI", raising=False)
+    monkeypatch.delenv("R2_DATA_CATALOG_URI", raising=False)
     from culture_ingest.common.config import build_catalog_settings
-    with pytest.raises(RuntimeError, match="R2_DEV_DATA_CATALOG_URI"):
+    with pytest.raises(RuntimeError, match="R2_DATA_CATALOG_URI"):
         build_catalog_settings("dev")
 
 
