@@ -427,7 +427,8 @@ def normalize_mapped_results(pulled) -> list[dict]:
 
 
 def build_run_report(
-    summaries: list[dict], ctx: RunContext, expected_total: int, *, load_failed: bool = False
+    summaries: list[dict], ctx: RunContext, expected_total: int, *, load_failed: bool = False,
+    environment: str | None = None, dag_id: str | None = None, task_id: str | None = None,
 ) -> dict:
     """데이터셋별 요약을 모아 run 단위 신뢰성 리포트를 만든다.
 
@@ -445,6 +446,14 @@ def build_run_report(
       datasets[] 안의 ``rows``/``iceberg_rows`` 도 같은 출처를 따른다.
     * NULL≠0 — 측정이 없었던 자리는 0 이 아니라 None. 특히 적재 태스크가 죽은 run 을
       "전 데이터셋 0행 적재"로 신고하던 것이 확정안이 금지한 바로 그 모양이었다.
+
+    ``environment``/``dag_id``/``task_id`` 는 ASK-Seoul#78 `F-*` 식별 묶음이다. **이 셋만은
+    리포트를 만드는 쪽이 실어야 한다** — 조회 DB 적재기는 payload 에 없으면
+    ``target``→``environment``→**적재기 자신의 실행 환경** 순으로 폴백하므로
+    (``common/ops/ingest.py``), 비워 두면 dev 에서 돌린 적재기가 prod 기록을 dev 로,
+    그 반대도 마찬가지로 찍는다. 실제로 `Z-7` 양방향 오염으로 관측된 모양이다.
+    나머지 `F-*` 필드(``schema_version``·``observed_date_kst``·``source_path_date``·
+    ``duration_hms``)는 적재기가 채우므로 도메인이 중복해 싣지 않는다.
     """
     # object_keys는 태스크 간 전달용 — 리포트 JSON에는 싣지 않는다(리니지는 _manifest.json).
     rows = [{k: v for k, v in s.items() if k != "object_keys"} for s in summaries if s]
@@ -475,6 +484,11 @@ def build_run_report(
     return redact({
         "domain": "culture",
         "layer": "bronze",
+        # 이 기록이 어느 환경/어느 DAG 것인지. 값이 없으면 지어내지 않고 None 을 둔다 —
+        # 적재기가 자기 환경으로 채우는 것보다야 낫지만, 그 폴백을 안 타게 하는 게 목적이다.
+        "environment": environment,
+        "dag_id": dag_id,
+        "task_id": task_id,
         # 기록 고유키·기록 수(#619 정정 ③). identity 에 재시도 횟수를 넣지 않는 이유는
         # ops.record_spec 모듈 docstring 참조 — 재시도가 기록을 늘리면 이중 집계가 된다.
         "event_id": build_event_id(

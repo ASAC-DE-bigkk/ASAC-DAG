@@ -305,7 +305,14 @@ def _report(**context) -> None:
         if name not in returned
     ]
     expected = len(planned) or len(summaries)  # plan XCom이 없으면 성공 수로 폴백
-    report = build_run_report(summaries + missing, ctx, expected_total=expected, load_failed=load_failed)
+    report = build_run_report(
+        summaries + missing, ctx, expected_total=expected, load_failed=load_failed,
+        # ASK-Seoul#78 F-* 식별 — 리포트가 자기 환경·DAG 를 밝힌다. 적재기 폴백에 맡기면
+        # 어느 환경에서 적재기를 돌렸는지가 기록의 환경이 된다(Z-7 양방향 오염).
+        environment=normalize_target(params["target"]),
+        dag_id=context["dag_run"].dag_id,
+        task_id=context["ti"].task_id,
+    )
 
     cov = report["coverage"]
     pct = "--" if cov["coverage_pct"] is None else cov["coverage_pct"]
