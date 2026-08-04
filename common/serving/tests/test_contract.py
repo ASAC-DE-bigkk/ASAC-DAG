@@ -210,7 +210,78 @@ def test_load_contracts_reads_quality_coverage_gate(tmp_path):
         "field": "value",
         "expected_distinct_count": 427,
         "minimum_ratio": 1.0,
+        "measurement_scope": "published_rows",
     }
+
+
+def test_load_contracts_reads_source_relation_coverage_outside_public_projection(tmp_path):
+    path = _projection_manifest(
+        tmp_path,
+        projection={"schema_version": "1.0.0", "columns": ["product_row_id", "value"]},
+        column_overrides={
+            "dataset": {
+                "description": "source dataset",
+                "data_type": "VARCHAR",
+                "config": {
+                    "meta": {
+                        "nullable": False,
+                        "semantic_role": "source_identifier",
+                        "unit": "not_applicable",
+                    }
+                },
+            }
+        },
+    )
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["quality_coverage"] = {
+        "field": "dataset",
+        "expected_distinct_count": 152,
+        "minimum_ratio": 0.95,
+        "measurement_scope": "source_relation",
+    }
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_contracts(path)[0]
+
+    assert contract.quality_coverage == {
+        "field": "dataset",
+        "expected_distinct_count": 152,
+        "minimum_ratio": 0.95,
+        "measurement_scope": "source_relation",
+    }
+
+
+def test_load_contracts_reads_explicit_not_applicable_coverage_reason(tmp_path):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["quality_coverage"] = {
+        "not_applicable_reason": "eligible source population is dynamic",
+    }
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_contracts(path)[0]
+
+    assert contract.quality_coverage == {
+        "not_applicable_reason": "eligible source population is dynamic",
+    }
+
+
+def test_load_contracts_uses_public_primary_key_for_rollup_projection(tmp_path):
+    path = _projection_manifest(
+        tmp_path,
+        projection={"schema_version": "1.0.0", "columns": ["product_row_id", "value"]},
+    )
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["primary_key"] = ["product_row_id", "value"]
+    serving["public_primary_key"] = ["product_row_id"]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_contracts(path)[0]
+
+    assert contract.primary_key == ("product_row_id",)
 
 
 def test_load_contracts_rejects_source_evidence_missing_attribution(tmp_path):

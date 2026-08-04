@@ -13,9 +13,16 @@ def test_missing_api_base_url_is_not_evaluated_smoke():
 
 
 class FakeCursor:
-    def __init__(self, show_columns_rows: list[tuple[str, str]], select_rows: list[tuple[Any, ...]]) -> None:
+    def __init__(
+        self,
+        show_columns_rows: list[tuple[str, str]],
+        select_rows: list[tuple[Any, ...]],
+        *,
+        distinct_count: int | None = None,
+    ) -> None:
         self.show_columns_rows = show_columns_rows
         self.select_rows = select_rows
+        self.distinct_count = distinct_count
         self.statements: list[str] = []
         self.description: list[tuple[str]] = []
         self._pending: str | None = None
@@ -25,6 +32,10 @@ class FakeCursor:
         if sql.startswith("SHOW COLUMNS"):
             self._pending = "show"
             self.description = []
+            return
+        if sql.startswith("SELECT COUNT(DISTINCT"):
+            self._pending = "distinct_count"
+            self.description = [("_col0",)]
             return
         self._pending = "select"
         selected = sql.removeprefix("SELECT ").split(" FROM ", 1)[0]
@@ -37,6 +48,11 @@ class FakeCursor:
         if self._pending == "show":
             return self.show_columns_rows
         return self.select_rows
+
+    def fetchone(self) -> tuple[int]:
+        assert self._pending == "distinct_count"
+        assert self.distinct_count is not None
+        return (self.distinct_count,)
 
 
 def _contract(**overrides: Any) -> ServingContract:
@@ -79,6 +95,36 @@ def test_opted_in_snapshot_read_uses_exact_quoted_projection_and_columns():
     assert plan.rows == [
         {"product_row_id": "row-1", "place_id": "place-1", "forecast_at": "2026-07-30 00:00:00"}
     ]
+
+
+def test_source_relation_coverage_is_measured_before_projected_read():
+    cursor = FakeCursor(
+        [
+            ("product_row_id", "varchar"),
+            ("place_id", "varchar"),
+            ("forecast_at", "timestamp"),
+            ("dataset", "varchar"),
+        ],
+        [("row-1", "place-1", "2026-07-30 00:00:00")],
+        distinct_count=147,
+    )
+    contract = _contract(
+        quality_coverage={
+            "field": "dataset",
+            "expected_distinct_count": 152,
+            "minimum_ratio": 0.95,
+            "measurement_scope": "source_relation",
+        }
+    )
+
+    plan = TrinoSourceReader(cursor, "iceberg_dev", "weather").read(contract, last_good_max=None)
+
+    assert cursor.statements == [
+        "SHOW COLUMNS FROM iceberg_dev.weather.gold_weather_place_current_outlook",
+        'SELECT COUNT(DISTINCT "dataset") FROM iceberg_dev.weather.gold_weather_place_current_outlook',
+        'SELECT "product_row_id","place_id","forecast_at" FROM iceberg_dev.weather.gold_weather_place_current_outlook',
+    ]
+    assert plan.coverage_observed_distinct_count == 147
 
 
 def test_opted_in_append_full_and_incremental_reads_use_projection_and_preserve_delete_window():

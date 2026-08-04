@@ -523,6 +523,63 @@ def test_snapshot_publish_records_passing_distinct_coverage_gate():
     }
 
 
+def test_snapshot_publish_uses_source_relation_coverage_observation():
+    contract = _contract(
+        quality_coverage={
+            "field": "dataset",
+            "expected_distinct_count": 152,
+            "minimum_ratio": 0.95,
+            "measurement_scope": "source_relation",
+        }
+    )
+    d1 = FakeD1()
+
+    publish(
+        [contract],
+        FakeSource({
+            contract.model_name: ReadPlan(
+                columns=COLUMNS,
+                rows=_rows(3),
+                coverage_observed_distinct_count=147,
+            )
+        }),
+        d1,
+        FakeSmoke(status="passed"),
+        source_run_id="coverage-source-relation",
+    )
+
+    assert d1.product_evidence[contract.product_id]["quality"]["coverage"] == {
+        "field": "dataset",
+        "expected_distinct_count": 152,
+        "observed_distinct_count": 147,
+        "minimum_ratio": 0.95,
+        "ratio": 147 / 152,
+        "status": "passed",
+    }
+
+
+def test_snapshot_publish_records_explicit_not_applicable_coverage():
+    contract = _contract(
+        quality_coverage={
+            "not_applicable_reason": "eligible source population is dynamic",
+        }
+    )
+    d1 = FakeD1()
+
+    publish(
+        [contract],
+        FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(3))}),
+        d1,
+        FakeSmoke(status="passed"),
+        source_run_id="coverage-not-applicable",
+    )
+
+    assert d1.product_evidence[contract.product_id]["quality"]["coverage"] == {
+        "status": "not_applicable",
+        "reason": "eligible source population is dynamic",
+    }
+
+
 def test_snapshot_publish_rejects_coverage_below_contract_threshold_before_write():
     contract = _contract(
         quality_coverage={

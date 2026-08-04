@@ -57,8 +57,9 @@
 | `reliability` | object | rollup 전용, [§5.3](#53-reliability-rollup-전용) | 없음 | 표본 신뢰도 정책 |
 | `upsert_strategy` | enum | `merge` \| `exact_set` \| `incremental` (`publication_mode: upsert`에서만) | `merge` | `exact_set`은 staging 교체·복구, `incremental`은 워터마크(`event_time`) 이후 바뀐 그레인만 부분 upsert(§3.6) |
 | `public_projection` | object | `schema_version` + ordered `columns` | 없음 | [§3.5](#35-public_projection-v14-선택-필드) — D1/public 물리 컬럼 allowlist |
+| `public_primary_key` | list[string] | `public_projection.columns` 안의 실제 컬럼 | `primary_key` | Gold보다 거친 공개 rollup의 D1 자연키 |
 | `source_evidence` | list[object] | [§3.6](#36-source_evidence-v15-선택-필드) 7개 필드 | 없음 | 공개 소스 URL·이용허락·재배포 범위·출처표시의 정적 증거 |
-| `quality_coverage` | object | [§3.7](#37-quality_coverage-v16-선택-필드) 3개 필드 | 없음 | 공개 축의 기대 distinct 집합과 최소 커버리지 비율 |
+| `quality_coverage` | object | [§3.7](#37-quality_coverage-v16-선택-필드) 측정 선언 또는 명시적 N/A | 없음 | 공개 축의 기대 distinct 집합과 최소 커버리지 비율 |
 
 ### 3.3 YAML에서 제외 — 실측·타 소유
 
@@ -90,7 +91,7 @@ public_projection:
 
 - `public_projection.schema_version`은 공개 물리 projection identity 버전이다. D1 handoff schema도 아니고, `contract_version: v1`을 대체하지도 않는다.
 - `columns`는 순서가 있는 물리 컬럼 식별자 allowlist다. 표현식, alias, wildcard, rename, quoted SQL fragment는 허용하지 않는다.
-- projection에는 `primary_key`, 선언된 `event_time`, `reliability.sample_count_field`가 모두 포함돼야 한다.
+- projection에는 공개 물리키(`public_primary_key`, 없으면 `primary_key`), 선언된 `event_time`, `reliability.sample_count_field`가 모두 포함돼야 한다. Gold 원천보다 거친 rollup으로 일부 원천 PK 컬럼을 의도적으로 제거할 때만 `public_primary_key`를 별도로 선언한다.
 - projection identity hash는 `schema_version`과 각 컬럼의 `name`, 정규화된 `data_type`, `nullable`, `semantic_role`, `unit`만으로 계산한다. `description`과 `null_meaning`은 identity에서 제외한다.
 - ASAC-DBT validator schema `v1.4`가 정적 계약을 검증하고, Export DAG는 opt-in 계약에서 Trino `SHOW COLUMNS` 후 실제 물리 컬럼 존재와 필수 컬럼 포함을 다시 확인한 뒤 explicit quoted select list만 사용한다.
 
@@ -126,14 +127,25 @@ quality_coverage:
   field: admin_dong_code
   expected_distinct_count: 426
   minimum_ratio: 1.0
+  measurement_scope: published_rows  # 기본값
 ```
 
 규칙:
 
-- 정확히 `field`, `expected_distinct_count`, `minimum_ratio`만 선언한다. `field`는 모델의 물리 컬럼이며 `public_projection`을 선언했다면 그 allowlist 안에 포함돼야 한다.
+- 측정 선언은 `field`, `expected_distinct_count`, `minimum_ratio`를 필수로 하고 `measurement_scope`를 선택적으로 둔다. 기본값 `published_rows`는 공개 projection 행에서 측정하며 `field`가 projection 안에 있어야 한다.
+- 공개 rollup이 coverage 축을 의도적으로 제거하는 경우 `measurement_scope: source_relation`을 선언한다. 이때 Publisher는 projection 적용 전 Gold relation에서 distinct를 실측하며, `field`는 모델의 실제 컬럼이되 공개 projection에 포함될 필요가 없다.
 - `expected_distinct_count`는 1 이상 정수, `minimum_ratio`는 0 초과 1 이하다.
 - Publisher는 reliability 적용 뒤 source 행에서 `field`의 NULL이 아닌 distinct 수·ratio·pass/fail을 계산하고, 기준 미달이면 **D1 write 전에 publication을 실패**시킨다.
 - 통과한 측정값은 `d1_product_quality.coverage_json`에 source/right·catalog와 같은 `publication_id`로 기록한다. coverage 미선언/미측정은 K-Skill live-bundle eligibility에서 통과로 해석하지 않는다.
+
+정적 기대 모집단을 재현할 수 없는 동적 제품은 숫자를 꾸며내지 않고 사유를 명시한다.
+
+```yaml
+quality_coverage:
+  not_applicable_reason: 최근 24시간 유효 관측이 존재하는 주차장 집합이 매 게시마다 변동
+```
+
+이 형식은 `not_applicable_reason` 하나만 허용하며, Publisher는 `status: not_applicable`과 사유를 같은 publication에 기록한다. Worker는 사유 없는 N/A나 coverage 자체가 없는 제품은 계속 차단한다.
 
 ## 4. `publication_mode`
 
@@ -258,6 +270,7 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 
 **개정 이력**
 
+- **v1.8** (2026-08-04): Gold보다 거친 공개 rollup을 위한 `public_primary_key`, projection 밖 Gold 축을 재현 가능하게 실측하는 `quality_coverage.measurement_scope: source_relation`, 동적 모집단용 명시적 `not_applicable_reason`을 추가했다. 미선언 계약의 기존 PK·published-row 측정 동작은 유지한다. ASAC-DBT validator schema `v1.8`와 lockstep.
 - **v1.7** (2026-08-04): `upsert_strategy` 허용값에 `incremental` 추가(허용값 추가라 하위 호환 v1 유지). 워터마크(`event_time`) 이후 바뀐 그레인만 부분 upsert해 D1 쓰기를 줄인다(§4). 전체-테이블 parity 면제·`verify_content_parity` 비호환. 미선언·`merge`·`exact_set` 동작은 불변. ASAC-DBT validator schema `v1.7`와 lockstep.
 - **v1.6** (2026-08-04): 선택 필드 `quality_coverage` 추가. 기대 distinct 집합과 최소 비율만 정적으로 선언하고, Publisher가 현재 source 행으로 측정·차단·기록한다. ASAC-DBT validator schema `v1.6`와 lockstep.
 - **v1.5** (2026-08-04): 선택 필드 `source_evidence` 추가. V1 live bundle 후보는 모든 원천의 source URL·이용허락·재배포 범위·출처표시·확인일을 선언하고, Publisher는 source와 현재 품질 실측을 동일 publication_id로 D1에 게시한다.

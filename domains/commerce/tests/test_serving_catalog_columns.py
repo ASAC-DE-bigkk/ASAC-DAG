@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "include"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -49,3 +52,142 @@ def test_gold_declaration_wins_over_nothing_and_derived_never_overwrites_it():
     col_rows, _ext, _pats = _handoff_rows(
         Serve(*SPEC_ARGS), meta, [("share", "double")], "pub1")
     assert col_rows[0]["description_ko"] == "롤업 재계산 의미."
+
+
+def test_handoff_uses_public_rollup_primary_key_when_declared():
+    from gold.serving_export import Serve, _handoff_rows
+
+    meta = {
+        "columns": {},
+        "serving": {
+            "primary_key": ["ym", "dataset", "event_type"],
+            "public_primary_key": ["ym", "event_type"],
+        },
+    }
+
+    _cols, ext, _patterns = _handoff_rows(
+        Serve(*SPEC_ARGS), meta, [("ym", "varchar"), ("event_type", "varchar")], "pub1"
+    )
+
+    assert ext["primary_key"] == '["ym", "event_type"]'
+
+
+class _CoverageCursor:
+    def __init__(self, observed: int):
+        self.observed = observed
+        self.statements: list[str] = []
+
+    def execute(self, sql):
+        self.statements.append(sql)
+
+    def fetchone(self):
+        return (self.observed,)
+
+
+def _public_contract(**overrides):
+    values = {
+        "product_id": "commerce_flow_monthly",
+        "model_name": "gold_license_flow_monthly",
+        "primary_key": ("ym", "event_type", "major", "category", "gu_code"),
+        "public_projection": ("ym", "event_type", "major", "category", "gu_code", "cnt"),
+        "event_time": "ym",
+        "freshness_slo_minutes": 100_800,
+        "projection_schema_version": "1.0.0",
+        "projection_schema_hash": "projection-hash",
+        "quality_coverage": {
+            "field": "dataset",
+            "expected_distinct_count": 152,
+            "minimum_ratio": 0.95,
+            "measurement_scope": "source_relation",
+        },
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_commerce_coverage_is_measured_from_full_source_relation():
+    from gold.serving_export import _measure_source_relation_coverage
+
+    cursor = _CoverageCursor(147)
+    _observed, coverage = _measure_source_relation_coverage(
+        cursor,
+        "iceberg_dev.commerce",
+        _public_contract(),
+    )
+
+    assert cursor.statements == [
+        'SELECT COUNT(DISTINCT "dataset") FROM iceberg_dev.commerce.gold_license_flow_monthly'
+    ]
+    assert coverage == {
+        "field": "dataset",
+        "expected_distinct_count": 152,
+        "observed_distinct_count": 147,
+        "minimum_ratio": 0.95,
+        "ratio": 147 / 152,
+        "status": "passed",
+    }
+
+
+def test_commerce_coverage_fails_before_publication_below_threshold():
+    from gold.serving_export import _measure_source_relation_coverage
+
+    with pytest.raises(RuntimeError, match="quality coverage failed"):
+        _measure_source_relation_coverage(
+            _CoverageCursor(140),
+            "iceberg_dev.commerce",
+            _public_contract(),
+        )
+
+
+def test_public_quality_evidence_checks_projection_pk_rows_and_freshness():
+    from gold.serving_export import _public_quality_evidence
+
+    columns = ["ym", "event_type", "major", "category", "gu_code", "cnt"]
+    rows = [
+        ["2026-01", "open", "health", "clinic", "11680", 2],
+        ["2026-02", "open", "health", "clinic", "11680", 3],
+    ]
+    coverage = {"status": "passed"}
+
+    quality = _public_quality_evidence(
+        _public_contract(),
+        columns,
+        rows,
+        d1_row_count=2,
+        coverage=coverage,
+        measured_at="2026-08-04T00:00:00+00:00",
+    )
+
+    assert quality == {
+        "source_row_count": 2,
+        "d1_row_count": 2,
+        "duplicate_primary_key_count": 0,
+        "null_primary_key_count": 0,
+        "freshness_as_of": "2026-02",
+        "freshness_slo_minutes": 100_800,
+        "serving_status": "published",
+        "measured_at": "2026-08-04T00:00:00+00:00",
+        "coverage": coverage,
+        "projection_schema_version": "1.0.0",
+        "projection_schema_hash": "projection-hash",
+    }
+
+
+def test_public_quality_evidence_rejects_duplicate_rollup_primary_key():
+    from gold.serving_export import _public_quality_evidence
+
+    columns = ["ym", "event_type", "major", "category", "gu_code", "cnt"]
+    rows = [
+        ["2026-01", "open", "health", "clinic", "11680", 2],
+        ["2026-01", "open", "health", "clinic", "11680", 3],
+    ]
+
+    with pytest.raises(RuntimeError, match="public primary key validation failed"):
+        _public_quality_evidence(
+            _public_contract(),
+            columns,
+            rows,
+            d1_row_count=2,
+            coverage=None,
+            measured_at="2026-08-04T00:00:00+00:00",
+        )

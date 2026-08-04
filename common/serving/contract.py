@@ -29,7 +29,10 @@ SOURCE_EVIDENCE_FIELDS = (
     "rights_checked_at",
 )
 SOURCE_EVIDENCE_REDISTRIBUTION = frozenset({"allowed_with_attribution", "prohibited", "unknown"})
-QUALITY_COVERAGE_FIELDS = ("field", "expected_distinct_count", "minimum_ratio")
+QUALITY_COVERAGE_REQUIRED_FIELDS = ("field", "expected_distinct_count", "minimum_ratio")
+QUALITY_COVERAGE_OPTIONAL_FIELDS = ("measurement_scope",)
+QUALITY_COVERAGE_MEASUREMENT_SCOPES = frozenset({"published_rows", "source_relation"})
+QUALITY_COVERAGE_NOT_APPLICABLE_FIELDS = ("not_applicable_reason",)
 
 
 @dataclass(frozen=True)
@@ -189,6 +192,38 @@ def _load_public_projection(
     return public_columns, schema_version, _projection_schema_hash(schema_version, public_columns, manifest_columns)
 
 
+def _load_public_primary_key(
+    product_id: str,
+    serving: dict[str, Any],
+    node: dict[str, Any],
+    public_projection: tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    """Return the physical public/D1 key, defaulting to the source model key.
+
+    Rollup exporters may intentionally drop source-grain columns. In that case the
+    public key must be declared explicitly and remain inside the public projection.
+    """
+    explicit_public_key = "public_primary_key" in serving
+    raw = serving.get("public_primary_key", serving.get("primary_key"))
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{product_id}: public_primary_key/primary_key must be a non-empty list")
+    if any(not isinstance(column, str) or not IDENTIFIER_RE.fullmatch(column) for column in raw):
+        raise ValueError(f"{product_id}: public_primary_key must contain physical identifiers")
+    if len(set(raw)) != len(raw):
+        raise ValueError(f"{product_id}: public_primary_key contains duplicate columns")
+    if explicit_public_key or public_projection is not None:
+        manifest_columns = node.get("columns") if isinstance(node.get("columns"), dict) else {}
+        missing = [column for column in raw if column not in manifest_columns]
+        if missing:
+            raise ValueError(f"{product_id}: public_primary_key unknown columns {','.join(missing)}")
+    if public_projection is not None:
+        projection = set(public_projection)
+        missing = [column for column in raw if column not in projection]
+        if missing:
+            raise ValueError(f"{product_id}: public_primary_key columns missing from public_projection {','.join(missing)}")
+    return tuple(raw)
+
+
 def _load_source_evidence(product_id: str, serving: dict[str, Any]) -> tuple[dict[str, Any], ...] | None:
     """Load source/right records without silently accepting incomplete evidence.
 
@@ -254,8 +289,19 @@ def _load_quality_coverage(
     raw = serving.get("quality_coverage")
     if raw is None:
         return None
-    if not isinstance(raw, dict) or set(raw) != set(QUALITY_COVERAGE_FIELDS):
-        raise ValueError(f"{product_id}: quality_coverage must contain exactly {','.join(QUALITY_COVERAGE_FIELDS)}")
+    if not isinstance(raw, dict):
+        raise ValueError(f"{product_id}: quality_coverage must be object")
+    if set(raw) == set(QUALITY_COVERAGE_NOT_APPLICABLE_FIELDS):
+        reason = raw.get("not_applicable_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"{product_id}: quality_coverage not_applicable_reason must be non-empty")
+        return {"not_applicable_reason": reason.strip()}
+    allowed_fields = set(QUALITY_COVERAGE_REQUIRED_FIELDS) | set(QUALITY_COVERAGE_OPTIONAL_FIELDS)
+    if not set(QUALITY_COVERAGE_REQUIRED_FIELDS).issubset(raw) or not set(raw).issubset(allowed_fields):
+        raise ValueError(
+            f"{product_id}: quality_coverage must contain {','.join(QUALITY_COVERAGE_REQUIRED_FIELDS)} "
+            f"and optional {','.join(QUALITY_COVERAGE_OPTIONAL_FIELDS)}"
+        )
     field = raw.get("field")
     if not isinstance(field, str) or not IDENTIFIER_RE.fullmatch(field):
         raise ValueError(f"{product_id}: quality_coverage field must be a physical identifier")
@@ -272,10 +318,17 @@ def _load_quality_coverage(
         or not 0 < float(minimum_ratio) <= 1
     ):
         raise ValueError(f"{product_id}: quality_coverage minimum_ratio must be in (0, 1]")
+    measurement_scope = raw.get("measurement_scope", "published_rows")
+    if measurement_scope not in QUALITY_COVERAGE_MEASUREMENT_SCOPES:
+        raise ValueError(
+            f"{product_id}: quality_coverage measurement_scope must be one of "
+            f"{','.join(sorted(QUALITY_COVERAGE_MEASUREMENT_SCOPES))}"
+        )
     return {
         "field": field,
         "expected_distinct_count": expected,
         "minimum_ratio": float(minimum_ratio),
+        "measurement_scope": measurement_scope,
     }
 
 
@@ -317,6 +370,9 @@ def load_contracts(
             node=node,
             require_public_projection=require_public_projection,
         )
+        public_primary_key = _load_public_primary_key(
+            str(product_id), serving, node, public_projection
+        )
         contracts.append(
             ServingContract(
                 product_id=str(product_id),
@@ -325,7 +381,7 @@ def load_contracts(
                 external=bool(serving.get("external", False)),
                 publication_mode=str(serving.get("publication_mode", "")),
                 zero_policy=str(serving.get("zero_policy", "retain_last_good")),
-                primary_key=tuple(serving.get("primary_key") or ()),
+                primary_key=public_primary_key,
                 upsert_strategy=serving.get("upsert_strategy"),
                 partial_min_ratio=partial.get("min_publish_ratio") if isinstance(partial, dict) else None,
                 reliability=serving.get("reliability") if isinstance(serving.get("reliability"), dict) else None,
