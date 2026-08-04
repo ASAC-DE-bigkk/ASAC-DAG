@@ -47,5 +47,10 @@ def test_land_writes_manifest_last_with_completion_fields(monkeypatch):
     assert manifest["load_date"] == "2026-07-28"
     assert manifest["object_keys"] == result["object_keys"]
     assert manifest["pages"] == 2 and manifest["rows"] == 5
-    assert manifest["status"] == "ok"
+    # 기대/실측 쌍 + 단위 자기 선언(ASK-Seoul#78 M-6·M-8) — 객체 단위(traffic 선례).
+    assert manifest["expected_count"] == 2
+    assert manifest["actual_count"] == 2
+    assert manifest["count_unit"] == "objects"
+    # M-9 값 집합 — transit 은 complete 만 사용(#689).
+    assert manifest["status"] == "complete"
     assert manifest["completed_at"]

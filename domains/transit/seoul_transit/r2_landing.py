@@ -130,7 +130,13 @@ def land(stage, domain, source, dataset, pages, *, title="", endpoint="", kind="
         "request_params": request_params or {},
         "pages": len(object_keys), "rows": rows, "bytes": total,
         "object_keys": object_keys,
-        "status": "ok",
+        # 기대/실측 쌍(ASK-Seoul#78 M-6·M-8) — 실시간 수집은 사전 기대 총량이 없어
+        # traffic 선례의 객체 단위를 쓴다: 업로드한 객체 수 그대로가 쌍의 양쪽.
+        "expected_count": len(object_keys),
+        "actual_count": len(object_keys),
+        "count_unit": "objects",
+        # M-9 값 집합 {complete, complete_with_violations} — transit 은 complete 만 사용(#689)
+        "status": "complete",
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     manifest_key = f"{base}/_manifest.json"
