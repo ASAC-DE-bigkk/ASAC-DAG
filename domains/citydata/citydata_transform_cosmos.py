@@ -62,13 +62,13 @@ DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata", dbt_project_dir=DBT_PROJECT)
 
-# run 관측 — bronze(_run_ok_d1)와 같은 **D1 직접 emit**. 왜 record_run(R2 경유)이 아니라 직접인가
-# (모두 dev 로컬 실측, ASK-Seoul#78):
-#  1) 관측 결과 transform 의 D1 run 은 34건 전부 layer=NULL/failed — 유효 silver/gold·성공 0.
-#     record_run("citydata","transform") 은 layer="transform" 을 쓰는데 Layer enum 은 bronze/silver/gold
-#     뿐이라 그 R2→D1 배치 적재 경로에서 유효 계층으로 안 남았다.
-#  2) bronze 는 record_run(R2) 에 더해 _run_ok_d1 로 **D1 에 직접** 실시간 한 줄을 쓴다 — transform 엔
-#     그게 없었다. 그래서 배치·계층 문제를 우회해 **모델명으로 layer 판별(silver_*/gold_*) + D1 직접 적재**.
+# run 관측 — 모델별 layer 로 **R2 ops/runs/ 파일 + D1 _ops_run_event 한 줄을 함께** 쓴다(emit_ops_event).
+# 왜 기존 record_run 을 바꿨나 (모두 dev 로컬 실측, ASK-Seoul#78):
+#  1) 관측 결과 transform 의 D1 run 은 34건 전부 layer=NULL — record_run("citydata","transform") 이
+#     layer="transform" 을 쓰는데 Layer enum 은 bronze/silver/gold 뿐이라 유효 계층으로 안 남았다.
+#  2) record_run 은 DAG 정의 시점의 **고정 layer 한 개**만 받아, silver·gold 를 한 DAG 에서 같이 굽는
+#     transform 에는 모델별 계층을 못 준다. → 태스크 id 의 모델명으로 layer 판별해 emit_ops_event 로
+#     R2+D1 을 유효 계층으로 함께 쓴다(bronze 가 R2+D1 둘 다 쓰는 것과 같은 커버리지, 스키마 자기일관).
 # 실패 콜백은 리스트 대신 **단일 함수로 합성** — 콜백 리스트의 실행 순서·보장을 걸지 않으려는 방어적 선택.
 def _model_layer(task_id: str):
     """Cosmos 모델 run 태스크(``tier.<model>.run``) → Layer. 모르면 None(추측 금지)."""
@@ -85,25 +85,27 @@ def _model_layer(task_id: str):
 
 
 def _emit_run_d1(context, status) -> None:
-    """모델 run 1건 = ``_ops_run_event`` D1 한 줄(bronze _run_ok_d1 과 동형). fail-open(C-2)."""
+    """모델 run 1건 = R2 ``ops/runs/`` 파일 + D1 ``_ops_run_event`` 한 줄(둘 다 유효 layer). fail-open(C-2).
+
+    emit_ops_event 가 R2 저장·D1 적재를 각각 감싸 실패를 삼킨다(관측 실패가 변환을 안 죽인다).
+    """
     ti = context["ti"]
     layer = _model_layer(ti.task_id)
     if layer is None:
         return
     try:
-        from common.ops.contract import Grain, OpsCategory, build_ops_event  # noqa: PLC0415
+        from common.ops.contract import Grain, OpsCategory, emit_ops_event  # noqa: PLC0415
         from citydata_ingest.source.d1_run_event_writer import make_d1_run_event_writer  # noqa: PLC0415
         target = (context.get("params") or {}).get("target", "dev")
-        record = build_ops_event(
-            OpsCategory.RUNS, domain="citydata", layer=layer,
-            grain=Grain.AIRFLOW_TASK, status=status,
+        emit_ops_event(
+            OpsCategory.RUNS, d1_writer=make_d1_run_event_writer(),
+            domain="citydata", layer=layer, grain=Grain.AIRFLOW_TASK, status=status,
             dag_id=ti.dag_id, task_id=ti.task_id, run_id=ti.run_id,
             try_number=ti.try_number, environment=target)
-        make_d1_run_event_writer()(record)
-    except Exception as exc:  # noqa: BLE001 — C-2 fail-open(관측 실패가 변환을 안 죽인다)
+    except Exception as exc:  # noqa: BLE001 — C-2 fail-open(import·검증 실패도 변환을 안 죽인다)
         import logging  # noqa: PLC0415
         logging.getLogger(__name__).warning(
-            "[ops] transform run D1 적재 실패(무시): %s", type(exc).__name__)
+            "[ops] transform run 기록 실패(무시): %s", type(exc).__name__)
 
 
 def _run_d1_success(context) -> None:
