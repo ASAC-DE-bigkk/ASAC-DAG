@@ -191,8 +191,10 @@ def test_callback_ignores_legacy_optout_for_weather_and_traffic(monkeypatch, sen
         assert stored
 
     assert len(sent) == 2
+    # 제목 앞에는 환경 표식이 붙을 수 있다(비운영·미상). 여기서 보려는 것은 "어느 도메인이
+    # 알림을 받았나" 이므로 표식과 무관하게 ❌ 뒤부터 읽는다.
     assert {"weather", "traffic"} <= {
-        payload["embeds"][0]["title"].split(" · ")[0].removeprefix("❌ ")
+        payload["embeds"][0]["title"].split(" · ")[0].split("❌ ")[-1]
         for payload in sent
     }
 
@@ -325,3 +327,71 @@ def _callback_traffic(stored):
 
     sink = R2ErrorSink(put_object=lambda key, payload: stored.append(key))
     return problem_failure_callback(domain="traffic", sink=sink)
+
+
+# ── 환경 표시 (어느 환경에서 실행한 결과물인지) ─────────────────────────────
+
+def test_non_prod_gets_a_visible_badge_in_the_title(monkeypatch, sent):
+    """비운영 메시지는 제목만 봐도 갈려야 한다.
+
+    여러 인스턴스(로컬·맥미니)가 같은 팀 채널을 쓰고, 웹훅만 설정돼 있으면 환경과 무관하게
+    전송된다. 받는 사람이 "누가 로컬에서 돌린 건가"를 메시지만 보고 알 수 있어야 한다.
+    """
+    monkeypatch.setenv("DBT_TARGET", "dev")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    assert send_embed("수집 완료", "본문", webhook=_WEBHOOK)
+    embed = sent[-1]["embeds"][0]
+    assert embed["title"].startswith("[DEV] ")
+    assert "env=dev" in embed["footer"]["text"]
+
+
+def test_prod_has_no_badge_but_still_carries_provenance(monkeypatch, sent):
+    """운영에는 표식을 붙이지 않는다 — 대부분이 운영이라 전부 달면 소음이 된다.
+
+    다만 footer 의 출처는 운영에도 남는다. 표식 없음이 "운영"인지 "표기 누락"인지
+    구분되어야 하기 때문이다.
+    """
+    monkeypatch.setenv("DBT_TARGET", "prod")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    assert send_embed("수집 완료", "본문", webhook=_WEBHOOK)
+    embed = sent[-1]["embeds"][0]
+    assert embed["title"] == "수집 완료"
+    assert "env=prod" in embed["footer"]["text"]
+
+
+def test_unset_environment_is_unknown_not_prod(monkeypatch, sent):
+    """미설정을 prod 로 채우지 않는다 — 없는 정보를 운영이라 단정하면 로컬이 운영으로 보인다."""
+    monkeypatch.delenv("DBT_TARGET", raising=False)
+    monkeypatch.delenv("ASK_SEOUL_TARGET", raising=False)
+    assert send_embed("수집 완료", "본문", webhook=_WEBHOOK)
+    embed = sent[-1]["embeds"][0]
+    assert embed["title"].startswith("[환경 미상] ")
+    assert "env=unknown" in embed["footer"]["text"]
+
+
+def test_conflicting_environment_is_shown_not_hidden(monkeypatch, sent):
+    """두 노브가 엇갈리면 드러낸다 — 한쪽을 조용히 고르면 잘못된 환경으로 표시된다."""
+    monkeypatch.setenv("DBT_TARGET", "prod")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    assert send_embed("수집 완료", "본문", webhook=_WEBHOOK)
+    embed = sent[-1]["embeds"][0]
+    assert "CONFLICT" in embed["title"]
+    assert "env=conflict(dev,prod)" in embed["footer"]["text"]
+
+
+def test_existing_footer_is_kept_not_replaced(monkeypatch, sent):
+    """도메인이 쓰던 footer 문구를 밀어내지 않는다 — 출처는 뒤에 잇는다."""
+    monkeypatch.setenv("DBT_TARGET", "prod")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    assert send_embed("t", "d", footer="매일 09:00 KST", webhook=_WEBHOOK)
+    text = sent[-1]["embeds"][0]["footer"]["text"]
+    assert text.startswith("매일 09:00 KST · ")
+    assert "env=prod" in text
+
+
+def test_plain_text_also_carries_the_badge(monkeypatch, sent):
+    """평문에는 footer 자리가 없어 앞에 표식만 붙인다."""
+    monkeypatch.setenv("DBT_TARGET", "dev")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    assert send_text("일일 리포트", webhook=_WEBHOOK)
+    assert sent[-1]["content"].startswith("[DEV] ")

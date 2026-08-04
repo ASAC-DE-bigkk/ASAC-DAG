@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import urllib.request
 
 from common.security import redact, refresh_env_secrets, register_secret
@@ -50,6 +51,56 @@ def resolve_webhook(domain: str | None = None, *, env: dict | None = None) -> st
         if url:
             return url
     return (environ.get(FALLBACK_WEBHOOK_ENV) or "").strip()
+
+
+def notify_environment(env: dict | None = None) -> str:
+    """이 메시지를 만든 실행의 환경. **모르면 추측하지 않고 ``unknown``.**
+
+    여러 인스턴스(로컬·맥미니)가 같은 팀 채널을 쓰고, 웹훅만 설정돼 있으면 환경과 무관하게
+    전송된다. 그래서 받는 사람이 "이게 운영 결과인가 누가 로컬에서 돌린 건가"를 메시지만 보고
+    가릴 수 있어야 한다.
+
+    ``ASK_SEOUL_TARGET``·``DBT_TARGET`` 을 보고, 둘이 엇갈리면 **감추지 않고 그대로 드러낸다** —
+    조용히 한쪽을 고르면 그 순간 잘못된 환경으로 표시된다. 미설정을 ``prod`` 로 채우지 않는 것도
+    같은 이유다(없는 정보를 운영이라고 단정하면 로컬 실행이 운영으로 보인다).
+    """
+    environ = os.environ if env is None else env
+    seen = {
+        str(environ.get(name, "")).strip().lower()
+        for name in ("ASK_SEOUL_TARGET", "DBT_TARGET")
+    }
+    seen.discard("")
+    if not seen:
+        return "unknown"
+    if len(seen) > 1:
+        return "conflict(" + ",".join(sorted(seen)) + ")"
+    return seen.pop()
+
+
+def _env_badge(environment: str) -> str:
+    """제목 앞 표식 — **운영에는 붙이지 않는다.**
+
+    평상시 메시지 대부분이 운영이라 전부 표식을 달면 소음이 되고, 소음이 되면 아무도 안 본다.
+    반대로 **비운영·미상은 즉시 눈에 띄어야** 한다 — 그게 "왜 이 알림이 왔지"의 답이다.
+    """
+    if environment == "prod":
+        return ""
+    if environment == "unknown":
+        return "[환경 미상] "
+    return f"[{environment.upper()}] "
+
+
+def _provenance(environment: str) -> str:
+    """footer 에 항상 붙는 출처 한 줄 — 운영 메시지도 근거를 갖는다.
+
+    호스트명을 같이 싣는 이유: 이 프로젝트는 여러 Airflow 인스턴스가 같은 저장소·채널을
+    공유해서, 환경만으로는 "어느 인스턴스인지"가 안 갈린다.
+    """
+    try:
+        host = socket.gethostname()
+    except Exception:  # noqa: BLE001 - 출처 표기 실패가 알림을 막지 않는다
+        host = "?"
+    return f"env={environment} · host={host}"
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -94,13 +145,17 @@ def send_embed(title: str, description: str, *, color: int = COLOR_OK,
         LOGGER.info("[discord] webhook 미설정 — 전송 스킵: %s", _truncate(title, 80))
         return False
     refresh_env_secrets()
+    environment = notify_environment()
+    # 표식은 truncate **전에** 붙인다 — 뒤에 붙이면 긴 제목에서 표식이 잘려 나간다.
     embed: dict = {
-        "title": _truncate(redact(title), _MAX_TITLE),
+        "title": _truncate(_env_badge(environment) + redact(title), _MAX_TITLE),
         "description": _truncate(redact(description), _MAX_DESCRIPTION),
         "color": color,
     }
-    if footer:
-        embed["footer"] = {"text": _truncate(redact(footer), _MAX_FOOTER)}
+    # 출처는 기존 footer 를 밀어내지 않고 뒤에 잇는다(도메인이 쓰던 문구 보존).
+    provenance = _provenance(environment)
+    text = f"{redact(footer)} · {provenance}" if footer else provenance
+    embed["footer"] = {"text": _truncate(text, _MAX_FOOTER)}
     return _post(url, {"embeds": [embed]})
 
 
@@ -112,4 +167,7 @@ def send_text(content: str, *, domain: str | None = None,
         LOGGER.info("[discord] webhook 미설정 — 전송 스킵")
         return False
     refresh_env_secrets()
-    return _post(url, {"content": _truncate(redact(content), _MAX_CONTENT)})
+    environment = notify_environment()
+    # 평문에는 footer 자리가 없어 앞에 표식만 붙인다(운영이면 표식 없음 — 기존 형태 그대로).
+    body = _env_badge(environment) + redact(content)
+    return _post(url, {"content": _truncate(body, _MAX_CONTENT)})
