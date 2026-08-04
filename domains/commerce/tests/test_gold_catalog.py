@@ -57,13 +57,41 @@ def test_version_deterministic_and_drift():
     assert cr.build_catalog(changed, _meta())["version"] != v1   # 필드 드리프트 = 버전 변경
 
 
-def test_unnamed_cluster_fails():
-    """이름 미정 cluster 는 무단 자동명명 없이 실패해야 한다."""
+def test_unnamed_cluster_falls_back_to_singles_without_losing_data():
+    """이름 미정 cluster 는 **무단 자동명명도, 파이프라인 중단도 하지 않는다.**
+
+    예전에는 여기서 ValueError 를 던졌는데, 그 한 번이 detail 적재 전체를 막아 silver detail
+    0건이 됐다(2026-08-04 운영 사고). 지금은 클러스터를 포기하고 단건으로 떨어뜨린다 —
+    임계 미달일 때와 같은 처리라 **데이터를 하나도 잃지 않는다**.
+
+    대신 조용히 넘어가면 안 되므로 `pending_cluster_names` 로 올라온다.
+    """
     fields = {f"mystery_{i}": _CORE | _SHARED for i in range(3)}   # 3종·공유9, 명명맵에 없음
     # 필러 4종(고유 필드) — 공유필드가 공통코어(>=90%)로 흡수되지 않게 분모를 늘린다.
     fields.update({f"filler_{i}": _CORE | {f"F{i}"} for i in range(4)})
-    with pytest.raises(ValueError):
-        cr.build_catalog(fields, {s: {"fmt": "v1"} for s in fields})
+    cat = cr.build_catalog(fields, {s: {"fmt": "v1"} for s in fields})
+
+    # 이름 없는 3종은 각각 단건 테이블로 — 자동으로 이름을 지어내지 않는다
+    objects = {d["object"] for d in cat["details"]}
+    assert {f"silver_mystery_{i}_detail" for i in range(3)} <= objects
+    assert all(d["kind"] == "detail_single" for d in cat["details"]
+               if d["members"][0].startswith("mystery_"))
+    # 그리고 후속 과제로 올라온다
+    pending = cat["pending_cluster_names"]
+    assert len(pending) == 1
+    assert sorted(pending[0]["members"]) == [f"mystery_{i}" for i in range(3)]
+
+
+def test_named_cluster_still_merges():
+    """이름이 있으면 지금까지처럼 하나로 합친다 — 폴백이 정상 경로를 바꾸지 않는다."""
+    named = next(iter(cr.NAME_BY_MEMBER))
+    fields = {named: _CORE | _SHARED}
+    fields.update({f"peer_{i}": _CORE | _SHARED for i in range(2)})
+    fields.update({f"filler_{i}": _CORE | {f"F{i}"} for i in range(4)})
+    cat = cr.build_catalog(fields, {s: {"fmt": "v1"} for s in fields})
+    clusters = [d for d in cat["details"] if d["kind"] == "detail_cluster"]
+    assert len(clusters) == 1 and named in clusters[0]["members"]
+    assert cat["pending_cluster_names"] == []
 
 
 def test_small_overlap_stays_single():

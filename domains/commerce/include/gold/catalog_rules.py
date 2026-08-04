@@ -91,15 +91,27 @@ def build_catalog(fields_by_short: dict[str, set[str]],
 
     details: list[dict] = []
     dataset_map: dict[str, dict] = {}
+    pending: list[dict] = []
     for fmt in sorted({*fmt_by_short.values()}):
         shorts = sorted(s for s in fields_by_short if fmt_by_short[s] == fmt)
         for members in _clusters(shorts, nc):
             shared = set.intersection(*[nc[s] for s in members]) if len(members) > 1 else nc[members[0]]
             is_cluster = len(members) >= MEMBERS_MIN and len(shared) >= SHARED_MIN
+            name = (next((NAME_BY_MEMBER[m] for m in members if m in NAME_BY_MEMBER), None)
+                    if is_cluster else None)
+            if is_cluster and not name:
+                # 이름이 없다고 **파이프라인을 멈추지 않는다.** 예전에는 여기서 ValueError 를
+                # 던졌고, 그 한 번이 detail 적재 전체를 막아 silver detail 0건이 됐다
+                # (2026-08-04 운영 사고). 대신 클러스터를 포기하고 아래 단건 경로로 떨어뜨린다 —
+                # 임계를 못 넘겼을 때와 같은 처리이고, **데이터는 하나도 잃지 않는다**
+                # (테이블이 1개 대신 N개가 될 뿐, 이름이 정해지면 다음 빌드에서 합쳐진다).
+                #
+                # 대신 **조용히 넘어가지 않는다** — pending 으로 올려 호출측이 경고·기록하게 하고,
+                # `tests/test_pending_cluster_names.py` 가 목록을 고정해 새 항목이 소리 없이
+                # 늘어나는 것을 막는다.
+                pending.append({"members": list(members), "shared_n": len(shared), "fmt": fmt})
+                is_cluster = False
             if is_cluster:
-                name = next((NAME_BY_MEMBER[m] for m in members if m in NAME_BY_MEMBER), None)
-                if not name:
-                    raise ValueError(f"cluster 이름 미정(NAME_BY_MEMBER 에 추가 필요): {members}")
                 payload = sorted({f.lower() for f in set().union(*[nc[s] for s in members])})
                 details.append({"object": f"silver_{name}_detail", "kind": "detail_cluster",
                                 "members": members, "payload": payload, "shared_n": len(shared)})
@@ -117,4 +129,7 @@ def build_catalog(fields_by_short: dict[str, set[str]],
     canon = json.dumps([{k: r[k] for k in ("object", "kind", "members", "payload")}
                         for r in details], ensure_ascii=False, sort_keys=True)
     version = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
-    return {"version": version, "details": details, "dataset_map": dataset_map}
+    # pending 은 "아직 이름이 없어 단건으로 떨어진 클러스터" — 적재는 정상이고 이름만 미정이다.
+    # 버전 해시에는 넣지 않는다(카탈로그 내용이 아니라 후속 과제 표시라서).
+    return {"version": version, "details": details, "dataset_map": dataset_map,
+            "pending_cluster_names": sorted(pending, key=lambda r: r["members"])}
