@@ -7,17 +7,22 @@ silver incrementals, and the contract tests in one DAG-ordered pass — and keep
 silver retries independent from bronze API collection.
 
 이 파일은 transform DAG 두 개를 담는다(#443 예고 분리):
-- ``transit_transform`` (*/15): 사용자향 '지금' 카드·증분 모델·silver·dim·테스트 —
-  ``--exclude tag:heavy``
+- ``transit_transform`` (*/15): 사용자향 '지금' 카드·증분 모델·silver·dim·게이트
+  테스트 — ``--exclude 'tag:heavy tag:hourly'``. 감시성 테스트(tag:hourly)는
+  시간당 1회만 ShortCircuit 분기(``dbt_test_rest``)로 실행한다(테스트 티어링 A안).
 - ``transit_transform_heavy`` (5,35 오프셋 30분): 아카이브 전량 재집계 프로파일 4종 —
   ``--select tag:heavy``, artifact 는 ``--target-path target_heavy`` 로 격리
 
 dbt 실행 방식은 타 도메인 transform DAG(weather/traffic)의 관례를 그대로 따른다:
 컨테이너 dbt 바이너리(``/home/airflow/dbt-venv/bin/dbt``), 마운트된 dbt 프로젝트
 (``/opt/airflow/dbt/domains/transit``), ``DBT_PROJECT_DIR``/``DBT_PROFILES_DIR``
-주입, ``--target {dev|prod}`` 분기. 차이는 run/test 를 쪼개지 않고 ``build`` 하나로
-계약 게이트를 세운다는 점(seed+dim+silver+test 전체) — dbt 테스트 실패는 build 의
-비영 종료로 이어져 태스크가 실패한다.
+주입, ``--target {dev|prod}`` 분기. 계약 게이트는 여전히 ``build`` 하나가 세운다
+(#190): 그레인 unique·키/시간축 not_null·미래 event_at 차단(freshness 계약,
+assert_silver_transit_no_future_event_at) 등 tag:gate 테스트는 매 15분
+build 안에서 DAG 순서로 돌고, 실패는 build 의 비영 종료 → 태스크 실패로 이어진다.
+range/enum/coverage/warn 등 감시성 테스트(tag:hourly)만 시간당 1회 분기로 뺐다 —
+B안 스코핑(ASAC-DBT#418)이 test 각각을 싸게 만든 뒤에도 남는 '테스트 개수 × 96회/일'
+의 단일노드 쿼리 조율 오버헤드를 줄인다. 분류 규약은 dbt_project.yml 헤더 주석 참조.
 
 빌드 후 ``run_results.json`` 을 파싱해 모델 단위 실행 메트릭(layer=silver, #188)을
 R2 에 적재한다(``dump_dbt_run_results``). 실패한 빌드에서도 모델/테스트 결과를
@@ -29,6 +34,9 @@ R2 에 적재한다(``dump_dbt_run_results``). 실패한 빌드에서도 모델/
 메트릭 태스크를 ``as_teardown(on_failure_fail_dagrun=False)`` 로 선언한다 —
 teardown 은 DagRun 판정에서 제외되어 dbt_build 가 실질 리프가 되고(build 실패 =
 run 실패 복원), build 실패에서도 메트릭은 계속 적재된다(#188 의도 보존).
+테스트 티어링(A안) 이후 실질 리프는 dbt_build → (시간당) dbt_test_rest 체인이다 —
+build 실패는 downstream upstream_failed 로, test_rest 실패는 리프 실패로 각각
+run 실패가 되고, 시간당 분기의 skip 은 성공 판정을 해치지 않는다(#526 의도 유지).
 설계 배경: domains/weather/docs/superpowers/specs/2026-07-14-weather-transform-
 teardown-provenance-design.md
 """
@@ -44,7 +52,10 @@ from zoneinfo import ZoneInfo
 from airflow import DAG
 from airflow.models.param import Param
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import (
+    PythonOperator,
+    ShortCircuitOperator,
+)
 
 # 동봉 패키지(seoul_transit)는 이 DAG 파일과 같은 폴더(dags/domains/transit/)에 있다.
 # Airflow 3.x 는 dags 하위 디렉터리를 sys.path 에 자동 추가하지 않으므로 직접 올린다.
@@ -76,6 +87,11 @@ RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, "target", "run_results.json")
 # 기본 target/ 을 같이 쓰면 run_results.json 등 artifact 를 서로 덮어써 메트릭이 섞인다.
 HEAVY_TARGET_PATH = "target_heavy"
 HEAVY_RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, HEAVY_TARGET_PATH, "run_results.json")
+# 시간당 1회 감시성 테스트 분기(dbt_test_rest)도 target-path 를 격리한다 — 같은 런에서
+# fresh build 의 run_results.json 을 teardown 메트릭이 읽기 전에 test 가 덮어쓰는
+# 경합을 막는다(heavy 격리와 동일 사유).
+REST_TARGET_PATH = "target_test_hourly"
+REST_RUN_RESULTS_PATH = os.path.join(DBT_PROJECT, REST_TARGET_PATH, "run_results.json")
 
 DOMAIN = os.environ.get("TRANSIT_DOMAIN", "transit")
 
@@ -163,6 +179,31 @@ def check_transform_gate(**_context) -> None:
         )
 
 
+def rest_tests_due(**_context) -> bool:
+    """감시성 테스트(tag:hourly) 분기를 시간당 정확히 1회만 통과시킨다(ShortCircuit).
+
+    citydata ``_is_hourly_window`` 관례 재사용: Variable 로 '이 시간 버킷에 이미
+    돌았나'를 본다. 분 창(minute 범위) 방식은 citydata 에서 트리거 분이 불규칙할 때
+    창을 자주 빗나가 hourly 티어가 몇 시간씩 안 도는 버그가 있었다(2026-07-26) —
+    transit 은 */15 cron 이라 덜하지만 max_active_runs=1 큐잉 지연으로 같은 문제가
+    재현될 수 있어 동일하게 Variable 방식을 쓴다. Variable set 후 downstream(test)이
+    실패해도 태스크 재시도·다음 시간 run 이 재검증한다(self-heal).
+
+    한계(감수): set 직후 이 태스크 자체가 죽으면 재시도가 False 를 보고 그 시간 분은
+    감시 테스트가 결손된다 — 다음 시간 run 이 self-heal 하므로 최대 1시간 결손이며,
+    citydata 도 같은 트레이드오프를 감수한다.
+    """
+    from airflow.models import Variable
+
+    now = datetime.now(KST)
+    key = "transit_transform_hourly_tests_last_hour"
+    cur = now.strftime("%Y-%m-%dT%H")  # 시간 버킷
+    if Variable.get(key, default_var="") == cur:
+        return False  # 이 시간엔 이미 실행함
+    Variable.set(key, cur)
+    return True
+
+
 def dbt_command(
     args: str,
     *,
@@ -193,12 +234,21 @@ def dbt_command(
     )
 
 
-def publish_silver_metrics(run_results_path: str = RUN_RESULTS_PATH, **context) -> dict:
+def publish_silver_metrics(
+    run_results_path: str = RUN_RESULTS_PATH,
+    *,
+    cleanup_after: bool = False,
+    **context,
+) -> dict:
     """dbt build 산출 run_results.json → 모델 단위 실행 메트릭(layer=silver, #188)을 R2 적재.
 
     - target(dev/prod) 은 params 에서 받아 sink 버킷(R2_DEV_* dev 우선) 을 정합시킨다.
     - run_results.json 부재(예: deps 실패로 build 미도달) 는 태스크를 실패시키지 않고 skip —
       메트릭 적재 실패가 이미 실패한 빌드 위에 잡음을 더하지 않게 한다.
+    - cleanup_after: 게시 성공 직후 run_results.json 을 삭제한다. 시간당 테스트 분기
+      전용 — ShortCircuit 은 teardown 을 skip 대상에서 제외하므로(아래 배선 주석 참조)
+      분기 skip 런에도 teardown 이 돌며, 파일을 지워 두지 않으면 지난 시간의 stale
+      결과를 매 15분 재게시한다. 삭제해 두면 skip 런은 '파일 없음 skip' no-op 이 된다.
     """
     if not os.path.exists(run_results_path):
         print(f"run_results.json 없음 — 메트릭 적재 skip: {run_results_path}")
@@ -206,6 +256,9 @@ def publish_silver_metrics(run_results_path: str = RUN_RESULTS_PATH, **context) 
     target = (context.get("params") or {}).get("target")
     records = dump_dbt_run_results(run_results_path, domain=DOMAIN, target=target)
     print(f"silver 메트릭 적재: {len(records)} records (domain={DOMAIN}, target={target})")
+    if cleanup_after:
+        os.remove(run_results_path)
+        print(f"게시 완료 후 artifact 제거(stale 재게시 방지): {run_results_path}")
     return {"rows": len(records), "skipped": False}
 
 
@@ -234,16 +287,19 @@ with DAG(
         on_failure_callback=record_transit_problem,
     )
 
-    # 계약 게이트: seed+dim+silver+test 전체를 DAG 순서로 build. dbt 테스트 실패는
-    # build 의 비영 종료 → 이 태스크 실패 → DAG 런 실패.
-    # tag:heavy(아카이브 전량 재집계 프로파일 4종)는 transit_transform_heavy 담당이라 제외.
+    # 계약 게이트: seed+dim+silver+게이트 테스트(tag:gate·무태그)를 DAG 순서로 build.
+    # dbt 테스트 실패는 build 의 비영 종료 → 이 태스크 실패 → DAG 런 실패.
+    # tag:heavy(아카이브 전량 재집계 프로파일 4종)는 transit_transform_heavy 담당,
+    # tag:hourly(감시성 테스트)는 아래 시간당 분기(dbt_test_rest) 담당이라 제외 —
+    # 그레인/키 무결성은 여전히 매 15분 여기서 차단된다(테스트 티어링 A안).
     # ⚠ fresh 에 남는 forecast_card·parking_full_risk 는 heavy 테이블(dong_rhythm·
     # parking_profile)을 SELECT 한다 — 신규 환경/골드 드롭 직후엔 첫 heavy 런(:05/:35)
     # 전까지 이 두 모델이 TABLE_NOT_FOUND 로 실패할 수 있다(1 heavy 주기 내 자가 회복,
     # 부트스트랩은 1회 수동 full build 권장).
     dbt_build = BashOperator(
         task_id="dbt_build",
-        bash_command=dbt_command("build", exclude="tag:heavy"),
+        # 공백 구분 union 셀렉터 — dbt 는 인자 안 공백을 여러 기준의 합집합으로 파싱한다.
+        bash_command=dbt_command("build", exclude="tag:heavy tag:hourly"),
         pool=TRINO_TRANSIT_HEAVY_POOL,
         on_failure_callback=record_transit_problem,
     )
@@ -256,7 +312,45 @@ with DAG(
         on_failure_callback=record_transit_problem,
     ).as_teardown(on_failure_fail_dagrun=False)
 
+    # 테스트 티어링(A안): 감시성 테스트(tag:hourly)는 시간당 1회만. build(게이트 테스트
+    # 포함)가 성공한 뒤에만 진행하므로 모델·그레인 무결성 검증 주기는 그대로 15분이다.
+    # citydata 3-tier 의 ShortCircuit 게이트 패턴과 동일 — 분기 미해당 런은 실패가
+    # 아니라 skip 이라 경보를 만들지 않고 DagRun 성공 판정도 해치지 않는다.
+    # 단 게이트 태스크 자체가 실패하면(예: Variable API 오류) dbt_test_rest 가
+    # upstream_failed 리프가 되어 run 실패다 — 감시 결손을 조용히 넘기지 않는 방향.
+    gate_test_hourly = ShortCircuitOperator(
+        task_id="gate_test_hourly",
+        python_callable=rest_tests_due,
+        on_failure_callback=record_transit_problem,
+    )
+
+    # 나머지 테스트 실행 — 같은 직렬화 pool(단일노드 Trino 보호). 매시 :00 런에서
+    # heavy(:05,:35)와 인접하지만 pool slot 1 이 동시 실행을 차단한다(대기만 발생).
+    dbt_test_rest = BashOperator(
+        task_id="dbt_test_rest",
+        bash_command=dbt_command(
+            "test", select="tag:hourly", exclude="tag:heavy",
+            target_path=REST_TARGET_PATH,
+        ),
+        pool=TRINO_TRANSIT_HEAVY_POOL,
+        on_failure_callback=record_transit_problem,
+    )
+
+    # 시간당 테스트 결과도 #188 메트릭으로 적재(heavy 와 동일 관례). teardown 이라
+    # DagRun 판정에서 빠지고, dbt_test_rest 실패에서도 결과를 남긴다.
+    # ⚠ ShortCircuit 은 teardown 을 skip 대상에서 제외한다(providers-standard
+    # get_tasks_to_skip 의 is_teardown 제외) — 이 태스크는 분기 skip 런에도 매번
+    # 실행된다. cleanup_after 로 게시 직후 run_results.json 을 지워, skip 런에선
+    # '파일 없음 skip' no-op 이 되게 한다(지난 시간 결과의 stale 재게시 방지).
+    publish_rest_metrics = PythonOperator(
+        task_id="publish_rest_test_metrics",
+        python_callable=publish_silver_metrics,
+        op_kwargs={"run_results_path": REST_RUN_RESULTS_PATH, "cleanup_after": True},
+        on_failure_callback=record_transit_problem,
+    ).as_teardown(on_failure_fail_dagrun=False)
+
     gate >> dbt_deps >> dbt_build >> publish_metrics
+    dbt_build >> gate_test_hourly >> dbt_test_rest >> publish_rest_metrics
 
 
 # ── heavy: 아카이브 전량 재집계 프로파일 4종을 느린 주기로 분리 ─────────────────────

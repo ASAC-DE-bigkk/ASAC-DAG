@@ -67,6 +67,24 @@ class FakePythonOperator(_FakeOperator):
         self.python_callable = python_callable
 
 
+class FakeShortCircuitOperator(FakePythonOperator):
+    """ShortCircuit fake — 배선·kwargs 검증용(skip 의미론은 모델링하지 않음, A안 #685)."""
+
+
+class FakeVariable:
+    """airflow.models.Variable fake — rest_tests_due 의 시간 버킷 dedup 검증용."""
+
+    _store: dict = {}
+
+    @classmethod
+    def get(cls, key, default_var=None):
+        return cls._store.get(key, default_var)
+
+    @classmethod
+    def set(cls, key, value):
+        cls._store[key] = value
+
+
 class FakeParam:
     def __init__(self, default=None, **schema):
         self.value = default
@@ -78,6 +96,7 @@ def install_airflow_fakes():
     airflow.DAG = FakeDAG
 
     airflow_models = types.ModuleType("airflow.models")
+    airflow_models.Variable = FakeVariable
     airflow_models_param = types.ModuleType("airflow.models.param")
     airflow_models_param.Param = FakeParam
 
@@ -88,6 +107,7 @@ def install_airflow_fakes():
     airflow_bash.BashOperator = FakeBashOperator
     airflow_python = types.ModuleType("airflow.providers.standard.operators.python")
     airflow_python.PythonOperator = FakePythonOperator
+    airflow_python.ShortCircuitOperator = FakeShortCircuitOperator
 
     airflow_utils = types.ModuleType("airflow.utils")
     airflow_trigger = types.ModuleType("airflow.utils.trigger_rule")
@@ -133,8 +153,13 @@ def test_task_order_deps_build_publish():
 
     expected = ["dbt_deps", "dbt_build", "publish_silver_metrics"]
     assert set(expected) <= set(dag.task_ids)
-    for upstream, downstream in zip(expected, expected[1:]):
-        assert dag.task_dict[upstream].downstream_task_ids == {downstream}
+    assert dag.task_dict["dbt_deps"].downstream_task_ids == {"dbt_build"}
+    # 테스트 티어링(A안 #685) 후 build 의 downstream 은 teardown 메트릭 + 시간당
+    # 테스트 게이트 둘 — build 실패 시 두 갈래 모두 멈춰 run 실패가 유지된다(#526).
+    assert dag.task_dict["dbt_build"].downstream_task_ids == {
+        "publish_silver_metrics",
+        "gate_test_hourly",
+    }
 
 
 def test_publish_teardown_restores_run_failure():
@@ -289,11 +314,13 @@ def test_dbt_command_selector_and_target_path_assembly():
     assert "--select" not in plain and "--exclude" not in plain
 
 
-def test_fresh_build_excludes_heavy_models():
+def test_fresh_build_excludes_heavy_models_and_hourly_tests():
     module = load_transform_module()
     build_cmd = module.dag.task_dict["dbt_build"].bash_command
-    assert "--exclude tag:heavy" in build_cmd
-    # fresh 는 기본 target/ 을 그대로 쓴다(격리는 heavy 쪽 책임).
+    # 공백 union 셀렉터(shlex 단일 인자) — heavy 모델·테스트와 감시성 테스트(tag:hourly)
+    # 를 함께 제외한다(테스트 티어링 A안 #685). 게이트 테스트(tag:gate·무태그)는 잔류.
+    assert "--exclude 'tag:heavy tag:hourly'" in build_cmd
+    # fresh 는 기본 target/ 을 그대로 쓴다(격리는 heavy·시간당 분기 쪽 책임).
     assert "--target-path" not in build_cmd
 
 
@@ -370,3 +397,80 @@ def test_fresh_and_heavy_do_not_share_param_instances():
     assert fresh_param is not heavy_param
     assert heavy_param.value == fresh_param.value
     assert heavy_param.schema["enum"] == ["dev", "prod"]
+
+
+# ── 테스트 티어링 (A안, #685) ────────────────────────────────────────────────────
+def test_hourly_test_branch_wiring_and_command():
+    module = load_transform_module()
+    dag = module.dag
+
+    gate = dag.task_dict["gate_test_hourly"]
+    assert isinstance(gate, FakeShortCircuitOperator)
+    assert gate.python_callable is module.rest_tests_due
+    assert gate.downstream_task_ids == {"dbt_test_rest"}
+    assert dag.task_dict["dbt_test_rest"].downstream_task_ids == {
+        "publish_rest_test_metrics"
+    }
+
+    rest = dag.task_dict["dbt_test_rest"]
+    assert "/home/airflow/dbt-venv/bin/dbt test" in rest.bash_command
+    assert "--select tag:hourly" in rest.bash_command
+    assert "--exclude tag:heavy" in rest.bash_command
+    # artifact 격리 — fresh build 의 target/run_results.json 을 덮어쓰지 않는다.
+    assert "--target-path target_test_hourly" in rest.bash_command
+    # 단일노드 Trino 직렬화 pool — heavy(:05,:35)와 인접해도 겹쳐 돌지 않는다.
+    assert rest.kwargs["pool"] == "trino_transit_heavy"
+
+
+def test_rest_publish_is_teardown_with_cleanup():
+    # ShortCircuit 은 teardown 을 skip 대상에서 제외하므로(providers-standard
+    # get_tasks_to_skip) 분기 skip 런에도 teardown 이 돈다 — cleanup_after 가
+    # 게시 직후 artifact 를 지워 skip 런을 '파일 없음 skip' no-op 으로 만든다.
+    module = load_transform_module()
+    publish = module.dag.task_dict["publish_rest_test_metrics"]
+
+    assert getattr(publish, "is_teardown", False) is True
+    assert publish.on_failure_fail_dagrun is False
+    assert publish.kwargs["op_kwargs"] == {
+        "run_results_path": module.REST_RUN_RESULTS_PATH,
+        "cleanup_after": True,
+    }
+    assert module.REST_RUN_RESULTS_PATH.replace("\\", "/") == (
+        "/opt/airflow/dbt/domains/transit/target_test_hourly/run_results.json"
+    )
+
+
+def test_rest_tests_due_once_per_kst_hour(monkeypatch):
+    # Variable 시간 버킷 dedup — 같은 시간엔 1회만 True(citydata 2026-07-26 관례).
+    module = load_transform_module()
+    FakeVariable._store.clear()
+
+    import datetime as _dt
+
+    class _FixedDatetime:
+        _now = _dt.datetime(2026, 8, 4, 10, 0)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls._now
+
+    monkeypatch.setattr(module, "datetime", _FixedDatetime)
+
+    assert module.rest_tests_due() is True  # 이 시간 첫 런
+    assert module.rest_tests_due() is False  # 같은 시간 버킷 재진입 차단
+    _FixedDatetime._now = _dt.datetime(2026, 8, 4, 11, 7)
+    assert module.rest_tests_due() is True  # 다음 시간 버킷은 다시 1회 허용
+
+
+def test_publish_metrics_cleanup_after_removes_artifact(tmp_path, monkeypatch):
+    module = load_transform_module()
+    run_results = tmp_path / "run_results.json"
+    _sample_run_results(run_results)
+    monkeypatch.setenv("ASAC_METRICS_DIR", str(tmp_path / "metrics"))
+
+    result = module.publish_silver_metrics(
+        run_results_path=str(run_results), cleanup_after=True, params={"target": "dev"}
+    )
+    assert result == {"rows": 1, "skipped": False}
+    # 게시 후 artifact 제거 — 다음 skip 런의 teardown 이 '파일 없음 skip' 이 된다.
+    assert not run_results.exists()
