@@ -69,6 +69,14 @@ def export(monkeypatch):
     monkeypatch.setattr(se, "_write_serve_state", lambda *a, **k: None)
     monkeypatch.setattr(se, "_report", lambda *a, **k: None)
     monkeypatch.setattr(se, "_check_contract_drift", lambda meta: None)
+    monkeypatch.setattr(
+        se,
+        "_load_public_evidence_contract",
+        lambda: types.SimpleNamespace(model_name="gold_license_flow_monthly"),
+    )
+    monkeypatch.setattr(se, "_public_quality_evidence", lambda *a, **k: {})
+    monkeypatch.setattr(se, "_measure_source_relation_coverage", lambda *a, **k: (147, {"status": "passed"}))
+    monkeypatch.setattr(se, "_publish_public_evidence", lambda *a, **k: None)
     monkeypatch.setattr(se, "SERVING_SPEC", (se.SERVING_SPEC[0],))
     assert se.SERVING_SPEC[0].d1_table == "d1_flow_monthly"
     return se, calls, state

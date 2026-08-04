@@ -92,6 +92,14 @@ class TrinoSourceReader:
         projected_columns = self._projected_columns(contract, columns)
         select_list = self._select_list(projected_columns)
         read_columns = projected_columns or columns
+        coverage_observed_distinct_count = None
+        coverage = contract.quality_coverage or {}
+        if coverage.get("measurement_scope") == "source_relation":
+            coverage_field = _quote_identifier(coverage["field"])
+            self._cursor.execute(
+                f"SELECT COUNT(DISTINCT {coverage_field}) FROM {relation}"
+            )
+            coverage_observed_distinct_count = int(self._cursor.fetchone()[0])
 
         incremental_upsert = (
             contract.publication_mode == "upsert"
@@ -102,12 +110,20 @@ class TrinoSourceReader:
         # 두 경우뿐. 그 외(snapshot·exact_set upsert·event_time 없는 append)는 전량 읽는다.
         if not incremental_upsert and (contract.publication_mode != "append" or not contract.event_time):
             rows = self._select(f"SELECT {select_list} FROM {relation}")
-            return ReadPlan(columns=read_columns, rows=rows)
+            return ReadPlan(
+                columns=read_columns,
+                rows=rows,
+                coverage_observed_distinct_count=coverage_observed_distinct_count,
+            )
 
         column_type = dict(columns).get(contract.event_time, "")
         if last_good_max is None:
             rows = self._select(f"SELECT {select_list} FROM {relation}")  # first run: full backfill
-            return ReadPlan(columns=read_columns, rows=rows)
+            return ReadPlan(
+                columns=read_columns,
+                rows=rows,
+                coverage_observed_distinct_count=coverage_observed_distinct_count,
+            )
 
         import pendulum
 
@@ -125,7 +141,11 @@ class TrinoSourceReader:
                 watermark = base.format("YYYY-MM-DD HH:mm:ss")
                 literal = f"timestamp '{watermark}'"
             rows = self._select(f"SELECT {select_list} FROM {relation} WHERE {event_time} >= {literal}")
-            return ReadPlan(columns=read_columns, rows=rows)
+            return ReadPlan(
+                columns=read_columns,
+                rows=rows,
+                coverage_observed_distinct_count=coverage_observed_distinct_count,
+            )
 
         # append: re-load only the recent window (idempotent) + any new rows.
         if column_type.startswith("date"):
@@ -135,7 +155,13 @@ class TrinoSourceReader:
             cutoff = base.subtract(hours=APPEND_LOOKBACK_HOURS).format("YYYY-MM-DD HH:00:00")
             literal = f"timestamp '{cutoff}'"
         rows = self._select(f"SELECT {select_list} FROM {relation} WHERE {event_time} >= {literal}")
-        return ReadPlan(columns=read_columns, rows=rows, delete_column=contract.event_time, delete_literal=f"'{cutoff}'")
+        return ReadPlan(
+            columns=read_columns,
+            rows=rows,
+            delete_column=contract.event_time,
+            delete_literal=f"'{cutoff}'",
+            coverage_observed_distinct_count=coverage_observed_distinct_count,
+        )
 
 
 def _trino_settings(target: str, schema: str) -> dict[str, Any]:

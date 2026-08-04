@@ -158,6 +158,7 @@ SERVING_SPEC: tuple[Serve, ...] = (
 
 # D1 원장 금지(iceberg_api) — export 대상 아님. 계약(dbt)·문서와의 대조용 명시 목록.
 ICEBERG_ONLY = ("gold_license_flow_daily",)
+PUBLIC_EVIDENCE_PRODUCT_ID = "commerce_flow_monthly"
 
 
 # ── D1 HTTP API ─────────────────────────────────────────────────────────────
@@ -277,6 +278,130 @@ def _append_ledger(token: str, *, publication_id: str, product_id: str, model_na
         log.warning("[serving export] 원장 기록 실패(무시): %s — %s", model_name, type(exc).__name__)
 
 
+def _manifest_path() -> str:
+    return os.path.join(
+        os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce"),
+        "target", "manifest.json")
+
+
+def _load_public_evidence_contract():
+    """Load the exact public product contract that this custom exporter owns.
+
+    Unlike the legacy catalog metadata path, evidence publication is fail-closed:
+    a missing manifest/projection must not produce a publication that the Worker
+    could mistake for a reviewed public schema.
+    """
+    from common.serving.contract import load_contracts
+
+    contracts = load_contracts(
+        _manifest_path(),
+        product_ids=[PUBLIC_EVIDENCE_PRODUCT_ID],
+        require_public_projection=True,
+    )
+    if len(contracts) != 1:
+        raise RuntimeError(f"{PUBLIC_EVIDENCE_PRODUCT_ID}: exact serving contract required")
+    return contracts[0]
+
+
+def _measure_source_relation_coverage(cur, qschema: str, contract) -> tuple[int | None, dict | None]:
+    declaration = contract.quality_coverage
+    if declaration is None:
+        return None, None
+    if declaration.get("not_applicable_reason"):
+        return None, {
+            "status": "not_applicable",
+            "reason": declaration["not_applicable_reason"],
+        }
+    if declaration.get("measurement_scope") != "source_relation":
+        raise RuntimeError(
+            f"{contract.product_id}: commerce rollup coverage must use measurement_scope=source_relation"
+        )
+    field = declaration["field"]
+    assert_identifier(field, field="quality coverage field")
+    cur.execute(
+        f'SELECT COUNT(DISTINCT "{field}") FROM {qschema}.{contract.model_name}'
+    )
+    observed = int(cur.fetchone()[0])
+    expected = int(declaration["expected_distinct_count"])
+    minimum_ratio = float(declaration["minimum_ratio"])
+    ratio = observed / expected
+    coverage = {
+        "field": field,
+        "expected_distinct_count": expected,
+        "observed_distinct_count": observed,
+        "minimum_ratio": minimum_ratio,
+        "ratio": ratio,
+        "status": "passed" if ratio >= minimum_ratio else "failed",
+    }
+    if ratio < minimum_ratio:
+        raise RuntimeError(
+            f"{contract.product_id}: quality coverage failed: observed={observed} "
+            f"expected={expected} ratio={ratio:.6f} minimum_ratio={minimum_ratio:.6f}"
+        )
+    return observed, coverage
+
+
+def _public_quality_evidence(
+    contract,
+    colnames: list[str],
+    rows: list,
+    *,
+    d1_row_count: int,
+    coverage: dict | None,
+    measured_at: str,
+) -> dict:
+    expected_projection = tuple(contract.public_projection or ())
+    if tuple(colnames) != expected_projection:
+        raise RuntimeError(
+            f"{contract.product_id}: public projection mismatch: "
+            f"expected={list(expected_projection)} actual={colnames}"
+        )
+    indexes = [colnames.index(column) for column in contract.primary_key]
+    key_values = [tuple(row[index] for index in indexes) for row in rows]
+    null_primary_key_count = sum(
+        1 for key in key_values if any(value is None for value in key)
+    )
+    distinct_primary_key_count = len(set(key_values))
+    if null_primary_key_count or distinct_primary_key_count != len(rows):
+        raise RuntimeError(
+            f"{contract.product_id}: public primary key validation failed: rows={len(rows)} "
+            f"distinct={distinct_primary_key_count} null={null_primary_key_count}"
+        )
+    if d1_row_count != len(rows):
+        raise RuntimeError(
+            f"{contract.product_id}: D1 row-count validation failed: "
+            f"source={len(rows)} d1={d1_row_count}"
+        )
+    return {
+        "source_row_count": len(rows),
+        "d1_row_count": d1_row_count,
+        "duplicate_primary_key_count": len(rows) - distinct_primary_key_count,
+        "null_primary_key_count": null_primary_key_count,
+        "freshness_as_of": _freshness_of(rows, colnames, contract.event_time),
+        "freshness_slo_minutes": contract.freshness_slo_minutes,
+        "serving_status": "published",
+        "measured_at": measured_at,
+        "coverage": coverage,
+        "projection_schema_version": contract.projection_schema_version,
+        "projection_schema_hash": contract.projection_schema_hash,
+    }
+
+
+def _publish_public_evidence(token: str, evidence_rows: list[tuple]) -> None:
+    if not evidence_rows:
+        return
+    from common.serving.d1_client import HttpD1Client
+
+    client = HttpD1Client(_d1_api(), token)
+    for contract, publication_id, quality in evidence_rows:
+        client.publish_product_evidence(
+            contract.product_id,
+            publication_id,
+            contract.source_evidence,
+            quality,
+        )
+
+
 def _load_serving_meta() -> dict[str, dict]:
     """dbt manifest → {model: {description, serving(계약 전체), tests}}. 부재 시 {}(경고).
 
@@ -284,9 +409,7 @@ def _load_serving_meta() -> dict[str, dict]:
     `meta.serving.*`(#478 확정 필드 + commerce 확장 serving_tier/d1_*) 는 그 **선언·검증**이다.
     여기서 읽어 _catalog 15컬럼(product_id/external/product_question/event_time 등)을 채우고
     SERVING_SPEC 과의 드리프트를 경보한다(계약이 정본과 어긋나면 알린다)."""
-    path = os.path.join(
-        os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce"),
-        "target", "manifest.json")
+    path = _manifest_path()
     try:
         with open(path, encoding="utf-8") as f:
             manifest = json.load(f)
@@ -339,7 +462,10 @@ def _handoff_rows(spec, m: dict, col_defs: list, publication_id: str) -> tuple[l
                 for i, (c, t) in enumerate(col_defs)]
     ext_row = {"product_id": pid, "table_name": spec.d1_table, "source_model": spec.source,
                "grain": sv.get("grain"),
-               "primary_key": json.dumps(sv.get("primary_key") or [], ensure_ascii=False),
+               "primary_key": json.dumps(
+                   sv.get("public_primary_key") or sv.get("primary_key") or [],
+                   ensure_ascii=False,
+               ),
                "time_axis": sv.get("event_time"),
                "tier": spec.tier, "rollup_rule": sv.get("d1_rollup"),   # 물리 확장(#638 §2.2)
                "publication_id": publication_id}
@@ -702,6 +828,11 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     catalog, schema, qschema = _qualified()   # qschema = 검증 식별자(iceberg_dev.commerce)
     meta = _load_serving_meta()
     _check_contract_drift(meta)
+    public_contract = (
+        _load_public_evidence_contract()
+        if any("commerce_" + spec.d1_table[3:] == PUBLIC_EVIDENCE_PRODUCT_ID for spec in SERVING_SPEC)
+        else None
+    )
     now = datetime.now(timezone.utc).isoformat()
     # 게시 실행 식별(#478 §3.4 런타임 기록) — source_run_id 는 export DAG run(Asset 트리거 소비측).
     source_run_id = os.environ.get("AIRFLOW_CTX_DAG_RUN_ID") or now
@@ -724,6 +855,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     handoff_cols: list = []          # MCP/API 핸드오프 보조 테이블 행(성공 스왑분)
     handoff_ext: list = []
     handoff_pats: list = []
+    public_evidence_rows: list[tuple] = []
     try:
         cur = conn.cursor()
         for spec in SERVING_SPEC:
@@ -754,6 +886,24 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
 
             colnames = [c for c, _ in col_defs]
             ddl = ", ".join(f'"{c}" {_sqlite_type(t)}' for c, t in col_defs)
+            product_id = "commerce_" + spec.d1_table[3:]
+            coverage = None
+            if product_id == PUBLIC_EVIDENCE_PRODUCT_ID:
+                if public_contract is None or public_contract.model_name != spec.source:
+                    raise RuntimeError(f"{product_id}: public serving contract/source mismatch")
+                # Projection/PK are checked before any D1 mutation. Coverage is measured
+                # from the full source relation because the public rollup omits dataset.
+                _public_quality_evidence(
+                    public_contract,
+                    colnames,
+                    rows,
+                    d1_row_count=n,
+                    coverage=None,
+                    measured_at=now,
+                )
+                _observed, coverage = _measure_source_relation_coverage(
+                    cur, qschema, public_contract
+                )
 
             # 무변경 게이트 — 직전 게시와 payload 지문이 같으면 행 재기록을 생략한다.
             # 스킵해도 잃는 정확성이 0인 이유: 지문이 같다는 건 보낼 바이트가 같다는 뜻이다.
@@ -830,6 +980,17 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
             cr, er, pr = _handoff_rows(spec, m, col_defs, publication_id)
             handoff_cols.extend(cr); handoff_ext.append(er); handoff_pats.extend(pr)
             published["commerce_" + spec.d1_table[3:]] = publication_id   # 잔여 정리 스코프
+            if product_id == PUBLIC_EVIDENCE_PRODUCT_ID:
+                actual_d1_rows = _d1_row_count(spec.d1_table, token)
+                quality = _public_quality_evidence(
+                    public_contract,
+                    colnames,
+                    rows,
+                    d1_row_count=actual_d1_rows,
+                    coverage=coverage,
+                    measured_at=now,
+                )
+                public_evidence_rows.append((public_contract, publication_id, quality))
             log.info("[serving export] %s ← %s: %d행(%s)%s", spec.d1_table, spec.source, n,
                      spec.tier, " — 무변경, 재기록 생략" if reuse else "")
 
@@ -838,6 +999,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
         _upsert_publish_state(state_rows, token)
         _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats,
                          _glossary_rows(cur, catalog, qschema, now), published, now)
+        _publish_public_evidence(token, public_evidence_rows)
     finally:
         conn.close()
 

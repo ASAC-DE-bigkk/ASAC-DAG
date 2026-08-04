@@ -39,6 +39,8 @@ class ReadPlan:
     rows: list[dict[str, Any]]
     delete_column: str | None = None  # append: clear this window before insert
     delete_literal: str | None = None
+    # `quality_coverage.measurement_scope=source_relation`의 projection 전 실측값.
+    coverage_observed_distinct_count: int | None = None
 
 
 class SourceReader(Protocol):
@@ -229,15 +231,29 @@ def _primary_key_stats(rows: Sequence[dict[str, Any]], primary_key: Sequence[str
     return len(rows), len(set(values)), null_count
 
 
-def _coverage_evidence(contract: ServingContract, rows: Sequence[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
+def _coverage_evidence(
+    contract: ServingContract,
+    rows: Sequence[dict[str, Any]],
+    observed_distinct_count: int | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     """Compute the declared distinct coverage and return a precise pre-write failure reason."""
     declaration = contract.quality_coverage
     if declaration is None:
         return None, None
+    not_applicable_reason = declaration.get("not_applicable_reason")
+    if not_applicable_reason:
+        return {
+            "status": "not_applicable",
+            "reason": not_applicable_reason,
+        }, None
     field = declaration["field"]
     expected = declaration["expected_distinct_count"]
     minimum_ratio = declaration["minimum_ratio"]
-    observed = len({row.get(field) for row in rows if row.get(field) is not None})
+    observed = (
+        observed_distinct_count
+        if observed_distinct_count is not None
+        else len({row.get(field) for row in rows if row.get(field) is not None})
+    )
     ratio = observed / expected
     coverage = {
         "field": field,
@@ -458,7 +474,9 @@ def publish(
             _append_ledger(d1, record, outcome="failed")
             report.records.append(record)
             continue
-        record.coverage, coverage_error = _coverage_evidence(contract, rows)
+        record.coverage, coverage_error = _coverage_evidence(
+            contract, rows, plan.coverage_observed_distinct_count
+        )
         if coverage_error:
             record.serving_status = STATUS_FAILED
             record.stage = "quality_coverage"
