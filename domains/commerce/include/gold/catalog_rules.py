@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+
 from collections import Counter, defaultdict
 from itertools import combinations
+
+from commerce_core.schemas import detect_row_format
 
 # ── 엄격 경계(사용자 확정) ────────────────────────────────────────────────────
 JACCARD_MIN = 0.7
@@ -33,6 +36,7 @@ NAME_BY_MEMBER: dict[str, str] = {
     "barber_shop": "public_sanitation_service",         # 공중위생영업
     "full_amusement_park": "amusement_park",            # 유원시설업
     "clinic": "medical_institution",                    # 의료기관(의원급·법인)
+    "livestock_processing": "livestock_business",       # 축산물영업(가공·포장·보관·운반·판매)
 }
 
 ENTITY_KEY = ["entity_id"]
@@ -85,7 +89,20 @@ def build_catalog(fields_by_short: dict[str, set[str]],
     detail row = {object, kind, members, payload(정렬 lowercase), shared_n}
     dataset_map = short → {entity_type, detail_table} (entity/dim_dataset 분기 지시자).
     """
-    fmt_by_short = {s: (meta_by_short.get(s, {}).get("fmt") or "v1") for s in fields_by_short}
+    # 응답 양식은 **실측 컬럼으로 판정**한다. 레지스트리의 `format` 은 수기 표기라 빠뜨리면
+    # 조용히 v1 로 떨어지고, 그러면 v2 표준 컬럼이 코어에서 안 빠져 **전부 "고유 필드"로 남아**
+    # 서로 무관한 데이터셋이 한 덩어리로 묶인다(2026-08-04 사고: 8종이 가짜 클러스터).
+    # bronze 는 이미 같은 판정으로 드리프트를 경고하고 별칭으로 대응하는데(bronze_tasks
+    # detect_row_format), 카탈로그만 등록값을 믿고 있었다. 판정 근거를 하나로 맞춘다.
+    # 판정 불가(unknown)일 때만 등록값으로 물러난다.
+    fmt_by_short = {}
+    fmt_mismatch: list[dict] = []
+    for s, fields in fields_by_short.items():
+        declared = (meta_by_short.get(s, {}).get("fmt") or "v1")
+        observed = detect_row_format(fields)
+        fmt_by_short[s] = declared if observed == "unknown" else observed
+        if observed != "unknown" and observed != declared:
+            fmt_mismatch.append({"short": s, "declared": declared, "observed": observed})
     cores = _cores(fields_by_short, fmt_by_short)
     nc = {s: fields_by_short[s] - cores.get(fmt_by_short[s], set()) for s in fields_by_short}
 
@@ -132,4 +149,7 @@ def build_catalog(fields_by_short: dict[str, set[str]],
     # pending 은 "아직 이름이 없어 단건으로 떨어진 클러스터" — 적재는 정상이고 이름만 미정이다.
     # 버전 해시에는 넣지 않는다(카탈로그 내용이 아니라 후속 과제 표시라서).
     return {"version": version, "details": details, "dataset_map": dataset_map,
-            "pending_cluster_names": sorted(pending, key=lambda r: r["members"])}
+            "pending_cluster_names": sorted(pending, key=lambda r: r["members"]),
+            # 레지스트리 `format` 이 실측과 어긋난 것 — 카탈로그는 실측을 따랐으므로 동작은
+            # 정상이지만, 등록값을 고쳐야 bronze 드리프트 경고가 매일 울리는 걸 멈춘다.
+            "fmt_mismatch": sorted(fmt_mismatch, key=lambda r: r["short"])}
