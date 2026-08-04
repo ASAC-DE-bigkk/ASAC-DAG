@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from common.discord import guard as discord_guard  # noqa: E402
 from common.discord.notify import (  # noqa: E402
     COLOR_FAIL,
+    user_agent,
     resolve_webhook,
     send_embed,
     send_text,
@@ -405,3 +406,42 @@ def test_plain_text_also_carries_the_badge(monkeypatch, sent):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
     assert send_text("일일 리포트", webhook=_WEBHOOK)
     assert sent[-1]["content"].startswith("[DEV] ")
+
+
+# ── UA 도메인 식별 ────────────────────────────────────────────────────────
+
+def test_user_agent_carries_the_domain(monkeypatch, sent):
+    """전송 계층을 합치면서 도메인 식별까지 잃지 않는다 — 수신측 로그·레이트리밋 축(#692)."""
+    import urllib.request
+
+    seen: list[str] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake(request, timeout=None):
+        seen.append(request.headers["User-agent"])
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    send_embed("t", "d", domain="traffic", webhook=_WEBHOOK)
+    send_text("t", domain="culture", webhook=_WEBHOOK)
+    send_embed("t", "d", webhook=_WEBHOOK)          # 도메인 없음
+    assert seen == ["asac-elt-notify/1.0 (traffic)",
+                    "asac-elt-notify/1.0 (culture)",
+                    "asac-elt-notify/1.0"]
+
+
+def test_user_agent_rejects_header_breaking_characters():
+    """괄호·개행이 섞이면 헤더가 깨지거나 주입된다 — 안전한 문자만 남긴다."""
+    injected = chr(13) + chr(10)   # CR LF — 헤더를 깨거나 새 헤더를 주입하는 형태
+    got = user_agent('bad name(x)' + injected + 'X-Injected: 1')
+    assert got == 'asac-elt-notify/1.0 (badnamexx-injected1)'
+    assert chr(13) not in got and chr(10) not in got
+    assert user_agent('   ') == 'asac-elt-notify/1.0'          # 공백뿐이면 도메인 없음
+    assert user_agent('()') == 'asac-elt-notify/1.0 (unknown)' # 남는 글자 없으면 unknown
+    assert user_agent("()") == "asac-elt-notify/1.0 (unknown)"

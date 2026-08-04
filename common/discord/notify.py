@@ -103,13 +103,35 @@ def _provenance(environment: str) -> str:
     return f"env={environment} · host={host}"
 
 
+#: 전송 주체 식별자. 제품 토큰은 **하나로 고정**하고(수신측 allowlist·차단 규칙이 이걸 본다),
+#: 어느 도메인이 보냈는지는 표준 UA 주석 문법으로 괄호에 싣는다 — `asac-elt-notify/1.0 (traffic)`.
+#: 전송 계층을 합치면서 도메인 식별까지 잃을 이유는 없다(ASAC-DAG#692).
+USER_AGENT_PRODUCT = "asac-elt-notify/1.0"
+
+
+def user_agent(domain: str | None = None) -> str:
+    """UA 한 줄. 도메인이 없으면 제품 토큰만.
+
+    urllib 기본 UA(`Python-urllib/x.y`)는 Discord 앞단 Cloudflare 가 403(error 1010)으로
+    막으므로 식별 가능한 UA 가 **필수**다. 그 위에 도메인을 얹어, 수신측 로그·레이트리밋에서
+    어느 파이프라인이 보낸 것인지 갈리게 한다.
+    """
+    name = (domain or "").strip().lower()
+    return f"{USER_AGENT_PRODUCT} ({safe_ua_token(name)})" if name else USER_AGENT_PRODUCT
+
+
+def safe_ua_token(value: str) -> str:
+    """UA 주석에 넣어도 안전한 문자만 남긴다 — 괄호·개행이 섞이면 헤더가 깨진다."""
+    return "".join(ch for ch in value if ch.isalnum() or ch in "-_.") or "unknown"
+
+
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
 
 
-def _post(webhook: str, payload: dict) -> bool:
+def _post(webhook: str, payload: dict, *, domain: str | None = None) -> bool:
     """payload 를 webhook 으로 POST. 실패는 삼키고 False (URL 비로그)."""
     register_secret(webhook)  # 전송 실패 로그 등 어떤 경로로도 URL 이 안 새게 명시 등록
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -118,9 +140,8 @@ def _post(webhook: str, payload: dict) -> bool:
         data=body,
         headers={
             "Content-Type": "application/json",
-            # urllib 기본 UA(Python-urllib/x.y)는 Discord 앞단 Cloudflare 가
-            # 403(error 1010)으로 차단한다 — 식별 가능한 UA 필수.
-            "User-Agent": "asac-elt-notify/1.0",
+            # 식별 가능한 UA 필수(기본 UA 는 Cloudflare 가 403 으로 차단) + 도메인 식별.
+            "User-Agent": user_agent(domain),
         },
         method="POST",
     )
@@ -156,7 +177,7 @@ def send_embed(title: str, description: str, *, color: int = COLOR_OK,
     provenance = _provenance(environment)
     text = f"{redact(footer)} · {provenance}" if footer else provenance
     embed["footer"] = {"text": _truncate(text, _MAX_FOOTER)}
-    return _post(url, {"embeds": [embed]})
+    return _post(url, {"embeds": [embed]}, domain=domain)
 
 
 def stamp_payload(payload: dict, *, env: dict | None = None) -> dict:
@@ -206,7 +227,8 @@ def send_payload(payload: dict, *, domain: str | None = None,
     refresh_env_secrets()
     stamped = stamp_payload(payload)
     # 전송 직전 일괄 redaction — 도메인이 만든 값에 자격증명이 섞여도 밖으로 나가지 않는다.
-    return _post(url, json.loads(redact(json.dumps(stamped, ensure_ascii=False))))
+    return _post(url, json.loads(redact(json.dumps(stamped, ensure_ascii=False))),
+                 domain=domain)
 
 
 def send_text(content: str, *, domain: str | None = None,
@@ -220,4 +242,4 @@ def send_text(content: str, *, domain: str | None = None,
     environment = notify_environment()
     # 평문에는 footer 자리가 없어 앞에 표식만 붙인다(운영이면 표식 없음 — 기존 형태 그대로).
     body = _env_badge(environment) + redact(content)
-    return _post(url, {"content": _truncate(body, _MAX_CONTENT)})
+    return _post(url, {"content": _truncate(body, _MAX_CONTENT)}, domain=domain)

@@ -139,8 +139,9 @@ def test_traffic_send_discord_posts_payload(monkeypatch):
     warning_payload = discord._discord_payload("title\n⚠️ 리포트 상태: 경고")
     assert warning_payload["embeds"][0]["color"] == discord.DISCORD_YELLOW
     assert request.get_method() == "POST"
-    # 전송 계층이 공용 모듈로 합쳐져 UA·timeout 이 공용 값이 된다(#692).
-    assert request.headers["User-agent"] == "asac-elt-notify/1.0"
+    # 전송 계층은 공용이지만 UA 에는 도메인이 실린다 — 수신측에서 어느 파이프라인이
+    # 보냈는지 갈려야 한다(#692). 제품 토큰은 하나로 고정.
+    assert request.headers["User-agent"] == "asac-elt-notify/1.0 (traffic)"
     assert timeout == 5.0
 
 
