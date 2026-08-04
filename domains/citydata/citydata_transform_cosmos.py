@@ -36,13 +36,16 @@ from cosmos import (
 )
 from cosmos.constants import InvocationMode, LoadMode, TestBehavior
 
+# 이 파일의 디렉토리(domains/citydata)를 sys.path 에 넣어 콜백에서 `citydata_ingest.*`(D1 writer)를
+# import 가능하게 — bronze 와 동일. 이게 없으면 run 관측 콜백이 ModuleNotFoundError 로 조용히 죽는다.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 _DAGS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _DAGS_ROOT not in sys.path:
     sys.path.insert(0, _DAGS_ROOT)
 
 from common.assets import CITYDATA_BRONZE_ASSET  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
-from common.ops.run_sink import record_run  # noqa: E402
 
 KST_TZ = ZoneInfo("Asia/Seoul")
 
@@ -59,10 +62,65 @@ DBT_BIN = "/home/airflow/dbt-venv/bin/dbt"
 record_citydata_problem = problem_failure_callback(
     domain="citydata", source_system="seoul_citydata", dbt_project_dir=DBT_PROJECT)
 
-# run 기록 — 성공·실패 모두 R2 runs/ 에 파일 1개(태스크 단위, common.ops.run_sink). 기존 problem
-# 콜백과 병행하며, best-effort(기록 실패는 태스크 판정 안 가림).
-_run_ok = record_run("citydata", "transform", status="success")
-_run_fail = record_run("citydata", "transform", status="failed")
+# run 관측 — 모델별 layer 로 **R2 ops/runs/ 파일 + D1 _ops_run_event 한 줄을 함께** 쓴다(emit_ops_event).
+# 왜 기존 record_run 을 바꿨나 (모두 dev 로컬 실측, ASK-Seoul#78):
+#  1) 관측 결과 transform 의 D1 run 은 34건 전부 layer=NULL — record_run("citydata","transform") 이
+#     layer="transform" 을 쓰는데 Layer enum 은 bronze/silver/gold 뿐이라 유효 계층으로 안 남았다.
+#  2) record_run 은 DAG 정의 시점의 **고정 layer 한 개**만 받아, silver·gold 를 한 DAG 에서 같이 굽는
+#     transform 에는 모델별 계층을 못 준다. → 태스크 id 의 모델명으로 layer 판별해 emit_ops_event 로
+#     R2+D1 을 유효 계층으로 함께 쓴다(bronze 가 R2+D1 둘 다 쓰는 것과 같은 커버리지, 스키마 자기일관).
+# 실패 콜백은 리스트 대신 **단일 함수로 합성** — 콜백 리스트의 실행 순서·보장을 걸지 않으려는 방어적 선택.
+def _model_layer(task_id: str):
+    """Cosmos 모델 run 태스크(``tier.<model>.run``) → Layer. 모르면 None(추측 금지)."""
+    parts = str(task_id).split(".")
+    if len(parts) < 2 or parts[-1] != "run":   # 모델 run 만 — test/gate/deps 제외
+        return None
+    from common.ops.contract import Layer  # noqa: PLC0415
+    model = parts[-2]
+    if model.startswith("silver_"):
+        return Layer.SILVER
+    if model.startswith("gold_"):
+        return Layer.GOLD
+    return None
+
+
+def _emit_run_d1(context, status) -> None:
+    """모델 run 1건 = R2 ``ops/runs/`` 파일 + D1 ``_ops_run_event`` 한 줄(둘 다 유효 layer). fail-open(C-2).
+
+    emit_ops_event 가 R2 저장·D1 적재를 각각 감싸 실패를 삼킨다(관측 실패가 변환을 안 죽인다).
+    """
+    ti = context["ti"]
+    layer = _model_layer(ti.task_id)
+    if layer is None:
+        return
+    try:
+        from common.ops.contract import Grain, OpsCategory, emit_ops_event  # noqa: PLC0415
+        from citydata_ingest.source.d1_run_event_writer import make_d1_run_event_writer  # noqa: PLC0415
+        target = (context.get("params") or {}).get("target", "dev")
+        emit_ops_event(
+            OpsCategory.RUNS, d1_writer=make_d1_run_event_writer(),
+            domain="citydata", layer=layer, grain=Grain.AIRFLOW_TASK, status=status,
+            dag_id=ti.dag_id, task_id=ti.task_id, run_id=ti.run_id,
+            try_number=ti.try_number, environment=target)
+    except Exception as exc:  # noqa: BLE001 — C-2 fail-open(import·검증 실패도 변환을 안 죽인다)
+        import logging  # noqa: PLC0415
+        logging.getLogger(__name__).warning(
+            "[ops] transform run 기록 실패(무시): %s", type(exc).__name__)
+
+
+def _run_d1_success(context) -> None:
+    from common.ops.contract import RunStatus  # noqa: PLC0415
+    _emit_run_d1(context, RunStatus.SUCCESS)
+
+
+def _fail_callback(context) -> None:
+    """problem 문서 + run D1 을 **단일 함수로 합성** — 콜백 리스트 순서에 의존 안 하려는 방어."""
+    from common.ops.contract import RunStatus  # noqa: PLC0415
+    try:
+        record_citydata_problem(context)
+    except Exception:  # noqa: BLE001 — 한 콜백 실패가 다른 콜백을 막지 않게
+        pass
+    _emit_run_d1(context, RunStatus.FAILED)
 
 # 티어는 dbt **태그**로 관리 — 모델명 하드코딩 리스트 대신. 각 모델의 tier 는 그 모델
 # schema.yml `config: tags: [fast|slow]` 에 있고(SQL=비즈니스로직 / yml=문서·메타 분리
@@ -133,8 +191,9 @@ def _tier_group(group_id: str, select: list[str]) -> DbtTaskGroup:
         # retries=0 유지(위 주석의 중복 방지 근거). run-metadata 는 성공·실패 모두 기록.
         default_args={
             "retries": 0,
-            "on_success_callback": _run_ok,
-            "on_failure_callback": [record_citydata_problem, _run_fail],
+            # 단일 콜백만 — 콜백 리스트 순서 의존 회피. run 관측은 모델별 layer 로 D1 직접 emit.
+            "on_success_callback": _run_d1_success,
+            "on_failure_callback": _fail_callback,
         },
     )
 
