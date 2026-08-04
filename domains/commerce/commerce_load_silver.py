@@ -225,7 +225,7 @@ def commerce_load_silver():
 
         silver detail(원형 — API 별 상이 컬럼) 생성용 스펙의 파생 과정(별도 meta_ 단위,
         PROJECT.md §4.3). 레이어 재분류(#70)로 gold DAG 에서 silver 파이프라인으로 편승."""
-        from commerce_core import registry
+        from commerce_core import notify, registry
         from gold import catalog_rules, loader, measure
 
         fields = measure.measure_fields()
@@ -236,7 +236,35 @@ def commerce_load_silver():
             import logging
             logging.getLogger(__name__).warning("detail 카탈로그 드리프트: %s → %s", prev_ver, cat["version"])
         loader.upsert_catalog(cat["details"], cat["version"])
-        return {"version": cat["version"], "specs": len(cat["details"])}
+
+        # 이름이 없어 단건으로 떨어진 클러스터 — **적재는 정상이고 이름만 미정**이다.
+        # 조용히 넘기면 영영 안 고쳐지므로, 규약 §19.1 형식의 품질 이벤트로 올려
+        # 알림·운영 기록 양쪽에 남긴다(파이프라인은 계속 진행).
+        pending = cat.get("pending_cluster_names") or []
+        if pending:
+            members = sorted({m for row in pending for m in row["members"]})
+            notify.notify_quality_event(
+                task="build_detail_catalog",
+                level="warning",
+                title="detail cluster 이름 미정 — 단건 테이블로 적재 중",
+                description=(
+                    "같은 모양으로 묶인 데이터셋에 도메인 이름이 없어, 클러스터 대신 개별 "
+                    "detail 테이블로 적재했습니다. **데이터 손실은 없습니다.** "
+                    "gold/catalog_rules.py 의 NAME_BY_MEMBER 에 이름을 추가하면 다음 빌드에서 "
+                    "하나로 합쳐집니다."),
+                metrics={
+                    "affected_rows": len(members),
+                    "settled_rows": len(cat["details"]),
+                    "affected_ratio_pct": round(100.0 * len(members) / max(len(cat["details"]), 1), 1),
+                    "unnamed_clusters": len(pending),
+                },
+                context={"members": members,
+                         "clusters": [{"members": r["members"], "shared_n": r["shared_n"]}
+                                      for r in pending]},
+            )
+
+        return {"version": cat["version"], "specs": len(cat["details"]),
+                "pending_cluster_names": pending}
 
     @task
     def load_details() -> dict:
