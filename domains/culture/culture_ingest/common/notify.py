@@ -15,14 +15,16 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-import requests
 
 from culture_ingest.common.security import redact
 from culture_ingest.source.datasets import BY_NAME
 
 log = logging.getLogger(__name__)
 
+from common.discord.notify import send_payload
+
 KST = ZoneInfo("Asia/Seoul")
+_DOMAIN = "culture"
 WEBHOOK_ENV = "CULTURE_DISCORD_WEBHOOK_URL"
 COLOR_PASS = 3066993   # 0x2ECC71
 COLOR_FAIL = 15158332  # 0xE74C3C
@@ -41,17 +43,27 @@ class NoopNotifier(Notifier):
 
 
 class DiscordWebhookNotifier(Notifier):
+    """전송은 공용 모듈(`common.discord.notify`)에 맡긴다 — ASAC-DAG#692.
+
+    payload 조립은 이 모듈이 그대로 하고(`build_report_payload`), 전송 계층만 공용으로 옮겼다.
+    그래서 출력은 이전과 같고 **환경 표식(`[PROD]`/`[DEV]`)과 footer 출처만 더해진다** —
+    여러 인스턴스가 같은 채널을 쓰므로 어느 환경 결과인지 메시지로 갈릴 수 있어야 한다.
+
+    함께 따라오는 것: 전송 직전 redaction(자격증명 유출 차단), 웹훅 URL 의 시크릿 등록,
+    Discord 앞단이 요구하는 UA. 기존 `requests` 의존이 사라져 stdlib 만 쓴다.
+    """
+
     def __init__(self, url: str, timeout: float = 10.0):
         self._url = url
-        self._timeout = timeout
+        self._timeout = timeout   # 공용 전송 계층이 자체 타임아웃을 쓴다(호환용으로만 보관)
 
     def send(self, payload: dict) -> None:
-        try:
-            requests.post(self._url, json=payload, timeout=self._timeout)
-        except Exception as exc:  # noqa: BLE001 -- best-effort.
-            # 예외 타입 이름만 남긴다 — requests 예외 문자열/traceback 에 웹훅 URL 이
-            # 섞여 로그로 새는 것을 막는다(설계 §7: URL 로그 금지).
-            log.warning("[notify] Discord 전송 실패(무시): %s", type(exc).__name__)
+        # 채널은 이 클래스가 받은 URL 로 고정한다(`notifier_from_env` 가 CULTURE_… 로 만든 값).
+        # 빈 값이면 공용 `resolve_webhook` 체인으로 넘어가 다른 채널로 나갈 수 있으므로 막는다.
+        if not (self._url or "").strip():
+            log.info("[notify] webhook 미설정 — 전송 스킵")
+            return
+        send_payload(payload, domain=_DOMAIN, webhook=self._url)
 
 
 def notifier_from_env(env: dict | None = None) -> Notifier:

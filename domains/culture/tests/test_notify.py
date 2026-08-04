@@ -14,18 +14,45 @@ def test_noop_send_does_not_raise():
     notify.NoopNotifier().send({"embeds": [{"title": "t"}]})
 
 
-def test_discord_send_posts_payload(monkeypatch):
+def _capture_urlopen(monkeypatch):
+    """공용 전송 계층(stdlib urllib)을 가로채 payload 를 모은다 — requests 의존 제거(#692)."""
+    import json as _json
+    import urllib.request
+
     calls = []
-    monkeypatch.setattr(notify.requests, "post",
-                        lambda url, json, timeout: calls.append((url, json, timeout)))
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake(request, timeout=None):
+        calls.append((request.full_url, _json.loads(request.data.decode("utf-8"))))
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    return calls
+
+
+def test_discord_send_posts_payload(monkeypatch):
+    calls = _capture_urlopen(monkeypatch)
     notify.DiscordWebhookNotifier("https://hook").send({"embeds": [{"title": "t"}]})
     assert calls and calls[0][0] == "https://hook"
+    embed = calls[0][1]["embeds"][0]
+    # 제목 내용은 그대로 두고 환경 표식만 앞에 붙는다(#692).
+    assert embed["title"].endswith("t")
+    assert "env=" in embed["footer"]["text"]
 
 
 def test_discord_send_swallows_failure(monkeypatch):
+    import urllib.request
+
     def boom(*a, **k):
         raise RuntimeError("down")
-    monkeypatch.setattr(notify.requests, "post", boom)
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
     notify.DiscordWebhookNotifier("https://hook").send({"embeds": []})  # 예외 없어야 함
 
 
@@ -135,10 +162,12 @@ def test_discord_send_does_not_log_url_on_failure(monkeypatch, caplog):
 
     secret_url = "https://discord.com/api/webhooks/999/SUPERSECRETTOKEN"
 
-    def boom(*a, **k):  # requests 예외 문자열에 URL 이 섞이는 상황을 재현
+    def boom(*a, **k):  # 전송 예외 문자열에 URL 이 섞이는 상황을 재현
         raise RuntimeError(f"ConnectionError: failed to reach {secret_url}")
 
-    monkeypatch.setattr(notify.requests, "post", boom)
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
     with caplog.at_level(logging.WARNING):
         notify.DiscordWebhookNotifier(secret_url).send({"embeds": []})  # 예외 없어야 함
     # 웹훅 URL/토큰이 로그로 새면 안 된다(설계 §7).

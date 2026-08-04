@@ -128,19 +128,21 @@ def test_traffic_send_discord_posts_payload(monkeypatch):
     request, timeout = calls[0]
     payload = json.loads(request.data.decode("utf-8"))
     assert "content" not in payload
-    assert payload["embeds"][0]["title"] == "hello"
+    # 제목 앞에 환경 표식이 붙는다(ASAC-DAG#692) — 여러 인스턴스가 같은 채널을 쓰므로
+    # 어느 환경 결과인지 메시지만 보고 갈릴 수 있어야 한다. 표식 뒤 내용은 이전과 동일하다.
+    assert payload["embeds"][0]["title"].endswith("hello")
+    assert payload["embeds"][0]["title"].startswith("[")
+    assert "env=" in payload["embeds"][0]["footer"]["text"]
     assert payload["embeds"][0]["color"] == discord.DISCORD_GREEN
-    failure_payload = json.loads(
-        discord._discord_payload("title\n❌ 리포트 상태: 실패").decode("utf-8")
-    )
+    failure_payload = discord._discord_payload("title\n❌ 리포트 상태: 실패")
     assert failure_payload["embeds"][0]["color"] == discord.DISCORD_RED
-    warning_payload = json.loads(
-        discord._discord_payload("title\n⚠️ 리포트 상태: 경고").decode("utf-8")
-    )
+    warning_payload = discord._discord_payload("title\n⚠️ 리포트 상태: 경고")
     assert warning_payload["embeds"][0]["color"] == discord.DISCORD_YELLOW
     assert request.get_method() == "POST"
-    assert request.headers["User-agent"] == "ask-seoul-traffic-report/1.0"
-    assert timeout == 10
+    # 전송 계층은 공용이지만 UA 에는 도메인이 실린다 — 수신측에서 어느 파이프라인이
+    # 보냈는지 갈려야 한다(#692). 제품 토큰은 하나로 고정.
+    assert request.headers["User-agent"] == "asac-elt-notify/1.0 (traffic)"
+    assert timeout == 15.0
 
 
 def test_traffic_send_discord_swallows_failure_without_logging_webhook(
@@ -290,4 +292,46 @@ def test_traffic_send_discord_report_posts_structured_payload(monkeypatch):
     payload = json.loads(request.data.decode("utf-8"))
     assert payload["embeds"][0]["fields"][2]["name"] == "파이프라인"
     assert request.get_method() == "POST"
-    assert timeout == 10
+    assert timeout == 15.0   # 공용 전송 계층 기본값(#692) — DISCORD_TIMEOUT_SECONDS 로 조정
+
+
+# ── 채널 결정은 이 도메인 규약 그대로 (ASAC-DAG#692) ──────────────────────
+
+def test_traffic_channel_priority_is_unchanged(monkeypatch):
+    """`ASK_SEOUL_…` 이 `TRAFFIC_…` 보다 우선한다 — 공용 모듈의 순서와 반대이므로 고정한다."""
+    import urllib.request
+
+    seen = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=None: (seen.append(req.full_url), _Response())[1])
+    monkeypatch.setenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://d/shared")
+    monkeypatch.setenv("TRAFFIC_DISCORD_WEBHOOK_URL", "https://d/traffic")
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://d/common")
+
+    discord.send_discord_message("t")
+    assert seen == ["https://d/shared"]          # 공용 체인이었다면 https://d/traffic 이었을 것
+
+
+def test_traffic_does_not_fall_back_to_common_webhook(monkeypatch):
+    """자체 체인이 비면 **보내지 않는다** — 공용 `DISCORD_WEBHOOK_URL` 로 새면 채널이 바뀐다."""
+    import urllib.request
+
+    seen = []
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=None: seen.append(req.full_url))
+    monkeypatch.delenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("TRAFFIC_DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://d/common")
+
+    assert discord.send_discord_message("t") is False
+    assert discord.send_discord_report(_traffic_pipeline_report("PASS")) is False
+    assert seen == []

@@ -6,6 +6,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from common.discord.notify import send_payload
+
 from .card import build_weather_discord_payload
 from .config import (
     DISCORD_GREEN,
@@ -108,7 +110,7 @@ def format_weather_discord_message(report: dict[str, Any]) -> str:
     return message
 
 
-def _discord_payload(message: str) -> bytes:
+def _discord_payload(message: str) -> dict:
     lines = message.splitlines()
     title = lines[0].strip("*") if lines else "Weather Bronze reliability report"
     description = "\n".join(lines[1:]).strip() or title
@@ -118,7 +120,7 @@ def _discord_payload(message: str) -> bytes:
         color = DISCORD_YELLOW
     else:
         color = DISCORD_GREEN
-    payload = {
+    return {
         "embeds": [
             {
                 "title": title[:256],
@@ -127,86 +129,37 @@ def _discord_payload(message: str) -> bytes:
             }
         ]
     }
-    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
 def send_discord_message(message: str, webhook_url: str | None = None) -> bool:
-    webhook_url = webhook_url or discord_webhook_url()
-    if not webhook_url:
+    """리포트 메시지 1건 전송 — 조립은 여기서, 전송만 공용 모듈이(ASAC-DAG#692).
+
+    **채널 결정은 이 도메인 규약 그대로다** — `discord_webhook_url()` 의 우선순위
+    (`ASK_SEOUL_DISCORD_WEBHOOK_URL` → `WEATHER_DISCORD_WEBHOOK_URL`)를 쓰고, 그것이
+    비면 **보내지 않는다.** 공용 `resolve_webhook` 의 체인으로 넘어가면 원래 안 보내던
+    상황에 다른 채널로 나갈 수 있어 그 폴백을 막는다.
+
+    바뀌는 것은 제목 앞 환경 표식과 footer 출처뿐 — 메시지 내용·색 판정은 그대로다.
+    """
+    url = webhook_url or discord_webhook_url()
+    if not url:
         LOGGER.info(
             "Discord webhook is not configured; skip weather report notification."
         )
         return False
-    request = urllib.request.Request(
-        webhook_url,
-        data=_discord_payload(message),
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "ask-seoul-weather-report/1.0",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            if response.status >= 400:
-                LOGGER.warning(
-                    "Weather report Discord notification failed: status=%s",
-                    response.status,
-                )
-                return False
-    except urllib.error.HTTPError as exc:
-        LOGGER.warning(
-            "Weather report Discord notification failed: status=%s error_type=%s",
-            exc.code,
-            type(exc).__name__,
-        )
-        return False
-    except Exception as exc:
-        LOGGER.warning(
-            "Weather report Discord notification failed: error_type=%s",
-            type(exc).__name__,
-        )
-        return False
-    return True
+    return send_payload(_discord_payload(message), domain="weather", webhook=url)
 
 
 def send_discord_report(report: dict[str, Any], webhook_url: str | None = None) -> bool:
-    webhook_url = webhook_url or discord_webhook_url()
-    if not webhook_url:
+    """카드 payload 전송 — `build_weather_discord_payload` 결과를 그대로(#692).
+
+    `fields`·`footer` 를 쓰는 모양이라 공용 `send_embed` 로는 담기지 않는다. `send_payload` 가
+    payload 를 건드리지 않고 표식·출처만 주입한다. 채널 결정은 위와 같이 이 도메인 규약.
+    """
+    url = webhook_url or discord_webhook_url()
+    if not url:
         LOGGER.info(
             "Discord webhook is not configured; skip weather report notification."
         )
         return False
-    request = urllib.request.Request(
-        webhook_url,
-        data=json.dumps(
-            build_weather_discord_payload(report), ensure_ascii=False
-        ).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "ask-seoul-weather-report/1.0",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            if response.status >= 400:
-                LOGGER.warning(
-                    "Weather report Discord notification failed: status=%s",
-                    response.status,
-                )
-                return False
-    except urllib.error.HTTPError as exc:
-        LOGGER.warning(
-            "Weather report Discord notification failed: status=%s error_type=%s",
-            exc.code,
-            type(exc).__name__,
-        )
-        return False
-    except Exception as exc:
-        LOGGER.warning(
-            "Weather report Discord notification failed: error_type=%s",
-            type(exc).__name__,
-        )
-        return False
-    return True
+    return send_payload(build_weather_discord_payload(report), domain="weather", webhook=url)

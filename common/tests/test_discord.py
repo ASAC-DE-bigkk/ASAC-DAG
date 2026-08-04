@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from common.discord import guard as discord_guard  # noqa: E402
 from common.discord.notify import (  # noqa: E402
     COLOR_FAIL,
+    timeout_seconds,
+    user_agent,
     resolve_webhook,
     send_embed,
     send_text,
@@ -191,8 +193,10 @@ def test_callback_ignores_legacy_optout_for_weather_and_traffic(monkeypatch, sen
         assert stored
 
     assert len(sent) == 2
+    # 제목 앞에는 환경 표식이 붙을 수 있다(비운영·미상). 여기서 보려는 것은 "어느 도메인이
+    # 알림을 받았나" 이므로 표식과 무관하게 ❌ 뒤부터 읽는다.
     assert {"weather", "traffic"} <= {
-        payload["embeds"][0]["title"].split(" · ")[0].removeprefix("❌ ")
+        payload["embeds"][0]["title"].split(" · ")[0].split("❌ ")[-1]
         for payload in sent
     }
 
@@ -325,3 +329,132 @@ def _callback_traffic(stored):
 
     sink = R2ErrorSink(put_object=lambda key, payload: stored.append(key))
     return problem_failure_callback(domain="traffic", sink=sink)
+
+
+# ── 환경 표시 (어느 환경에서 실행한 결과물인지) ─────────────────────────────
+
+def test_non_prod_gets_a_visible_badge_in_the_title(monkeypatch, sent):
+    """비운영 메시지는 제목만 봐도 갈려야 한다.
+
+    여러 인스턴스(로컬·맥미니)가 같은 팀 채널을 쓰고, 웹훅만 설정돼 있으면 환경과 무관하게
+    전송된다. 받는 사람이 "누가 로컬에서 돌린 건가"를 메시지만 보고 알 수 있어야 한다.
+    """
+    monkeypatch.setenv("DBT_TARGET", "dev")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    assert send_embed("수집 완료", "본문", webhook=_WEBHOOK)
+    embed = sent[-1]["embeds"][0]
+    assert embed["title"].startswith("[DEV] ")
+    assert "env=dev" in embed["footer"]["text"]
+
+
+def test_prod_is_labelled_too_not_left_blank(monkeypatch, sent):
+    """운영도 표식을 단다 — "표식 없음"에서 운영을 추론하게 만들지 않는다.
+
+    한쪽만 비우면 그 공백이 '운영'인지 '이 변경 이전 메시지'인지 '표기 누락'인지 갈리지
+    않는다. 미설정을 prod 로 채우지 않는 것과 같은 이유다.
+    """
+    monkeypatch.setenv("DBT_TARGET", "prod")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    assert send_embed("수집 완료", "본문", webhook=_WEBHOOK)
+    embed = sent[-1]["embeds"][0]
+    assert embed["title"] == "[PROD] 수집 완료"
+    assert "env=prod" in embed["footer"]["text"]
+
+
+def test_every_environment_gets_a_badge(monkeypatch, sent):
+    """어느 환경이든 같은 자리에 표식이 있다 — 읽는 사람이 형식을 하나만 기억하면 된다."""
+    cases = {"dev": "[DEV] ", "prod": "[PROD] ", "stage": "[STAGE] "}
+    for target, badge in cases.items():
+        monkeypatch.setenv("DBT_TARGET", target)
+        monkeypatch.setenv("ASK_SEOUL_TARGET", target)
+        assert send_embed("t", "d", webhook=_WEBHOOK)
+        assert sent[-1]["embeds"][0]["title"].startswith(badge), target
+
+
+def test_unset_environment_is_unknown_not_prod(monkeypatch, sent):
+    """미설정을 prod 로 채우지 않는다 — 없는 정보를 운영이라 단정하면 로컬이 운영으로 보인다."""
+    monkeypatch.delenv("DBT_TARGET", raising=False)
+    monkeypatch.delenv("ASK_SEOUL_TARGET", raising=False)
+    assert send_embed("수집 완료", "본문", webhook=_WEBHOOK)
+    embed = sent[-1]["embeds"][0]
+    assert embed["title"].startswith("[환경 미상] ")
+    assert "env=unknown" in embed["footer"]["text"]
+
+
+def test_conflicting_environment_is_shown_not_hidden(monkeypatch, sent):
+    """두 노브가 엇갈리면 드러낸다 — 한쪽을 조용히 고르면 잘못된 환경으로 표시된다."""
+    monkeypatch.setenv("DBT_TARGET", "prod")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    assert send_embed("수집 완료", "본문", webhook=_WEBHOOK)
+    embed = sent[-1]["embeds"][0]
+    assert "CONFLICT" in embed["title"]
+    assert "env=conflict(dev,prod)" in embed["footer"]["text"]
+
+
+def test_existing_footer_is_kept_not_replaced(monkeypatch, sent):
+    """도메인이 쓰던 footer 문구를 밀어내지 않는다 — 출처는 뒤에 잇는다."""
+    monkeypatch.setenv("DBT_TARGET", "prod")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    assert send_embed("t", "d", footer="매일 09:00 KST", webhook=_WEBHOOK)
+    text = sent[-1]["embeds"][0]["footer"]["text"]
+    assert text.startswith("매일 09:00 KST · ")
+    assert "env=prod" in text
+
+
+def test_plain_text_also_carries_the_badge(monkeypatch, sent):
+    """평문에는 footer 자리가 없어 앞에 표식만 붙인다."""
+    monkeypatch.setenv("DBT_TARGET", "dev")
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    assert send_text("일일 리포트", webhook=_WEBHOOK)
+    assert sent[-1]["content"].startswith("[DEV] ")
+
+
+# ── UA 도메인 식별 ────────────────────────────────────────────────────────
+
+def test_user_agent_carries_the_domain(monkeypatch, sent):
+    """전송 계층을 합치면서 도메인 식별까지 잃지 않는다 — 수신측 로그·레이트리밋 축(#692)."""
+    import urllib.request
+
+    seen: list[str] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake(request, timeout=None):
+        seen.append(request.headers["User-agent"])
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    send_embed("t", "d", domain="traffic", webhook=_WEBHOOK)
+    send_text("t", domain="culture", webhook=_WEBHOOK)
+    send_embed("t", "d", webhook=_WEBHOOK)          # 도메인 없음
+    assert seen == ["asac-elt-notify/1.0 (traffic)",
+                    "asac-elt-notify/1.0 (culture)",
+                    "asac-elt-notify/1.0"]
+
+
+def test_user_agent_rejects_header_breaking_characters():
+    """괄호·개행이 섞이면 헤더가 깨지거나 주입된다 — 안전한 문자만 남긴다."""
+    injected = chr(13) + chr(10)   # CR LF — 헤더를 깨거나 새 헤더를 주입하는 형태
+    got = user_agent('bad name(x)' + injected + 'X-Injected: 1')
+    assert got == 'asac-elt-notify/1.0 (badnamexx-injected1)'
+    assert chr(13) not in got and chr(10) not in got
+    assert user_agent('   ') == 'asac-elt-notify/1.0'          # 공백뿐이면 도메인 없음
+    assert user_agent('()') == 'asac-elt-notify/1.0 (unknown)' # 남는 글자 없으면 unknown
+    assert user_agent("()") == "asac-elt-notify/1.0 (unknown)"
+
+
+def test_timeout_defaults_to_fifteen_and_is_env_tunable():
+    """짧은 타임아웃은 곧 '아무도 모르는 알림 유실'이다 — best-effort 라 실패를 삼키기 때문.
+
+    유실을 줄이는 쪽으로 15초를 기본값으로 두고, 운영에서 조정할 수 있게 env 노브를 둔다.
+    잘못된 값·비양수는 기본값으로 떨어진다(설정 실수가 타임아웃 0 을 만들지 않게).
+    """
+    assert timeout_seconds({}) == 15.0
+    assert timeout_seconds({"DISCORD_TIMEOUT_SECONDS": "30"}) == 30.0
+    for bad in ("abc", "", "0", "-5"):
+        assert timeout_seconds({"DISCORD_TIMEOUT_SECONDS": bad}) == 15.0, bad
