@@ -69,6 +69,26 @@ class ServingContract:
     column_descriptions: dict[str, str] | None = None  # manifest node.columns description
     usage_patterns: tuple[dict[str, Any], ...] = ()
 
+    def __post_init__(self) -> None:
+        # upsert_strategy 값 검증 — 오타/미지원 값을 게시 전에 잡는다(serving_contract/schema.yml v1.5 와 정렬).
+        #  * merge       : 전량 upsert(INSERT OR REPLACE 전체, 전체-테이블 parity 강제)
+        #  * exact_set   : 전량 교체(staging swap 라이프사이클, 전체-테이블 parity 강제)
+        #  * incremental : 부분 upsert — reader 가 event_time(워터마크) 이후 바뀐 그레인만 읽어
+        #                  INSERT OR REPLACE 로 그 PK 만 덮는다(나머지 D1 행 보존). D1 쓰기 절약.
+        if self.upsert_strategy is not None and self.upsert_strategy not in {"merge", "exact_set", "incremental"}:
+            raise ValueError(
+                f"{self.product_id}: upsert_strategy 는 'merge'|'exact_set'|'incremental' 만 허용 — got {self.upsert_strategy!r}"
+            )
+        if self.upsert_strategy == "incremental":
+            if self.publication_mode != "upsert":
+                raise ValueError(
+                    f"{self.product_id}: upsert_strategy=incremental 은 publication_mode=upsert 가 필요"
+                )
+            if not self.event_time:
+                raise ValueError(
+                    f"{self.product_id}: upsert_strategy=incremental 은 event_time(워터마크 컬럼) 선언이 필요"
+                )
+
 
 def _merged_meta(node: dict[str, Any]) -> dict[str, Any]:
     top = node.get("meta") or {}

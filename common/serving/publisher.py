@@ -394,11 +394,24 @@ def publish(
         catalog = d1.catalog_row(contract.model_name)
         if catalog and catalog.get("row_count") is not None:
             last_good_count = int(catalog["row_count"])
+        incremental_upsert = (
+            contract.publication_mode == "upsert" and contract.upsert_strategy == "incremental"
+        )
+        # append·incremental upsert 는 D1 의 현 max(event_time) 을 워터마크로 받아 그 이후만 읽는다.
         last_good_max = (
             d1.table_max(contract.model_name, contract.event_time)
-            if contract.event_time and contract.publication_mode == "append"
+            if contract.event_time and (contract.publication_mode == "append" or incremental_upsert)
             else None
         )
+        if incremental_upsert and verify_content_parity:
+            # 부분 소스(바뀐 그레인) vs 전체 D1 은 콘텐츠 해시가 구조적으로 불일치 — 조합 금지.
+            record.serving_status = STATUS_FAILED
+            record.stage = "content_contract"
+            record.reason = "incremental upsert 는 verify_content_parity 와 호환 불가(부분 소스 vs 전체 D1)"
+            report.failures.append(f"{contract.model_name}: {record.reason}")
+            _append_ledger(d1, record, outcome="failed")
+            report.records.append(record)
+            continue
 
         plan = source.read(contract, last_good_max)
         record.source_row_count = len(plan.rows)
@@ -501,13 +514,15 @@ def publish(
         record.d1_row_count = d1_row_count
         record.distinct_primary_key_count = distinct_primary_key_count
         record.null_primary_key_count = null_primary_key_count
+        # 전체-테이블 parity(d1 == source)는 전량 게시(snapshot·exact_set/plain upsert)만 강제한다.
+        # incremental upsert 는 부분 소스라 append 처럼 면제 — PK 유일성·비-NULL 은 그대로 검증.
+        requires_full_parity = contract.publication_mode == "snapshot" or (
+            contract.publication_mode == "upsert" and contract.upsert_strategy != "incremental"
+        )
         if (
             d1_row_count != distinct_primary_key_count
             or null_primary_key_count != 0
-            or (
-                contract.publication_mode in {"snapshot", "upsert"}
-                and d1_row_count != source_row_count
-            )
+            or (requires_full_parity and d1_row_count != source_row_count)
         ):
             record.stage = "read_back"
             _fail_after_write(d1, report, record, contract, message=(

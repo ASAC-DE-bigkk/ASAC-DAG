@@ -93,11 +93,17 @@ class TrinoSourceReader:
         select_list = self._select_list(projected_columns)
         read_columns = projected_columns or columns
 
-        if contract.publication_mode != "append" or not contract.event_time:
+        incremental_upsert = (
+            contract.publication_mode == "upsert"
+            and contract.upsert_strategy == "incremental"
+            and bool(contract.event_time)
+        )
+        # 워터마크 기반 증분 읽기는 append(시간 윈도우 재적재)와 incremental upsert(바뀐 그레인만)
+        # 두 경우뿐. 그 외(snapshot·exact_set upsert·event_time 없는 append)는 전량 읽는다.
+        if not incremental_upsert and (contract.publication_mode != "append" or not contract.event_time):
             rows = self._select(f"SELECT {select_list} FROM {relation}")
             return ReadPlan(columns=read_columns, rows=rows)
 
-        # append: re-load only the recent window (idempotent) + any new rows.
         column_type = dict(columns).get(contract.event_time, "")
         if last_good_max is None:
             rows = self._select(f"SELECT {select_list} FROM {relation}")  # first run: full backfill
@@ -106,13 +112,28 @@ class TrinoSourceReader:
         import pendulum
 
         base = pendulum.parse(str(last_good_max).replace(" ", "T"))
+        event_time = _quote_identifier(contract.event_time)
+
+        if incremental_upsert:
+            # incremental upsert: D1 워터마크(=현 max event_time) 이후 바뀐 그레인만 읽어
+            # partial INSERT OR REPLACE 로 그 PK 만 덮는다(delete 없음 — append 아님).
+            # 워터마크는 초 단위로 내림 + `>=` 로 경계 버킷을 놓치지 않게(재적재는 PK 멱등이라 무해).
+            if column_type.startswith("date"):
+                watermark = base.format("YYYY-MM-DD")
+                literal = f"date '{watermark}'"
+            else:
+                watermark = base.format("YYYY-MM-DD HH:mm:ss")
+                literal = f"timestamp '{watermark}'"
+            rows = self._select(f"SELECT {select_list} FROM {relation} WHERE {event_time} >= {literal}")
+            return ReadPlan(columns=read_columns, rows=rows)
+
+        # append: re-load only the recent window (idempotent) + any new rows.
         if column_type.startswith("date"):
             cutoff = base.subtract(days=APPEND_LOOKBACK_DAYS).format("YYYY-MM-DD")
             literal = f"date '{cutoff}'"
         else:
             cutoff = base.subtract(hours=APPEND_LOOKBACK_HOURS).format("YYYY-MM-DD HH:00:00")
             literal = f"timestamp '{cutoff}'"
-        event_time = _quote_identifier(contract.event_time)
         rows = self._select(f"SELECT {select_list} FROM {relation} WHERE {event_time} >= {literal}")
         return ReadPlan(columns=read_columns, rows=rows, delete_column=contract.event_time, delete_literal=f"'{cutoff}'")
 
