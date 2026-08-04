@@ -180,3 +180,34 @@ def test_coverage_pct_unchanged_when_denominator_exists(landed, expected, pct):
     summaries += [_summary(name=f"bad{i}", error="boom") for i in range(expected - landed)]
     report = build_run_report(summaries, CTX, expected_total=expected)
     assert report["coverage"]["coverage_pct"] == pct
+
+
+# ── ASK-Seoul#78 F-* 식별 묶음 ────────────────────────────────────────────────
+
+def test_report_carries_environment_and_dag_identity():
+    """적재기 폴백을 안 타게 리포트가 자기 환경·DAG 를 밝힌다(Z-7 양방향 오염 통로)."""
+    report = build_run_report(
+        [_summary()], CTX, expected_total=1,
+        environment="prod", dag_id="culture_bronze", task_id="report",
+    )
+    assert report["environment"] == "prod"
+    assert report["dag_id"] == "culture_bronze"
+    assert report["task_id"] == "report"
+
+
+def test_report_identity_is_null_when_unknown_not_guessed():
+    # 모르는 값을 "dev" 같은 기본값으로 채우면 그게 곧 거짓 기록이다(F-3 NULL≠0 과 같은 원칙).
+    report = build_run_report([_summary()], CTX, expected_total=1)
+    assert report["environment"] is None
+    assert report["dag_id"] is None
+    assert report["task_id"] is None
+
+
+def test_identity_fields_do_not_change_event_id():
+    """F-1 추가만 — 식별 필드가 붙어도 기존 기록의 고유키는 그대로다."""
+    plain = build_run_report([_summary()], CTX, expected_total=1)
+    tagged = build_run_report(
+        [_summary()], CTX, expected_total=1,
+        environment="prod", dag_id="culture_bronze", task_id="report",
+    )
+    assert plain["event_id"] == tagged["event_id"]

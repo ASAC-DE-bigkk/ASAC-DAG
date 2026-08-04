@@ -45,6 +45,8 @@ if _DAGS_ROOT not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
+from common.ops import Layer  # noqa: E402
+from common.ops.observability import ops_default_args  # noqa: E402
 
 from culture_ingest.common.maintenance import (  # noqa: E402
     MAINTAINED_TABLES,
@@ -107,19 +109,22 @@ with DAG(
     schedule="30 4 * * 0",  # 매주 일요일 04:30 KST — population(04:00)·_shared(04:00)와 시차
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 1, "retry_delay": timedelta(minutes=10)},
+    default_args={
+        "retries": 1, "retry_delay": timedelta(minutes=10),
+        # ASK-Seoul#78 — 이 DAG 의 모든 태스크가 실행 기록을 남긴다. 실패 상세
+        # (RFC 9457 Problem JSON)를 밀어내지 않고 뒤에 붙는다(교체가 아니라 추가).
+        **ops_default_args("culture", Layer.BRONZE, on_failure=record_culture_problem),
+    },
     params=DEFAULT_PARAMS,
     tags=["maintenance", "culture", "iceberg", "r2"],
 ) as dag:
     maintain = PythonOperator(
         task_id="maintain",
         python_callable=_maintain,
-        on_failure_callback=record_culture_problem,
     )
     storage_cleanup = PythonOperator(
         task_id="storage_cleanup",
         python_callable=_storage_cleanup,
-        on_failure_callback=record_culture_problem,
     )
 
     maintain >> storage_cleanup

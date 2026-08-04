@@ -57,6 +57,8 @@ if _PLUGINS_DIR not in sys.path:
 
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.runtime_guard import TARGET_CHOICES, default_target  # noqa: E402
+from common.ops import Layer  # noqa: E402
+from common.ops.observability import ops_default_args  # noqa: E402
 from culture_deadline import on_deadline_missed  # noqa: E402
 
 from culture_ingest.common.config import (  # noqa: E402
@@ -305,7 +307,14 @@ def _report(**context) -> None:
         if name not in returned
     ]
     expected = len(planned) or len(summaries)  # plan XCom이 없으면 성공 수로 폴백
-    report = build_run_report(summaries + missing, ctx, expected_total=expected, load_failed=load_failed)
+    report = build_run_report(
+        summaries + missing, ctx, expected_total=expected, load_failed=load_failed,
+        # ASK-Seoul#78 F-* 식별 — 리포트가 자기 환경·DAG 를 밝힌다. 적재기 폴백에 맡기면
+        # 어느 환경에서 적재기를 돌렸는지가 기록의 환경이 된다(Z-7 양방향 오염).
+        environment=normalize_target(params["target"]),
+        dag_id=context["dag_run"].dag_id,
+        task_id=context["ti"].task_id,
+    )
 
     cov = report["coverage"]
     pct = "--" if cov["coverage_pct"] is None else cov["coverage_pct"]
@@ -371,7 +380,12 @@ with DAG(
     schedule="0 3 * * *",
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},
+    default_args={
+        "retries": 2, "retry_delay": timedelta(minutes=2),
+        # ASK-Seoul#78 — 이 DAG 의 모든 태스크가 실행 기록을 남긴다. 실패 상세
+        # (RFC 9457 Problem JSON)를 밀어내지 않고 뒤에 붙는다(교체가 아니라 추가).
+        **ops_default_args("culture", Layer.BRONZE, on_failure=record_culture_problem),
+    },
     params=DEFAULT_PARAMS,
     tags=["ingest", "culture", "bronze", "r2"],
     # 침묵 감시(#259): 실패 콜백·리포트는 "실패한 run"만 잡고, "끝나지 않는 run"
@@ -387,7 +401,6 @@ with DAG(
     plan = PythonOperator(
         task_id="plan",
         python_callable=_plan,
-        on_failure_callback=record_culture_problem,
     )
 
     # 2) fetch_raw: plan 결과를 동적 매핑, 데이터셋마다 raw 박제까지만(재현 불가 경계).
@@ -404,7 +417,6 @@ with DAG(
         task_id="fetch_raw",
         python_callable=_fetch_raw,
         max_active_tis_per_dagrun=2,
-        on_failure_callback=record_culture_problem,
     ).expand(op_kwargs=plan.output)
 
     # 3) load_bronze: R2 raw → bronze Iceberg (멱등, API 재호출 없이 단독 재시도 가능).
@@ -416,7 +428,6 @@ with DAG(
         python_callable=_load_bronze,
         trigger_rule="all_done",
         outlets=[Asset(CULTURE_BRONZE_ASSET)],
-        on_failure_callback=record_culture_problem,
     )
 
     # 4) report: 일부가 실패해도(all_done) 항상 요약을 남김.
@@ -424,7 +435,6 @@ with DAG(
         task_id="report",
         python_callable=_report,
         trigger_rule="all_done",
-        on_failure_callback=record_culture_problem,
     )
 
     plan >> fetch_raw >> load_bronze_task >> report
