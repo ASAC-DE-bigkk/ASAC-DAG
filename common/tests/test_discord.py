@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from common.discord import guard as discord_guard  # noqa: E402
 from common.discord.notify import (  # noqa: E402
     COLOR_FAIL,
+    timeout_seconds,
     user_agent,
     resolve_webhook,
     send_embed,
@@ -445,3 +446,15 @@ def test_user_agent_rejects_header_breaking_characters():
     assert user_agent('   ') == 'asac-elt-notify/1.0'          # 공백뿐이면 도메인 없음
     assert user_agent('()') == 'asac-elt-notify/1.0 (unknown)' # 남는 글자 없으면 unknown
     assert user_agent("()") == "asac-elt-notify/1.0 (unknown)"
+
+
+def test_timeout_defaults_to_fifteen_and_is_env_tunable():
+    """짧은 타임아웃은 곧 '아무도 모르는 알림 유실'이다 — best-effort 라 실패를 삼키기 때문.
+
+    유실을 줄이는 쪽으로 15초를 기본값으로 두고, 운영에서 조정할 수 있게 env 노브를 둔다.
+    잘못된 값·비양수는 기본값으로 떨어진다(설정 실수가 타임아웃 0 을 만들지 않게).
+    """
+    assert timeout_seconds({}) == 15.0
+    assert timeout_seconds({"DISCORD_TIMEOUT_SECONDS": "30"}) == 30.0
+    for bad in ("abc", "", "0", "-5"):
+        assert timeout_seconds({"DISCORD_TIMEOUT_SECONDS": bad}) == 15.0, bad

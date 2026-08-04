@@ -142,7 +142,7 @@ def test_traffic_send_discord_posts_payload(monkeypatch):
     # 전송 계층은 공용이지만 UA 에는 도메인이 실린다 — 수신측에서 어느 파이프라인이
     # 보냈는지 갈려야 한다(#692). 제품 토큰은 하나로 고정.
     assert request.headers["User-agent"] == "asac-elt-notify/1.0 (traffic)"
-    assert timeout == 5.0
+    assert timeout == 15.0
 
 
 def test_traffic_send_discord_swallows_failure_without_logging_webhook(
@@ -292,4 +292,4 @@ def test_traffic_send_discord_report_posts_structured_payload(monkeypatch):
     payload = json.loads(request.data.decode("utf-8"))
     assert payload["embeds"][0]["fields"][2]["name"] == "파이프라인"
     assert request.get_method() == "POST"
-    assert timeout == 5.0   # 공용 전송 계층의 값(#692)
+    assert timeout == 15.0   # 공용 전송 계층 기본값(#692) — DISCORD_TIMEOUT_SECONDS 로 조정

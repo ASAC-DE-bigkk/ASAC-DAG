@@ -39,7 +39,24 @@ _MAX_DESCRIPTION = 4096
 _MAX_FOOTER = 2048
 _MAX_CONTENT = 2000
 
-_TIMEOUT_SECONDS = 5.0
+#: 전송 타임아웃(초). 정상 왕복은 1초 안쪽이고, 초과는 대개 DNS 해석·Cloudflare 앞단 지연·
+#: 컨테이너 네트워크 경로 때문이다(레이트리밋 429 는 즉시 응답이라 타임아웃 원인이 아니다).
+#:
+#: **짧게 잡으면 알림이 조용히 사라진다** — 이 모듈은 best-effort 라 실패를 삼키므로, 타임아웃은
+#: 곧 "아무도 모르는 유실"이다. 반대로 길면 Discord 가 멎었을 때 태스크 콜백이 그만큼 붙잡힌다.
+#: 유실을 줄이는 쪽으로 15초를 기본값으로 둔다(ASAC-DAG#692). 운영에서 조정할 수 있게 env 노브.
+DEFAULT_TIMEOUT_SECONDS = 15.0
+TIMEOUT_ENV = "DISCORD_TIMEOUT_SECONDS"
+
+
+def timeout_seconds(env: dict | None = None) -> float:
+    """전송 타임아웃. 값이 없거나 해석 불가·비양수면 기본값으로 떨어진다(fail-safe)."""
+    environ = os.environ if env is None else env
+    try:
+        value = float(str(environ.get(TIMEOUT_ENV, "")).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_TIMEOUT_SECONDS
 
 
 def resolve_webhook(domain: str | None = None, *, env: dict | None = None) -> str:
@@ -146,7 +163,7 @@ def _post(webhook: str, payload: dict, *, domain: str | None = None) -> bool:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS):
+        with urllib.request.urlopen(request, timeout=timeout_seconds()):
             pass
         return True
     except Exception as exc:  # noqa: BLE001 -- best-effort: 알림 실패가 run 을 못 막게
