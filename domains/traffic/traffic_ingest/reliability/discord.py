@@ -292,21 +292,34 @@ def _discord_payload(message: str) -> dict:
 
 
 def send_discord_message(message: str, webhook_url: str | None = None) -> bool:
-    """리포트 메시지 1건 전송 — 조립은 여기서, 전송은 공용 모듈이(ASAC-DAG#692).
+    """리포트 메시지 1건 전송 — 조립은 여기서, 전송만 공용 모듈이(ASAC-DAG#692).
 
-    메시지 내용·색 판정은 그대로 두고 전송 계층만 공용으로 옮겼다. 그래서 출력은 이전과
-    같고, 앞에 환경 표식(`[PROD]`/`[DEV]`)과 footer 출처가 더해진다 — 여러 인스턴스가 같은
-    채널을 쓰기 때문에 어느 환경 결과인지 메시지만 보고 가릴 수 있어야 한다.
+    **채널 결정은 이 도메인 규약 그대로다** — `discord_webhook_url()` 의 우선순위
+    (`ASK_SEOUL_DISCORD_WEBHOOK_URL` → `TRAFFIC_DISCORD_WEBHOOK_URL`)를 쓰고, 그것이
+    비면 **보내지 않는다.** 공용 `resolve_webhook` 의 체인으로 넘어가면 원래 안 보내던
+    상황에 다른 채널로 나갈 수 있어 그 폴백을 막는다.
+
+    바뀌는 것은 제목 앞 환경 표식과 footer 출처뿐 — 메시지 내용·색 판정은 그대로다.
     """
-    return send_payload(_discord_payload(message),
-                        domain="traffic", webhook=webhook_url or discord_webhook_url() or None)
+    url = webhook_url or discord_webhook_url()
+    if not url:
+        LOGGER.info(
+            "Discord webhook is not configured; skip traffic report notification."
+        )
+        return False
+    return send_payload(_discord_payload(message), domain="traffic", webhook=url)
 
 
 def send_discord_report(report: dict[str, Any], webhook_url: str | None = None) -> bool:
-    """카드 payload 전송 — `build_traffic_discord_payload` 결과를 그대로 보낸다(#692).
+    """카드 payload 전송 — `build_traffic_discord_payload` 결과를 그대로(#692).
 
     `fields`·`footer` 를 쓰는 모양이라 공용 `send_embed` 로는 담기지 않는다. `send_payload` 가
-    payload 를 건드리지 않고 표식·출처만 주입한다.
+    payload 를 건드리지 않고 표식·출처만 주입한다. 채널 결정은 위와 같이 이 도메인 규약.
     """
-    return send_payload(build_traffic_discord_payload(report),
-                        domain="traffic", webhook=webhook_url or discord_webhook_url() or None)
+    url = webhook_url or discord_webhook_url()
+    if not url:
+        LOGGER.info(
+            "Discord webhook is not configured; skip traffic report notification."
+        )
+        return False
+    return send_payload(build_traffic_discord_payload(report), domain="traffic", webhook=url)

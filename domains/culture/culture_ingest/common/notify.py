@@ -58,6 +58,11 @@ class DiscordWebhookNotifier(Notifier):
         self._timeout = timeout   # 공용 전송 계층이 자체 타임아웃을 쓴다(호환용으로만 보관)
 
     def send(self, payload: dict) -> None:
+        # 채널은 이 클래스가 받은 URL 로 고정한다(`notifier_from_env` 가 CULTURE_… 로 만든 값).
+        # 빈 값이면 공용 `resolve_webhook` 체인으로 넘어가 다른 채널로 나갈 수 있으므로 막는다.
+        if not (self._url or "").strip():
+            log.info("[notify] webhook 미설정 — 전송 스킵")
+            return
         send_payload(payload, domain=_DOMAIN, webhook=self._url)
 
 

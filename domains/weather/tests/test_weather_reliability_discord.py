@@ -282,3 +282,45 @@ def test_weather_send_discord_report_posts_structured_payload(monkeypatch):
     assert payload["embeds"][0]["fields"][2]["name"] == "파이프라인"
     assert request.get_method() == "POST"
     assert timeout == 15.0   # 공용 전송 계층 기본값(#692) — DISCORD_TIMEOUT_SECONDS 로 조정
+
+
+# ── 채널 결정은 이 도메인 규약 그대로 (ASAC-DAG#692) ──────────────────────
+
+def test_weather_channel_priority_is_unchanged(monkeypatch):
+    """`ASK_SEOUL_…` 이 `WEATHER_…` 보다 우선한다 — 공용 모듈의 순서와 반대이므로 고정한다."""
+    import urllib.request
+
+    seen = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=None: (seen.append(req.full_url), _Response())[1])
+    monkeypatch.setenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", "https://d/shared")
+    monkeypatch.setenv("WEATHER_DISCORD_WEBHOOK_URL", "https://d/weather")
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://d/common")
+
+    discord.send_discord_message("t")
+    assert seen == ["https://d/shared"]          # 공용 체인이었다면 https://d/weather 이었을 것
+
+
+def test_weather_does_not_fall_back_to_common_webhook(monkeypatch):
+    """자체 체인이 비면 **보내지 않는다** — 공용 `DISCORD_WEBHOOK_URL` 로 새면 채널이 바뀐다."""
+    import urllib.request
+
+    seen = []
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=None: seen.append(req.full_url))
+    monkeypatch.delenv("ASK_SEOUL_DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("WEATHER_DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://d/common")
+
+    assert discord.send_discord_message("t") is False
+    assert discord.send_discord_report(_weather_pipeline_report("PASS")) is False
+    assert seen == []
