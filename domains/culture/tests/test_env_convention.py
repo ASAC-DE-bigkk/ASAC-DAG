@@ -104,12 +104,16 @@ def test_warehouse_never_guesses_dev_when_unset():
 
 
 def test_declared_value_wins_even_when_it_contradicts_the_target():
-    """⚠️ 값 오설정(target=dev 인데 선언값이 prod 창고)은 여기서 안 막는다.
+    """⚠️ 값 오설정(target=dev 인데 env 가 prod 값 한 벌)은 여기서 안 막는다.
 
     키 이름으로 되돌리면 `Z-7` 을 다시 어기는 것이라, 이 조합을 거르는 것은 **값 기반
-    게이트**(`common.runtime_guard.validate_dev_runtime` — weather·traffic 참고 구현)의
-    몫이다. culture 는 아직 그 게이트를 안 부르고, 로컬 dev 박스가 실제로 이 조합이다
-    (#78 에 확인 요청). 이 테스트는 그 사실을 눈에 보이게 두려고 있다.
+    게이트**의 몫이다 — 카탈로그 *이름* 이 아니라 창고·버킷 *값* 을 target 과 대조하는
+    검사. culture 는 아직 그런 게이트를 안 부른다(#78 에 확인 요청).
+
+    주의: 여기서 `PROD_CATALOG`(=``iceberg``)는 "prod 창고"라는 뜻이 아니라 **canonical
+    카탈로그 이름**이다. 실제로 어느 창고냐는 그 카탈로그가 읽는
+    ``R2_DATA_CATALOG_WAREHOUSE`` 값이 정한다(dev 박스 실측: ``iceberg`` →
+    ``..._seoul-dev``). 이름으로 환경을 읽으려 드는 순간 `Z-7` 을 다시 어긴다.
     """
     assert build_warehouse_settings("dev", env=PROD_ENV).catalog == PROD_CATALOG
 
