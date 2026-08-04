@@ -82,3 +82,19 @@ def test_rows_carry_timezone_only_for_cron_entries():
 
 def test_every_entry_declares_a_delay_budget():
     assert all(c.max_delay_min > 0 for c in REGISTRY)
+
+
+def test_human_interval_agrees_with_the_cron():
+    """화면에 뜨는 사람 말 표기(`interval_ko`)가 cron 과 다른 시각을 말하면 안 된다.
+
+    cron 이 정본이고 표기는 사본이다 — 스케줄을 옮기면서 표기만 남으면, 공유 화면이
+    실제로 도는 시각과 다른 시각을 안내한다.
+    """
+    for cadence in REGISTRY:
+        if cadence.trigger_type != TRIGGER_SCHEDULE:
+            assert cadence.interval_ko, f"{cadence.dag_id}: 표기가 비었다"
+            continue
+        minute, hour = cadence.cron.split()[:2]
+        assert f"{int(hour):02d}:{int(minute):02d}" in cadence.interval_ko, (
+            f"{cadence.dag_id}: 표기 {cadence.interval_ko!r} 가 cron {cadence.cron!r} 과 다르다"
+        )

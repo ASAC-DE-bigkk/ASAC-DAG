@@ -36,6 +36,10 @@ class ExpectedCadence:
     upstream: str | None        # TRIGGER_ASSET 일 때 상류 dag_id
     max_delay_min: int          # 기대 시점 이후 이만큼 지나면 지연
     note: str
+    # 공유 화면에 그대로 뜨는 사람 말 표기. cron 을 그대로 보여주면 도메인마다 표기가
+    # 갈려(전 도메인은 "일 1회 00:00" 식) 같은 칸에 두 어휘가 섞인다. cron 이 정본이고
+    # 이건 그 사본이라, 아래 테스트가 둘의 시각을 대조한다.
+    interval_ko: str = ""
 
 
 # 모든 cron 은 DAG 타임존 해석 — culture DAG 는 전부 KST 로 정의돼 있다.
@@ -50,6 +54,7 @@ REGISTRY: tuple[ExpectedCadence, ...] = (
         # 통상 run ~30분(7/5 14분 → 7/7 28분), 세종 88MB 적재가 13분을 먹는다.
         # DAG 자체의 침묵 감시는 2h(deadline) — 여기 90분은 그보다 앞서는 '지연' 선.
         max_delay_min=90,
+        interval_ko="일 1회 03:00",
         note="일 1회 수집·bronze 적재. 확정안 표의 '주 1회'는 오류(주간 정비 DAG만 본 값)",
     ),
     ExpectedCadence(
@@ -58,6 +63,7 @@ REGISTRY: tuple[ExpectedCadence, ...] = (
         cron=None,
         upstream="culture_bronze",
         max_delay_min=60,
+        interval_ko="상류 완료 시",
         note="bronze Asset 발행에 이어 돎 — 고정 시각 없음. 상류가 늦으면 같이 늦는 게 정상",
     ),
     ExpectedCadence(
@@ -66,6 +72,7 @@ REGISTRY: tuple[ExpectedCadence, ...] = (
         cron="30 4 * * *",
         upstream=None,
         max_delay_min=60,
+        interval_ko="일 1회 04:30",
         note="일 1회 gold → 서빙 D1 내보내기",
     ),
     ExpectedCadence(
@@ -74,6 +81,7 @@ REGISTRY: tuple[ExpectedCadence, ...] = (
         cron="0 5 * * *",
         upstream=None,
         max_delay_min=60,
+        interval_ko="일 1회 05:00",
         note="일 1회 SLO 마트 — 본류(03:00→~04:00) 뒤·facility_refresh(05:30) 앞 슬롯",
     ),
     ExpectedCadence(
@@ -82,6 +90,7 @@ REGISTRY: tuple[ExpectedCadence, ...] = (
         cron="30 4 * * 0",
         upstream=None,
         max_delay_min=120,
+        interval_ko="주 1회 일요일 04:30",
         note="주 1회 정비(일요일). 도메인 주기가 아니라 정비 주기",
     ),
     ExpectedCadence(
@@ -90,6 +99,7 @@ REGISTRY: tuple[ExpectedCadence, ...] = (
         cron="30 5 * * 0",
         upstream=None,
         max_delay_min=120,
+        interval_ko="주 1회 일요일 05:30",
         note="주 1회 시설 전량 갱신(일요일). 도메인 주기가 아니라 갱신 주기",
     ),
 )
