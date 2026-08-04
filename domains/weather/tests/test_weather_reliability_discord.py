@@ -116,19 +116,20 @@ def test_weather_send_discord_posts_payload(monkeypatch):
     request, timeout = calls[0]
     payload = json.loads(request.data.decode("utf-8"))
     assert "content" not in payload
-    assert payload["embeds"][0]["title"] == "hello"
+    # 제목 앞에 환경 표식이 붙는다(ASAC-DAG#692) — 여러 인스턴스가 같은 채널을 쓰므로
+    # 어느 환경 결과인지 메시지만 보고 갈릴 수 있어야 한다. 표식 뒤 내용은 이전과 동일하다.
+    assert payload["embeds"][0]["title"].endswith("hello")
+    assert payload["embeds"][0]["title"].startswith("[")
+    assert "env=" in payload["embeds"][0]["footer"]["text"]
     assert payload["embeds"][0]["color"] == discord.DISCORD_GREEN
-    failure_payload = json.loads(
-        discord._discord_payload("title\n❌ 리포트 상태: 실패").decode("utf-8")
-    )
+    failure_payload = discord._discord_payload("title\n❌ 리포트 상태: 실패")
     assert failure_payload["embeds"][0]["color"] == discord.DISCORD_RED
-    warning_payload = json.loads(
-        discord._discord_payload("title\n⚠️ 리포트 상태: 경고").decode("utf-8")
-    )
+    warning_payload = discord._discord_payload("title\n⚠️ 리포트 상태: 경고")
     assert warning_payload["embeds"][0]["color"] == discord.DISCORD_YELLOW
     assert request.get_method() == "POST"
-    assert request.headers["User-agent"] == "ask-seoul-weather-report/1.0"
-    assert timeout == 10
+    # 전송 계층이 공용 모듈로 합쳐져 UA·timeout 이 공용 값이 된다(#692).
+    assert request.headers["User-agent"] == "asac-elt-notify/1.0"
+    assert timeout == 5.0
 
 
 def test_weather_send_discord_swallows_failure_without_logging_webhook(
@@ -279,4 +280,4 @@ def test_weather_send_discord_report_posts_structured_payload(monkeypatch):
     payload = json.loads(request.data.decode("utf-8"))
     assert payload["embeds"][0]["fields"][2]["name"] == "파이프라인"
     assert request.get_method() == "POST"
-    assert timeout == 10
+    assert timeout == 5.0   # 공용 전송 계층의 값(#692)

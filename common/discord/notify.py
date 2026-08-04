@@ -159,6 +159,56 @@ def send_embed(title: str, description: str, *, color: int = COLOR_OK,
     return _post(url, {"embeds": [embed]})
 
 
+def stamp_payload(payload: dict, *, env: dict | None = None) -> dict:
+    """**호출측이 만든 payload 를 그대로 두고** 환경 표식·출처만 주입한다.
+
+    도메인마다 embed 모양이 다르다(traffic·weather 는 ``fields``, culture 는 자체 footer).
+    공용 ``send_embed`` 로 갈아끼우면 그 모양이 바뀌므로, **메시지 조립은 도메인이 그대로 하고
+    전송만 공용을 쓰게** 하는 통로다. 바뀌는 것은 첫 embed 의 제목 앞 표식과 footer 뒤 출처뿐.
+
+    - 제목: 표식을 **앞에** 붙이고 256자로 자른다(뒤에 붙이면 긴 제목에서 표식이 잘린다).
+    - footer: 기존 문구를 밀어내지 않고 ``· env=… · host=…`` 를 뒤에 잇는다. 없으면 새로 만든다.
+    - ``embeds`` 가 없는 payload(평문 ``content``)는 content 앞에 표식만 붙인다.
+
+    원본을 변형하지 않는다 — 호출측이 같은 dict 를 재사용해도 표식이 겹쳐 붙지 않는다.
+    """
+    import copy
+
+    environment = notify_environment(env)
+    badge = _env_badge(environment)
+    provenance = _provenance(environment)
+    stamped = copy.deepcopy(payload)
+
+    embeds = stamped.get("embeds")
+    if isinstance(embeds, list) and embeds and isinstance(embeds[0], dict):
+        head = embeds[0]
+        head["title"] = _truncate(badge + str(head.get("title") or ""), _MAX_TITLE)
+        footer = head.get("footer")
+        existing = str((footer or {}).get("text") or "").strip()
+        text = f"{existing} · {provenance}" if existing else provenance
+        head["footer"] = {**(footer or {}), "text": _truncate(text, _MAX_FOOTER)}
+    elif stamped.get("content") is not None:
+        stamped["content"] = _truncate(badge + str(stamped["content"]), _MAX_CONTENT)
+    return stamped
+
+
+def send_payload(payload: dict, *, domain: str | None = None,
+                 webhook: str | None = None) -> bool:
+    """도메인이 조립한 payload 를 공용 전송 경로로 보낸다(표식·출처 주입 + redaction).
+
+    ``send_embed`` 가 못 담는 모양(``fields`` 등)을 쓰는 도메인용. 전송 계층만 공용이 되고
+    메시지 내용은 도메인 소유라는 이 모듈의 원칙(#161)을 그대로 지킨다.
+    """
+    url = webhook or resolve_webhook(domain)
+    if not url:
+        LOGGER.info("[discord] webhook 미설정 — 전송 스킵")
+        return False
+    refresh_env_secrets()
+    stamped = stamp_payload(payload)
+    # 전송 직전 일괄 redaction — 도메인이 만든 값에 자격증명이 섞여도 밖으로 나가지 않는다.
+    return _post(url, json.loads(redact(json.dumps(stamped, ensure_ascii=False))))
+
+
 def send_text(content: str, *, domain: str | None = None,
               webhook: str | None = None) -> bool:
     """평문 메시지 1건 전송 (population 일일 리포트 등 기존 평문 사용처 이전용)."""
