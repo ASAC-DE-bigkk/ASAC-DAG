@@ -193,6 +193,53 @@ def test_load_contracts_reads_source_evidence_and_freshness_slo(tmp_path):
     )
 
 
+def test_load_contracts_reads_freshness_field_separately_from_event_time(tmp_path):
+    timestamp_meta = {
+        "description": "quality timestamp",
+        "data_type": "TIMESTAMP",
+        "config": {
+            "meta": {
+                "nullable": False,
+                "semantic_role": "timestamp",
+                "unit": "datetime",
+            }
+        },
+    }
+    path = _projection_manifest(
+        tmp_path,
+        projection={
+            "schema_version": "1.0.0",
+            "columns": ["product_row_id", "value", "observed_at", "collected_at"],
+        },
+        column_overrides={
+            "observed_at": timestamp_meta,
+            "collected_at": timestamp_meta,
+        },
+    )
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["event_time"] = "observed_at"
+    serving["freshness_field"] = "collected_at"
+    serving["freshness_slo_minutes"] = 90
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_contracts(path)[0]
+
+    assert contract.event_time == "observed_at"
+    assert contract.freshness_field == "collected_at"
+
+
+def test_load_contracts_rejects_unknown_freshness_field(tmp_path):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["freshness_field"] = "missing_collected_at"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="freshness_field unknown column missing_collected_at"):
+        load_contracts(path)
+
+
 def test_load_contracts_reads_quality_coverage_gate(tmp_path):
     path = _projection_manifest(tmp_path)
     manifest = json.loads(path.read_text(encoding="utf-8"))
