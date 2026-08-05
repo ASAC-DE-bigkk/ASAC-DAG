@@ -16,7 +16,6 @@ EXPECTED_PRODUCTS = {
     "transit_dong_now",
     "transit_parking_full_risk",
     "transit_dong_hourly",
-    "transit_forecast_card",
     "transit_event_access",
     "transit_parking_profile",
 }
@@ -65,7 +64,6 @@ def test_transit_serving_export_declares_three_thin_tier_wrappers(monkeypatch):
         {
             "domain": "transit",
             "product_ids": [
-                "transit_forecast_card",
                 "transit_event_access",
                 "transit_parking_profile",
             ],

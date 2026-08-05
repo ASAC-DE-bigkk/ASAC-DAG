@@ -292,10 +292,10 @@ with DAG(
     # tag:heavy(아카이브 전량 재집계 프로파일 4종)는 transit_transform_heavy 담당,
     # tag:hourly(감시성 테스트)는 아래 시간당 분기(dbt_test_rest) 담당이라 제외 —
     # 그레인/키 무결성은 여전히 매 15분 여기서 차단된다(테스트 티어링 A안).
-    # ⚠ fresh 에 남는 forecast_card·parking_full_risk 는 heavy 테이블(dong_rhythm·
-    # parking_profile)을 SELECT 한다 — 신규 환경/골드 드롭 직후엔 첫 heavy 런(:05/:35)
-    # 전까지 이 두 모델이 TABLE_NOT_FOUND 로 실패할 수 있다(1 heavy 주기 내 자가 회복,
-    # 부트스트랩은 1회 수동 full build 권장).
+    # (forecast_card 는 상류 citydata ppltn_forecast 삭제로 제품 제거 — ASAC-DBT#432)
+    # ⚠ fresh 에 남는 parking_full_risk 는 heavy 테이블(parking_profile)을 SELECT 한다 —
+    # 신규 환경/골드 드롭 직후엔 첫 heavy 런(:05/:35) 전까지 이 모델이 TABLE_NOT_FOUND 로
+    # 실패할 수 있다(1 heavy 주기 내 자가 회복, 부트스트랩은 1회 수동 full build 권장).
     dbt_build = BashOperator(
         task_id="dbt_build",
         # 공백 구분 union 셀렉터 — dbt 는 인자 안 공백을 여러 기준의 합집합으로 파싱한다.

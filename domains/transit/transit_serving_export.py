@@ -8,7 +8,8 @@
 3-tier 주기는 프로토타입 --mode(fast/hourly/full)를 스케줄 분리로 승계(#475):
   fast(:10/:25/:40/:55) : 실시간 스냅샷 2종 — dong_now·parking_full_risk (15분 전량 교체)
   hourly(:40)           : dong_hourly — append(hour_at, lookback 2h), D1 비면 전체 백필
-  daily(08:40 KST)      : forecast_card·event_access·parking_profile — 일 1회 전량 교체
+  daily(08:40 KST)      : event_access·parking_profile — 일 1회 전량 교체
+                          (forecast_card 는 상류 citydata 삭제로 제품 제거 — ASAC-DBT#432)
 
 신선도 임계(75분 등)는 각 모델 계약의 ``freshness_slo_minutes`` 로 이식 — 감시는
 watchdog 몫(계약 §7.4), Publisher 는 freshness 실측값만 ``_catalog`` 에 기록한다.
@@ -35,7 +36,6 @@ HOURLY = [
     "transit_dong_hourly",            # append(hour_at)
 ]
 DAILY = [
-    "transit_forecast_card",
     "transit_event_access",
     "transit_parking_profile",
 ]
