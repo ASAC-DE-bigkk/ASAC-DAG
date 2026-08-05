@@ -19,10 +19,10 @@ from .trino import build_trino_settings, connect, ensure_schema, sql_identifier,
 
 CITYDATA_BRONZE_TABLE = "bronze_seoul_citydata"
 
-# citydata 는 **seoul_citydata 스키마로 분리**(#69) — population(seoul_ppltn)과 격리한다.
-# (상권·따릉이·대기질 등은 인구와 별개 신호라 스키마도 분리한다.)
+# citydata 스키마 — dev·prod 통일 ``citydata`` (도메인명 정렬, #60). 과거 dev 는 seoul_citydata
+# 로 분리(#69, seoul_ppltn 격리)했으나 prod 규약으로 통일. env 로 예외 오버라이드만.
 CITYDATA_SCHEMA_ENV = "SEOUL_CITYDATA_SCHEMA"
-DEFAULT_CITYDATA_SCHEMA = "seoul_citydata"
+DEFAULT_CITYDATA_SCHEMA = "citydata"
 
 _COLUMNS = (
     "request_id",

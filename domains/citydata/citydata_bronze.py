@@ -208,7 +208,7 @@ def _load_bronze(**context) -> int:
     ctx = RunContext(**fetched["ctx"])
     inserted = load_citydata_bronze_from_raw(
         ctx, results=fetched["results"], target=params["target"],
-        schema=("citydata" if params["target"] == "prod" else None),
+        schema="citydata",  # dev·prod 통일 (도메인명 정렬, #60/#69 — seoul_citydata 분리 폐지)
         blocks=tuple(params.get("blocks") or DEFAULT_BRONZE_BLOCKS))
     print(f"[citydata bronze] bronze_rows_inserted={inserted}")
     # run-metadata 완전성: 시도 장소 대비 적재(landed) + bronze 행수 → 콜백이 이 XCom 을 읽어 채운다.

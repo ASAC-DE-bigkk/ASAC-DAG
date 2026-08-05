@@ -10,10 +10,10 @@ import os
 
 from ..common.config import load_env_file, pick
 
-# raw 원본 객체가 적재되는 raw prefix. env(SEOUL_PPLTN_LANDING_ROOT)로 덮어쓴다.
-# ⚠ 기본값은 raw/population 유지 — 기존 raw 아카이브 연속성(경로 이전 시 과거분과 분리)을
-# 위해 도메인 개명(population→citydata) 후에도 데이터 경로는 그대로 둔다.
-LANDING_ROOT = os.environ.get("SEOUL_PPLTN_LANDING_ROOT", "raw/population")
+# raw 원본 객체가 적재되는 raw prefix. dev·prod 통일 ``raw/citydata`` (도메인명 정렬, #60).
+# 과거 dev 는 raw/population 이었으나 prod 규약으로 통일 — #60 "이동 0건"대로 기존 객체는
+# 옮기지 않고(새 쓰기부터), env(SEOUL_PPLTN_LANDING_ROOT)로만 예외 오버라이드.
+LANDING_ROOT = os.environ.get("SEOUL_PPLTN_LANDING_ROOT", "raw/citydata")
 
 # 추적 메타데이터 source_id -- raw path와 bronze row 양쪽에 쓰인다.
 # (블록 bronze 의 source_id 는 citydata.CITYDATA_SOURCE_ID='seoul_citydata' 를 쓴다.)

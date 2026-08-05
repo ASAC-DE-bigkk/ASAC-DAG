@@ -55,9 +55,11 @@ class CitydataIngestOptions:
 
 
 def _raw_root(target: str) -> str:
-    """raw 랜딩 루트 — target=prod 는 신규 ``raw/citydata``, dev 는 기존
-    ``source_config.LANDING_ROOT``(불변, prod 컷오버 #556 — dev 경로는 그대로 둔다)."""
-    return "raw/citydata" if target == "prod" else source_config.LANDING_ROOT
+    """raw 랜딩 루트 — dev·prod 통일 ``raw/citydata`` (도메인명 정렬, #60/#556).
+
+    과거 dev 는 ``raw/population`` 이었으나 prod 규약으로 통일. #60 "이동 0건" 원칙대로
+    기존 raw/population 객체는 옮기지 않고 역사자료로 남기며, **새 쓰기부터** raw/citydata."""
+    return "raw/citydata"
 
 
 def _build_sink(target: str, env_file: str | None, dry_run: bool, local_dir: str) -> Sink:
@@ -245,24 +247,18 @@ def write_citydata_run_report(report: dict, *, target: str = "dev",
                               env_file: str | None = None) -> str:
     """run 리포트를 R2 에 JSON 으로 남긴다. 키 반환.
 
-    dev(불변): ``{LANDING_ROOT}/_reports/{source_id}/...`` (기존 경로 그대로).
-    prod(신규, #556): ``ops/reports/citydata/...`` — ops 존으로 분리(#60).
+    dev·prod 통일: ``ops/reports/citydata/...`` — ops 존(#60, 사람·대시보드·TTL).
         날짜 칸은 ``observed_date=``(P-4, ASK-Seoul#78) — 관측일(KST).
+        (과거 dev 는 raw/_reports 였으나 prod 규약으로 통일 — 새 쓰기부터.)
     """
     settings = build_r2_settings(target, env_file)
     missing = missing_r2(settings)
     if missing:
         raise RuntimeError(f"Missing R2 config: {', '.join(missing)}")
-    if target == "prod":
-        key = (
-            f"ops/reports/citydata"
-            f"/observed_date={report['load_date']}/ingest_ts={report['ingest_ts']}/run_report.json"
-        )
-    else:
-        key = (
-            f"{source_config.LANDING_ROOT}/_reports/{CITYDATA_SOURCE_ID}"
-            f"/load_date={report['load_date']}/ingest_ts={report['ingest_ts']}/run_report.json"
-        )
+    key = (
+        f"ops/reports/citydata"
+        f"/observed_date={report['load_date']}/ingest_ts={report['ingest_ts']}/run_report.json"
+    )
     body = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
     R2Sink(settings).put(key, body, "application/json")
     return key

@@ -38,8 +38,8 @@ from citydata_ingest.source.serving_verify import verify_citydata_serving  # noq
 
 KST = pendulum.timezone("Asia/Seoul")
 _TARGET = default_target()
-# 스키마: prod=citydata, dev=seoul_citydata (serving_export·dbt profiles 와 정렬). CITYDATA_SCHEMA 로 dev 오버라이드.
-CITYDATA_SCHEMA = "citydata" if _TARGET == "prod" else os.environ.get("CITYDATA_SCHEMA", "seoul_citydata")
+# 스키마: dev·prod 통일 citydata (serving_export·dbt profiles 와 정렬, #60). env 로 예외 오버라이드만.
+CITYDATA_SCHEMA = os.environ.get("CITYDATA_SCHEMA", "citydata")
 
 # 신선도 두 지표 임계 (#517 과 동일 값 이관).
 PUBLISH_DELAY_ALERT_MIN = 60   # (a) collected_at−event_at 중앙값 이 넘으면 발표지연 경보

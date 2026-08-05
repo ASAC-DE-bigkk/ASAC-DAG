@@ -23,8 +23,8 @@ from common.serving.dag_factory import build_serving_export_dag
 
 # 프로젝트 target 관례(DBT_TARGET, 기본 prod) — 컷오버(#556). runmetrics._resolve_target 와 동일.
 _TARGET = os.environ.get("DBT_TARGET", "prod")
-# 스키마: prod=citydata, dev=seoul_citydata (transform·dbt profiles 와 정렬).
-_SCHEMA = "citydata" if _TARGET == "prod" else "seoul_citydata"
+# 스키마: dev·prod 통일 citydata (transform·dbt profiles 와 정렬, #60).
+_SCHEMA = "citydata"
 
 # 티어 = product_id 묶음. 각 골드의 publication_trigger.schedule_cron(계약)이 아래 스케줄과 정렬돼 있다.
 # 실시간 스냅샷 제거 + 시계열 집중(ASAC-DBT#404) — CRITICAL(5분마다 전량) tier 폐지.
