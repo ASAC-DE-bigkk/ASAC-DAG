@@ -460,6 +460,19 @@ def _handoff_rows(spec, m: dict, col_defs: list, publication_id: str) -> tuple[l
                  "column_name": c, "type": _sqlite_type(t),
                  "description_ko": descs.get(c) or None, "publication_id": publication_id}
                 for i, (c, t) in enumerate(col_defs)]
+    # 설명 없는 컬럼은 **조용히 NULL 로 나가면 안 된다**(ASAC-DBT#434). 소비자(사람·MCP/AI)는
+    # d1_catalog_columns 만 보고 컬럼 의미를 판단하는데, 빈 설명은 "설명이 없다"가 아니라
+    # "이 제품은 덜 만들어졌다"로 읽힌다. 게시는 막지 않되(직전본 유지가 더 나쁘다) 무엇이
+    # 비었는지 이름까지 남긴다 — 채울 자리는 dbt `columns:`(gold 실컬럼) 또는
+    # `meta.serving.d1_derived_columns`(롤업이 만들어 내는 파생 컬럼)다.
+    missing = [r["column_name"] for r in col_rows if not r["description_ko"]]
+    if missing:
+        log_event("serve.column_description_missing", level="warning", where="_handoff_rows",
+                  product_id=pid, table=spec.d1_table,
+                  settled_rows=len(col_rows), affected_rows=len(missing),
+                  affected_ratio_pct=round(100.0 * len(missing) / max(len(col_rows), 1), 1),
+                  columns=sorted(missing)[:20],
+                  hint="dbt columns: 또는 meta.serving.d1_derived_columns 에 선언하세요")
     ext_row = {"product_id": pid, "table_name": spec.d1_table, "source_model": spec.source,
                "grain": sv.get("grain"),
                "primary_key": json.dumps(
