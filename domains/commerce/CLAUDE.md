@@ -1021,22 +1021,38 @@ Current known rule:
   external alert. Watermark unknown → full-table fallback.
 
 
-## 19.2 D1 서빙 — commerce 자체 관리
+## 19.2 D1 서빙 — org 공통 Serving Contract(#478) 를 따른다
 
-commerce gold(Iceberg) → 공유 Cloudflare **D1(SQLite)** 선별 export 는 **commerce 안에서 자체
-규약으로 관리**한다(타 도메인 방식 추종 불필요). 기존 serving Postgres 경로는 폐기(2026-07-14).
+commerce gold(Iceberg) → 공유 Cloudflare **D1(SQLite)** 선별 export 의 정본 규약은 **ASAC-DAG#478
+Serving Contract v1/v1.1** 이다. commerce 는 2026-07-22 그 스레드에서 채택에 동의했고, gold 22종이
+확정 필드를 선언하고 있다. **자체 규약으로 이탈해 관리하지 않는다.** 기존 serving Postgres 경로는
+폐기(2026-07-14).
 
-- **정본 규약**: gold 모델 `config.meta.serving.serving_tier`(`d1_direct`/`d1_rollup`/`iceberg_api`)
-  + `d1_table`·`publication_mode`(iceberg/rollup)·`product_id`(gold_*). 설계 정본은 dbt
-  `docs/DB/gold/serving-design.md`.
-- **구현(진행 중 — 미구현 아님)**: 계약 ASAC-DBT **#334/PR#335**(`serving_tier`), export ASAC-DAG
-  **#493/PR#494** `commerce_serving_export`(gold Asset 트리거 분리 DAG, `include/gold/serving_export.py`
-  — direct 15 스냅샷, rollup GROUP BY 파생, iceberg_api Trino 직조회, 행수 밴드 게이트, 마커
-  `commerce_serve_state`). 전부 번들 자립(공유 패키지 강제 소비 없음).
-- **org 공통 계약 #478 과는 별개**: ASAC-DAG #478 `meta.serving.enabled/…` 는 별도 org 계약이며
-  commerce 는 자체 `serving_tier` 규약을 쓴다. 단 ASAC-DBT `serving-contract-gate` CI 가
-  `config.meta.serving` 있는 모든 모델을 #478 규격으로 검사하므로 정합 주의 — 결정은 commerce 자체
-  PR(#335 계열)에서. 상세·추적: **[docs/serving-contract-chain.md](docs/serving-contract-chain.md)**.
+- **선언(dbt `config.meta.serving`)** — 2026-08-05 실측, `_commerce_gold__models.yml`:
+  - #478 v1 필수 `enabled`·`product_id`·`contract_version`·`grain`·`primary_key`·
+    `publication_mode`·`zero_policy` = **22/22**
+  - #478 v1.1 `publication_trigger` 22 · `event_time` 3 · `freshness_slo_minutes` 3(조건부 필수 충족)
+  - #478 선택 `product_question` 22 · `shape` 22 · `partial_policy` 21 / 외부 공개 `external` 22
+  - **commerce 확장**(같은 블록 안에 얹는다 — 별도 네임스페이스 금지):
+    `serving_tier`(`d1_direct`/`d1_rollup`/`iceberg_api`)·`d1_table`·`usage_patterns`·
+    `source_evidence`·`quality_coverage`·`public_projection`·`public_primary_key`
+  - #478 이 금지한 것은 **다른 이름의 규약을 병행 선언하는 것**(이중 선언)이지 확장 자체가 아니다.
+- **소비**: `include/gold/serving_export.py` 가 `meta.serving.*` 를 읽어 `_catalog` 15컬럼
+  (`product_id`·`external`·`product_question`·`event_time` 등)을 채운다 — **선언이 곧 게시 결과**다.
+  `d1_direct` 스냅샷 / `d1_rollup` GROUP BY 파생 / `iceberg_api` D1 금지·Trino 직조회, 행수 밴드
+  게이트, 마커 `commerce_serve_state`. `SERVING_SPEC` 과 dbt 선언은 실행 시 대조돼 어긋나면 경보.
+- **외부 공개를 내릴 때**는 `external: false` 만 바꾼다(ASAC-DBT#434 가 요청하는 방식). gold
+  테이블·파이프라인은 그대로 두고, export 를 한 번 돌리면 `_catalog.external` 이 0 이 되어 카탈로그에서
+  빠진다. **데이터를 지우는 조치가 아니다.**
+- **이력(같은 사고 반복 방지)**: 2026-07-27, 이미 적용돼 있던 `meta.serving`(07-23) 위에 같은 내용을
+  한 번 더 적용해 블록이 충돌했다. 중복을 되돌린 것까지는 맞았으나 그 김에 이 절을 "#478 과는 별개,
+  자체 관리"로 다시 써버렸다 — 실제 충돌 범위보다 훨씬 넓은 결론이었다. 하루 뒤 PR#335 머지와 22종
+  재작성으로 코드는 #478 정합으로 갔고 문서만 9일간 반대로 남았다.
+  **로컬 충돌은 충돌만 되돌린다. 거버넌스 문서를 함께 고치지 않는다.**
+- 계약 이력: ASAC-DBT #334 → **PR#335(머지 2026-07-28)**, export ASAC-DAG #493 → PR#494.
+  설계 정본은 dbt `docs/DB/gold/serving-design.md`. `serving-contract-gate` CI 는 `config.meta.serving`
+  있는 모든 모델을 #478 규격으로 검사하는데, commerce 는 확정 필드를 갖췄으므로 통과 대상이다.
+  상세·추적: **[docs/serving-contract-chain.md](docs/serving-contract-chain.md)**.
 
 
 ## 19.3 운영 기록 관문 (ops record gate — 경로·형식·값 집합의 단일 통로)

@@ -32,7 +32,7 @@
 | [docs/pipeline/](docs/pipeline/README.md) | 레이어별 — [raw/](docs/pipeline/raw/README.md)(수집) · [bronze/](docs/pipeline/bronze/README.md)(Iceberg) · [silver/](docs/pipeline/silver/README.md)(dbt) · [gold/](docs/pipeline/gold/README.md)(미구현) |
 | [docs/README.md](docs/README.md) | 카테고리 코드 위치·문서 인덱스·빠른 실행 |
 | [config/dataset_registry.yaml](config/dataset_registry.yaml) | 수집 대상 단일 진실 공급원 |
-| [docs/serving-contract-chain.md](docs/serving-contract-chain.md) | **D1 서빙 추적** — commerce 자체 관리(serving_tier 규약 · export ASAC-DAG PR#494 · 계약 ASAC-DBT PR#335 · 설계 dbt serving-design.md) + org 공통 계약 #478 참고·정합 주의 |
+| [docs/serving-contract-chain.md](docs/serving-contract-chain.md) | **D1 서빙 추적** — org 공통 Serving Contract #478 v1/v1.1 채택(gold 22종 확정 필드 선언) + commerce 확장(`serving_tier`·`d1_table`). 소비 export ASAC-DAG PR#494 · 계약 ASAC-DBT PR#335(머지) · 설계 dbt serving-design.md |
 
 ## 4. 프로젝트 운영
 
