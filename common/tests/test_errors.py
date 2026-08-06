@@ -104,6 +104,21 @@ def test_classify_urllib_http_error_before_connection():
 def test_registry_unknown_slug_falls_back_to_unhandled():
     assert error_types.get("no-such-slug").slug == "unhandled"
     assert error_types.get("api-timeout").slug == "api-timeout"
+    assert error_types.get("loader-delay").slug == "loader-delay"
+
+
+def test_loader_delay_problem_error_keeps_its_explicit_type():
+    problem = Problem.from_exception(
+        ProblemError(error_types.LOADER_DELAY, "running_minutes=16"),
+        domain="transit",
+        dag_id="transit_bronze_loader_watchdog",
+        task_id="detect_loader_delay",
+        run_id="scheduled__2026-08-06T14:20:00+00:00",
+        try_number=1,
+    )
+
+    assert problem.type == "urn:asac:error:loader-delay"
+    assert problem.title == "Pipeline loader exceeded its runtime SLO"
 
 
 # ── 경로 규약 ───────────────────────────────────────────────────────────────────

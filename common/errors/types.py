@@ -27,6 +27,9 @@ UNHANDLED = ErrorType("unhandled", "Unhandled exception")
 API_TIMEOUT = ErrorType("api-timeout", "External API request timed out")
 CONNECTION_ERROR = ErrorType("connection-error", "External API connection failed")
 HTTP_ERROR = ErrorType("http-error", "External API returned an HTTP error status")
+# 수집은 성공했지만 pending 적재가 장기 running 상태로 멈춘 경우. 원천·게시 실패와
+# 구분해 freshness 사고의 원인을 조회할 수 있도록 명시 유형으로 남긴다(#719).
+LOADER_DELAY = ErrorType("loader-delay", "Pipeline loader exceeded its runtime SLO")
 
 _REGISTRY: dict[str, ErrorType] = {}
 
@@ -46,7 +49,7 @@ def all_types() -> dict[str, ErrorType]:
     return dict(_REGISTRY)
 
 
-for _t in (UNHANDLED, API_TIMEOUT, CONNECTION_ERROR, HTTP_ERROR):
+for _t in (UNHANDLED, API_TIMEOUT, CONNECTION_ERROR, HTTP_ERROR, LOADER_DELAY):
     register(_t)
 
 

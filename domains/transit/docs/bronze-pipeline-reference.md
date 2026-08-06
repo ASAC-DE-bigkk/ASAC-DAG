@@ -11,6 +11,7 @@
   transit_bus_bronze           TOPIS 위치, 노선 마스터 기반 전 노선(서울 ~728) 병렬
   transit_parking_bronze       GetParkingInfo 1콜 — 전체
 [transit_bronze_loader] */10 : pending 마커 소비 → 원본 재파싱 → Iceberg 청크 INSERT
+[transit_bronze_loader_watchdog] */5 : loader 장기 running 감시 → R2 Problem + Discord
 [transit_bus_route_master] @weekly : getBusRouteList → R2 raw + collector reference
 [transit_master_bronze]  @weekly   : 역·주차장 마스터 (기존 구조 유지)
 ```
@@ -81,6 +82,7 @@
 | `TRANSIT_TRANSFORM_SCHEDULE` | `*/15` | dbt 변환 주기 (#443) — 실측 build 344초. 프로파일·event_access 가 아카이브 성장에 따라 늘어나므로 주기에 근접하면 무거운 모델 분리 |
 | `TRANSIT_ARCHIVE_TABLE` | `gold_transit_dong_15min` | purge 선행 게이트가 보는 아카이브 테이블 (#443) |
 | `TRANSIT_LOADER_INSERT_MAX_CHARS` | `700000` | INSERT 문 길이 캡 (QUERY_TEXT_TOO_LARGE 회피) |
+| `TRANSIT_LOADER_RUNTIME_SLO_MINUTES` | `15` | loader 10분 주기 + 5분 유예. 초과 `running`은 적재 지연으로 경보 (#719) |
 
 - 지하철 일괄은 **경로형** `realtimeStationArrival/ALL` 필수 — start/end 형은 1000행 캡.
 - 버스 부분 실패 허용선: 노선 단위 오류는 격리, 실패 >10%(최소 5)면 원천/키 이상으로 런 실패.
@@ -127,6 +129,13 @@
 - 버스 쿼터 가드(#440): HTTP 200 이어도 **headerCd 5/6/7(쿼터·인증 이상)이 과반이면
   런 실패** → Discord. 미운행 '결과 없음'(headerCd=4)은 정상 취급(rows=-1 보존).
 - loader: 파싱 0행인데 manifest rows>0 이면 런 실패·마커 보존(파서 회귀 감지).
+- loader 장기 실행(#719): `transit_bronze_loader_watchdog`가 Airflow 메타DB에서
+  `running` loader의 실행 시간을 5분마다 검사한다. `TRANSIT_LOADER_RUNTIME_SLO_MINUTES`
+  (기본 15분)를 **초과**하면 원인 유형 `loader_delay`로 한 target run당 한 번만
+  실패·R2 Problem·Discord 알림을 남긴다. 복수 `running` run이 비정상적으로 겹쳐도
+  오래된 run부터 매 tick 하나씩 모두 경보한다. 감시 자체는 loader의 처리·동시성·마커
+  목록을 변경하거나 실행을 중단하지 않는다. 따라서 timeout/throughput 최적화는 별도
+  구조 개선 이슈에서 처리한다.
 
 ## 운영 노트
 

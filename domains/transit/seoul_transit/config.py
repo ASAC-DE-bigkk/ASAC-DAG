@@ -161,6 +161,14 @@ LOADER_PENDING_LEGACY_PREFIXES = tuple(
 )
 # INSERT 문 최대 길이(문자) — Trino QUERY_TEXT_TOO_LARGE(100만자) 회피용 바이트 캡.
 LOADER_INSERT_MAX_CHARS = int(os.environ.get("TRANSIT_LOADER_INSERT_MAX_CHARS", "700000"))
+# Loader는 기본 10분 주기다. 15분은 다음 scheduled run을 막는 장기 실행을 잡되,
+# 일시적인 Trino/R2 지연을 바로 사고로 오인하지 않기 위한 5분 유예를 포함한다.
+# 이 값은 감시 전용이며 loader를 취소·재시작·병렬화하지 않는다(#719).
+LOADER_RUNTIME_SLO = timedelta(minutes=int(
+    os.environ.get("TRANSIT_LOADER_RUNTIME_SLO_MINUTES", "15")
+))
+if LOADER_RUNTIME_SLO <= timedelta(0):
+    raise ValueError("TRANSIT_LOADER_RUNTIME_SLO_MINUTES must be positive")
 
 
 def load_key(var: str = "SEOUL_API_KEY_TRAN") -> str:
