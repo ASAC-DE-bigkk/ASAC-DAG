@@ -46,16 +46,16 @@ def test_flow_hot_path_combines_model_and_contract_in_one_pinned_build():
     assert "dbt_test_flow_silver" not in dag.task_ids
 
 
-def test_gold_hot_path_builds_only_six_d1_products_and_one_receipt():
+def test_gold_hot_path_builds_only_five_core_d1_products_and_one_receipt():
     module = load_gold_transform_module()
     specs = {spec.task_id: spec for spec in module.GOLD_DBT_PHASE_SPECS}
 
     assert list(specs) == ["dbt_deps_gold", "dbt_run_gold"]
     build = specs["dbt_run_gold"]
     assert build.dbt_command == "build"
-    assert build.selector == "ask_seoul_traffic_transform_gold_hot_build"
+    assert build.selector == "ask_seoul_traffic_transform_core_gold_hot_build"
     assert build.selector_when_flow_missing == (
-        "ask_seoul_traffic_transform_gold_incident_hot_build"
+        "ask_seoul_traffic_transform_core_gold_incident_hot_build"
     )
     assert build.snapshot_required is True
     assert build.pin_critical is True

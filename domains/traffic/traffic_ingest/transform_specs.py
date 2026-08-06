@@ -81,14 +81,14 @@ GOLD_DBT_PHASE_SPECS = (
     DbtPhaseSpec(
         "dbt_run_gold",
         "build",
-        "ask_seoul_traffic_transform_gold_hot_build",
+        "ask_seoul_traffic_transform_core_gold_hot_build",
         silver_persisted=True,
         fresh_parse=True,
         snapshot_required=True,
         pin_critical=True,
         admin_dong_crosswalk_pin_required=True,
         selector_when_flow_missing=(
-            "ask_seoul_traffic_transform_gold_incident_hot_build"
+            "ask_seoul_traffic_transform_core_gold_incident_hot_build"
         ),
     ),
 )
