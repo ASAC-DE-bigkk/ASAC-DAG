@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import config
 from .config import KST
+from .loader import INGEST_TS_RE as _INGEST_TS_RE
 from .loader import TABLE_SPECS, sql_identifier
 
 # 실시간 dataset → R2 source 세그먼트 — collector 와 같은 config 값(env 오버라이드
@@ -39,8 +40,9 @@ SOURCE_BY_DATASET: dict[str, str] = {
 # 없이는 거부되므로 7d 고정(행 DELETE 는 주 단위, 스냅샷 메타·파일은 7일 뒤 회수).
 SNAPSHOT_RETENTION = "7d"
 
-# raw 경로의 /ingest_ts=…/ 세그먼트와 pending 마커 파일명의 <ingest_ts>__ 프리픽스 공용
-_INGEST_TS_RE = re.compile(r"(?:/ingest_ts=|/)(\d{8}T\d{6}Z)(?:/|__)")
+# raw 경로의 /ingest_ts=…/ 세그먼트와 pending 마커 파일명의 <ingest_ts>__ 프리픽스 공용.
+# 정의는 loader.INGEST_TS_RE 한 곳 — 만료 스윕(여기)과 백로그 나이(loader)가 같은 식을
+# 재야 "지워지는 경계"와 "경보하는 경계"가 어긋나지 않는다(#719 리뷰).
 
 
 def raw_prefix(dataset: str, domain: str = "transit") -> str:

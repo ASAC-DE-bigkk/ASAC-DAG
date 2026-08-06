@@ -170,6 +170,29 @@ LOADER_RUNTIME_SLO = timedelta(minutes=int(
 if LOADER_RUNTIME_SLO <= timedelta(0):
     raise ValueError("TRANSIT_LOADER_RUNTIME_SLO_MINUTES must be positive")
 
+# ── loader 백로그 관측 (ASK-Seoul#719) ───────────────────────────────────────
+# 적재가 밀리면 수집·변환·게시가 전부 성공(초록)인 채로 창고만 늙는다. 2026-08-06
+# 실측: 런 1건이 26시간 32분 '실행 중'으로 돌면서 서빙 2종이 SLO(75분)를 161·200분
+# 초과했는데, 실패한 태스크가 없어 어떤 경보에도 걸리지 않았다. 잔량·최고령 나이를
+# 매 런 남기고 임계 초과 시 경보한다 — 조용한 지연을 만들지 않는 것이 목적.
+#
+# 나이 임계는 실시간 제품의 freshness SLO(75분)보다 낮게 잡는다 — SLO 를 넘기기
+# **전에** 울려야 조치할 시간이 있다. 잔량 임계는 통상 정상 범위(10분 주기 × 유입
+# ~6.3건 ≈ 7건)의 몇 배로, 일시적 밀림에는 안 울리게.
+LOADER_BACKLOG_AGE_WARN_MINUTES = int(
+    os.environ.get("TRANSIT_LOADER_BACKLOG_AGE_WARN_MINUTES", "45")
+)
+LOADER_BACKLOG_WARN = int(os.environ.get("TRANSIT_LOADER_BACKLOG_WARN", "60"))
+
+# 런 시간 예산(분) — 이 시간을 넘기면 **다음 마커부터** 다음 런으로 넘긴다.
+# 마커 경계에서만 판정하므로 진행 중인 마커(Trino INSERT 등)를 끊지는 못한다 —
+# 한 문장이 매달리는 형태의 정지에는 dagrun_timeout 같은 런 상한이 따로 필요하다.
+# **기본 0 = 무제한**으로, #369 의 "pending 전량 처리" 동작을 그대로 유지한다.
+# 켜는 판단은 위 백로그 관측치를 실제로 보고 내린다(#719) — 예산을 켜면 매 런이
+# "성공 + 잔량 있음" 으로 끝날 수 있어, 잔량 경보가 함께 살아 있어야 조용한 적체가
+# 되지 않는다. 값은 DAG 주기(*/10)와 같거나 그보다 짧게 잡는 것이 의미가 있다.
+LOADER_RUN_BUDGET_MINUTES = int(os.environ.get("TRANSIT_LOADER_RUN_BUDGET_MINUTES", "0"))
+
 
 def load_key(var: str = "SEOUL_API_KEY_TRAN") -> str:
     """API 인증키를 환경변수에서 로드 (compose env_file 로 주입)."""
