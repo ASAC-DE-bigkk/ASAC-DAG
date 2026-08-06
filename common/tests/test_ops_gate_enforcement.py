@@ -46,8 +46,6 @@ GRANDFATHERED: dict[str, str] = {
         "ops/control/state/traffic/run_ledger — 상태 계열(P-5·R-4 만료 금지) @masondev1024",
     "domains/traffic/traffic_ingest/snapshot_receipt.py":
         "ops/control/state/traffic/snapshot_receipts — 상태 계열(P-5) @masondev1024",
-    "domains/transit/seoul_transit/config.py":
-        "ops/control/state/transit/loader_pending — 상태 계열(P-5) @codingpoppy94",
     "domains/weather/weather_ingest/common/runtime.py":
         "ops/control/checkpoints/weather — 상태 계열(P-5) @masondev1024",
 }

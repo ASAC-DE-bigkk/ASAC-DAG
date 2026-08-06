@@ -16,6 +16,8 @@ import os
 import urllib.parse
 from datetime import timedelta, timezone
 
+from common.ops import ControlSubtype, OpsCategory, category_prefix
+
 KST = timezone(timedelta(hours=9))
 
 # ── R2 랜딩 경로 세그먼트 — collector·maintenance 공용 (경로 계약 단일화, 리뷰 #369)
@@ -139,8 +141,16 @@ PARKING_ROWS = int(os.environ.get("PARKING_ROWS", "1000"))
 # (transit_transform 의 TRANSIT_TRANSFORM_SCHEDULE 관례와 정합).
 # ops/control/state = "지워지면 다음 실행이 오작동하는" 존(ASK-Seoul#60, #547) — R2 lifecycle
 # TTL 금지. 만료 정리는 소유 파이프라인(transit_maintenance stale 스윕, 알림 동반)만 수행.
+#
+# 규약이 정하는 앞부분(ops/control/state/transit/)은 **관문이 만든다**(#78 P-5) — 손으로
+# 조립하면 하위유형·도메인 순서가 어긋나도 아무도 못 잡는다. loader_pending 은 그 아래
+# 도메인이 정하는 칸이다. 쓰기(loader.pending_key)와 읽기(bronze_loader·maintenance 나열)가
+# **같은 이 값**을 쓴다 — 갈리면 마커가 양쪽에서 안 보이는 고립이 생긴다(#547).
+_LOADER_PENDING_DEFAULT = category_prefix(
+    OpsCategory.CONTROL, control=ControlSubtype.STATE, domain="transit"
+) + "loader_pending/"
 LOADER_PENDING_PREFIX = os.environ.get(
-    "TRANSIT_LOADER_PENDING_PREFIX", "ops/control/state/transit/loader_pending/"
+    "TRANSIT_LOADER_PENDING_PREFIX", _LOADER_PENDING_DEFAULT
 )
 # 구경로(#547 이전) 드레인용 — 배포 시점에 구경로에 남은 마커가 loader·maintenance 양쪽에서
 # 보이지 않게 되는 고립(적재 누락 + 무알림 소실)을 막는다. 구경로 소진 확인 후 빈 값으로 제거.

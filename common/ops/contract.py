@@ -9,7 +9,8 @@
 1. **경로는 만들 수 없고 요청만 할 수 있다** (`ops_key`). 문자열로 경로를 조립하는 길을 없애
    카테고리를 오타내거나 용도에 안 맞는 존에 쓰는 사고를 구조적으로 차단한다.
    - 관측 계열 → ``ops/<category>/<domain>/observed_date=<KST>/…``  (P-4·P-6·P-9)
-   - 상태 계열 → ``ops/<category>/<domain>/…`` (날짜 칸 금지)        (P-5)
+   - control  → ``ops/control/{state,checkpoints,queues}/<domain>/…`` (하위유형이 도메인 앞)
+   - 그 밖의 상태 계열 → ``ops/<category>/<domain>/…`` (날짜 칸 금지)  (P-5)
 2. **선택지는 미리 좁혀져 있다.** category/layer/grain/status/rows_source/sink_type 은 전부
    닫힌 집합(enum)이라, 없는 값을 쓰면 그 자리에서 죽는다 (R-1·V-1·V-4·V-5·N-5).
 3. **필수 항목이 빠지면 즉시 실패한다** (`build_ops_event`). 무엇이 어느 규칙 때문에 필요한지
@@ -89,6 +90,18 @@ OBSERVATION_CATEGORIES: frozenset[OpsCategory] = frozenset({
 STATE_CATEGORIES: frozenset[OpsCategory] = frozenset({
     OpsCategory.CONTROL, OpsCategory.RECEIPTS,
 })
+
+
+class ControlSubtype(StrEnum):
+    """``ops/control/`` 하위유형 — 닫힌 집합(#78 §1 존 구조표).
+
+    구조표가 ``control/{state,checkpoints,queues}/<domain>/`` 이라 하위유형이 **도메인보다
+    앞**에 온다. 다른 카테고리(`ops/<category>/<domain>/`)와 모양이 다른 유일한 자리다.
+    """
+
+    STATE = "state"
+    CHECKPOINTS = "checkpoints"
+    QUEUES = "queues"
 #: 보관 기간(일). None = 만료 금지(R-3·R-4). 자동 삭제 규칙은 ops 루트가 아니라
 #: 반드시 이 카테고리 단위로만 건다(R-2).
 RETENTION_DAYS: dict[OpsCategory, int | None] = {
@@ -274,21 +287,35 @@ def resolve_environment(env: Mapping[str, str] | None = None) -> Environment:
 
 def ops_key(category: OpsCategory | str, *, domain: str, filename: str,
             observed_date_kst: str | date | None = None,
+            control: ControlSubtype | str | None = None,
             subpath: Sequence[str] = ()) -> str:
     """ops 오브젝트 키 — **이 함수 밖에서 ops 경로를 문자열로 조립하지 않는다.**
 
     관측 계열 → ``ops/<category>/<domain>/observed_date=<KST>/[subpath/]<filename>``
       (P-4 날짜 칸 이름 · P-6 카테고리 우선 · P-9 도메인은 인자)
-    상태 계열 → ``ops/<category>/<domain>/[subpath/]<filename>``
+    control  → ``ops/control/<subtype>/<domain>/[subpath/]<filename>``
+      (#78 §1 — 하위유형이 도메인보다 앞. 날짜 칸은 금지 P-5)
+    그 밖의 상태 계열 → ``ops/<category>/<domain>/[subpath/]<filename>``
       (P-5 — 최신본만 의미가 있어 날짜 파티션이 무의미하다)
 
-    용도에 안 맞는 조합은 거부한다: 관측인데 날짜가 없거나, 상태인데 날짜를 주는 경우.
+    용도에 안 맞는 조합은 거부한다: 관측인데 날짜가 없거나, 상태인데 날짜를 주거나,
+    control 인데 하위유형이 없는 경우.
     """
     cat = coerce_category(category)
     dom = assert_domain(domain)
     if not str(filename or "").strip():
         _fail("filename 이 비었습니다")
-    parts = [OPS_ROOT, cat.value, dom]
+    if cat is OpsCategory.CONTROL:
+        if control is None:
+            _fail("control 은 하위유형이 필수입니다(#78 §1) — "
+                  f"{', '.join(m.value for m in ControlSubtype)} 중 하나를 주세요.")
+        sub = _coerce(ControlSubtype, control, field="control", rule="#78 §1")
+        parts = [OPS_ROOT, cat.value, sub.value, dom]
+    elif control is not None:
+        _fail(f"control 하위유형은 '{OpsCategory.CONTROL.value}' 에만 씁니다: "
+              f"category='{cat.value}'")
+    else:
+        parts = [OPS_ROOT, cat.value, dom]
     if cat in OBSERVATION_CATEGORIES:
         if observed_date_kst is None:
             _fail(f"관측 계열 '{cat.value}' 은 observed_date_kst 가 필수입니다(P-4). "
@@ -323,9 +350,24 @@ def legacy_observation_key(category: OpsCategory | str, *, domain: str, date: st
     return "/".join(parts)
 
 
-def category_prefix(category: OpsCategory | str, *, domain: str | None = None) -> str:
-    """스캔용 접두 — 카테고리 전체 또는 한 도메인. 소비자(적재기·점검)가 쓴다(P-6)."""
+def category_prefix(category: OpsCategory | str, *, domain: str | None = None,
+                    control: ControlSubtype | str | None = None) -> str:
+    """스캔용 접두 — 카테고리 전체 또는 한 도메인. 소비자(적재기·점검)가 쓴다(P-6).
+
+    control 은 하위유형이 도메인보다 앞이라(#78 §1), 도메인만으로는 접두를 만들 수 없다 —
+    ``ops/control/`` 전체를 훑거나 하위유형을 함께 지정한다.
+    """
     cat = coerce_category(category)
+    if cat is OpsCategory.CONTROL and control is not None:
+        sub = _coerce(ControlSubtype, control, field="control", rule="#78 §1")
+        base = f"{OPS_ROOT}/{cat.value}/{sub.value}/"
+        return base if domain is None else f"{base}{assert_domain(domain)}/"
+    if cat is OpsCategory.CONTROL and domain is not None:
+        _fail("control 은 하위유형이 도메인보다 앞입니다(#78 §1) — "
+              "domain 만으로는 접두를 만들 수 없습니다. control= 을 함께 주세요.")
+    if control is not None:
+        _fail(f"control 하위유형은 '{OpsCategory.CONTROL.value}' 에만 씁니다: "
+              f"category='{cat.value}'")
     if domain is None:
         return f"{OPS_ROOT}/{cat.value}/"
     return f"{OPS_ROOT}/{cat.value}/{assert_domain(domain)}/"
