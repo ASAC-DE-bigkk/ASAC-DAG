@@ -62,6 +62,9 @@ class ServingContract:
     projection_schema_version: str | None = None
     projection_schema_hash: str | None = None
     freshness_slo_minutes: int | None = None
+    # Static publication cadence declared by the DBT contract. The watchdog reads
+    # it at runtime; it is intentionally not copied into mutable D1 evidence.
+    publication_trigger: dict[str, Any] | None = None
     # V1 evidence contract (#678): absent means legacy product, not an empty source list.
     # The Publisher preserves existing evidence for absent legacy declarations.
     source_evidence: tuple[dict[str, Any], ...] | None = None
@@ -436,6 +439,11 @@ def load_contracts(
                       int(serving["freshness_slo_minutes"])
                       if isinstance(serving.get("freshness_slo_minutes"), int)
                       and not isinstance(serving.get("freshness_slo_minutes"), bool)
+                      else None
+                  ),
+                  publication_trigger=(
+                      dict(serving["publication_trigger"])
+                      if isinstance(serving.get("publication_trigger"), dict)
                       else None
                   ),
                   source_evidence=_load_source_evidence(str(product_id), serving),

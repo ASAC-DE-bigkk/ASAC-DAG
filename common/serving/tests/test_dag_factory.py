@@ -63,6 +63,20 @@ def test_serving_export_factory_keeps_content_parity_opt_in_default_false():
     ].default is False
 
 
+def test_watchdog_target_must_match_execution_environment():
+    assert dag_factory.validate_watchdog_target(
+        "dev", env={"DBT_TARGET": "dev"}
+    ) == "dev"
+    assert dag_factory.validate_watchdog_target(
+        " DEV ", env={"DBT_TARGET": "dev"}
+    ) == "dev"
+
+    with pytest.raises(RuntimeError, match="disagrees with environment"):
+        dag_factory.validate_watchdog_target(
+            "dev", env={"DBT_TARGET": "prod"}
+        )
+
+
 def test_publication_scope_uses_the_latest_terminal_asset_subset():
     configured = ("incident", "flow-latest", "flow-profile")
     context = {
