@@ -87,7 +87,11 @@ def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_br
             compacted_files_fingerprint="a" * 64,
         ).to_json()
     )
-    monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: pytest.fail("Traffic Core must not resolve Citydata"),
+    )
     monkeypatch.setattr(
         module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
     )
@@ -103,7 +107,7 @@ def test_gold_resolver_uses_silver_marker_for_flow_only_trigger_and_never_raw_br
 
     assert incident == "incident-1"
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
-    assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
+    assert module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY not in pushed
     assert pushed[module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY] == 99
     assert pushed[module.GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY] is False
 
@@ -123,7 +127,11 @@ def test_gold_resolver_pins_bootstrap_requirement_when_anchor_is_missing(
             compacted_files_fingerprint="a" * 64,
         ).to_json()
     )
-    monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: pytest.fail("Traffic Core must not resolve Citydata"),
+    )
     monkeypatch.setattr(
         module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
     )
@@ -145,13 +153,13 @@ def test_gold_resolver_pins_bootstrap_requirement_when_anchor_is_missing(
     [
         (
             True,
-            "ask_seoul_traffic_transform_gold_bootstrap_hot_build",
-            "ask_seoul_traffic_transform_gold_incident_bootstrap_hot_build",
+            "ask_seoul_traffic_transform_core_gold_bootstrap_hot_build",
+            "ask_seoul_traffic_transform_core_gold_incident_bootstrap_hot_build",
         ),
         (
             False,
-            "ask_seoul_traffic_transform_gold_hot_build",
-            "ask_seoul_traffic_transform_gold_incident_hot_build",
+            "ask_seoul_traffic_transform_core_gold_hot_build",
+            "ask_seoul_traffic_transform_core_gold_incident_hot_build",
         ),
     ],
 )
@@ -209,7 +217,11 @@ def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch)
     triggering_asset_events = UserDict(
         {module.TRAFFIC_INCIDENT_SILVER_ASSET: UserList([event])}
     )
-    monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
+    monkeypatch.setattr(
+        module,
+        "resolve_citydata_crowding_snapshot_id",
+        lambda: pytest.fail("Traffic Core must not resolve Citydata"),
+    )
     monkeypatch.setattr(
         module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
     )
@@ -226,7 +238,7 @@ def test_gold_resolver_accepts_airflow_lazy_asset_event_collections(monkeypatch)
         == "incident-1"
     )
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] is None
-    assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
+    assert module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY not in pushed
     assert pushed[module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY] == 99
     assert pushed[module.SILVER_OUTPUT_EVIDENCE_XCOM_KEY] == {
         "snapshot_id": 42,
@@ -256,7 +268,7 @@ def test_gold_resolver_skips_superseded_silver_marker_before_external_reads(
     monkeypatch.setattr(
         module,
         "resolve_citydata_crowding_snapshot_id",
-        lambda: pytest.fail("stale Gold input must skip before Citydata"),
+        lambda: pytest.fail("Traffic Core must not resolve Citydata"),
     )
 
     with pytest.raises(FakeAirflowSkipException, match="superseded"):
@@ -494,8 +506,7 @@ def test_gold_admission_fails_closed_for_malformed_marker_and_skips_exact_tuple(
         output_snapshot_id=42,
         compacted_files_fingerprint="a" * 64,
     ).to_json()
-    with pytest.raises(FakeAirflowSkipException):
-        module.admit_traffic_gold_snapshot(ti=ti)
+    assert module.admit_traffic_gold_snapshot(ti=ti)["action"] == "RUN"
 
 
 def test_gold_admission_uses_fresh_current_evidence_not_stale_resolver_xcom(
@@ -561,9 +572,7 @@ def test_gold_success_marker_uses_fresh_evidence_and_heavy_pool(monkeypatch):
         FakeVariable.values[module.GOLD_SUCCESS_MARKER_KEY]
     )
     assert marker.output_snapshot_id == 43
-    assert outlet_event.extra[module.TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY] == list(
-        module.TRAFFIC_INCIDENT_PUBLICATION_PRODUCT_IDS
-    )
+    assert outlet_event.extra[module.TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY] == []
     task = module.dag.task_dict["mark_traffic_gold_success"]
     assert task.kwargs["pool"] == module.TRINO_TRANSFORM_POOL
     assert task.kwargs["priority_weight"] == module.PIN_CRITICAL_PRIORITY
@@ -579,5 +588,5 @@ def test_gold_publication_scope_includes_flow_products_only_when_flow_is_pinned(
     )
 
     assert module._publication_product_ids(ti=ti) == (
-        module.TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS
+        module.TRAFFIC_CORE_PUBLICATION_PRODUCT_IDS
     )

@@ -20,6 +20,9 @@ _MARKER_FIELDS = frozenset(
 _FINGERPRINT_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 SILVER_SUCCESS_MARKER_KEY = "ask_seoul.traffic.silver_transform.last_success.v1"
 GOLD_SUCCESS_MARKER_KEY = "ask_seoul.traffic.gold_transform.last_success.v1"
+CROSS_DOMAIN_GOLD_SUCCESS_MARKER_KEY = (
+    "ask_seoul.traffic.cross_domain_gold_transform.last_success.v1"
+)
 
 
 class TransformAdmissionError(ValueError):
@@ -67,10 +70,14 @@ class TransformIdentity:
 
         if self.flow_run_id is not None:
             _require_non_empty_run_id(self.flow_run_id, field="flow_run_id")
-        _require_positive_snapshot_id(
-            self.citydata_snapshot_id,
-            field="citydata_snapshot_id",
-        )
+        # Core Traffic Gold is intentionally independent of Citydata.  The
+        # field remains in the versioned identity for backward compatibility
+        # with cross-domain markers, but is optional for the core path.
+        if self.citydata_snapshot_id is not None:
+            _require_positive_snapshot_id(
+                self.citydata_snapshot_id,
+                field="citydata_snapshot_id",
+            )
 
     @classmethod
     def silver(cls, incident_run_id: str) -> "TransformIdentity":
@@ -82,7 +89,7 @@ class TransformIdentity:
         incident_run_id: str,
         *,
         flow_run_id: str | None,
-        citydata_snapshot_id: int,
+        citydata_snapshot_id: int | None = None,
     ) -> "TransformIdentity":
         return cls(
             pipeline="gold",
@@ -237,6 +244,7 @@ def admission_decision(
 __all__ = [
     "AdmissionDecision",
     "GOLD_SUCCESS_MARKER_KEY",
+    "CROSS_DOMAIN_GOLD_SUCCESS_MARKER_KEY",
     "SILVER_SUCCESS_MARKER_KEY",
     "TransformAdmissionError",
     "TransformIdentity",

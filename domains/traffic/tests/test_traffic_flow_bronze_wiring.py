@@ -44,9 +44,12 @@ def test_flow_dag_has_two_meaningful_tasks_and_no_independent_cron():
         "DatasetTriggeredTimetable",
         "AssetTriggeredTimetable",
     }
-    assert dag_module.TRAFFIC_INCIDENT_BRONZE_ASSET in repr(
-        dag_module.dag.schedule
+    schedule_repr = repr(
+        getattr(dag_module.dag, "schedule", dag_module.dag.timetable)
     )
+    if dag_module.TRAFFIC_INCIDENT_BRONZE_ASSET not in schedule_repr:
+        schedule_repr = repr(getattr(dag_module.dag.timetable, "dataset_condition", ""))
+    assert dag_module.TRAFFIC_INCIDENT_BRONZE_ASSET in schedule_repr
 
 
 def test_flow_landing_wrapper_uses_exact_triggering_incident_parent(monkeypatch):

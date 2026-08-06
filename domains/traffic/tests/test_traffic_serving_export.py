@@ -9,7 +9,7 @@ import pytest
 DAG_PATH = Path(__file__).resolve().parents[1] / "traffic_serving_export.py"
 
 
-def test_traffic_serving_export_delegates_all_six_products_to_common_publisher(monkeypatch):
+def test_traffic_serving_export_delegates_core_flow_products_to_common_publisher(monkeypatch):
     """Catch a Traffic wrapper that duplicates Publisher policy or omits a selected product."""
     if not DAG_PATH.is_file():
         pytest.fail("traffic_serving_export wrapper is missing")
@@ -25,10 +25,9 @@ def test_traffic_serving_export_delegates_all_six_products_to_common_publisher(m
     factory_module.build_serving_export_dag = build_serving_export_dag
     monkeypatch.setitem(sys.modules, "common.serving.dag_factory", factory_module)
     asset_module = types.ModuleType("traffic_ingest.assets")
-    asset_module.TRAFFIC_GOLD_PUBLICATION_READY_ASSET = "iceberg://traffic/gold/publication-ready"
+    asset_module.TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET = "iceberg://traffic/gold/core-publication-ready"
     asset_module.TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY = "product_ids"
-    asset_module.TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS = (
-        "traffic_incident_x_weather_current_hourly",
+    asset_module.TRAFFIC_CORE_PUBLICATION_PRODUCT_IDS = (
         "traffic_flow_congestion_hotspots_hourly",
         "traffic_flow_link_latest",
         "traffic_flow_change_latest",
@@ -47,7 +46,6 @@ def test_traffic_serving_export_delegates_all_six_products_to_common_publisher(m
     assert captured == {
         "domain": "traffic",
         "product_ids": [
-            "traffic_incident_x_weather_current_hourly",
             "traffic_flow_congestion_hotspots_hourly",
             "traffic_flow_link_latest",
             "traffic_flow_change_latest",
@@ -58,7 +56,7 @@ def test_traffic_serving_export_delegates_all_six_products_to_common_publisher(m
         "require_public_projection": True,
         "verify_content_parity": True,
         "publication_scope_metadata_key": "product_ids",
-        "schedule": ("asset", "iceberg://traffic/gold/publication-ready"),
+        "schedule": ("asset", "iceberg://traffic/gold/core-publication-ready"),
         "dag_id": "traffic_serving_export",
         "target": "dev",
         "schema": "traffic",
@@ -92,5 +90,5 @@ def test_traffic_export_is_the_only_traffic_serving_dag():
 def test_traffic_export_subscribes_only_to_the_validated_gold_terminal_asset():
     source = DAG_PATH.read_text(encoding="utf-8")
 
-    assert "TRAFFIC_GOLD_PUBLICATION_READY_ASSET" in source
-    assert "schedule=schedule_asset(TRAFFIC_GOLD_PUBLICATION_READY_ASSET)" in source
+    assert "TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET" in source
+    assert "schedule=schedule_asset(TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET)" in source

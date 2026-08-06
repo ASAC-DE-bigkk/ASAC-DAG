@@ -1112,7 +1112,6 @@ def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
             return run_id
 
     monkeypatch.setattr(module, "build_traffic_flow_manifest", lambda: FlowManifest())
-    monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
     monkeypatch.setattr(
         module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
     )
@@ -1131,7 +1130,7 @@ def test_gold_flow_asset_pins_compatible_publishable_flow(monkeypatch):
     )
     assert flow_calls == ["flow-42"]
     assert pushed[module.FLOW_SNAPSHOT_XCOM_KEY] == "flow-42"
-    assert pushed[module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY] == 7
+    assert module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY not in pushed
     assert pushed[module.ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY] == 99
 
 
@@ -1145,7 +1144,6 @@ def test_gold_stale_incompatible_flow_becomes_none(monkeypatch):
         "build_traffic_flow_manifest",
         lambda: pytest.fail("incompatible Flow must not be read"),
     )
-    monkeypatch.setattr(module, "resolve_citydata_crowding_snapshot_id", lambda: 7)
     monkeypatch.setattr(
         module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99
     )
@@ -1174,18 +1172,14 @@ def test_gold_resolver_fails_closed_when_citydata_unavailable(monkeypatch):
     module = load_gold_transform_module()
     _set_silver_marker(module)
     _set_current_silver_evidence(monkeypatch, module)
-    from traffic_ingest.external_snapshot import ExternalSnapshotUnavailableError
-
     monkeypatch.setattr(
         module,
         "resolve_citydata_crowding_snapshot_id",
-        lambda: (_ for _ in ()).throw(
-            ExternalSnapshotUnavailableError("no Citydata snapshot")
-        ),
+        lambda: pytest.fail("Core Traffic Gold must not resolve Citydata"),
     )
+    monkeypatch.setattr(module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99)
 
-    with pytest.raises(FakeAirflowFailException, match="no Citydata snapshot"):
-        module.resolve_traffic_gold_snapshot_run(triggering_asset_events={})
+    assert module.resolve_traffic_gold_snapshot_run(triggering_asset_events={}) == "incident-42"
 
 
 def test_gold_resolver_propagates_citydata_query_errors_for_retry(monkeypatch):
@@ -1195,11 +1189,11 @@ def test_gold_resolver_propagates_citydata_query_errors_for_retry(monkeypatch):
     monkeypatch.setattr(
         module,
         "resolve_citydata_crowding_snapshot_id",
-        lambda: (_ for _ in ()).throw(RuntimeError("Trino connection reset")),
+        lambda: pytest.fail("Core Traffic Gold must not resolve Citydata"),
     )
+    monkeypatch.setattr(module, "resolve_admin_dong_crosswalk_snapshot_id", lambda: 99)
 
-    with pytest.raises(RuntimeError, match="Trino connection reset"):
-        module.resolve_traffic_gold_snapshot_run(triggering_asset_events={})
+    assert module.resolve_traffic_gold_snapshot_run(triggering_asset_events={}) == "incident-42"
 
 
 def test_gold_low_level_resolver_pins_admin_dong_crosswalk_snapshot_and_pushes_xcom():
@@ -1518,35 +1512,26 @@ def test_snapshot_required_phase_passes_citydata_snapshot_id_to_dbt(monkeypatch)
     assert result["status"] == "success"
     assert json.loads(captured["variables"]) == {
         "traffic_snapshot_dag_run_id": "snapshot-a",
-        "traffic_citydata_crowding_snapshot_id": 8738321387624398062,
         "admin_dong_crosswalk_pin_snapshot_id": 8738321387624398063,
     }
 
 
-@pytest.mark.parametrize(
-    "external_snapshot_id",
-    [None, 0, -1, True, "8738321387624398062"],
-)
-def test_citydata_required_phase_rejects_missing_or_invalid_citydata_snapshot(
-    monkeypatch,
-    external_snapshot_id,
-):
+@pytest.mark.parametrize("external_snapshot_id", [None, 0, -1, True, "8738321387624398062"])
+def test_core_phase_ignores_citydata_snapshot_requirement(monkeypatch, external_snapshot_id):
     module = load_gold_transform_module()
-    called = False
-
-    def fail_if_called(**_kwargs):
-        nonlocal called
-        called = True
-
-    monkeypatch.setattr(module.traffic_dbt, "execute_dbt_phase", fail_if_called)
+    _pin_gold_phase_evidence(monkeypatch, module)
+    captured = {}
+    monkeypatch.setattr(
+        module.transform_runtime,
+        "run_dbt_phase",
+        lambda **kwargs: captured.update(kwargs) or {"status": "success"},
+    )
 
     def xcom_pull(*, task_ids, key=None):
         if key is None:
             return "snapshot-a"
         if key == module.FLOW_SNAPSHOT_XCOM_KEY:
             return None
-        if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY:
-            return external_snapshot_id
         return None
 
     ti = types.SimpleNamespace(
@@ -1555,23 +1540,20 @@ def test_citydata_required_phase_rejects_missing_or_invalid_citydata_snapshot(
         xcom_pull=xcom_pull,
     )
 
-    with pytest.raises(
-        FakeAirflowFailException,
-        match="traffic dbt phase requires Citydata crowding snapshot",
-    ):
-        module.run_dbt_phase(
-            dbt_command="run",
-            selector="ask_seoul_traffic_transform_gold",
-            snapshot_task_id=module.SNAPSHOT_TASK_ID,
-            snapshot_required=True,
-            citydata_snapshot_required=True,
-            silver_persisted=True,
-            ti=ti,
-            run_id="asset_triggered__missing-citydata-pin",
-            params={"target": "dev"},
-        )
+    result = module.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_traffic_transform_gold",
+        snapshot_task_id=module.SNAPSHOT_TASK_ID,
+        snapshot_required=True,
+        citydata_snapshot_required=True,
+        silver_persisted=True,
+        ti=ti,
+        run_id="asset_triggered__missing-citydata-pin",
+        params={"target": "dev"},
+    )
 
-    assert called is False
+    assert result["status"] == "success"
+    assert captured["citydata_snapshot_required"] is False
 
 
 def test_snapshot_required_phase_rejects_missing_late_pin(monkeypatch):
@@ -2179,10 +2161,10 @@ def test_split_phase_specs_isolate_hot_build_pins():
     assert gold_specs["dbt_deps_gold"].threads is None
     assert gold_specs["dbt_run_gold"].dbt_command == "build"
     assert gold_specs["dbt_run_gold"].selector == (
-        "ask_seoul_traffic_transform_gold_hot_build"
+        "ask_seoul_traffic_transform_core_gold_hot_build"
     )
     assert gold_specs["dbt_run_gold"].selector_when_flow_missing == (
-        "ask_seoul_traffic_transform_gold_incident_hot_build"
+        "ask_seoul_traffic_transform_core_gold_incident_hot_build"
     )
     assert gold_specs["dbt_run_gold"].selector_by_test_tier is None
     assert gold_specs["dbt_run_gold"].selector_by_test_tier_when_flow_missing is None
@@ -2233,7 +2215,7 @@ def test_dbt_phase_task_adapter_forwards_hot_runtime_contract():
         "dbt_run_gold": (
             False,
             None,
-            "ask_seoul_traffic_transform_gold_incident_hot_build",
+            "ask_seoul_traffic_transform_core_gold_incident_hot_build",
             None,
         ),
     }

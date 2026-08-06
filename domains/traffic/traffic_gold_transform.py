@@ -1,4 +1,4 @@
-"""Airflow DAG: combine Traffic Silver with compatible Flow and Citydata for Gold."""
+"""Airflow DAG: build Traffic Core Gold from pinned Traffic Silver inputs."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
+from airflow.sdk.exceptions import AirflowFailException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Param, Variable
 
@@ -40,18 +41,20 @@ import traffic_dbt_execution as traffic_dbt  # noqa: E402
 from traffic_ingest import transform_runtime  # noqa: E402
 from traffic_ingest.transform_runtime import PREFLIGHT_SNAPSHOT_DAG_RUN_ID  # noqa: E402, F401
 from traffic_ingest.assets import (  # noqa: E402
+    TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET_REF,
+    TRAFFIC_CORE_PUBLICATION_PRODUCT_IDS,
     TRAFFIC_FLOW_SILVER_ASSET,
-    TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS,
-    TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF,
+    TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS,  # noqa: F401 - compatibility export
+    TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF,  # noqa: F401 - compatibility export
     TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY,
-    TRAFFIC_INCIDENT_PUBLICATION_PRODUCT_IDS,
+    TRAFFIC_INCIDENT_PUBLICATION_PRODUCT_IDS,  # noqa: F401 - compatibility export
     TRAFFIC_INCIDENT_SILVER_ASSET,
     schedule_asset,
 )
 from traffic_ingest.common.resources import TRINO_TRANSFORM_POOL  # noqa: E402
 from traffic_ingest.external_snapshot import (  # noqa: E402
     resolve_admin_dong_crosswalk_snapshot_id,
-    resolve_citydata_crowding_snapshot_id,
+    resolve_citydata_crowding_snapshot_id,  # noqa: F401 - cross-domain compatibility
     traffic_gold_anchor_exists,
 )
 from traffic_ingest.flow_ingest import build_traffic_flow_manifest  # noqa: E402
@@ -98,15 +101,15 @@ FLOW_SNAPSHOT_XCOM_KEY = "traffic_flow_snapshot_dag_run_id"
 CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY = "traffic_citydata_crowding_snapshot_id"
 ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY = "admin_dong_crosswalk_pin_snapshot_id"
 GOLD_BOOTSTRAP_REQUIRED_XCOM_KEY = "traffic_gold_bootstrap_required"
-GOLD_HOT_SELECTOR = "ask_seoul_traffic_transform_gold_hot_build"
+GOLD_HOT_SELECTOR = "ask_seoul_traffic_transform_core_gold_hot_build"
 GOLD_INCIDENT_HOT_SELECTOR = (
-    "ask_seoul_traffic_transform_gold_incident_hot_build"
+    "ask_seoul_traffic_transform_core_gold_incident_hot_build"
 )
 GOLD_BOOTSTRAP_HOT_SELECTOR = (
-    "ask_seoul_traffic_transform_gold_bootstrap_hot_build"
+    "ask_seoul_traffic_transform_core_gold_bootstrap_hot_build"
 )
 GOLD_INCIDENT_BOOTSTRAP_HOT_SELECTOR = (
-    "ask_seoul_traffic_transform_gold_incident_bootstrap_hot_build"
+    "ask_seoul_traffic_transform_core_gold_incident_bootstrap_hot_build"
 )
 # Gold validation must win the next slot after its priority-1 build. Silver
 # writers remain priority 10, preserving their precedence before Gold starts.
@@ -130,11 +133,9 @@ def resolve_traffic_gold_snapshot_run(**context) -> str:
         variable=Variable,
         incident_manifest_factory=build_traffic_manifest,
         flow_manifest_factory=build_traffic_flow_manifest,
-        citydata_snapshot_resolver=resolve_citydata_crowding_snapshot_id,
         admin_dong_crosswalk_snapshot_resolver=resolve_admin_dong_crosswalk_snapshot_id,
         current_silver_evidence_loader=current_silver_output_evidence,
         flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,
-        citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
         admin_dong_crosswalk_xcom_key=ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
     )
     task_instance = context.get("ti") or context.get("task_instance")
@@ -159,7 +160,6 @@ def _gold_identity(*, ti) -> TransformIdentity:
     return TransformIdentity.gold(
         incident_run_id,
         flow_run_id=flow_run_id,
-        citydata_snapshot_id=resolve_gold_citydata_snapshot_id(ti=ti),
     )
 
 
@@ -169,8 +169,8 @@ def _publication_product_ids(*, ti) -> tuple[str, ...]:
         key=FLOW_SNAPSHOT_XCOM_KEY,
     )
     if isinstance(flow_run_id, str) and flow_run_id.strip():
-        return TRAFFIC_GOLD_PUBLICATION_PRODUCT_IDS
-    return TRAFFIC_INCIDENT_PUBLICATION_PRODUCT_IDS
+        return TRAFFIC_CORE_PUBLICATION_PRODUCT_IDS
+    return ()
 
 
 def admit_traffic_gold_snapshot(**context) -> dict[str, object]:
@@ -194,7 +194,7 @@ def mark_traffic_gold_success(**context) -> dict[str, object]:
     )
     outlet_events = context.get("outlet_events")
     if outlet_events is not None:
-        outlet_events[TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF].extra = {
+        outlet_events[TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET_REF].extra = {
             "gold_dag_run_id": str(context.get("run_id") or ""),
             "gold_success_marker": serialized,
             TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY: list(
@@ -220,6 +220,9 @@ def run_dbt_phase(
     selector_by_test_tier_when_flow_missing=None,
     **context,
 ) -> dict[str, object]:
+    if selector == "ask_seoul_traffic_transform_gold_hot_build":
+        selector = GOLD_HOT_SELECTOR
+        selector_when_flow_missing = GOLD_INCIDENT_HOT_SELECTOR
     if dbt_command == "build" and selector == GOLD_HOT_SELECTOR:
         bootstrap_required = context["ti"].xcom_pull(
             task_ids=SNAPSHOT_TASK_ID,
@@ -258,7 +261,10 @@ def run_dbt_phase(
         silver_persisted=silver_persisted,
         fresh_parse=fresh_parse,
         snapshot_required=snapshot_required,
-        citydata_snapshot_required=citydata_snapshot_required,
+        # The Traffic Core DAG never admits a Citydata gate.  Keep the
+        # parameter for shared-call compatibility, but force the Core runtime
+        # contract to remain independent of that optional domain.
+        citydata_snapshot_required=False,
         admin_dong_crosswalk_pin_required=admin_dong_crosswalk_pin_required,
         threads=threads,
         selector_by_test_tier=selector_by_test_tier,
@@ -269,7 +275,7 @@ def run_dbt_phase(
         dbt_bin=DBT_BIN,
         dbt_project=DBT_PROJECT,
         flow_xcom_key=FLOW_SNAPSHOT_XCOM_KEY,
-        citydata_xcom_key=CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY,
+        citydata_xcom_key=None,
         admin_dong_crosswalk_xcom_key=ADMIN_DONG_CROSSWALK_PIN_XCOM_KEY,
         load_results=load_dbt_results,
         classify_failure=classify_dbt_failure,
@@ -310,7 +316,7 @@ def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> d
 
 with DAG(
     dag_id="traffic_gold_transform",
-    description="Build Traffic Gold from Silver, compatible Flow, and Citydata.",
+    description="Build Traffic Core Gold from pinned Traffic Silver and Flow.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=schedule_asset(TRAFFIC_INCIDENT_SILVER_ASSET)
     | schedule_asset(TRAFFIC_FLOW_SILVER_ASSET),
@@ -360,7 +366,7 @@ with DAG(
     mark_success = PythonOperator(
         task_id="mark_traffic_gold_success",
         python_callable=mark_traffic_gold_success,
-        outlets=[TRAFFIC_GOLD_PUBLICATION_READY_ASSET_REF],
+        outlets=[TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET_REF],
         pool=TRINO_TRANSFORM_POOL,
         priority_weight=PIN_CRITICAL_PRIORITY,
         weight_rule="absolute",

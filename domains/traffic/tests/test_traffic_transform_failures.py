@@ -188,7 +188,7 @@ def test_dbt_deps_and_selected_phases_use_only_supported_isolated_paths(
     )
 
 
-def test_successful_pinned_dbt_phase_returns_citydata_snapshot_lineage(
+def test_successful_pinned_core_dbt_phase_omits_citydata_snapshot_lineage(
     tmp_path, monkeypatch
 ):
     module = load_gold_transform_module()
@@ -210,15 +210,11 @@ def test_successful_pinned_dbt_phase_returns_citydata_snapshot_lineage(
 
     monkeypatch.setattr(module, "build_traffic_manifest", Manifest)
     monkeypatch.setattr(module, "DBT_PROJECT", str(tmp_path / "dbt"))
-    snapshot_id = 8738321387624398062
-
     def xcom_pull(*, task_ids, key=None):
         if task_ids != module.SNAPSHOT_TASK_ID:
             return None
         if key == module.FLOW_SNAPSHOT_XCOM_KEY:
             return None
-        if key == module.CITYDATA_CROWDING_SNAPSHOT_XCOM_KEY:
-            return snapshot_id
         return "snapshot-a"
 
     ti = types.SimpleNamespace(
@@ -251,7 +247,7 @@ def test_successful_pinned_dbt_phase_returns_citydata_snapshot_lineage(
         params={"target": "dev"},
     )
 
-    assert result["traffic_citydata_crowding_snapshot_id"] == snapshot_id
+    assert result["traffic_citydata_crowding_snapshot_id"] is None
 
 
 def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
@@ -314,9 +310,7 @@ def test_dbt_contract_failure_skips_airflow_retry_and_records_pinned_snapshot(
 
     assert pushed["key"] == module.DBT_FAILURE_XCOM_KEY
     assert pushed["value"]["traffic_snapshot_dag_run_id"] == "snapshot-a"
-    assert (
-        pushed["value"]["traffic_citydata_crowding_snapshot_id"] == 8738321387624398062
-    )
+    assert pushed["value"]["traffic_citydata_crowding_snapshot_id"] is None
     assert pushed["value"]["failure_classification"] == "data-contract-violation"
     assert pushed["value"]["silver_persisted"] is True
     assert pushed["value"]["dbt_run_results_path"].endswith("/run_results.json")

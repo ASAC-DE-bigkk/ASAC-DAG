@@ -599,15 +599,20 @@ def resolve_traffic_gold_snapshot_run(
     variable,
     incident_manifest_factory: Callable[[], Any],
     flow_manifest_factory: Callable[[], Any],
-    citydata_snapshot_resolver: Callable[[], int],
     admin_dong_crosswalk_snapshot_resolver: Callable[[], int],
     current_silver_evidence_loader: Callable[[], SilverOutputEvidence],
     flow_xcom_key: str,
-    citydata_xcom_key: str,
     admin_dong_crosswalk_xcom_key: str,
+    citydata_snapshot_resolver: Callable[[], int] | None = None,
+    citydata_xcom_key: str | None = None,
     silver_evidence_xcom_key: str = SILVER_OUTPUT_EVIDENCE_XCOM_KEY,
 ) -> str:
-    """Pin a Silver parent, optional compatible Flow, and Citydata scalar."""
+    """Pin a Silver parent, optional compatible Flow, and shared axis pin.
+
+    Citydata is an optional cross-domain input.  Core Traffic Gold callers do
+    not provide a resolver or XCom key, so a Citydata outage cannot block the
+    Traffic-only publication path.
+    """
     silver_events = _events_for_asset(context, "iceberg://traffic/incident/silver")
     if silver_events:
         incident_run_id, evidence, _ = max(
@@ -655,16 +660,18 @@ def resolve_traffic_gold_snapshot_run(
             flow_manifest_factory(), flow_run_id, domain="traffic flow"
         )
 
-    try:
-        citydata_snapshot_id = citydata_snapshot_resolver()
-    except ExternalSnapshotUnavailableError as exc:
-        raise AirflowFailException(str(exc)) from exc
-    if (
-        not isinstance(citydata_snapshot_id, int)
-        or isinstance(citydata_snapshot_id, bool)
-        or citydata_snapshot_id <= 0
-    ):
-        raise AirflowFailException("Traffic Citydata snapshot is invalid")
+    citydata_snapshot_id = None
+    if citydata_snapshot_resolver is not None:
+        try:
+            citydata_snapshot_id = citydata_snapshot_resolver()
+        except ExternalSnapshotUnavailableError as exc:
+            raise AirflowFailException(str(exc)) from exc
+        if (
+            not isinstance(citydata_snapshot_id, int)
+            or isinstance(citydata_snapshot_id, bool)
+            or citydata_snapshot_id <= 0
+        ):
+            raise AirflowFailException("Traffic Citydata snapshot is invalid")
 
     try:
         admin_dong_crosswalk_snapshot_id = admin_dong_crosswalk_snapshot_resolver()
@@ -680,7 +687,8 @@ def resolve_traffic_gold_snapshot_run(
     task_instance = context.get("ti") or context.get("task_instance")
     if task_instance is not None:
         task_instance.xcom_push(key=flow_xcom_key, value=flow_run_id)
-        task_instance.xcom_push(key=citydata_xcom_key, value=citydata_snapshot_id)
+        if citydata_xcom_key is not None:
+            task_instance.xcom_push(key=citydata_xcom_key, value=citydata_snapshot_id)
         task_instance.xcom_push(
             key=admin_dong_crosswalk_xcom_key,
             value=admin_dong_crosswalk_snapshot_id,
@@ -732,7 +740,7 @@ def dbt_snapshot_variables(
     snapshot_task_id: str,
     incident_run_id: str,
     flow_xcom_key: str,
-    citydata_crowding_snapshot_xcom_key: str,
+    citydata_crowding_snapshot_xcom_key: str | None,
     admin_dong_crosswalk_xcom_key: str | None = None,
 ) -> dict[str, object]:
     variables: dict[str, object] = {"traffic_snapshot_dag_run_id": incident_run_id}
@@ -745,19 +753,20 @@ def dbt_snapshot_variables(
         flow_run_id = None
     if flow_run_id:
         variables["traffic_flow_snapshot_dag_run_id"] = flow_run_id
-    try:
-        citydata_crowding_snapshot_id = task_instance.xcom_pull(
-            task_ids=snapshot_task_id,
-            key=citydata_crowding_snapshot_xcom_key,
-        )
-    except TypeError:
-        citydata_crowding_snapshot_id = None
-    if (
-        isinstance(citydata_crowding_snapshot_id, int)
-        and not isinstance(citydata_crowding_snapshot_id, bool)
-        and citydata_crowding_snapshot_id > 0
-    ):
-        variables[citydata_crowding_snapshot_xcom_key] = citydata_crowding_snapshot_id
+    if citydata_crowding_snapshot_xcom_key is not None:
+        try:
+            citydata_crowding_snapshot_id = task_instance.xcom_pull(
+                task_ids=snapshot_task_id,
+                key=citydata_crowding_snapshot_xcom_key,
+            )
+        except TypeError:
+            citydata_crowding_snapshot_id = None
+        if (
+            isinstance(citydata_crowding_snapshot_id, int)
+            and not isinstance(citydata_crowding_snapshot_id, bool)
+            and citydata_crowding_snapshot_id > 0
+        ):
+            variables[citydata_crowding_snapshot_xcom_key] = citydata_crowding_snapshot_id
     if admin_dong_crosswalk_xcom_key is not None:
         try:
             crosswalk_pin_id = task_instance.xcom_pull(

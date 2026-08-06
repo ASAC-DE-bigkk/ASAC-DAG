@@ -53,7 +53,13 @@ TRAFFIC_PIPELINE_STAGE_POLICIES = (
         "incident_silver", "Incident Silver", "traffic_incident_transform", 120
     ),
     StagePolicy("flow_silver", "Flow Silver", "traffic_flow_transform", 120),
-    StagePolicy("gold", "Traffic Gold", "traffic_gold_transform", 240),
+    StagePolicy("gold", "Traffic Core Gold", "traffic_gold_transform", 240),
+    StagePolicy(
+        "cross_domain_gold",
+        "Traffic cross-domain Gold",
+        "traffic_cross_domain_gold_transform",
+        240,
+    ),
     StagePolicy(
         "maintenance",
         "Iceberg maintenance",
