@@ -22,6 +22,10 @@
 
 - 키: `ops/control/state/transit/loader_pending/<dataset>/<ingest_ts>__<safe_run_id>.json` (ASK-Seoul#60 존 규약 — #547 에서 `state/transit/…` 에서 이사)
   (사전순 나열 = 시간순 처리)
+- 규약이 정하는 앞부분(`ops/control/state/transit/`)은 **관문이 만든다**
+  (`common.ops.category_prefix`, #78 P-5·§1) — 하위유형(`state`)이 도메인보다 앞이다.
+  쓰기(`loader.pending_key`)와 읽기(bronze_loader·maintenance 나열)가 `config.LOADER_PENDING_PREFIX`
+  **한 값**을 공유한다. 갈리면 마커가 양쪽에서 안 보이는 고립이 된다(#547).
 - 본문: `{dataset, table, shape, source, manifest_key, run_id, ts_collected}`
 - collector 가 R2 랜딩 직후 등록, loader 가 적재 성공 시 삭제.
 - **멱등성**: 마커 단위 `DELETE WHERE dag_run_id=<collector run>` 후 재적재 —

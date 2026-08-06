@@ -17,7 +17,7 @@ for p in (str(_DAGS), str(_TRANSIT)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from seoul_transit import loader  # noqa: E402
+from seoul_transit import config, loader  # noqa: E402
 
 
 def _marker(dataset, **over):
@@ -50,6 +50,24 @@ def test_pending_key_sorts_chronologically_and_sanitizes():
     late = loader.pending_key("parking", "20260715T120000Z", "scheduled__2026-07-15T12:00:00+00:00")
     assert early < late
     assert "+" not in early and ":" not in early.rsplit("/", 1)[1]
+
+
+def test_pending_prefix_comes_from_the_ops_gate():
+    """규약 앞부분은 관문이 만든다(#78 P-5 · §1) — 손으로 조립하지 않는다.
+
+    하위유형(state)이 도메인(transit)보다 앞이어야 한다. 이 순서가 뒤집히면 운영 중인
+    마커가 나열 접두에서 빠져 loader·maintenance 양쪽에서 안 보이는 고립이 된다(#547).
+    """
+    from common.ops import ControlSubtype, OpsCategory, category_prefix
+
+    assert config.LOADER_PENDING_PREFIX.startswith(
+        category_prefix(OpsCategory.CONTROL, control=ControlSubtype.STATE, domain="transit"))
+    assert config.LOADER_PENDING_PREFIX == "ops/control/state/transit/loader_pending/"
+    # 쓰기와 읽기가 같은 값을 쓴다 — 갈리면 마커 고립.
+    assert loader.pending_key("parking", "20260715T110000Z", "r").startswith(
+        config.LOADER_PENDING_PREFIX)
+    # 구경로 드레인은 유지된다(#547 — 소진 확인 전 제거 금지).
+    assert config.LOADER_PENDING_LEGACY_PREFIXES
 
 
 # ── envelope 파싱 (지하철·주차) ───────────────────────────────────────────────────

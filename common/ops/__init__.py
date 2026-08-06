@@ -18,6 +18,7 @@ from common.ops.contract import (  # noqa: F401
     RECORD_FIELDS,
     RETENTION_DAYS,
     STATE_CATEGORIES,
+    ControlSubtype,
     Environment,
     Grain,
     Layer,
@@ -38,7 +39,8 @@ from common.ops.contract import (  # noqa: F401
 
 __all__ = [
     "BLOB_CATEGORIES", "OBSERVATION_CATEGORIES", "RECORD_FIELDS", "RETENTION_DAYS",
-    "STATE_CATEGORIES", "Environment", "Grain", "Layer", "ManifestStatus", "OpsCategory",
+    "STATE_CATEGORIES", "ControlSubtype", "Environment", "Grain", "Layer",
+    "ManifestStatus", "OpsCategory",
     "OpsContractError", "RowsSource", "RunStatus", "SinkType", "build_ops_event",
     "category_prefix", "emit_ops_event", "event_id_for", "event_object_key", "ops_key",
     "resolve_environment",

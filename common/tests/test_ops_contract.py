@@ -11,6 +11,7 @@ import pytest
 from common.ops import contract
 from common.ops.contract import (
     Grain,
+    ControlSubtype,
     Layer,
     OpsCategory,
     OpsContractError,
@@ -52,11 +53,52 @@ def test_p4_observation_without_date_is_rejected():
 
 
 def test_p5_state_series_must_not_carry_a_date():
-    assert ops_key(OpsCategory.CONTROL, domain="commerce", subpath=("markers",),
-                   filename="_RUN.completed") == "ops/control/commerce/markers/_RUN.completed"
+    assert ops_key(OpsCategory.CONTROL, control="state", domain="commerce",
+                   subpath=("markers",),
+                   filename="_RUN.completed") == "ops/control/state/commerce/markers/_RUN.completed"
     with pytest.raises(OpsContractError, match="P-5"):
-        ops_key(OpsCategory.CONTROL, domain="commerce", observed_date_kst="2026-08-01",
-                filename="_RUN.completed")
+        ops_key(OpsCategory.CONTROL, control="state", domain="commerce",
+                observed_date_kst="2026-08-01", filename="_RUN.completed")
+
+
+# ── #78 §1: control 은 하위유형이 도메인보다 앞 ──────────────────────────────────
+def test_control_subtype_precedes_domain():
+    """구조표가 ``control/{state,checkpoints,queues}/<domain>/`` 이다.
+
+    도메인을 하위유형 앞에 두면 운영 중인 상태 경로(4개 도메인)가 전부 규약 밖으로 나간다.
+    """
+    assert ops_key(OpsCategory.CONTROL, control=ControlSubtype.STATE, domain="transit",
+                   subpath=("loader_pending", "parking"), filename="m.json") == (
+        "ops/control/state/transit/loader_pending/parking/m.json")
+    assert ops_key(OpsCategory.CONTROL, control="checkpoints", domain="weather",
+                   filename="hwm.json") == "ops/control/checkpoints/weather/hwm.json"
+
+
+def test_control_without_subtype_is_rejected():
+    # 하위유형을 빠뜨리면 ops/control/<domain>/ 이 되어 구조표와 어긋난다 — 쓰는 순간 막는다.
+    with pytest.raises(OpsContractError, match="하위유형이 필수"):
+        ops_key(OpsCategory.CONTROL, domain="transit", filename="m.json")
+
+
+def test_control_subtype_is_a_closed_set():
+    with pytest.raises(OpsContractError, match="control"):
+        ops_key(OpsCategory.CONTROL, control="markers", domain="transit", filename="m.json")
+
+
+def test_control_subtype_rejected_outside_control():
+    with pytest.raises(OpsContractError, match="control"):
+        ops_key(OpsCategory.RUNS, control="state", domain="transit",
+                observed_date_kst="2026-08-06", filename="m.json")
+
+
+def test_category_prefix_for_control_needs_the_subtype():
+    assert category_prefix(OpsCategory.CONTROL, control="state",
+                           domain="transit") == "ops/control/state/transit/"
+    assert category_prefix(OpsCategory.CONTROL, control="state") == "ops/control/state/"
+    assert category_prefix(OpsCategory.CONTROL) == "ops/control/"
+    # 도메인만으로는 접두를 만들 수 없다 — 조용히 틀린 접두를 주는 대신 거부한다.
+    with pytest.raises(OpsContractError, match="하위유형이 도메인보다 앞"):
+        category_prefix(OpsCategory.CONTROL, domain="transit")
 
 
 def test_r1_category_is_a_closed_set():
