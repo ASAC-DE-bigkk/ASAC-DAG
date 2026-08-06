@@ -72,6 +72,7 @@ class ServingContract:
     grain: str | None = None
     serving_tier: str | None = None      # 물리 게시 확장 — 미선언 도메인은 None(#638 §2.2)
     rollup_rule: str | None = None       # 물리 게시 확장(commerce d1_rollup) — 동상
+    display: dict[str, Any] | None = None  # v1.10(#706) 사람이 읽는 표시 메타 — 미선언은 None
     column_descriptions: dict[str, str] | None = None  # manifest node.columns description
     usage_patterns: tuple[dict[str, Any], ...] = ()
 
@@ -441,6 +442,7 @@ def load_contracts(
                   quality_coverage=_load_quality_coverage(str(product_id), serving, node),
                   grain=serving.get("grain"),
                   # commerce 로컬 키(serving_tier/d1_rollup)와 #638 §1 스펙 키(tier/rollup_rule) 겸용
+                  display=serving.get("display"),
                   serving_tier=serving.get("serving_tier") or serving.get("tier"),
                   rollup_rule=serving.get("d1_rollup") or serving.get("rollup_rule"),
                   column_descriptions=(

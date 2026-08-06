@@ -149,6 +149,7 @@ class D1Client(Protocol):
         columns_rows: Sequence[dict[str, Any]],
         ext_rows: Sequence[dict[str, Any]],
         pattern_rows: Sequence[dict[str, Any]],
+        display_rows: Sequence[dict[str, Any]] = (),
     ) -> None: ...
     def publish_product_evidence(
         self,
@@ -217,6 +218,16 @@ HANDOFF_COLUMN_TYPES: dict[str, tuple[tuple[str, str], ...]] = {
         ("allow_empty", "INTEGER NOT NULL DEFAULT 0"),
         ("insight_sample_ko", "TEXT"), ("publication_id", "TEXT NOT NULL"),
     ),
+    # v1.10 (#706): 사람이 읽는 표시 메타. **기존 표에 컬럼을 더하지 않고 새 표로 낸다** —
+    # handoff_schema_is_current 가 컬럼 집합을 완전 일치로 보므로, 공유 표에 컬럼을 더하면
+    # 구 코드를 가진 실행기가 자기가 아는 모양으로 되돌리며 그 컬럼을 삭제한다. 실행기가
+    # 여러 대라 발행마다 왕복한다. 새 표는 구 코드가 존재조차 모르므로 그 왕복이 없다.
+    "d1_catalog_display": (
+        ("product_id", "TEXT NOT NULL"),
+        ("title", "TEXT"), ("summary", "TEXT"), ("caveat", "TEXT"),
+        ("use_cases", "TEXT"),          # JSON 배열 문자열 — 미선언은 NULL
+        ("publication_id", "TEXT NOT NULL"),
+    ),
     "d1_catalog_glossary": (
         ("vocabulary_id", "TEXT NOT NULL"), ("code", "TEXT NOT NULL"),
         ("label_ko", "TEXT NOT NULL"), ("origin", "TEXT NOT NULL"),
@@ -227,6 +238,7 @@ HANDOFF_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "d1_catalog_columns": ("product_id", "column_name"),
     "d1_catalog_ext": ("product_id",),
     "d1_usage_patterns": ("product_id", "pattern_id"),
+    "d1_catalog_display": ("product_id",),
     "d1_catalog_glossary": ("vocabulary_id", "code"),
 }
 # 잔여 행 정리(#638 §3 ②)의 스코프 컬럼. 판별 방식은 테이블 성질로 갈린다:
@@ -239,6 +251,7 @@ HANDOFF_SCOPE_COLUMNS: dict[str, str] = {
     "d1_catalog_columns": "product_id",
     "d1_catalog_ext": "product_id",
     "d1_usage_patterns": "product_id",
+    "d1_catalog_display": "product_id",
     "d1_catalog_glossary": "vocabulary_id",
 }
 HANDOFF_PRUNE_KEYS: dict[str, str] = {
@@ -247,9 +260,12 @@ HANDOFF_PRUNE_KEYS: dict[str, str] = {
 }
 HANDOFF_STALE_MARKERS: dict[str, str] = {
     "d1_catalog_ext": "publication_id",
+    "d1_catalog_display": "publication_id",
     "d1_catalog_glossary": "exported_at",
 }
-HANDOFF_PRODUCT_TABLES = ("d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns")
+HANDOFF_PRODUCT_TABLES = (
+    "d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns", "d1_catalog_display",
+)
 HANDOFF_COLUMNS = {table: tuple(name for name, _ in cols) for table, cols in HANDOFF_COLUMN_TYPES.items()}
 
 
@@ -765,8 +781,10 @@ class HttpD1Client:
         columns_rows: Sequence[dict[str, Any]],
         ext_rows: Sequence[dict[str, Any]],
         pattern_rows: Sequence[dict[str, Any]],
+        # v1.10 (#706): 미선언 도메인은 빈 시퀀스 그대로 — 기본값이라 기존 호출부가 안 깨진다.
+        display_rows: Sequence[dict[str, Any]] = (),
     ) -> None:
-        """제품 스코프 보조 3종을 자연키 upsert 후 이번 선언에 없는 잔여 행만 정리(#638 §3).
+        """제품 스코프 보조 4종을 자연키 upsert 후 이번 선언에 없는 잔여 행만 정리(#638 §3).
 
         원자성 경계는 제품 단위(#638 §3) — 중간 실패 시 이 제품의 메타만 신·구 혼재하고
         다른 제품·도메인 행은 건드리지 않는다. columns/patterns 정리는 선언 키셋 기준
@@ -774,14 +792,18 @@ class HttpD1Client:
         glossary 는 제품 스코프가 아니라 여기 없다(취합 소유 도메인의 게시 경로가 별도 — #638 §2.4).
         """
         statements: list[str] = []
-        for table in ("d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns"):
+        for table in HANDOFF_PRODUCT_TABLES:
             self._ensure_handoff_schema(table)
         statements.extend(handoff_upsert_statements("d1_catalog_columns", columns_rows))
         statements.extend(handoff_upsert_statements("d1_catalog_ext", ext_rows))
         statements.extend(handoff_upsert_statements("d1_usage_patterns", pattern_rows))
+        statements.extend(handoff_upsert_statements("d1_catalog_display", display_rows))
         statements.append(handoff_prune_statement(
             "d1_catalog_columns", product_id, [str(row["column_name"]) for row in columns_rows]))
         statements.append(handoff_stale_delete_statement("d1_catalog_ext", product_id, publication_id))
+        # display 를 내린 제품의 옛 행이 남지 않게 — ext 와 같은 단일 키 스코프라 판별도 같다
+        statements.append(
+            handoff_stale_delete_statement("d1_catalog_display", product_id, publication_id))
         statements.append(handoff_prune_statement(
             "d1_usage_patterns", product_id, [str(row["pattern_id"]) for row in pattern_rows]))
         for batch in group_api_batches(statements):

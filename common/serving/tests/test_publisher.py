@@ -116,7 +116,9 @@ class FakeD1:
             for row in rows
         ]
 
-    def publish_product_meta(self, product_id, publication_id, columns_rows, ext_rows, pattern_rows) -> None:
+    def publish_product_meta(
+        self, product_id, publication_id, columns_rows, ext_rows, pattern_rows, display_rows=()
+    ) -> None:
         self.product_meta[product_id] = {
             "publication_id": publication_id,
             "columns": [dict(row) for row in columns_rows],

@@ -9,6 +9,7 @@ import pytest
 
 from common.serving.d1_client import (
     CATALOG_COLUMNS,
+    HANDOFF_COLUMNS,
     MAX_API_BATCH_BYTES,
     MAX_SQL_STATEMENT_BYTES,
     MAX_STATEMENTS_PER_API_BATCH,
@@ -425,7 +426,7 @@ def test_publisher_meta_rows_round_trip_through_real_sqlite_schema():
         product_id=contract.product_id, model_name=contract.model_name,
         publication_id="pub-9", source_run_id="r", published_at="t",
         serving_status="published", reason="")
-    columns_rows, ext_rows, pattern_rows = _product_meta_rows(
+    columns_rows, ext_rows, pattern_rows, _display_rows = _product_meta_rows(
         contract, [("product_row_id", "varchar")], record)
 
     d1 = SqliteCatalogClient()
@@ -667,3 +668,57 @@ def test_publication_ledger_is_append_only_and_records_publication_stage():
     ]
     with pytest.raises(sqlite3.IntegrityError):
         d1.append_publication_ledger(record)
+
+
+# ── d1_catalog_display (v1.10 · ASAC-DAG#706) ─────────────────────────────────
+# 이 표를 **새로 만든** 이유가 핵심이다: 공유 표에 컬럼을 더하면 구 코드를 가진 실행기가
+# 자기가 아는 모양으로 되돌리며 그 컬럼을 지운다(handoff_schema_is_current 가 완전 일치 판정).
+# 아래 두 테스트가 그 불변을 지킨다.
+
+def test_display_rows_publish_and_replace():
+    d1 = SqliteCatalogClient()
+    columns_rows, ext_rows, pattern_rows = _product_meta_payload("pub-1")
+    display_rows = [{
+        "product_id": "commerce_x", "title": "제목", "summary": "요약",
+        "caveat": None, "use_cases": '["a", "b"]', "publication_id": "pub-1",
+    }]
+
+    d1.publish_product_meta("commerce_x", "pub-1", columns_rows, ext_rows, pattern_rows, display_rows)
+
+    rows = d1._query("SELECT product_id, title, use_cases, publication_id FROM d1_catalog_display;")
+    assert rows == [{"product_id": "commerce_x", "title": "제목",
+                     "use_cases": '["a", "b"]', "publication_id": "pub-1"}]
+
+    # 같은 제품 재게시 = 자연키 upsert(행이 늘지 않는다)
+    display_rows[0].update(title="바뀐 제목", publication_id="pub-2")
+    d1.publish_product_meta("commerce_x", "pub-2", columns_rows, ext_rows, pattern_rows, display_rows)
+    rows = d1._query("SELECT product_id, title FROM d1_catalog_display;")
+    assert rows == [{"product_id": "commerce_x", "title": "바뀐 제목"}]
+
+
+def test_display_declaration_withdrawn_removes_stale_row():
+    """선언을 내린 제품의 옛 표시 메타가 남으면 화면이 없는 제목을 계속 보여준다."""
+    d1 = SqliteCatalogClient()
+    columns_rows, ext_rows, pattern_rows = _product_meta_payload("pub-1")
+    d1.publish_product_meta("commerce_x", "pub-1", columns_rows, ext_rows, pattern_rows, [{
+        "product_id": "commerce_x", "title": "제목", "summary": "요약",
+        "caveat": None, "use_cases": None, "publication_id": "pub-1",
+    }])
+    assert d1._query("SELECT COUNT(*) AS n FROM d1_catalog_display;")[0]["n"] == 1
+
+    # display 를 내린 채 재게시 — 빈 시퀀스
+    d1.publish_product_meta("commerce_x", "pub-2", columns_rows, ext_rows, pattern_rows, [])
+
+    assert d1._query("SELECT COUNT(*) AS n FROM d1_catalog_display;")[0]["n"] == 0
+
+
+def test_display_table_does_not_disturb_shared_tables():
+    """🔴 이 PR 의 안전 근거 — 기존 3종의 컬럼 집합이 그대로여야 재작성이 안 일어난다."""
+    assert HANDOFF_COLUMNS["d1_catalog_columns"] == (
+        "product_id", "table_name", "ordinal", "column_name", "type",
+        "description_ko", "publication_id")
+    assert HANDOFF_COLUMNS["d1_catalog_ext"] == (
+        "product_id", "table_name", "source_model", "grain", "primary_key",
+        "time_axis", "tier", "rollup_rule", "publication_id")
+    assert HANDOFF_COLUMNS["d1_usage_patterns"][0] == "product_id"
+    assert len(HANDOFF_COLUMNS["d1_usage_patterns"]) == 12
