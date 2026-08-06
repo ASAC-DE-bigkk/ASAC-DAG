@@ -61,13 +61,19 @@ from gold.assets import GOLD_READY_ASSET  # noqa: F401  (re-export)
 
 log = logging.getLogger(__name__)
 
-# ── 서빙 대상 D1 (공유 ask-seoul-dev-d1) ──────────────────────────────────────
+# ── 서빙 대상 D1 ──────────────────────────────────────────────────────────────
 # account/DB id 는 **비밀이 아니다**(citydata 규약 승계) — 팀 계정 이관 시 env override.
 # 토큰(CLOUDFLARE_API_TOKEN, D1 Edit 권한)만 시크릿(자동 마스킹).
-SERVING_ACCOUNT_ID = os.getenv("COMMERCE_SERVING_ACCOUNT_ID",
-                               "0d39ddce1c07c97df66843ede19f56c4")
-SERVING_D1_DATABASE_ID = os.getenv("COMMERCE_SERVING_D1_DATABASE_ID",
-                                   "9db0e851-558e-489f-9e76-f131d25aa267")
+#
+# 해석 순서: commerce 오버라이드 → **canonical**(공유 SERVING_*) — 값이 배포 영역을 정한다(#654).
+# 과거엔 dev D1 uuid 가 코드 기본값이라, canonical 이 prod 를 가리켜도 **조용히 dev 로 게시**됐다
+# (2026-08-06 실측: prod 향 export 22종·26만 행이 전부 dev 로 감). 기본값은 두지 않는다 —
+# 환경이 지정되지 않았으면 어디로도 쓰지 말고 즉시 죽는 게 맞다(_d1_api 형식 검증이 잡는다).
+SERVING_ACCOUNT_ID = (os.getenv("COMMERCE_SERVING_ACCOUNT_ID")
+                      or os.getenv("SERVING_CLOUDFLARE_ACCOUNT_ID")
+                      or "0d39ddce1c07c97df66843ede19f56c4")   # 팀 공유 계정(전 환경 동일)
+SERVING_D1_DATABASE_ID = (os.getenv("COMMERCE_SERVING_D1_DATABASE_ID")
+                          or os.getenv("SERVING_D1_DATABASE_ID", ""))
 _CF_ID = re.compile(r"^[0-9a-fA-F-]{16,64}$")   # hex(account) / uuid(db) — URL 조립 전 형식 검증
 
 INSERT_BATCH = 100          # D1 HTTP API 요청당 INSERT 행수(요청 크기 제한 여유).
