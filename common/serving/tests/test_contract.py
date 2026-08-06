@@ -229,6 +229,18 @@ def test_load_contracts_reads_freshness_field_separately_from_event_time(tmp_pat
     assert contract.freshness_field == "collected_at"
 
 
+def test_load_contracts_retains_publication_trigger_for_runtime_watchdog(tmp_path):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["publication_trigger"] = {"schedule_cron": "10 * * * *"}
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_contracts(path)[0]
+
+    assert contract.publication_trigger == {"schedule_cron": "10 * * * *"}
+
+
 def test_load_contracts_rejects_unknown_freshness_field(tmp_path):
     path = _projection_manifest(tmp_path)
     manifest = json.loads(path.read_text(encoding="utf-8"))
