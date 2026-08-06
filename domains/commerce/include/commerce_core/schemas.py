@@ -56,6 +56,9 @@ COLUMN_ALIASES_V2: dict[str, str] = {
     "UPDATEDT": "DATA_UPDT_YMD", "LASTMODTS": "LAST_MDFCN_YMD",
     "RDNWHLADDR": "ROAD_NM_ADDR", "SITEWHLADDR": "LOTNO_ADDR",
     "X": "XCRD", "Y": "YCRD", "APVPERMYMD": "LCPMT_YMD", "DCBYMD": "CLSBIZ_YMD",
+    # 업태명 — 2026-08-04 mail_order_sale v2 전환 실측에서 확인된 짝. gold detail payload 가
+    # 원문 키를 직접 뽑으므로(정규화 컬럼 아님) 이 표에 없으면 v2 행의 uptaenm 이 통째로 빈다.
+    "UPTAENM": "BZSTAT_SE_NM",
 }
 
 
