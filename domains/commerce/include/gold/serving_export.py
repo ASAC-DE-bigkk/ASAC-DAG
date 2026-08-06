@@ -387,19 +387,60 @@ def _public_quality_evidence(
     }
 
 
+def _generic_quality_evidence(sv: dict, colnames: list[str], rows: list, *,
+                              product_id: str, d1_row_count: int | None,
+                              measured_at: str) -> dict:
+    """공개 투영(public_projection) 없는 일반 제품의 품질 증거 — 게시 스냅샷 실측.
+
+    `_public_quality_evidence` 는 공개 gold 의 투영 해시까지 검증하는 fail-closed 경로라
+    flow_monthly 전용이다. 나머지 제품은 여기서 **게시한 그 행들**로 PK 중복/NULL 을 세고
+    행수·신선도를 남긴다(#434 — d1_product_quality 에 commerce 행이 0이던 원인의 절반).
+    """
+    pk = list(sv.get("public_primary_key") or sv.get("primary_key") or [])
+    idx = [colnames.index(c) for c in pk if c in colnames]
+    missing = [c for c in pk if c not in colnames]
+    if missing or not idx:
+        # PK 를 못 재면 0 으로 접지 말고 알린다 — 모른다 ≠ 0 (§19.3).
+        log_event("serve.evidence_pk_unmeasurable", level="warning",
+                  where="_generic_quality_evidence", product_id=product_id,
+                  declared_pk=pk, missing_in_projection=missing)
+    dup = nulls = 0
+    if idx:
+        seen: set = set()
+        for r in rows:
+            key = tuple(r[i] for i in idx)
+            if any(v is None for v in key):
+                nulls += 1
+            if key in seen:
+                dup += 1
+            else:
+                seen.add(key)
+    return {
+        "source_row_count": len(rows),
+        "d1_row_count": d1_row_count if d1_row_count is not None else len(rows),
+        "duplicate_primary_key_count": dup,
+        "null_primary_key_count": nulls,
+        "freshness_as_of": _freshness_of(rows, colnames, sv.get("event_time")),
+        "freshness_slo_minutes": sv.get("freshness_slo_minutes"),
+        "serving_status": "published",
+        "measured_at": measured_at,
+        "coverage": None,   # coverage 선언은 flow_monthly 만 — 없는 선언은 재지 않는다(fail-closed 회피)
+    }
+
+
 def _publish_public_evidence(token: str, evidence_rows: list[tuple]) -> None:
+    """(product_id, publication_id, sources|None, quality) 를 공용 증거 테이블로 게시.
+
+    sources=None 은 '이 제품은 아직 source_evidence 미선언' — 공용 클라이언트가 기존 행을
+    보존한다(quality 만 갱신). 선언이 생기면 그 제품 범위만 교체된다.
+    """
     if not evidence_rows:
         return
     from common.serving.d1_client import HttpD1Client
 
     client = HttpD1Client(_d1_api(), token)
-    for contract, publication_id, quality in evidence_rows:
-        client.publish_product_evidence(
-            contract.product_id,
-            publication_id,
-            contract.source_evidence,
-            quality,
-        )
+    for product_id, publication_id, sources, quality in evidence_rows:
+        client.publish_product_evidence(product_id, publication_id, sources, quality)
 
 
 def _load_serving_meta() -> dict[str, dict]:
@@ -1003,7 +1044,17 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                     coverage=coverage,
                     measured_at=now,
                 )
-                public_evidence_rows.append((public_contract, publication_id, quality))
+                public_evidence_rows.append(
+                    (public_contract.product_id, publication_id,
+                     public_contract.source_evidence, quality))
+            else:
+                # 일반 제품도 증거를 게시한다(#434) — 종전에는 flow_monthly 1종만 게시해
+                # d1_catalog_sources/d1_product_quality 에 commerce 행이 0이었다.
+                quality = _generic_quality_evidence(
+                    sv, colnames, rows, product_id=product_id,
+                    d1_row_count=_d1_row_count(spec.d1_table, token), measured_at=now)
+                public_evidence_rows.append(
+                    (product_id, publication_id, sv.get("source_evidence"), quality))
             log.info("[serving export] %s ← %s: %d행(%s)%s", spec.d1_table, spec.source, n,
                      spec.tier, " — 무변경, 재기록 생략" if reuse else "")
 
