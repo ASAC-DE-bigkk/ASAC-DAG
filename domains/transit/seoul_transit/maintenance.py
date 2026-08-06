@@ -7,9 +7,10 @@
 보존 대상 등록은 이 모듈의 SOURCE_BY_DATASET 이 유일한 관문이다 — loader 의
 TABLE_SPECS(적재 가능 dataset)에 추가하는 것만으로는 삭제 대상이 되지 않는다.
 
-경계 판정은 load_date 라벨(UTC 날짜)이 아니라 **ingest_ts(UTC 타임스탬프)** 를
-"이번 주 월요일 00:00 KST 의 UTC 환산값"과 비교한다 — KST 주 경계와 UTC 라벨의
-9시간 어긋남(월요일 00~09시 KST 객체가 일요일 UTC 라벨을 다는 문제)을 원천 제거.
+경계 판정은 load_date 라벨이 아니라 **ingest_ts(UTC 타임스탬프)** 를 "이번 주 월요일
+00:00 KST 의 UTC 환산값"과 비교한다. 라벨은 날짜 단위라 월요일 00:00 이라는 시각
+경계를 가를 수 없고, 라벨의 시간대 기준이 바뀌어도(#78 P-1 로 UTC→KST 전환) 삭제
+경계가 따라 흔들리지 않는다 — 판정이 라벨과 무관한 것이 이 설계의 요점이다.
 
 R2 는 lifecycle 규칙 대신 DAG 삭제를 쓴다: lifecycle 설정(S3 PutBucketLifecycle)은
 버킷 전체 교체라 타 도메인 규칙을 덮어쓸 위험 + 주 경계가 아닌 객체 age 기준이라

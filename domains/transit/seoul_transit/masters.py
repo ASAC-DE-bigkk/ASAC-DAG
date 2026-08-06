@@ -265,7 +265,8 @@ def land_master(
     """
     store = storage if storage is not None else build_r2_storage()
     now = datetime.now(timezone.utc)
-    load_date = load_date or now.strftime("%Y-%m-%d")
+    # load_date 는 KST 실행일(P-1), ingest_ts 는 UTC — r2_landing.land 와 같은 기준.
+    load_date = load_date or now.astimezone(config.KST).strftime("%Y-%m-%d")
     ingest_ts = ingest_ts or now.strftime("%Y%m%dT%H%M%SZ")
     base = (
         f"raw/transit/{spec.source_system}/{spec.dataset}"

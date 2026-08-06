@@ -270,6 +270,26 @@ def test_land_master_path_convention_and_manifest():
     assert list(store.objects)[-1] == result["manifest_key"]
 
 
+def test_land_master_default_load_date_is_kst_run_day(monkeypatch):
+    """기본 load_date 는 KST 실행일(#78 P-1) — r2_landing.land 와 같은 기준."""
+    from datetime import datetime, timezone
+
+    class _FrozenDatetime(datetime):
+        _NOW = datetime(2026, 8, 5, 16, 30, 0, tzinfo=timezone.utc)  # = 08-06 01:30 KST
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls._NOW if tz is None else cls._NOW.astimezone(tz)
+
+    monkeypatch.setattr(masters, "datetime", _FrozenDatetime)
+    store = FakeStorage()
+    result = masters.land_master(
+        iter([(1, b'{"a": 1}', [{"x": 1}])]), _SPEC, run_id="run-kst", storage=store,
+    )
+    assert "/load_date=2026-08-06/" in result["manifest_key"]        # 라벨은 KST
+    assert "/ingest_ts=20260805T163000Z/" in result["manifest_key"]  # 묶음 키는 UTC
+
+
 def test_land_master_empty_snapshot_raises():
     # 마스터는 절대 0행일 수 없다 — 빈 스냅샷은 원천 이상 신호 → RuntimeError, manifest 미기록.
     store = FakeStorage()

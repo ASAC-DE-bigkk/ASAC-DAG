@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
 from common.http import HttpCore, QueryKey
@@ -44,6 +44,9 @@ _MAX_PAGES = 40
 
 # 인증키 env 이름 — 공공데이터포털 공용 키(#154, 구 PUBLIC_DATA_API_KEY_BUS 일괄 전환).
 _KEY_ENV_NAME = "PUBLIC_DATA_API_KEY"
+
+# raw 파티션 라벨 기준(ASK-Seoul#78 P-1) — 형제 모듈들과 같은 로컬 상수 관례.
+_KST = timezone(timedelta(hours=9))
 
 
 def load_service_key() -> str:
@@ -171,11 +174,20 @@ def land_snapshot(
         raw/common/admin_dong/load_date=YYYY-MM-DD/ingest_ts=YYYYMMDDTHHMMSSZ/page-NNNN.json
         + .../_manifest.json
 
+    ``load_date`` 는 **KST 수집 실행일**(ASK-Seoul#78 P-1), ``ingest_ts`` 는 UTC 다.
+
+    이 라벨은 **읽힌다** — commerce 의 `enrich_admin_dong_ref` 가 max(load_date) →
+    그 안 max(ingest_ts) 로 최신 스냅샷을 고른다. 기준을 UTC 에서 KST 로 바꿔도 선택이
+    깨지지 않는 이유는 KST 라벨이 같은 시각의 UTC 라벨보다 **같거나 하루 뒤**여서, 나중에
+    수집한 스냅샷의 라벨이 이전 것보다 작아질 수 없기 때문이다(단조 증가 유지).
+    구·신 기준이 섞인 집합에서의 선택은 리더 쪽 회귀 테스트가 지킨다
+    (`domains/commerce/tests/test_silver_tasks.py::test_latest_admin_dong_pages_*`).
+
     storage 주입 가능(테스트) — 미지정 시 build_r2_storage(). 반환: 랜딩 결과 dict.
     """
     store = storage if storage is not None else build_r2_storage()
     now = datetime.now(timezone.utc)
-    load_date = load_date or now.strftime("%Y-%m-%d")
+    load_date = load_date or now.astimezone(_KST).strftime("%Y-%m-%d")
     ingest_ts = ingest_ts or now.strftime("%Y%m%dT%H%M%SZ")
     base = f"raw/common/{DATASET}/load_date={load_date}/ingest_ts={ingest_ts}"
 

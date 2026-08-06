@@ -240,6 +240,23 @@ def test_master_replace_sql_is_delete_then_insert_with_escaping():
     assert "timestamp '2026-07-21 13:45:00.000000'" in stmts[1]
 
 
+def test_snapshot_labels_split_kst_label_from_utc_lineage():
+    """load_date 는 KST(#78 P-1), collected_at 은 UTC 계보 시각 — 기준이 갈린다.
+
+    16:30Z 는 KST 로 다음 날 01:30 이다. 두 값을 같은 문자열에서 잘라 쓰면
+    'KST 날짜 + UTC 시각' 이라는 존재하지 않는 시각이 bronze 에 박힌다.
+    """
+    load_date, collected_at = bus_routes.snapshot_labels("20260805T163000Z")
+    assert load_date == "2026-08-06"                      # KST 실행일
+    assert collected_at == "2026-08-05 16:30:00.000000"   # UTC 원본
+
+
+def test_snapshot_labels_rejects_malformed_ingest_ts():
+    # 형식이 깨지면 '-- ::' 같은 리터럴이 INSERT 로 흘러가므로 여기서 끊는다.
+    with pytest.raises(ValueError, match="ingest_ts"):
+        bus_routes.snapshot_labels("2026-08-05")
+
+
 def test_master_replace_sql_refuses_empty_rows():
     # 빈 rows 로는 DELETE 만 남아 전건 소실 위험 — 호출 자체를 막는다.
     with pytest.raises(ValueError):

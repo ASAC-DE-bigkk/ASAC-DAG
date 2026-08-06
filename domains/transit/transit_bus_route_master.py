@@ -13,7 +13,6 @@ dim_transit_bus_route_tier 가 관측 역산 대신 이 tier 를 직접 조인�
 """
 
 import os
-import re
 import sys
 from datetime import datetime
 
@@ -101,16 +100,11 @@ def load_route_master_bronze() -> dict:
         )
 
     # ingest_ts 는 land()가 항상 채우지만(정상 경로), 옛 포맷·수동 조작으로 결손되면
-    # 슬라이싱이 깨진 timestamp 리터럴('-- ::')을 만들어 INSERT 가 실패한다 — 명확히 막는다.
-    ingest_ts = str(ref.get("ingest_ts", ""))  # 예: 20260721T134500Z (UTC)
-    if not re.fullmatch(r"\d{8}T\d{6}Z", ingest_ts):
-        raise RuntimeError(
-            f"reference.ingest_ts 형식 오류({ingest_ts!r}) — YYYYMMDDTHHMMSSZ 기대. 적재 중단"
-        )
-    load_date = f"{ingest_ts[0:4]}-{ingest_ts[4:6]}-{ingest_ts[6:8]}"
-    collected_at = (
-        f"{load_date} {ingest_ts[9:11]}:{ingest_ts[11:13]}:{ingest_ts[13:15]}.000000"
-    )
+    # 깨진 timestamp 리터럴('-- ::')을 만들어 INSERT 가 실패한다 — 헬퍼가 명확히 막는다.
+    try:
+        load_date, collected_at = bus_routes.snapshot_labels(str(ref.get("ingest_ts", "")))
+    except ValueError as exc:
+        raise RuntimeError(f"{exc} — 적재 중단") from exc
     run_id = current_dag_run_id()
 
     catalog, schema = _trino_target()

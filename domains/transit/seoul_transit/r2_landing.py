@@ -1,9 +1,16 @@
 """R2(S3) 객체 적재 — 팀 규약 <stage>/<domain>/<source>/<dataset>/load_date=…/ingest_ts=…/ + _manifest.json.
 
-⚠️ load_date·ingest_ts 라벨은 **UTC** — maintenance 의 보존 컷오프도 UTC 로 맞춘다.
+load_date 는 **KST 수집 실행일**(ASK-Seoul#78 P-1 — 전 도메인 공통 규약), ingest_ts 는
+**UTC 타임스탬프**다. 둘의 기준이 다른 것은 의도다:
+  - 파티션 라벨(load_date)은 사람이 "어느 날 수집분인가"로 읽는 값이라 KST.
+  - ingest_ts 는 한 실행의 객체 묶음을 시간순으로 가르는 값이라 UTC(사전순=시간순).
+보존 컷오프는 라벨이 아니라 ingest_ts 로 판정한다(maintenance.week_cutoff) — 그래서
+라벨 기준이 바뀌어도 삭제 경계는 흔들리지 않는다.
 
-자격증명은 활성 .env 에서 자동 선택 (common.storage.r2_env 의 #230 폴백 규약과 정렬):
-  - R2 모드: R2_DEV_* 우선(멘티 dev 게이트) → R2_* 폴백(prod 단독 env)
+자격증명은 활성 .env 에서 자동 선택 (common.storage.r2_env 규약과 정렬):
+  - R2 모드: canonical `R2_*` 한 세트. **키 이름은 배포 환경을 담지 않고 값이 정한다**
+    (구 `R2_DEV_*` 우선 분기는 #647/`0739845` 에서 폐지 — 되살리면 같은 날짜 기록이
+    두 버킷으로 갈린다, ASK-Seoul#78 Z-7)
   - local 모드: MINIO_ROOT_* + S3_ENDPOINT/S3_BUCKET (최종 fallback)
 stage 만 바꾸면 raw/bronze/silver/gold 동일하게 재사용.
 """
@@ -12,6 +19,8 @@ import functools
 import json
 import os
 from datetime import datetime, timezone
+
+from .config import KST
 
 
 def _env(*names: str) -> str | None:
@@ -107,7 +116,8 @@ def land(stage, domain, source, dataset, pages, *, title="", endpoint="", kind="
     """
     client, bucket = _client_and_bucket()
     now = datetime.now(timezone.utc)
-    load_date = load_date or now.strftime("%Y-%m-%d")
+    # 라벨은 KST 실행일(P-1), 묶음 키는 UTC 타임스탬프 — 기준이 다른 이유는 모듈 문서 참조.
+    load_date = load_date or now.astimezone(KST).strftime("%Y-%m-%d")
     ingest_ts = ingest_ts or now.strftime("%Y%m%dT%H%M%SZ")
     base = f"{stage}/{domain}/{source}/{dataset}/load_date={load_date}/ingest_ts={ingest_ts}"
 

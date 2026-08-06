@@ -49,6 +49,50 @@ def test_sgg_prefix_mismatch_detects_admin_legal_code_disagreement():
     assert mismatches[0]["admin_prefix"] == "11680"
 
 
+class _FakeAdminDongStorage:
+    """list_keys 만 쓰는 최소 더블 — _latest_admin_dong_pages 가 그것만 호출한다."""
+
+    def __init__(self, keys):
+        self._keys = list(keys)
+
+    def list_keys(self, prefix):
+        return [k for k in self._keys if k.startswith(prefix)]
+
+
+def _admin_dong_key(load_date, ingest_ts, page=1):
+    return (f"{enrich_tasks.ADMIN_DONG_RAW_PREFIX}load_date={load_date}"
+            f"/ingest_ts={ingest_ts}/page-{page:04d}.json")
+
+
+def test_latest_admin_dong_pages_picks_newest_across_mixed_date_bases():
+    """구 UTC 라벨과 신 KST 라벨이 섞여 있어도 **더 나중에 수집한** 스냅샷을 골라야 한다.
+
+    admin_dong 랜딩의 load_date 는 ASK-Seoul#78 P-1 로 UTC → KST 로 바뀌었다(신규 쓰기부터).
+    전환 구간에는 두 기준의 라벨이 공존한다. KST 라벨은 같은 시각의 UTC 라벨보다 같거나
+    하루 뒤라 나중 스냅샷의 라벨이 이전 것보다 작아질 수 없다 — 이 성질이 깨지면
+    최신본 대신 옛 스냅샷이 전량 교체 원천이 되고, 참조 테이블이 조용히 과거로 되돌아간다.
+    """
+    storage = _FakeAdminDongStorage([
+        _admin_dong_key("2026-08-05", "20260805T230000Z"),   # 전환 전(UTC 라벨)
+        _admin_dong_key("2026-08-06", "20260806T010000Z"),   # 전환 후(KST 라벨), 더 나중 수집
+    ])
+    load_date, ingest_ts, pages = enrich_tasks._latest_admin_dong_pages(storage)
+    assert (load_date, ingest_ts) == ("2026-08-06", "20260806T010000Z")
+    assert pages == [_admin_dong_key("2026-08-06", "20260806T010000Z")]
+
+
+def test_latest_admin_dong_pages_breaks_ties_on_ingest_ts():
+    """같은 load_date 안에서는 ingest_ts(UTC, 사전순=시간순)가 최신을 가른다."""
+    storage = _FakeAdminDongStorage([
+        _admin_dong_key("2026-08-06", "20260806T010000Z"),
+        _admin_dong_key("2026-08-06", "20260806T090000Z"),
+        _admin_dong_key("2026-08-05", "20260805T235900Z"),
+    ])
+    load_date, ingest_ts, pages = enrich_tasks._latest_admin_dong_pages(storage)
+    assert (load_date, ingest_ts) == ("2026-08-06", "20260806T090000Z")
+    assert len(pages) == 1
+
+
 def _patch_masked_address_query(monkeypatch, *, fetch_row, watermark):
     """공통 셋업 — Trino/알림/워터마크를 목킹하고 실행된 (sql, params) 를 캡처해 반환한다."""
     sent = []
