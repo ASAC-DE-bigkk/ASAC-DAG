@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timezone
 
 from .api import bus_url, get_text
+from .config import KST
 
 _HEADER_CD = re.compile(r"<headerCd>(\d+)</headerCd>")
 _HEADER_MSG = re.compile(r"<headerMsg>([^<]*)</headerMsg>")
@@ -78,6 +80,25 @@ BUS_ROUTE_MASTER_COLUMNS = (
     "bus_route_id", "bus_route_nm", "route_type", "tier",
     "load_date", "collected_at", "dag_run_id",
 )
+
+
+def snapshot_labels(ingest_ts: str) -> tuple[str, str]:
+    """reference 의 ``ingest_ts``(UTC) → ``(load_date, collected_at)``.
+
+    - ``load_date`` 는 **KST 실행일**(ASK-Seoul#78 P-1) — 파티션·bronze 라벨 공통 기준.
+    - ``collected_at`` 은 **UTC 리터럴** — bronze 계보 시각 계약(ingested_at 과 같은 기준).
+
+    둘을 같은 문자열에서 잘라 쓰면 KST 날짜에 UTC 시각이 붙은 값이 나온다. 형식이 어긋난
+    ingest_ts 는 깨진 timestamp 리터럴을 만들어 INSERT 를 실패시키므로 여기서 끊는다.
+    """
+    if not re.fullmatch(r"\d{8}T\d{6}Z", ingest_ts or ""):
+        raise ValueError(
+            f"reference.ingest_ts 형식 오류({ingest_ts!r}) — YYYYMMDDTHHMMSSZ 기대")
+    moment = datetime.strptime(ingest_ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    return (
+        moment.astimezone(KST).strftime("%Y-%m-%d"),
+        moment.strftime("%Y-%m-%d %H:%M:%S.%f"),
+    )
 
 
 def tier_for(route_type: str | None, tier1_types: set[str]) -> int:

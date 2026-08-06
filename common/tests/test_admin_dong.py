@@ -176,6 +176,31 @@ def test_land_snapshot_path_convention_and_manifest():
     assert manifest["object_keys"] == result["object_keys"]
 
 
+def test_default_load_date_is_kst_run_day(monkeypatch):
+    """기본 load_date 는 KST 실행일(#78 P-1), ingest_ts 는 UTC 유지."""
+    from datetime import datetime, timezone
+
+    class _FrozenDatetime(datetime):
+        _NOW = datetime(2026, 8, 5, 16, 30, 0, tzinfo=timezone.utc)  # = 08-06 01:30 KST
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls._NOW if tz is None else cls._NOW.astimezone(tz)
+
+    monkeypatch.setattr(admin_dong, "datetime", _FrozenDatetime)
+    result = admin_dong.land_snapshot(
+        iter([(1, b'{"data": [1]}', [{"a": 1}])]), revision="2025-07-01",
+        run_id="run-kst", storage=FakeStorage(),
+    )
+    assert "/load_date=2026-08-06/" in result["manifest_key"]        # 라벨은 KST
+    assert "/ingest_ts=20260805T163000Z/" in result["manifest_key"]  # 묶음 키는 UTC
+
+
+# 이 라벨은 commerce enrich_admin_dong_ref 가 max(load_date) → max(ingest_ts) 로 읽는다.
+# 구·신 기준이 섞인 집합에서 최신본이 뽑히는지는 그 리더 쪽에서 검증한다 —
+# domains/commerce/tests/test_silver_tasks.py::test_latest_admin_dong_pages_*.
+
+
 # ── serviceKey 미노출 ─────────────────────────────────────────────────────────────
 def test_service_key_goes_to_params_not_url():
     transport = FakeTransport([_page([_row("2025-07-01")], per_page=1000)])

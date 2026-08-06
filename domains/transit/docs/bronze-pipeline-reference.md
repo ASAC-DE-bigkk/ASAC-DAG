@@ -18,6 +18,29 @@
 수집(고빈도)과 적재(저빈도)를 분리해 고빈도 수집에서 Trino 소형 INSERT·Iceberg
 스냅샷 폭증을 차단한다. dag_id 는 분리 전과 동일(이력 연속성).
 
+## raw 경로 라벨 기준 (ASK-Seoul#78 P-1)
+
+`raw/transit/<source>/<dataset>/load_date=YYYY-MM-DD/ingest_ts=YYYYMMDDTHHMMSSZ/`
+
+| 칸 | 기준 | 왜 |
+|---|---|---|
+| `load_date=` | **KST 수집 실행일** | 전 도메인 공통 규약(P-1). 사람이 "어느 날 수집분인가"로 읽는 값 |
+| `ingest_ts=` | **UTC 타임스탬프** | 한 실행의 객체 묶음을 시간순으로 가르는 값(사전순 = 시간순) |
+
+- 전환 전(2026-08-06 이전) 파티션은 `load_date` 가 **UTC 날짜**다. 기존 객체는 옮기지
+  않는다(#78 G-1 — 신규 쓰기부터). 두 기준이 섞이는 구간은 KST 자정~09시 수집분뿐이다.
+- **R2 raw 객체의 라벨을 읽어서 판정하는 코드는 없다** — 보존은 `ingest_ts`(maintenance),
+  적재는 매니페스트 기준이다.
+- 다만 같은 값이 **마스터 bronze 의 `load_date` 컬럼**으로 들어가고, 그쪽은 읽힌다:
+  `dim_transit_station` · `dim_transit_parking` · `dim_transit_bus_route_tier` 가
+  `max(load_date)` 로 최신 스냅샷을 고르고, `master_load_sql` 은 `DELETE WHERE load_date=…`
+  로 멱등을 잡는다. 기준을 바꿔도 깨지지 않는 근거는 **단조성**이다 — KST 라벨은 같은 시각의
+  UTC 라벨보다 같거나 하루 뒤라, 나중에 수집한 스냅샷의 라벨이 이전 것보다 작아질 수 없다.
+  (마스터는 `@weekly` 00:00 UTC = 09:00 KST 라 두 기준이 애초에 일치한다. 전환 구간을
+  가로지르는 **수동 트리거**는 옛 라벨 행과 새 라벨 행이 함께 남을 수 있다 — dim 은
+  `max()` 라 영향 없고, 중복 저장만 생긴다.)
+- bronze 의 `collected_at`·`ingested_at` 은 계보 시각이라 **UTC 유지** — 라벨만 KST 다.
+
 ## pending 마커 규약
 
 - 키: `ops/control/state/transit/loader_pending/<dataset>/<ingest_ts>__<safe_run_id>.json` (ASK-Seoul#60 존 규약 — #547 에서 `state/transit/…` 에서 이사)
@@ -79,7 +102,8 @@
   (월요일 아침 최소). 마스터(주간 스냅샷)·reference 는 대상 아님 — 대상 dataset 은
   `maintenance.SOURCE_BY_DATASET` 에 명시 열거.
 - 경계 판정은 **ingest_ts(UTC)** 를 "월요일 00:00 KST 의 UTC 환산(일요일 15:00Z)"과
-  비교 — load_date 라벨(UTC 날짜)과 KST 주 경계의 9시간 어긋남을 원천 제거.
+  비교 — 라벨은 날짜 단위라 시각 경계를 가를 수 없고, 판정을 라벨과 분리해 두면
+  라벨의 시간대 기준이 바뀌어도(위 P-1 전환) 삭제 경계가 흔들리지 않는다.
 - R2 raw: lifecycle 규칙 대신 DAG 삭제(버킷 설정 교체 리스크 회피 + 주 경계 정밀 삭제
   + 로그 가시성). @daily 지만 실제 대량 삭제는 월요일 런에서 발생.
 - 보존 대상 등록의 관문은 `maintenance.SOURCE_BY_DATASET` — loader 의 TABLE_SPECS 에

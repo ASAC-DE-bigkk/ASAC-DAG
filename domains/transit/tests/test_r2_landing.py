@@ -1,9 +1,10 @@
-"""r2_landing.land() 완결 확인서 계약 (ASK-Seoul#60 약속③, #547).
+"""r2_landing.land() 완결 확인서 계약 (ASK-Seoul#60 약속③, #547) + 라벨 기준(#78 P-1).
 
 land() 는 boto3 직결이라 _client_and_bucket 를 페이크로 치환해 검증한다.
 """
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 _TRANSIT = Path(__file__).resolve().parents[1]        # domains/transit
@@ -54,3 +55,35 @@ def test_land_writes_manifest_last_with_completion_fields(monkeypatch):
     # M-9 값 집합 — transit 은 complete 만 사용(#689).
     assert manifest["status"] == "complete"
     assert manifest["completed_at"]
+
+
+class _FrozenDatetime(datetime):
+    """datetime.now(tz) 만 고정하는 최소 더블 — 그 외 동작은 표준 datetime 그대로."""
+
+    _NOW = datetime(2026, 8, 5, 16, 30, 0, tzinfo=timezone.utc)  # = 08-06 01:30 KST
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls._NOW if tz is None else cls._NOW.astimezone(tz)
+
+
+def test_default_load_date_is_kst_run_day(monkeypatch):
+    """기본 load_date 는 **KST 수집 실행일**(#78 P-1), ingest_ts 는 UTC 유지.
+
+    UTC 로 접으면 08-05, KST 로 접으면 08-06 인 시각을 고른다 — KST 자정~09시 구간이
+    두 기준이 갈리는 유일한 구간이라, 여기가 어긋나면 전 도메인 파티션이 하루 밀린다.
+    """
+    fake = _FakeClient()
+    monkeypatch.setattr(r2_landing, "_client_and_bucket", lambda: (fake, "unit-bucket"))
+    monkeypatch.setattr(r2_landing, "datetime", _FrozenDatetime)
+
+    result = r2_landing.land(
+        "raw", "transit", "seoul_parking", "parking", pages=['{"a":1}'], rows=1,
+        run_id="run-kst",
+    )
+
+    assert "/load_date=2026-08-06/" in result["manifest_key"]      # 라벨은 KST
+    assert "/ingest_ts=20260805T163000Z/" in result["manifest_key"]  # 묶음 키는 UTC
+    manifest = json.loads(fake.puts[-1][1].decode("utf-8"))
+    assert manifest["load_date"] == "2026-08-06"
+    assert manifest["ingest_ts"] == "20260805T163000Z"
