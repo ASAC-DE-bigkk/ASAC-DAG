@@ -23,9 +23,11 @@ GRANDFATHERED: dict[str, str] = {
     "common/ops/product_observability.py":
         "ops/product-events·product-health — 관문의 event_id 규칙 계보. 경로 전환은 후속",
     "common/runmetrics.py":
-        "ops/metrics — transit·weather·traffic 기록기. 날짜 기준 KST 전환(P-4)·환경 분리(Z-7) 대기 @codingpoppy94",
+        "ops/metrics — transit·weather·traffic 기록기. P-4(날짜 칸 KST) 완료. Z-7 은 버킷 분리가 "
+        "이미 배포 값으로 해결됐고(#647 R2_DEV_* 폐지), 남은 간극은 event_id·_ops_daily_metric "
+        "에 environment 가 없는 것 — 미해결. 관문 배선도 남음 @codingpoppy94",
     "common/errors/sink.py":
-        "ops/errors — 전 도메인 실패 상세. 날짜 기준 KST 전환(P-4) 대기 @codingpoppy94",
+        "ops/errors — 전 도메인 실패 상세. P-4(날짜 칸 KST) 완료. 관문 배선만 남음 @codingpoppy94",
     "domains/traffic/traffic_dbt_failure.py":
         "ops/recovery — traffic 복구 근거 기록기 @masondev1024",
     "domains/commerce/include/commerce_core/logship.py":

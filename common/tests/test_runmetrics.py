@@ -160,7 +160,7 @@ def test_run_id_filename_is_sanitized(tmp_path):
     assert ":" not in name and "+" not in name
     assert name.endswith("__try2.json")
     assert record["run_id"] == "scheduled__2026-07-07T00:00:00+09:00"  # 본문엔 원본 보존
-    # date= 파티션은 started_at UTC 날짜.
+    # date= 파티션은 started_at 을 KST 로 접은 날짜(#78 P-4).
     assert path.parent.name.startswith("date=")
 
 
@@ -380,6 +380,112 @@ def test_r2_sink_bronze_key_convention_and_payload():
     assert set(record.keys()) == set(_RECORD_FIELDS)
     assert record["run_id"] == "scheduled__2026-07-07T00:00:00+09:00"  # 본문 원본 보존
     assert record["rows"] == 7
+
+
+# ── P-4: 경로 날짜 칸은 KST ─────────────────────────────────────────────────────
+def _bare_record(**overrides):
+    record = {"domain": "transit", "dag_id": "transit_master_bronze",
+              "task_id": "land", "run_id": "manual__1", "try_number": 1,
+              "started_at": "2026-08-05T02:00:00+00:00"}
+    record.update(overrides)
+    return record
+
+
+def test_r2_sink_date_partition_folds_started_at_to_kst():
+    """UTC 15:00 이후 시작한 런은 KST 로 다음 날 — 경로가 그 날짜를 써야 한다(#78 P-4).
+
+    조회 DB 의 정본 날짜는 기록 내용을 KST 로 접은 값이라(`common.ops.ingest`), 경로가
+    UTC 면 KST 자정~09시 구간에서 저장소↔DB 대조가 하루씩 어긋난다.
+    """
+    sink = MetricsR2Sink(put_object=_FakePut())
+    key = sink.object_key(_bare_record(started_at="2026-08-05T16:30:00+00:00"))
+    assert "/observed_date=2026-08-06/" in key
+    # 경계 이전은 같은 날 그대로.
+    same_day = sink.object_key(_bare_record(started_at="2026-08-05T14:59:00+00:00"))
+    assert "/observed_date=2026-08-05/" in same_day
+
+
+def test_r2_sink_date_partition_survives_unparseable_started_at():
+    """시각을 못 읽어도 기록을 버리지 않되, 날짜 칸은 **날짜 형식이어야** 한다.
+
+    전환 전 구현(`str(started)[:10]`)은 못 읽는 값을 그대로 잘라
+    `observed_date=not-a-time` 같은 칸을 만들었다 — 적재기가 날짜로 못 읽는 파티션이다.
+    """
+    import re
+
+    sink = MetricsR2Sink(put_object=_FakePut())
+    key = sink.object_key(_bare_record(started_at="not-a-timestamp"))
+    assert re.search(r"/observed_date=\d{4}-\d{2}-\d{2}/", key), key
+
+
+def test_record_timestamps_stay_utc_while_path_folds_to_kst(tmp_path):
+    """레코드 안의 시각은 UTC 유지(#188 DB 이관 계약) — KST 로 접는 것은 경로뿐이다."""
+    sink = MetricsFileSink(root=tmp_path)
+
+    @track(layer="bronze", domain="transit", sink=sink)
+    def f(**context):
+        return {"rows": 1}
+
+    f(**_context())
+    _, record = _read_only_record(tmp_path)
+    assert record["started_at"].endswith("+00:00")
+    assert record["finished_at"].endswith("+00:00")
+
+
+# ── Z-7: 버킷은 배포 값이 가른다(#647). 레코드의 target 은 그 위의 단서다 ───────────
+def test_record_carries_environment_for_z7_separation(tmp_path):
+    """레코드가 자기 환경을 싣는지 고정한다(#78 Z-7 의 "기록 안에 environment" 항목).
+
+    ⚠️ 이 필드만으로 Z-7 이 충족되지는 않는다. 조회 DB 쪽 간극이 남아 있다 —
+    `event_id`(contract._IDENTITY_FIELDS)에 environment 가 없어 같은 DAG 의 dev·prod
+    실행이 같은 해시를 만들고, `_ops_daily_metric` 집계도 environment 로 묶지 않는다.
+    두 배포가 한 D1 을 보게 되면 그때 실제 혼입이 난다(현재는 D1 도 분리돼 있다).
+    """
+    sink = MetricsFileSink(root=tmp_path)
+
+    @track(layer="bronze", domain="transit", target="dev", sink=sink)
+    def f(**context):
+        return {"rows": 1}
+
+    f(**_context())
+    _, record = _read_only_record(tmp_path)
+    assert record["target"] == "dev"
+
+
+def test_r2_credentials_come_only_from_the_canonical_key_set(monkeypatch):
+    """자격 해석은 `common.storage.r2_env` 위임에서 벗어나지 않는다.
+
+    키 이름으로 환경을 고르는 분기(`R2_DEV_*` 우선)는 `0739845`(#647)에서 삭제됐다 —
+    남겨 두면 누가 그 키를 채우는 순간 같은 날짜 기록이 두 버킷으로 갈린다(#78 Z-7).
+    여기서 타깃 분기가 되살아나면 실패한다.
+    """
+    seen = []
+
+    def _fake_r2_env(name):
+        seen.append(name)
+        return {"R2_ENDPOINT": "https://example.invalid",
+                "R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s",
+                "R2_BUCKET_NAME": "seoul-dev"}[name]
+
+    import common.storage as storage
+    monkeypatch.setattr(storage, "r2_env", _fake_r2_env)
+    # boto3 는 함수 안에서 import 된다 — 모듈 자리를 더블로 채운다(미설치 환경 포함).
+    monkeypatch.setitem(sys.modules, "boto3", _StubBoto3())
+
+    # 타깃이 무엇이든 자격은 r2_env 한 곳에서만 온다 — 타깃 분기가 생기면 여기서 깨진다.
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
+    MetricsR2Sink()._put_r2_object("ops/metrics/transit/observed_date=2026-08-06/x.json", b"{}")
+    assert seen == ["R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME"]
+
+
+class _StubBoto3:
+    """boto3.client(...).put_object(...) 만 받는 최소 더블."""
+
+    def client(self, *_args, **_kwargs):
+        return self
+
+    def put_object(self, **_kwargs):
+        return {}
 
 
 def test_r2_sink_silver_key_uses_model_and_invocation(tmp_path):

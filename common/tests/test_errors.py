@@ -109,11 +109,24 @@ def test_registry_unknown_slug_falls_back_to_unhandled():
 # ── 경로 규약 ───────────────────────────────────────────────────────────────────
 def test_object_key_follows_ops_domain_first_convention():
     # ops 존 도메인-우선(#60/#573) — ops/errors/<domain>/observed_date=…/dag_id=…/
+    # 날짜·시각은 KST(#78 P-4) — 03:12:45Z = 12:12:45 KST.
     key = build_object_key(_make_problem())
     assert key == (
         "ops/errors/traffic/observed_date=2026-07-03/dag_id=traffic_incident_bronze/"
-        "scheduled__2026-07-03T03-10-00-00-00__031245123456_api-timeout.json"
+        "scheduled__2026-07-03T03-10-00-00-00__121245123456_api-timeout.json"
     )
+
+
+def test_object_key_date_folds_to_kst_across_the_day_boundary():
+    """UTC 로 접으면 전날이 되는 시각 — 경로 날짜가 KST 기준인지 고정한다(P-4).
+
+    KST 자정~09시 구간이 이 함정에 걸린다. 조회 DB 의 정본 날짜가 KST 라
+    (`common.ops.ingest`), 경로가 UTC 면 저장소↔DB 대조가 그 구간에서 하루씩 어긋난다.
+    """
+    occurred = datetime(2026, 8, 5, 16, 30, 0, 0, tzinfo=timezone.utc)  # = 08-06 01:30 KST
+    key = build_object_key(_make_problem(occurred_at=occurred))
+    assert "/observed_date=2026-08-06/" in key
+    assert "__013000000000_" in key.rsplit("/", 1)[1]  # 시각도 KST(01:30:00)
 
 
 def test_object_key_sanitizes_reserved_characters():

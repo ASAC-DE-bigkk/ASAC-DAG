@@ -13,7 +13,9 @@
   HttpCore 가 요청/재시도를 집계한다(비활성 기본은 no-op — 기존 도메인 무영향).
 - sink(기본 R2, #77 errors sink 동형): 오브젝트 키
   `ops/metrics/<domain>/observed_date=YYYY-MM-DD/<dag_id>__<task_id>__<run_id>__try<N>.json`
-  (dev=seoul-dev, prod=seoul 기존 버킷 재사용 — R2_DEV_* dev 우선 규약).
+  (날짜 칸은 **KST** — ASK-Seoul#78 P-4. 레코드 안의 시각 필드는 UTC 그대로다).
+  버킷·자격은 canonical `R2_*` 한 세트(#647/`0739845`) — **키 이름이 배포 환경을 담지
+  않고 값이 정한다.** 배포 하나가 버킷 하나를 가리키므로 자격으로 환경을 고를 여지가 없다.
   ASAC_METRICS_DIR 설정 시 로컬 파일 sink(디버그) — 선택 로직은 `resolve_sink()`.
   sink 를 분리해 나중에 DB sink 로 교체 가능(write(record) 계약).
 - 실패 안전: 메트릭 기록 실패는 **본 태스크를 절대 실패시키지 않는다**(경고 로그만).
@@ -32,7 +34,7 @@ import re
 import socket
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -55,6 +57,9 @@ _RECORD_FIELDS: tuple[str, ...] = (
 
 # 오브젝트/파일명 세그먼트에 남길 문자 — 이 밖은 전부 '-' 로 치환(errors/sink.py 규약과 동일).
 _UNSAFE_SEGMENT_CHARS = re.compile(r"[^A-Za-z0-9._=-]")
+
+# 관측 계열 경로의 날짜 칸 기준(P-4). 레코드 값은 UTC 유지 — 경로만 이 기준으로 접는다.
+_KST = timezone(timedelta(hours=9))
 
 
 def _blank_record() -> dict[str, Any]:
@@ -220,8 +225,21 @@ def _schedule_delay_s(started_at: datetime, data_interval_end: Any) -> float | N
 
 # ── sink (기본 R2 → 추후 DB 교체 / 파일 sink 는 테스트·로컬 디버그) ───────────────
 def _record_date(record: dict[str, Any]) -> str:
+    """경로 날짜 칸(P-4) — 레코드 시각을 **KST 로 접은** 날짜.
+
+    레코드 안의 started_at/finished_at 은 UTC ISO8601 그대로 둔다(#188 DB 이관 계약).
+    조회 DB 의 정본 날짜도 기록 내용을 KST 로 접은 값이라(common.ops.ingest), 경로만
+    KST 로 맞추면 저장소↔DB 대조에서 하루씩 어긋나던 것이 사라진다.
+    시각을 못 읽으면 지금 시각으로 접는다 — 기록을 버리지 않는다.
+    """
     started = record.get("started_at") or _iso(_utc_now())
-    return str(started)[:10]  # ISO8601 앞 10자 = YYYY-MM-DD (UTC)
+    try:
+        moment = datetime.fromisoformat(str(started))
+    except ValueError:
+        moment = _utc_now()
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(_KST).date().isoformat()
 
 
 def _record_object_name(record: dict[str, Any]) -> str:
@@ -270,8 +288,11 @@ class MetricsR2Sink:
     """레코드를 R2 에 per-record JSON 으로 적재 — #77 errors sink(R2ErrorSink)와 동형 패턴.
 
     - 버킷/자격은 errors sink 와 같은 env 규약: R2_ENDPOINT/R2_ACCESS_KEY_ID/
-      R2_SECRET_ACCESS_KEY/R2_BUCKET_NAME, dev 타깃이면 R2_DEV_* 우선(버킷 분리 —
-      dev=seoul-dev, prod=seoul 기존 버킷 재사용).
+      R2_SECRET_ACCESS_KEY/R2_BUCKET_NAME — **canonical 한 세트뿐이다.**
+      키 이름으로 환경을 고르는 분기(`R2_DEV_*` 우선)는 `0739845`(#647)에서 삭제됐다:
+      호스트가 ENV2 개편에서 그 키를 없앴고, 분기를 남겨 두면 누가 `R2_DEV_*` 를 채우는
+      순간 같은 날짜 기록이 두 버킷으로 갈리기 때문이다(ASK-Seoul#78 `Z-7`).
+      **되살리지 말 것** — 환경을 바꾸려면 키 이름이 아니라 값을 바꾼다.
     - 오브젝트 키: ops/metrics/<domain>/observed_date=YYYY-MM-DD/<이름>.json (#60/#573)
       (이름 규약은 _record_object_name — bronze 는 dag/task/run/try, silver 는 모델/invocation).
     - put_object 주입은 테스트용(가짜 클라이언트) — 미지정 시 boto3 지연 임포트.
