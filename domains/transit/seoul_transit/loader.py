@@ -17,13 +17,21 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Iterator
+from datetime import datetime, timezone
+from typing import Iterable, Iterator
 
 from . import config
 from .records import envelope
 
 _HEADER_CD = re.compile(r"<headerCd>(\d+)</headerCd>")
 _SAFE_RUN_ID = re.compile(r"[^A-Za-z0-9_.-]")
+# raw 경로의 /ingest_ts=…/ 세그먼트와 pending 마커 파일명의 <ingest_ts>__ 프리픽스 공용.
+# maintenance(만료 스윕)와 loader(백로그 나이)가 **같은 식**을 재도록 여기 한 곳에만 둔다 —
+# 갈리면 "만료로 지워지는 경계"와 "낡았다고 경보하는 경계"가 조용히 어긋난다(#719 리뷰).
+INGEST_TS_RE = re.compile(r"(?:/ingest_ts=|/)(\d{8}T\d{6}Z)(?:/|__)")
+# ingest_ts 를 못 읽는 마커의 **정렬** 기준 — 맨 앞(먼저 드레인)으로 보낸다.
+# 나이 측정에는 쓰지 않는다(oldest_pending 참조).
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 # envelope 형 테이블(지하철·주차) 공통 컬럼 — 기존 bronze 스키마와 동일해야 한다.
 ENVELOPE_COLUMNS = ("source", "ts_source", "ts_collected", "lat", "lon", "raw")
@@ -84,9 +92,71 @@ def sql_str(value) -> str:
 
 # ── pending 마커 ─────────────────────────────────────────────────────────────────
 def pending_key(dataset: str, ingest_ts: str, run_id: str) -> str:
-    """마커 키 — ingest_ts 프리픽스라 사전순 나열 = 시간순 처리."""
+    """마커 키 — **같은 dataset 안에서만** 사전순 = 시간순.
+
+    키가 `<prefix><dataset>/<ingest_ts>__<run>.json` 이라 dataset 세그먼트가 앞에 온다.
+    dataset 을 가로지르는 시간순은 사전순으로 얻어지지 않는다 — 나열 결과를 처리
+    순서로 쓰려면 반드시 :func:`sort_markers` 를 거칠 것(#719).
+    """
     safe = _SAFE_RUN_ID.sub("_", run_id)
     return f"{config.LOADER_PENDING_PREFIX}{dataset}/{ingest_ts}__{safe}.json"
+
+
+def marker_ingest_ts(marker_key: str) -> datetime | None:
+    """마커 키 → 수집(랜딩) 시각(UTC). 형식이 다르면 None.
+
+    추출식은 maintenance 만료 스윕과 공유(:data:`INGEST_TS_RE`). 마커 본문을 받지 않고
+    키만으로 판정한다 — 백로그 나이는 본문 다운로드 없이 나와야 한다(나열만으로 수천
+    건을 재는 경로).
+    """
+    match = INGEST_TS_RE.search(marker_key)
+    if not match:
+        return None
+    return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+
+
+def oldest_pending(marker_keys: Iterable[str]) -> tuple[datetime | None, str | None, int]:
+    """파싱 가능한 마커 중 최고령 → (시각, 키, 파싱 불가 건수).
+
+    **처리 순서(:func:`sort_markers`)와 분리한다.** sort_markers 는 ingest_ts 를 못 읽는
+    키를 굶기지 않으려고 맨 앞에 두는데, 그 첫 키를 그대로 '최고령'으로 삼으면 파싱 불가
+    키 **하나**가 나이 신호를 통째로 지운다 — 그리고 그런 키는 실패해도 보존되고
+    (마커 격리, #369) maintenance 만료 스윕도 건너뛰므로(ingest_ts 없는 키는 안 건드림)
+    영구히 남을 수 있다. #719 가 없애려는 침묵이 정확히 그 형태라, 정렬 규칙과 측정
+    규칙을 같은 것으로 두지 않는다.
+
+    파싱 불가 건수를 함께 돌려준다 — 0 이 아니면 나이 신호가 그만큼 불완전하다는 뜻이라
+    로그에 드러나야 한다.
+    """
+    oldest_at: datetime | None = None
+    oldest_key: str | None = None
+    unparsable = 0
+    for key in marker_keys:
+        at = marker_ingest_ts(key)
+        if at is None:
+            unparsable += 1
+            continue
+        if oldest_at is None or at < oldest_at:
+            oldest_at, oldest_key = at, key
+    return oldest_at, oldest_key, unparsable
+
+
+def sort_markers(marker_keys: Iterable[str]) -> list[str]:
+    """마커 키를 **dataset 무관 전역 시간순**으로 정렬한다(#719).
+
+    #369 는 docstring·주석 양쪽에 "마커를 시간순으로 처리한다"고 적었지만, 구현은
+    나열의 사전순을 그대로 썼다. 키가 `<dataset>/<ingest_ts>__…` 라 사전순은 실제로는
+    **dataset 이름순**이고, 그 안에서만 시간순이다. 그래서 한 런이 `bus_position` 전량 →
+    `parking` 전량 → `subway_arrival` 전량 순으로 처리됐다(2026-08-06 prod 실측: 19·53·90건).
+    트레이드오프는 있다: dataset 단위 처리에서는 드레인 도중 **일부** dataset 이 이미
+    최신이 되지만, 시간순에서는 도중에 완전히 따라잡은 dataset 이 없는 대신 어느 것도
+    유독 뒤로 밀리지 않는다. 서빙 export 는 자기 cron(:10/:25/:40/:55)으로 드레인
+    도중의 bronze 를 읽으므로, 최악 관측 나이를 낮추는 후자를 택한다(ASK-Seoul#719).
+
+    ingest_ts 를 못 읽는 키(구형식·수기 생성)는 맨 앞에 둔다 — 뒤로 밀어 굶기지 않고
+    먼저 드레인한다. 동일 시각은 키 사전순으로 안정 정렬(런 간 순서 재현성).
+    """
+    return sorted(marker_keys, key=lambda k: (marker_ingest_ts(k) or _EPOCH, k))
 
 
 def make_marker(*, dataset: str, source: str, manifest_key: str,

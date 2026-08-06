@@ -3,7 +3,8 @@
 collector/loader 분리의 핵심 계약:
 - R2 원본 재파싱 결과가 기존 collector 인라인 적재와 동일한 행을 만든다.
 - INSERT 청크가 문자 캡을 지킨다(Trino QUERY_TEXT_TOO_LARGE 회피).
-- pending 마커 키가 사전순 = 시간순이다.
+- pending 마커 키가 **같은 dataset 안에서** 사전순 = 시간순이고, dataset 을 가로지르는
+  처리 순서는 sort_markers 가 세운다(#719).
 """
 import json
 import sys
@@ -50,6 +51,44 @@ def test_pending_key_sorts_chronologically_and_sanitizes():
     late = loader.pending_key("parking", "20260715T120000Z", "scheduled__2026-07-15T12:00:00+00:00")
     assert early < late
     assert "+" not in early and ":" not in early.rsplit("/", 1)[1]
+
+
+def test_sort_markers_orders_across_datasets_by_time():
+    """#719 회귀 — 나열의 사전순은 dataset 이름순이라 시간순이 아니다.
+
+    2026-08-06 prod: 한 런이 bus_position 19건 전량 → parking 53건 전량 →
+    subway_arrival 90건 순으로 처리됐다. 키의 `<dataset>/` 세그먼트가 ingest_ts 보다
+    앞서기 때문. 정렬을 거치면 실제 수집 시각 순으로 섞여야 한다.
+    """
+    keys = [
+        loader.pending_key("subway_arrival", "20260806T100000Z", "r1"),   # 가장 오래됨
+        loader.pending_key("parking", "20260806T110000Z", "r2"),
+        loader.pending_key("bus_position", "20260806T120000Z", "r3"),     # 가장 최신
+    ]
+    # 사전순(= 기존 동작)은 dataset 이름순 — 가장 최신인 버스가 맨 앞으로 온다.
+    assert [k.split("/")[-2] for k in sorted(keys)] == [
+        "bus_position", "parking", "subway_arrival"]
+    # 정렬을 거치면 수집 시각 순.
+    assert [k.split("/")[-2] for k in loader.sort_markers(keys)] == [
+        "subway_arrival", "parking", "bus_position"]
+
+
+def test_sort_markers_puts_unparsable_first_and_is_stable():
+    """ingest_ts 를 못 읽는 키는 굶기지 않고 먼저 드레인한다. 동시각은 키 사전순."""
+    odd = config.LOADER_PENDING_PREFIX + "parking/legacy-marker.json"
+    same_a = loader.pending_key("parking", "20260806T110000Z", "a")
+    same_b = loader.pending_key("subway_arrival", "20260806T110000Z", "b")
+    ordered = loader.sort_markers([same_b, same_a, odd])
+    assert ordered[0] == odd
+    assert ordered[1:] == sorted([same_a, same_b])
+
+
+def test_marker_ingest_ts_parses_and_rejects():
+    at = loader.marker_ingest_ts(loader.pending_key("parking", "20260806T114501Z", "r"))
+    assert at is not None
+    assert (at.year, at.month, at.day, at.hour, at.minute) == (2026, 8, 6, 11, 45)
+    assert at.tzinfo is not None                       # 나이 계산이 naive 비교로 깨지지 않게
+    assert loader.marker_ingest_ts("prefix/parking/not-a-stamp__r.json") is None
 
 
 def test_pending_prefix_comes_from_the_ops_gate():
