@@ -72,7 +72,10 @@ def export(monkeypatch):
     monkeypatch.setattr(
         se,
         "_load_public_evidence_contract",
-        lambda: types.SimpleNamespace(model_name="gold_license_flow_monthly"),
+        # 증거 게시 확장(#434) 이후 공개 경로가 product_id/source_evidence 도 읽는다.
+        lambda: types.SimpleNamespace(model_name="gold_license_flow_monthly",
+                                      product_id="commerce_flow_monthly",
+                                      source_evidence=None),
     )
     monkeypatch.setattr(se, "_public_quality_evidence", lambda *a, **k: {})
     monkeypatch.setattr(se, "_measure_source_relation_coverage", lambda *a, **k: (147, {"status": "passed"}))

@@ -90,6 +90,8 @@ def _run(monkeypatch, fake, *, rows=_ROWS, col_defs=_COLS):
     monkeypatch.setattr(se, "_insert_rows", fake.insert)
     monkeypatch.setattr(se, "_report", lambda *a, **k: None)
     monkeypatch.setattr(se, "_write_serve_state", lambda *a, **k: None)
+    # 증거 게시 확장(#434) — 일반 제품도 증거를 게시하므로 D1 클라이언트를 가로챈다.
+    monkeypatch.setattr(se, "_publish_public_evidence", lambda *a, **k: None)
     monkeypatch.setattr(wh, "_qualified", lambda: ("cat", "sch", "cat.sch"))
     monkeypatch.setattr(wh, "_connect", lambda c, s: _FakeConn(_FakeCursor(col_defs, rows)))
     return se.export_to_d1()

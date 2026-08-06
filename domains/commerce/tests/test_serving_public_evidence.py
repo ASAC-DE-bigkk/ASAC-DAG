@@ -126,8 +126,10 @@ def test_flow_monthly_publishes_public_evidence_with_active_publication(monkeypa
     assert len(evidence_calls) == 1
     token, evidence_rows = evidence_calls[0]
     assert token == "test-token"
-    evidence_contract, publication_id, quality = evidence_rows[0]
-    assert evidence_contract is contract
+    # 증거 게시 확장(#434) — 행 모양은 (product_id, publication_id, sources, quality)로 통일됐다.
+    product_id, publication_id, sources, quality = evidence_rows[0]
+    assert product_id == contract.product_id
+    assert sources is contract.source_evidence
     assert publication_id == state["d1_flow_monthly"][3]
     assert quality["source_row_count"] == quality["d1_row_count"] == 2
     assert quality["duplicate_primary_key_count"] == quality["null_primary_key_count"] == 0
