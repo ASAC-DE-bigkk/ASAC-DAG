@@ -140,8 +140,10 @@ def _product_meta_rows(
     contract: ServingContract,
     columns: Sequence[Column],
     record: ProductRecord,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """핸드오프 메타 3종(#638 §2.2) 행 — 계약 선언(dbt yml→manifest)에서 그대로 나온다.
+) -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
+]:
+    """핸드오프 메타 4종(#638 §2.2 · display 는 v1.10 #706) 행 — 계약 선언(dbt yml→manifest)에서 그대로 나온다.
 
     타입은 D1 실물과 같은 SQLite 타입으로 싣고(commerce 관행 동형), 컬럼 설명이 없는
     도메인은 description_ko=NULL 로 컬럼 행 자체는 게시한다(이름·타입·게시본 대조는 유효).
@@ -172,6 +174,22 @@ def _product_meta_rows(
             "publication_id": record.publication_id,
         }
     ]
+    # v1.10 (#706): 미선언 제품은 **행을 만들지 않는다** — 빈 문자열로 채우면 화면이
+    # "설명이 있는 척"하게 된다(카탈로그 컬럼 설명에서 같은 판단을 이미 했다).
+    display = contract.display if isinstance(contract.display, dict) else None
+    display_rows = [
+        {
+            "product_id": contract.product_id,
+            "title": display.get("title"),
+            "summary": display.get("summary"),
+            "caveat": display.get("caveat"),
+            "use_cases": (
+                json.dumps(list(display["use_cases"]), ensure_ascii=False)
+                if isinstance(display.get("use_cases"), list) else None
+            ),
+            "publication_id": record.publication_id,
+        }
+    ] if display else []
     pattern_rows = [
         {
             "product_id": contract.product_id,
@@ -192,7 +210,7 @@ def _product_meta_rows(
         # 한 모델→다제품 선언(commerce geo_grid 관행)과의 동형성: d1_table 명시 시 해당 제품만.
         and pattern.get("d1_table", contract.model_name) == contract.model_name
     ]
-    return columns_rows, ext_rows, pattern_rows
+    return columns_rows, ext_rows, pattern_rows, display_rows
 
 
 def _product_evidence(
@@ -627,9 +645,11 @@ def publish(
             # 핸드오프 메타(#638) — 같은 try 안이라 실패 시 스냅샷·_catalog 가 함께 복원된다.
             # 메타 행 자체는 보상하지 않는다(#638 §3 — 제품 단위 신·구 혼재 허용, 타 제품 무영향).
             record.stage = "product_meta"
-            columns_rows, ext_rows, pattern_rows = _product_meta_rows(contract, plan.columns, record)
+            columns_rows, ext_rows, pattern_rows, display_rows = _product_meta_rows(
+                contract, plan.columns, record)
             d1.publish_product_meta(
-                contract.product_id, record.publication_id, columns_rows, ext_rows, pattern_rows
+                contract.product_id, record.publication_id, columns_rows, ext_rows, pattern_rows,
+                display_rows,
             )
             # 권리/품질 증거(#678)는 이번 publication_id에 결속한다. 여기서 실패하면
             # catalog와 스냅샷을 복원하고, Worker는 publication 불일치/누락으로 계속 차단한다.
