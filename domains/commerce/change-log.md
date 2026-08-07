@@ -34,6 +34,13 @@ response:
 - 검증 방식의 결함 3건을 실측으로 잡고 고쳤다: ①이름 추정 짝 오류(emission_repair 교차 —
   값 검증이 적발) ②빈값끼리 일치 부풀림("78.9% 일치"의 실체가 빈값 116건) ③observed_date
   시대 컷 오분류(전환 증분 관측일=전날).
+- 실패 실버 run 들의 사이드 이펙트 전수 점검(사용자 요청): 실질 지뢰는 **실버 DONE 마커
+  17건 잔재** 하나 — `load_details` 는 죽었지만 그 앞 `mark_silver_done` 이 성공해, 마커
+  기반 증분(`silver_unmarked_publishable_predicate`)이 보정 run 전부를 건너뛰고 초록으로
+  끝날 상태였다(초록 위장). `clear_stale_silver_markers_v2_switch.py`(dry-run 기본)로 백업
+  후 삭제 + `sync_state_files()` 로 R2 스냅샷 동기화(스냅샷이 낡으면 복원 시 DONE 부활).
+  카탈로그의 v2형 payload 12건은 다음 run 의 `build_detail_catalog` 재계산으로 자가 치유
+  확인, 실버 본체·detail 테이블 오염 0 실측(잔재 마커가 역설적으로 반보정 유입도 막았다).
 
 decision:
 - **물리 테이블에 v2 컬럼 추가(ALTER)안**은 재차 기각 — 같은 의미가 두 컬럼으로 갈라져
