@@ -194,13 +194,13 @@ def resolve_params(sql_text: str, hint_text: str = "") -> tuple[str, dict[str, s
 # (범위형 '37.54 ~ 37.57', 두 값 나열 ':gu_a, :gu_b', 산술식 ':lat - 0.005', '||' 연접의 '%',
 #  영문 코드 컬럼(축산=livestock·식품=food — D1 실측 대조)). 추측값 없음.
 _PARAM_OVERRIDES: dict[str, dict[str, str]] = {
-    "d1_geo_grid_detail/bbox-heatmap-slice": {
+    "d1_geo_grid_detail/bbox_heatmap_slice": {
         "min_lat": "37.54", "max_lat": "37.57", "min_lng": "126.91", "max_lng": "126.94",
         "category": "'food'", "min_cnt": "10",
     },
-    "d1_dong_category_matrix/gu-category-cross": {"gu_a": "'강남구'", "gu_b": "'마포구'"},
-    "d1_dong_category_matrix/gu-category-concentration": {"category_ko": "'숙박'"},
-    "d1_geo_grid_detail/point-area-category-mix": {"lat": "37.4979", "lng": "127.0276"},
+    "d1_dong_category_matrix/gu_category_cross": {"gu_a": "'강남구'", "gu_b": "'마포구'"},
+    "d1_dong_category_matrix/gu_category_concentration": {"category_ko": "'숙박'"},
+    "d1_geo_grid_detail/point_area_category_mix": {"lat": "37.4979", "lng": "127.0276"},
     "d1_gu_specialization/category_top_gus": {"category": "'livestock'"},
     "d1_gu_specialization/category_volume_gus": {"category": "'food'"},
     "d1_multi_site/keyword_slice": {"q": "'약국'"},
@@ -208,7 +208,7 @@ _PARAM_OVERRIDES: dict[str, dict[str, str]] = {
 
 
 # ── 실행·기록 ────────────────────────────────────────────────────────────────
-def run(yml_path: Path, *, execute: bool, apply: bool) -> dict:
+def run(yml_path: Path, *, execute: bool, apply: bool, only: str | None = None) -> dict:
     import os
 
     from gold import serving_export as se
@@ -216,6 +216,8 @@ def run(yml_path: Path, *, execute: bool, apply: bool) -> dict:
     text = yml_path.read_text(encoding="utf-8")
     lines = text.split("\n")
     patterns = parse_patterns(lines)
+    if only:   # 부분 재검증(#179) — key(d1_table/pattern_id) 부분 일치만 실행, 나머지는 무접촉
+        patterns = [p for p in patterns if only in p.key]
     bad = [p.key for p in patterns if p.verified_rows_line < 0 or not p.d1_table or not p.sql_lines]
     if bad:
         raise SystemExit(f"파싱 실패(수동 확인 필요): {bad[:5]} … {len(bad)}건")
@@ -297,6 +299,8 @@ def main() -> int:
     parser.add_argument("--env-file", default=None, help="로컬 실행용 root .env(값 미출력, setdefault)")
     parser.add_argument("--execute", action="store_true", help="D1 실행 + 보고(yml 미기록)")
     parser.add_argument("--apply", action="store_true", help="D1 실행 + yml 에 verified_* 기록")
+    parser.add_argument("--only", default=None,
+                        help="key(d1_table/pattern_id) 부분 일치 필터 — 바뀐 패턴만 재검증할 때")
     args = parser.parse_args()
 
     _bootstrap(args.env_file)
@@ -305,7 +309,7 @@ def main() -> int:
     yml_path = Path(args.yml) if args.yml else (
         Path(os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce"))
         / "models" / "gold" / "_commerce_gold__models.yml")
-    report = run(yml_path, execute=args.execute or args.apply, apply=args.apply)
+    report = run(yml_path, execute=args.execute or args.apply, apply=args.apply, only=args.only)
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     ok = not report["failed"] and not report["skipped"]
     return 0 if ok else 1
