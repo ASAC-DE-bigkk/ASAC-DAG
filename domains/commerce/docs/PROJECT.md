@@ -94,7 +94,7 @@ minor = short               (API)
 | 단계 | 단위 | 완료 제외 | 실패 이어받기 | 중단 → 미완성 drop |
 |---|---|---|---|---|
 | **raw** | (dataset, run) | 당일 `completed` 마커 제외 | `recollect`(incomplete 재수집) | 재수집이 파일 덮어씀 + `cleanup_incomplete` |
-| **bronze** | (dataset, run) | 워터마크 이후만 | `commit_watermark`(실패 run 직전까지만 전진) | PyIceberg **delete+append 원자 트랜잭션**(재적재 시 delete 선행) |
+| **bronze** | (dataset, run) | 워터마크 이후만 | `commit_watermark`(실패 run 직전까지만 전진) | PyIceberg는 **delete+append 원자 트랜잭션**. Trino는 배치별 자동 커밋이므로 중단 시 해당 `(dataset, bronze_run_id)`를 명시 삭제한 뒤 재적재 |
 | **silver** | (dataset, bronze_run_id) | **DONE 마커**(dbt test 통과분) | 미마커 run 재처리 | `delete_unmarked_silver_history_runs`(미완성 이력 삭제 후 재append). current/detail 은 grain 단위 incremental(원자) |
 | **gold** | (Iceberg·dbt) grain/워터마크 | incremental 워터마크(collected_at) 이후만 | 미반영 창 재처리 | dbt incremental(delete+insert/append) · full-refresh(§4) |
 | **유지보수(#226)** | (테이블, op) | 멱등 → 성공 재실행 무해 | 실패 op 만 재실행 | 각 op 원자·멱등 |
@@ -103,6 +103,19 @@ minor = short               (API)
   않는다. current/detail 은 '최신 포인터'만 grain 단위로 교체(#81).
 - **신규 개발 규약**(gold 포함): (1) 처리 단위를 명확히 정하고, (2) 완료 마커/워터마크로 완료분 skip,
   (3) 중단 시 미완성분을 식별해 **drop 후 재실행**(원자 트랜잭션 또는 delete-then-write). 단위는 적당히 큼.
+
+### 3.1 LOCALDATA 컬럼 표준 전환 시 Raw 정본화
+
+- registry의 `format`은 **실제 응답 형식**, `canonical_format`은 Raw 영구 증분과 diff-target의
+  **비교·저장 형식**이다. 둘이 다를 때는 정렬·해시·diff보다 먼저 선언된 1:1 키 매핑을 적용한다.
+- `mail_order_sale`의 v2 25개 필드는 v1 25개 필드로 **키만 바꾸고 값은 바꾸지 않는다**. 원본 형식과
+  매핑 버전을 completed 마커에 남겨 역변환 가능하게 한다. 미지정 필드·누락·v1/v2 충돌은 조용히
+  흡수하지 않고 실패시켜 원천 스키마 변경을 드러낸다.
+- 이 데이터셋은 `UPDATEDT`/`LASTMODTS` 갱신만 믿고 첫 일치에서 비교를 끝내지 않는다. 매 수집의
+  정렬본 전체를 직전 정본과 비교하되, 영구 save와 이후 Bronze에는 **실제 신규·변경 행만** 전달한다.
+  즉 전체 API 조회·외부 정렬 비용은 남지만, 컬럼명 변경만으로 기적재 행을 다시 쓰지는 않는다.
+- Raw 정본화는 값 보존 + 1:1 키 치환이라 가역적이어야 한다. 이 규칙을 만족하지 못하는 스키마 변경은
+  별도 버전/마이그레이션으로 처리하며, 임의로 필드를 버리거나 합치지 않는다.
 
 ---
 
@@ -243,6 +256,10 @@ silver/gold 변환·DB 명세는 **dbt 번들**(별도 서브모듈 ASAC-DBT —
 ---
 
 ## 7. 변경 이력
+
+- 2026-08-07: `mail_order_sale` v2 응답을 v1 정본 키로 가역 변환한 뒤 전체 비교해 실제 변경분만
+  저장하도록 확정. Trino Bronze 중단분은 자동 원복으로 간주하지 않고 `(dataset, bronze_run_id)`
+  단위 명시 삭제 후 재실행한다(운영 스키마 전환 오탐 재발 방지).
 
 - 2026-07-31: **0종 실행도 완료 알림 발송(§2)** — 사용자 지시("수집 건수가 0건이더라도 실행 완료가
   되면 알림"). 근거: `commerce_collect_raw` 가 동일자 완료분 제외로 대상 0종이 되면 `finalize_run`

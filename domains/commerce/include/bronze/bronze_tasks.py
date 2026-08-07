@@ -10,7 +10,7 @@
   - incomplete : 건수 불일치/부분(cap)/오류(status=partial|failed) → 미완료(다음 실행 재수집)
   (없음=이번 실행 미시도. '완료'와 '미완료'를 동시에 두면 중복·불일치 위험이라 1개만 둔다.)
 
-CLAUDE.md 준수: §2.1 리니지(마커 JSON) · §2.2 원본 보존(NDJSON 줄=원본 응답) · §2.5 인증키 비노출.
+CLAUDE.md 준수: §2.1 리니지(마커 JSON) · §2.2 값/출처 보존(선언 시 가역 키 정본화) · §2.5 인증키 비노출.
 serving DB·외부 매니페스트 없음 — 수집 상태는 마커 존(run 미러)의 마커가 전부.
 """
 from __future__ import annotations
@@ -27,7 +27,10 @@ from bronze.validators import assess_completeness
 from commerce_core import paths
 from commerce_core.hashing import sha256_hex
 from commerce_core.notify import notify_schema_drift
-from commerce_core.schemas import DOMAIN, SOURCE_SYSTEM, Dataset, detect_row_format
+from commerce_core.schemas import (
+    CANONICAL_MAPPING_VERSION, DOMAIN, SOURCE_SYSTEM, Dataset,
+    canonicalize_dataset_row, detect_row_format,
+)
 from commerce_core.settings import get_settings
 from commerce_core.storage import Storage, get_storage
 from security import redact   # 마커(error)·요약에 저장되는 메시지의 시크릿 마스킹(이중 방어)
@@ -55,7 +58,9 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
         def _rows():
             for p in raw_pages:
                 for row in parse_page(p, dataset.service_name).rows:
-                    yield row
+                    # 키 표준 전환은 정렬·normalize·검증키보다 먼저 적용해야 컬럼명만 바뀐 기존 행을
+                    # 신규로 오인하지 않는다. 값은 변경하지 않고, 불완전한 매핑은 예외로 중단한다.
+                    yield canonicalize_dataset_row(dataset, row)
         collect_date = paths.run_collect_date(bronze_run_id) or base["observed_date"]
         prev_target, prev_keyfile = incremental.find_diff_target(
             storage, dir_prefix=paths.diff_target_prefix(prefix=prefix, short=short))
@@ -71,7 +76,10 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
                     prefix=prefix, short=short, collect_date=collect_date),
                 target_key_file=paths.bronze_diff_target_keyfile(
                     prefix=prefix, short=short, collect_date=collect_date),
-                prev_target_key=prev_target, prev_target_keyfile=prev_keyfile)
+                prev_target_key=prev_target, prev_target_keyfile=prev_keyfile,
+                # 정본 변환 데이터셋은 소스가 timestamp 갱신을 보장한다는 공식 계약이 없으므로
+                # 첫 일치에서 끊지 않고 전체 정렬본을 비교해 실제 변경분 누락을 막는다.
+                stop_on_aligned_match=(dataset.canonical_fmt or dataset.fmt) == dataset.fmt)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         object_key = incr.get("increment_key")   # 증분 파일 키(동일=None: 마커만)
@@ -89,6 +97,11 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
         "observed_date": base["observed_date"], "collected_at": _utcnow_iso(),
         "started_at": started_at, "run_id": base["run_id"], "bronze_run_id": bronze_run_id,
         "schema_version": schema_version,
+        "source_format": dataset.fmt,
+        "canonical_format": dataset.canonical_fmt or dataset.fmt,
+        "canonical_mapping_version": (
+            CANONICAL_MAPPING_VERSION
+            if (dataset.canonical_fmt or dataset.fmt) != dataset.fmt else None),
         "pages_written": len(raw_pages), "rows_total": rows_total,
         "list_total_count": list_total_count, "complete": complete,
         "bronze_key": object_key, "pages": page_metas,

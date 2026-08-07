@@ -32,12 +32,16 @@
   — MGTNO 는 발급 자치단체 안에서만 유니크라 **단독 사용 시 다른 구청의 별개 업소가 같은 키로
   충돌**(중복/이력 매핑 오류)하므로 OPNSFTEAMCODE 를 포함한다. → silver 그레인 (dataset,
   opnsfteamcode, mgtno)·정렬 `coalesce(updatedt_ts, lastmodts_ts, epoch) desc, lastmodts desc` 와 일치.
-- **v1/v2 정본 해석(#65)**: 정렬·식별키는 원본 row 에서 뽑되 `schemas.canonical_get` 으로 **v1 정본 키가
+- **v1/v2 정본 해석(#65)**: 기본 데이터셋의 정렬·식별키는 원본 row 에서 뽑되 `schemas.canonical_get` 으로 **v1 정본 키가
   없으면 v2 별칭**(`DATA_UPDT_YMD`·`LAST_MDFCN_YMD`·`OGDP_INST_CD`·`MNG_NO`)을 해석한다. 안 하면
   v2(환경 13종)는 v1 키가 전무해 sort_key 가 **전부 `(0,0,'','')` 로 붕괴** → 정렬이 페이지네이션(무순서)
   으로 무너지고, 같은 데이터도 매 수집이 위치 어긋남으로 **전량 신규(오탐)** 방출(수질오염·대기배출
-  매일 수천 건 오탐의 원인이었다). **내용 동일성 판정·저장(normalize/검증키)은 원본 그대로**(§2.2) —
-  키 해석만 정본화한다.
+  매일 수천 건 오탐의 원인이었다).
+- **통신판매업 스키마 전환(2026-08-04)**: registry에 `format: v2`, `canonical_format: v1`을 선언한다.
+  API에서 받은 v2 25개 키를 검증된 v1 25개 키로 **값 변경 없이 1:1 치환한 다음** 정렬·normalize·
+  검증키·diff를 수행한다. source/canonical 형식과 매핑 버전은 completed 마커에 남는다. 필드 누락·추가·
+  혼합은 실패시켜 미확인 스키마를 조용히 저장하지 않는다. 이 데이터셋은 timestamp 갱신 보장을 전제로
+  한 조기 중단을 끄고 전체 정렬본을 비교하므로, 기적재 행은 다시 저장하지 않고 실제 변경 행만 save한다.
 - **전량 RAM 금지** → `external_merge_sort`: 청크를 임시파일로 쓰고 `heapq.merge` 로 병합(스트리밍·바운디드 RAM).
   비교정렬 하한 O(n log n). (정수키라 이론상 radix O(n) 가능하나, 외부 정렬 견고성/단순성으로 병합 채택.)
 
@@ -47,14 +51,16 @@
   오늘 키 == diff-target 키 → **동일**(증분 없음, 마커만 — 단 diff 파일명 날짜는 오늘로 롤링).
 - **diff**(`diff_new_rows`) = 오늘·전날 둘 다 같은 키로 정렬 → **스트리밍 병합**으로 신규/변경 row만 방출.
   같은 정렬키 위치는 정규화 문자열 **직접 비교**(hot loop 에 해시 안 씀).
-- **비교 조기 중단**(`stop_on_aligned_match`): UPDATEDT/LASTMODTS desc 정렬이라 신규/변경 row 는 항상
+- **비교 조기 중단**(`stop_on_aligned_match`): 기본값은 UPDATEDT/LASTMODTS desc 정렬이라 신규/변경 row 는 항상
   위쪽에 온다 → 정렬 프런티어에서 **같은 정보(키+내용)가 처음 일치하는 순간 비교를 중단**(이하 동일 간주).
   전제: 내용이 바뀌면 UPDATEDT **또는 LASTMODTS** 가 갱신된다. 둘 다 그대로면서 내용만 바뀌는
-  이상치는 이 모드에서 감지되지 않음 — 파일 단위 동일/상이는 검증키가 판정.
+  이상치는 이 모드에서 감지되지 않음 — 파일 단위 동일/상이는 검증키가 판정. `mail_order_sale`은 이
+  소스 보장이 공식 계약으로 확인되지 않았으므로 `False`로 실행해 끝까지 비교한다.
 
 ## 4. 수집 흐름 (bronze_tasks)
 
-- **수집 완료(status==ok)일 때만** 처리: 수집 페이지 → row 파싱 → `incremental_store`
+- **수집 완료(status==ok)일 때만** 처리: 수집 페이지 → row 파싱 → registry 선언에 따른 가역 키 정본화
+  → `incremental_store`
   (landing 저장 → 이전 diff 발견/다운로드 → 비교(조기 중단) → 증분 업로드 → diff 이동+키 사이드카).
 - **중간 중단(status!=ok)은 증분/이동을 수행하지 않는다** — 구 날짜 diff 가 그대로 남아
   파일명 날짜로 "그 API 는 오늘 완료 안 됨"이 식별된다. 마커에
