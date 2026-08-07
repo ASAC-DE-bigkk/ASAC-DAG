@@ -44,7 +44,7 @@ def test_missing_description_is_reported_with_column_names(spec, monkeypatch):
     meta = {"columns": {"major": "대분류", "uptaenm": "세부 업태", "active_cnt": "영업 중 업소 수"},
             "serving": {}}                       # share 미선언 → 비어서 나감
 
-    rows, _ext, _pat = se._handoff_rows(spec, meta, COLS, "pub-1")
+    rows, _ext, _pat, _disp = se._handoff_rows(spec, meta, COLS, "pub-1")
 
     assert [r["column_name"] for r in rows if not r["description_ko"]] == ["share"]
     assert len(seen) == 1
@@ -63,7 +63,7 @@ def test_derived_column_declaration_fills_the_gap(spec, monkeypatch):
     meta = {"columns": {"major": "대분류", "uptaenm": "세부 업태", "active_cnt": "영업 중 업소 수"},
             "serving": {"d1_derived_columns": {"share": "같은 dataset 안 구성비(0~1)"}}}
 
-    rows, _ext, _pat = se._handoff_rows(spec, meta, COLS, "pub-1")
+    rows, _ext, _pat, _disp = se._handoff_rows(spec, meta, COLS, "pub-1")
 
     assert {r["column_name"]: r["description_ko"] for r in rows}["share"] == (
         "같은 dataset 안 구성비(0~1)")
@@ -73,7 +73,7 @@ def test_derived_column_declaration_fills_the_gap(spec, monkeypatch):
 def test_publication_is_not_blocked_by_a_missing_description(spec, monkeypatch):
     """설명 하나 때문에 게시를 막으면 직전본이 그대로 남는다 — 그게 더 나쁘다."""
     _events(monkeypatch)
-    rows, ext, _pat = se._handoff_rows(spec, {"columns": {}, "serving": {}}, COLS, "pub-1")
+    rows, ext, _pat, _disp = se._handoff_rows(spec, {"columns": {}, "serving": {}}, COLS, "pub-1")
 
     assert len(rows) == len(COLS)                 # 행은 그대로 만들어진다
     assert all(r["publication_id"] == "pub-1" for r in rows)
@@ -86,5 +86,5 @@ def test_dbt_columns_win_nothing_when_derived_overrides(spec, monkeypatch):
     meta = {"columns": {"share": "gold 쪽 설명"},
             "serving": {"d1_derived_columns": {"share": "롤업 기준 구성비"}}}
 
-    rows, _ext, _pat = se._handoff_rows(spec, meta, [("share", "double")], "pub-1")
+    rows, _ext, _pat, _disp = se._handoff_rows(spec, meta, [("share", "double")], "pub-1")
     assert rows[0]["description_ko"] == "롤업 기준 구성비"

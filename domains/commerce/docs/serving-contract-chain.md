@@ -17,14 +17,24 @@
 | **#478 v1 필수** | `enabled` · `product_id` · `contract_version` · `grain` · `primary_key` · `publication_mode` · `zero_policy` | **22/22** |
 | **#478 v1.1** | `publication_trigger` 22 · `event_time` 3 · `freshness_slo_minutes` 3 | 조건부 필수 충족 |
 | **#478 선택** | `product_question` 22 · `shape` 22 · `partial_policy` 21 | — |
+| **계약 v1.10** | `display`(title·summary + 선택 caveat·use_cases) | **22/22** (2026-08-07, #706) |
 | **외부 공개** | `external` | 22/22 |
-| **commerce 확장** | `serving_tier` · `d1_table` · `usage_patterns` · `source_evidence` · `quality_coverage` · `public_projection` · `public_primary_key` | — |
+| **commerce 확장** | `serving_tier` · `d1_table` · `d1_display` · `usage_patterns` · `source_evidence` · `quality_coverage` · `public_projection` · `public_primary_key` | — |
 
 실제 값: `publication_mode: snapshot` 22/22(#478 enum `snapshot|upsert|append` 안),
 `zero_policy: retain_last_good` 22/22.
 
 **확장은 같은 블록 안에 얹는다 — 별도 네임스페이스(`meta.commerce_serving` 등)를 만들지 않는다.**
 #478 이 금지한 것은 *다른 이름의 규약을 병행 선언하는 것*(이중 선언)이지 확장 자체가 아니다.
+
+### commerce 확장 `d1_display` — 한 모델이 여러 D1 제품을 낳을 때
+
+`gold_license_geo_grid` 하나가 `d1_geo_grid_overview`·`d1_geo_grid_detail` 두 제품이 된다.
+계약 필드 `display` 는 모델당 하나뿐이라 그대로 두면 **두 제품이 같은 제목으로 화면에 나란히
+선다.** 그래서 `usage_patterns[].d1_table` 라우팅과 같은 방식으로 d1_table 별 덮어쓰기를 둔다.
+
+덮어쓰기를 `display` **안**에 못 넣는 이유: 계약 validator 가 display 하위 키를 스펙 밖이면
+오타로 잡는다(`display_unknown_field`). 그래서 형제 키다. 1:1 제품은 이 키가 없다.
 
 ### commerce 확장 `serving_tier`
 
@@ -45,6 +55,10 @@
   채운다 — **선언이 곧 게시 결과**다.
 - commerce 소유 `d1_*` 테이블만 DROP+CREATE. 공유 `_catalog`/`_request_log`/`d1_meta` 는
   **upsert(DROP 금지 — transit 규약 승계)**.
+- 핸드오프 보조 5종(`d1_catalog_columns`/`_ext`/`d1_usage_patterns`/`d1_catalog_display`/
+  `d1_catalog_glossary`)은 자연키 upsert. **commerce 는 공용 `publish_product_meta` 를 쓰지 않고
+  자체 `_publish_handoff` 로 게시한다** — 계약에 새 표가 들어와도 이 파일을 함께 고치지 않으면
+  한 행도 안 나간다(#706 때 실제로 그랬다. 다른 도메인은 "선언뿐"이지만 commerce 는 아니다).
 - 스왑 전 **행수 밴드 게이트**(0행/2배 → `stale`, 직전 게시 유지). 상태 마커는 R2
   `commerce_serve_state/_export_state.json`(silver/bronze state 와 대칭).
 - `SERVING_SPEC`(export 쪽 목록) ↔ dbt 선언은 실행 시 대조되어 어긋나면 경보(파이프라인은 진행).
