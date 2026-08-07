@@ -124,9 +124,11 @@ def _storage_cleanup(**context) -> None:
 
 with DAG(
     dag_id="citydata_maintenance",
-    description="Weekly Iceberg maintenance (optimize/expire/orphan + boto3 cleanup). maintenance 동안 transform 을 pause/resume 해 delete+insert↔optimize 충돌 방지 (bronze 는 유지).",
+    description="Daily Iceberg maintenance (optimize/expire/orphan + boto3 cleanup). maintenance 동안 transform 을 pause/resume 해 delete+insert↔optimize 충돌 방지 (bronze 는 유지).",
     start_date=pendulum.datetime(2026, 1, 1, tz=KST),
-    schedule="0 4 * * 0",  # 매주 일요일 04:00 KST (오프피크)
+    # 매일 04:00 KST (오프피크). 주1→매일(ASAC-DAG#730): 스냅샷을 1일치로 유지해 metadata
+    # 재독량↓ → 로컬 prod 실행 시 R2 읽기 트래픽 절감. 보존 7d 유지라 과도 expire 아님.
+    schedule="0 4 * * *",
     catchup=False,
     max_active_runs=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=10)},
