@@ -63,6 +63,20 @@ def test_serving_export_factory_keeps_content_parity_opt_in_default_false():
     ].default is False
 
 
+def test_watchdog_target_must_match_execution_environment():
+    assert dag_factory.validate_watchdog_target(
+        "dev", env={"DBT_TARGET": "dev"}
+    ) == "dev"
+    assert dag_factory.validate_watchdog_target(
+        " DEV ", env={"DBT_TARGET": "dev"}
+    ) == "dev"
+
+    with pytest.raises(RuntimeError, match="disagrees with environment"):
+        dag_factory.validate_watchdog_target(
+            "dev", env={"DBT_TARGET": "prod"}
+        )
+
+
 def test_publication_scope_uses_the_latest_terminal_asset_subset():
     configured = ("incident", "flow-latest", "flow-profile")
     context = {
@@ -102,6 +116,20 @@ def test_publication_scope_fails_closed_without_a_valid_subset(context):
             ("incident", "flow"),
             metadata_key="product_ids",
         )
+
+
+def test_publication_scope_accepts_an_explicit_empty_terminal_scope():
+    context = {
+        "triggering_asset_events": {
+            "terminal": [types.SimpleNamespace(extra={"product_ids": []})]
+        }
+    }
+
+    assert dag_factory.resolve_publication_product_ids(
+        context,
+        ("incident", "flow"),
+        metadata_key="product_ids",
+    ) == ()
 
 
 def test_non_target_serving_wrappers_do_not_opt_into_content_parity(monkeypatch):

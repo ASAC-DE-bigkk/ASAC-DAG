@@ -16,7 +16,12 @@ from datetime import datetime, time
 
 from common.discord import COLOR_WARN, send_embed
 
-from .config import KST, TRANSIT_QUIET_HOURS
+from .config import (
+    KST,
+    LOADER_BACKLOG_AGE_WARN_MINUTES,
+    LOADER_BACKLOG_WARN,
+    TRANSIT_QUIET_HOURS,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +71,51 @@ def warn_if_empty(dataset: str, rows: int, run_id: str, *, domain: str = "transi
             f"비었는지 확인이 필요합니다 — 키/쿼터/원천 이상 가능. "
             f"실시간은 소급 불가하니 방치 시 이력 공백이 됩니다.\n"
             f"run_id=`{run_id}`"
+        ),
+        color=COLOR_WARN,
+        domain=domain,
+    )
+
+
+def backlog_exceeded(pending: int, oldest_age_minutes: float | None) -> bool:
+    """적재 백로그가 경보 임계를 넘었나 — 나이(주) 또는 잔량(보) 중 하나라도.
+
+    나이가 주 판정이다: 실제 피해는 "마커가 몇 건 쌓였나"가 아니라 "가장 오래된 관측이
+    아직 창고에 없다"는 것이고, 그게 곧 서빙 freshness 지연이다. 잔량은 나이가 아직
+    임계에 못 미쳐도 유입이 드레인을 앞지르는 국면을 잡는 보조 지표.
+    """
+    if oldest_age_minutes is not None and oldest_age_minutes >= LOADER_BACKLOG_AGE_WARN_MINUTES:
+        return True
+    return pending >= LOADER_BACKLOG_WARN
+
+
+def warn_backlog(*, pending: int, oldest_age_minutes: float | None,
+                 oldest_key: str | None = None, deferred: int = 0,
+                 domain: str = "transit") -> bool:
+    """적재 백로그가 임계를 넘으면 Discord WARN. 임계 이하면 no-op. 전송 여부 반환.
+
+    무경보 창(TRANSIT_QUIET_HOURS)으로 억제하지 **않는다** — 0행 경보와 달리 백로그는
+    심야에 정상인 상태가 아니고, 주차처럼 24시간 수집하는 소스가 그대로 늙는다.
+    적체가 지속되면 런마다(10분) 반복 발신된다: 조용해지는 것보다 시끄러운 편이 낫다는
+    판단(#719 — 26시간 무경보가 이 기능의 존재 이유).
+    """
+    if not backlog_exceeded(pending, oldest_age_minutes):
+        return False
+    age = "알 수 없음" if oldest_age_minutes is None else f"{oldest_age_minutes:.0f}분"
+    LOGGER.warning("[%s] 적재 백로그 %d건 · 최고령 %s (deferred=%d)",
+                   domain, pending, age, deferred)
+    deferred_line = (
+        f"이번 런에서 시간 예산으로 넘긴 마커: **{deferred}건**\n" if deferred else ""
+    )
+    return send_embed(
+        title=f"⚠️ {domain} · bronze 적재 백로그 {pending}건 (최고령 {age})",
+        description=(
+            f"수집된 원본이 창고에 적재되지 못하고 **{pending}건** 대기 중입니다. "
+            f"가장 오래된 마커가 **{age}** 됐습니다.\n"
+            f"{deferred_line}"
+            f"수집·변환·게시는 계속 성공하지만 **창고 데이터는 그만큼 늙습니다** — "
+            f"서빙 freshness SLO 초과로 이어집니다.\n"
+            + (f"최고령 마커: `{oldest_key}`" if oldest_key else "")
         ),
         color=COLOR_WARN,
         domain=domain,

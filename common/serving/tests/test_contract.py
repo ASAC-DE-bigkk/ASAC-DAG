@@ -153,6 +153,19 @@ def test_load_domain_contracts_returns_the_exact_enabled_domain_set(tmp_path):
     assert [contract.product_id for contract in contracts] == sorted(WEATHER_PRODUCTS)
 
 
+def test_load_domain_contracts_allows_an_explicit_partitioned_scope(tmp_path):
+    loader = _load_domain_contracts()
+
+    contracts = loader(
+        _manifest(tmp_path),
+        "weather",
+        WEATHER_PRODUCTS[:2],
+        allow_partitioned_scope=True,
+    )
+
+    assert [contract.product_id for contract in contracts] == sorted(WEATHER_PRODUCTS[:2])
+
+
 def test_load_contracts_reads_opt_in_upsert_strategy(tmp_path):
     contract = contract_module.load_contracts(_manifest(tmp_path), ["traffic_flow_link_latest"])[0]
 
@@ -227,6 +240,18 @@ def test_load_contracts_reads_freshness_field_separately_from_event_time(tmp_pat
 
     assert contract.event_time == "observed_at"
     assert contract.freshness_field == "collected_at"
+
+
+def test_load_contracts_retains_publication_trigger_for_runtime_watchdog(tmp_path):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["publication_trigger"] = {"schedule_cron": "10 * * * *"}
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_contracts(path)[0]
+
+    assert contract.publication_trigger == {"schedule_cron": "10 * * * *"}
 
 
 def test_load_contracts_rejects_unknown_freshness_field(tmp_path):
@@ -592,6 +617,15 @@ def test_non_exact_domain_exporter_can_load_its_intended_citydata_subset(tmp_pat
     assert [contract.product_id for contract in contracts] == ["citydata_place_latest"]
     with pytest.raises(ValueError, match="missing=citydata_ppltn_hourly"):
         loader(path, "citydata", ["citydata_place_latest"], exact_domain_contracts=True)
+
+    partitioned = loader(
+        path,
+        "citydata",
+        ["citydata_place_latest"],
+        exact_domain_contracts=True,
+        partitioned_domain_scope=True,
+    )
+    assert [contract.product_id for contract in partitioned] == ["citydata_place_latest"]
 
 
 def test_export_contract_loader_keeps_public_projection_requirement_explicit(tmp_path):

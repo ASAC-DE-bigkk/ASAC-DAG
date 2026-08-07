@@ -62,6 +62,9 @@ class ServingContract:
     projection_schema_version: str | None = None
     projection_schema_hash: str | None = None
     freshness_slo_minutes: int | None = None
+    # Static publication cadence declared by the DBT contract. The watchdog reads
+    # it at runtime; it is intentionally not copied into mutable D1 evidence.
+    publication_trigger: dict[str, Any] | None = None
     # V1 evidence contract (#678): absent means legacy product, not an empty source list.
     # The Publisher preserves existing evidence for absent legacy declarations.
     source_evidence: tuple[dict[str, Any], ...] | None = None
@@ -438,6 +441,11 @@ def load_contracts(
                       and not isinstance(serving.get("freshness_slo_minutes"), bool)
                       else None
                   ),
+                  publication_trigger=(
+                      dict(serving["publication_trigger"])
+                      if isinstance(serving.get("publication_trigger"), dict)
+                      else None
+                  ),
                   source_evidence=_load_source_evidence(str(product_id), serving),
                   quality_coverage=_load_quality_coverage(str(product_id), serving, node),
                   grain=serving.get("grain"),
@@ -470,12 +478,15 @@ def load_domain_contracts(
     product_ids: Iterable[str],
     *,
     require_public_projection: bool = False,
+    allow_partitioned_scope: bool = False,
 ) -> list[ServingContract]:
     """Load one wrapper's complete enabled domain contract set.
 
     A domain exporter must not silently publish a subset of its enabled dbt
     contracts. Model names remain the dbt-owned domain boundary, so no D1 table
-    or product list is duplicated in the DAG factory.
+    or product list is duplicated in the DAG factory. A domain with explicitly
+    separated publisher paths may opt into a partitioned scope; each such path
+    still has to list only enabled contracts from the same domain.
     """
     requested = list(product_ids)
     duplicates = sorted({product_id for product_id in requested if requested.count(product_id) > 1})
@@ -493,7 +504,7 @@ def load_domain_contracts(
     ]
     enabled_ids = {contract.product_id for contract in enabled_domain_contracts}
     requested_ids = set(requested)
-    missing = sorted(enabled_ids - requested_ids)
+    missing = sorted(enabled_ids - requested_ids) if not allow_partitioned_scope else []
     unexpected = sorted(requested_ids - enabled_ids)
     if missing or unexpected:
         detail = " ".join(
@@ -506,4 +517,8 @@ def load_domain_contracts(
         )
         raise ValueError(f"{domain}: enabled serving exact-set mismatch {detail}")
 
-    return enabled_domain_contracts
+    return [
+        contract
+        for contract in enabled_domain_contracts
+        if contract.product_id in requested_ids
+    ]

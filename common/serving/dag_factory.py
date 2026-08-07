@@ -18,7 +18,8 @@ for unit tests.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import json
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 
 from common.ops.product_observability import record_product_event
@@ -146,7 +147,7 @@ def resolve_publication_product_ids(
         raise RuntimeError("serving publication scope must be a product ID list")
 
     selected = tuple(raw_scope)
-    if not selected or any(
+    if any(
         not isinstance(product_id, str) or not product_id.strip()
         for product_id in selected
     ):
@@ -169,6 +170,7 @@ def _load_export_contracts(
     *,
     exact_domain_contracts: bool,
     require_public_projection: bool = False,
+    partitioned_domain_scope: bool = False,
 ):
     from common.serving.contract import load_contracts, load_domain_contracts
 
@@ -178,12 +180,118 @@ def _load_export_contracts(
             domain,
             product_ids,
             require_public_projection=require_public_projection,
+            allow_partitioned_scope=partitioned_domain_scope,
         )
     return load_contracts(
         manifest_path,
         product_ids,
         require_public_projection=require_public_projection,
     )
+
+
+def validate_watchdog_target(
+    target: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Fail before a D1 read if this watchdog's declared target is stale."""
+    from common.runtime_guard import resolve_runtime_target
+
+    declared_target = str(target).strip().lower()
+    if declared_target not in {"dev", "prod"}:
+        raise RuntimeError("serving watchdog target must be dev or prod")
+    runtime_target = resolve_runtime_target(env)
+    if declared_target != runtime_target:
+        raise RuntimeError(
+            "serving watchdog target disagrees with environment: "
+            f"declared={declared_target!r} runtime={runtime_target!r}"
+        )
+    return runtime_target
+
+
+def build_serving_freshness_watchdog_dag(
+    domain: str,
+    product_ids: Sequence[str],
+    *,
+    schedule: str,
+    dag_id: str | None = None,
+    dbt_project: str | None = None,
+    target: str = "dev",
+    exact_domain_contracts: bool = False,
+    naive_freshness_timezones: Mapping[str, str] | None = None,
+    publication_grace_minutes: int = 0,
+    failure_callback: Callable[[dict[str, object]], None] | None = None,
+):
+    """Build an independent, read-only D1 freshness watchdog DAG.
+
+    The watchdog intentionally has no Publisher, Trino, or write dependency.  It
+    must still observe a stale D1 record when the export DAG itself is not running.
+    """
+    import pendulum
+    from airflow import DAG
+    from airflow.providers.standard.operators.python import PythonOperator
+
+    from common.serving.runtime import build_d1_client_from_env
+    from common.serving.watchdog import evaluate_watchdog, raise_for_watchdog_failures
+
+    kst = pendulum.timezone("Asia/Seoul")
+    expected_product_ids = tuple(product_ids)
+    timezone_by_product = dict(naive_freshness_timezones or {})
+    if (
+        not isinstance(publication_grace_minutes, int)
+        or isinstance(publication_grace_minutes, bool)
+        or publication_grace_minutes < 0
+    ):
+        raise ValueError("publication_grace_minutes must be a non-negative integer")
+
+    def _run(**context) -> None:
+        runtime_target = validate_watchdog_target(target)
+        contracts = _load_export_contracts(
+            _manifest_path(domain, dbt_project),
+            domain,
+            expected_product_ids,
+            exact_domain_contracts=exact_domain_contracts,
+        )
+        loaded_ids = {contract.product_id for contract in contracts}
+        missing_ids = sorted(set(expected_product_ids) - loaded_ids)
+        if missing_ids:
+            raise RuntimeError(
+                f"{domain}: freshness watchdog contract missing product_ids={','.join(missing_ids)}"
+            )
+        report = evaluate_watchdog(
+            build_d1_client_from_env(),
+            contracts,
+            checked_at=datetime.now(timezone.utc),
+            naive_freshness_timezones=timezone_by_product,
+            publication_grace_minutes=publication_grace_minutes,
+        )
+        payload = {"domain": domain, "target": runtime_target, **report.payload()}
+        print("[serving-watchdog] " + json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        context["ti"].xcom_push(key="serving_freshness_watchdog", value=payload)
+        raise_for_watchdog_failures(report)
+
+    with DAG(
+        dag_id=dag_id or f"{domain}_serving_freshness_watchdog",
+        description=f"{domain} D1 serving freshness를 독립 감시하는 Serving Contract v1 watchdog.",
+        start_date=pendulum.datetime(2026, 1, 1, tz=kst),
+        schedule=schedule,
+        catchup=False,
+        max_active_runs=1,
+        default_args={
+            "retries": 1,
+            "retry_delay": timedelta(minutes=5),
+            "execution_timeout": timedelta(minutes=5),
+        },
+        params={"target": target},
+        tags=["serving", domain, "d1", "watchdog"],
+    ) as dag:
+        PythonOperator(
+            task_id="check_serving_freshness",
+            python_callable=_run,
+            on_failure_callback=failure_callback,
+        )
+
+    return dag
 
 
 def build_serving_export_dag(
@@ -199,6 +307,7 @@ def build_serving_export_dag(
     require_public_projection: bool = False,
     verify_content_parity: bool = False,
     publication_scope_metadata_key: str | None = None,
+    partitioned_domain_scope: bool = False,
 ):
     """Build a serving-export DAG for one domain. Returns an Airflow ``DAG``."""
     import os
@@ -225,6 +334,7 @@ def build_serving_export_dag(
             product_ids,
             exact_domain_contracts=exact_domain_contracts,
             require_public_projection=require_public_projection,
+            partitioned_domain_scope=partitioned_domain_scope,
         )
         if not contracts:
             raise RuntimeError(f"{domain}: product_ids {list(product_ids)} 에 해당하는 enabled 계약이 없다")
@@ -233,6 +343,9 @@ def build_serving_export_dag(
             product_ids,
             metadata_key=publication_scope_metadata_key,
         )
+        if not publication_product_ids:
+            print(f"[serving:{domain}] published=0 skipped=0 of 0 products (empty terminal scope)")
+            return
         selected_ids = set(publication_product_ids)
         contracts = [
             contract for contract in contracts if contract.product_id in selected_ids

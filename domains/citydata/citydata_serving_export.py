@@ -44,6 +44,8 @@ DAILY = [
     "citydata_sbike_dow_hour",             # 신설: 영역 요일×시간 따릉이 가용
     "citydata_air_daily",                  # 신설: 일별 대기질 추이 (append)
     "citydata_charger_dow_hour",           # 신설: 영역 요일×시간 충전소 가용 (as-of 리샘플링)
+    "citydata_dst_daily",                  # 신설: 일별 재난 경보 현황 (append)
+    "citydata_dst_dow_hour",               # 신설: 재난 경보 요일×시간 패턴 (snapshot)
 ]
 
 citydata_serving_export_fast = build_serving_export_dag(

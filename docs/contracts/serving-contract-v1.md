@@ -256,11 +256,12 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 게시가 끝난 뒤에도 계약은 지켜져야 한다. 선언(§3)과 기록(§7.3)만으로는 **지켜보는 주체**가 없다 — 특히 export DAG 안의 자기보고 경보는 DAG 자체가 죽으면 함께 침묵한다(#477과 같은 계열의 조용한 실패).
 
 - **export DAG 밖의 독립 관찰자(watchdog)** 가 다음 검사쌍 2개를 주기적으로 대조한다:
-  1. `_catalog.published_at` ↔ `publication_trigger` 주기(cron 간격 / `max_interval_minutes`) — **D1 미갱신·죽은 DAG** 탐지
+  1. `_catalog.exported_at`(게시 시각) ↔ `publication_trigger` 주기(cron 간격 / `max_interval_minutes`) — **D1 미갱신·죽은 DAG** 탐지
   2. `_catalog.freshness` ↔ `freshness_slo_minutes` — `freshness_field`(미선언 시 `event_time`) 기준으로 **제때 게시됐지만 낡은 데이터** 탐지
 - 위반 시 경보를 발생시킨다. (`serving_status` 소비자 노출 연계는 후속 검토)
 - K-Skill Worker 같은 공개 소비 게이트도 요청 시점 wall clock과 같은 SLO를 대조해 초과 제품을 fail-closed 한다. 이는 요청이 없으면 침묵하므로 독립 watchdog을 대체하지 않는다.
-- 이 조항은 **책임과 검사 대상만** 규정한다. watchdog 구현(위치·소유·알림 경로)은 별도 후속 이슈.
+- ASAC-DAG #720 구현은 `common/serving/watchdog.py`와 도메인별 독립 watchdog DAG로 위 두 검사쌍을 D1 읽기 전용으로 수행하고, task 실패를 기존 실패 콜백에 전달한다. Transit fast tier가 첫 적용이다.
+- timezone 없는 `freshness`는 원천 계약이 명시한 제품별 timezone으로만 해석한다. 근거·timezone·형식이 없으면 stale 여부를 추정하지 않고 fail-closed 한다.
 - 계약에 이미 있는 선언·기록만 읽으므로 이 조항으로 인한 추가 스키마 변경은 없다.
 
 ## 8. 계약 버전 정책
