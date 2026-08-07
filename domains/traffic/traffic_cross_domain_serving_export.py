@@ -1,5 +1,8 @@
 """Publish the separately built Traffic×Weather product through D1."""
 
+# Keep this URI-backed Asset on the wrapper so Airflow persists the direct
+# schedule reference after the Cross-domain Gold asset is registered.
+
 import os
 import sys
 
@@ -22,6 +25,7 @@ dag = build_serving_export_dag(
     domain="traffic",
     product_ids=list(TRAFFIC_CROSS_DOMAIN_PUBLICATION_PRODUCT_IDS),
     exact_domain_contracts=True,
+    partitioned_domain_scope=True,
     require_public_projection=True,
     verify_content_parity=True,
     publication_scope_metadata_key=TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY,

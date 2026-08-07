@@ -141,11 +141,11 @@ def test_weather_transform_runs_place_mart_before_full_gold_and_metrics():
         }
     assert (
         dag.task_dict["dbt_run_gold"].kwargs["op_kwargs"]["selector"]
-        == "ask_seoul_weather_transform_gold"
+        == "ask_seoul_weather_transform_serving_gold"
     )
     assert (
         dag.task_dict["dbt_test_gold"].kwargs["op_kwargs"]["selector"]
-        == "ask_seoul_weather_transform_gold"
+        == "ask_seoul_weather_transform_serving_gold"
     )
 
 

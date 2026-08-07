@@ -26,6 +26,7 @@ dag = build_serving_export_dag(
     domain="traffic",
     product_ids=list(TRAFFIC_CORE_PUBLICATION_PRODUCT_IDS),
     exact_domain_contracts=True,
+    partitioned_domain_scope=True,
     require_public_projection=True,
     verify_content_parity=True,
     publication_scope_metadata_key=TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY,
