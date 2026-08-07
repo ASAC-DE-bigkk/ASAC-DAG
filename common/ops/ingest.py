@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -518,12 +519,22 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
     stamp = (now or datetime.now(timezone.utc)).isoformat()
     wanted = list(categories) if categories else sorted(OBSERVATION_CATEGORIES)
 
+    # ── 진행 로그(#732 후속): 이 함수는 목록→걸러내기→읽기→적재가 전부 무음이어서, 첫
+    # 따라잡기 실행(백로그 수만 건)이 몇 십 분 걸리면 밖에서는 "죽었는지 도는지"를 구분할
+    # 수 없었다(2026-08-07 실측 — fork 교착과 정상 백로그 처리가 같은 모양으로 보였다).
+    # 단계 경계마다 건수·경과를 남긴다. 키/경로 값은 ops 존 상수 조립이라 시크릿이 없다.
+    t0 = time.monotonic()
     keys: list[str] = []
     for category in wanted:
         prefix = f"{OPS_ROOT}/{OpsCategory(category).value}/"
+        before = len(keys)
         keys.extend(list_keys(prefix))
+        LOGGER.info("[ops.ingest] 목록 %s: %d건 (누적 %d · %.1fs)",
+                    category, len(keys) - before, len(keys), time.monotonic() - t0)
     objects = select_objects(keys, categories=wanted, domains=domains,
                              since=since, until=until, receipt=receipt)
+    LOGGER.info("[ops.ingest] 창(%s~%s) 선별 %d건 / 전체 %d건 (%.1fs)",
+                since, until, len(objects), len(keys), time.monotonic() - t0)
 
     for statement in d1_ops.bootstrap_statements():
         d1_execute(statement)   # security: allow-sql — 상수 DDL(DROP 없음, D-6)
@@ -542,16 +553,23 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
         before = len(candidates)
         candidates = [obj for obj in candidates if obj.key not in seen_keys]
         receipt.skipped_existing += before - len(candidates)
+    LOGGER.info("[ops.ingest] 1차 관문 통과 %d건(기지 스킵 %d) — 읽기 시작 (%.1fs)",
+                len(candidates), receipt.skipped_existing, time.monotonic() - t0)
 
     if len(candidates) > max_objects:
         # 상한에 걸린 만큼을 영수증에 남긴다 — 조용히 자르면 "전부 봤다"로 읽힌다.
         # 남은 분은 다음 실행이 이어서 가져간다(1차 관문이 이미 넣은 것을 건너뛰므로 전진한다).
         receipt.truncated = len(candidates) - max_objects
         candidates = candidates[:max_objects]
+        LOGGER.warning("[ops.ingest] 상한 %d 적용 — %d건은 다음 실행이 이어받는다",
+                       max_objects, receipt.truncated)
 
     # C-6 2차 관문: 원천이 event_id 를 발급했거나 키가 바뀐 경우를 위해 내용 기준으로 한 번 더.
     records: list[dict[str, Any]] = []
-    for obj in candidates:
+    for read_i, obj in enumerate(candidates, 1):
+        if read_i % 2000 == 0:   # 진행 박동 — 대형 백로그에서 생존/속도를 밖에서 판별하는 근거
+            LOGGER.info("[ops.ingest] 읽기 %d/%d (%.1fs)",
+                        read_i, len(candidates), time.monotonic() - t0)
         try:
             payload = read_json(obj.key)
         except Exception as exc:  # noqa: BLE001 - 한 파일의 문제로 적재 전체를 멈추지 않는다
@@ -574,11 +592,15 @@ def ingest(*, list_keys: Callable[[str], Sequence[str]],
         known |= {str(row.get("event_id")) for row in (d1_execute(statement) or [])}  # security: allow-sql — 공용 빌더(값 이스케이프)
     fresh = [record for record in records if record["event_id"] not in known]
     receipt.skipped_existing += len(records) - len(fresh)
+    LOGGER.info("[ops.ingest] 정규화 %d · 2차 관문 통과 %d — 적재 시작 (%.1fs)",
+                receipt.normalized, len(fresh), time.monotonic() - t0)
 
     rows = [d1_ops.to_run_event_row(record, ingested_at=stamp) for record in fresh]
     for statement in d1_ops.run_event_upsert_statements(rows):
         d1_execute(statement)   # security: allow-sql — 공용 빌더(식별자 상수, 값 이스케이프)
     receipt.loaded = len(rows)
+    LOGGER.info("[ops.ingest] 적재 %d행 완료 — 일별 집계 재계산 시작 (%.1fs)",
+                receipt.loaded, time.monotonic() - t0)
 
     # 재계산 대상 = 이번에 넣은 날짜 ∪ **집계가 기록보다 뒤처진 날짜**.
     # 뒤엣것이 없으면 C-2 인라인 경로로 들어온 기록(배치 입장에선 늘 "이미 있는 것")은
