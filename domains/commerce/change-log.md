@@ -41,6 +41,20 @@ response:
   후 삭제 + `sync_state_files()` 로 R2 스냅샷 동기화(스냅샷이 낡으면 복원 시 DONE 부활).
   카탈로그의 v2형 payload 12건은 다음 run 의 `build_detail_catalog` 재계산으로 자가 치유
   확인, 실버 본체·detail 테이블 오염 0 실측(잔재 마커가 역설적으로 반보정 유입도 막았다).
+- 복구 완주 후 실측에서 마지막 잔재 2건 발견·치유. **`silver_license_entity` 가 v2 시절
+  content_hash 를 보유**(8/4~8/6 run 들의 dbt 는 성공했었고 ③④ 정리 대상이 아니었으며
+  증분 워터마크가 재계산을 비켜감) → gold `uptae_mix` 의 entity⋈detail **content_hash 조인이
+  4종 22,834행을 탈락**시킴(feed·distribution 이 D1 롤업에서 실종된 실원인 — detail 백필
+  문제가 아니었다. distribution 은 food_sanitation 클러스터 복귀 시 epoch 워터마크로 과거분
+  19,618행이 이미 자동 백필돼 있었다). dbt `include_datasets` 분기로 12종 61,161행 재계산
+  → 불일치 0. **`silver_license_entity_history` 유령 버전 25,188행**(정본 history 에 없는
+  해시 — 값 동일·해시만 다른 가짜 버전, change_activity 버전수 부풀림)은
+  `purge_entity_history_phantoms_v2_switch.py`(dry-run·백업, 판정식은 삭제 시점 재계산)로
+  정리 — Trino DELETE 가 대상 별칭을 지원하지 않아 DELETE 문만 테이블명 상관참조.
+- `report_silver` 의 구 ORM 태스크 나열(AttributeError)을 REST v2 로 교체 — 전 태스크 성공
+  run 이 실패로 찍히고 재시도마다 리포트가 중복 발송되던 원인(실버 리포트 2통 사고).
+  `airflow_meta.task_instance_states()` 신설. 전제였던 401 은 FAB 계정 비밀번호를 `.env`
+  선언값으로 재정렬해 해소 — logship·watchdog REST 경로도 함께 풀림.
 
 decision:
 - **물리 테이블에 v2 컬럼 추가(ALTER)안**은 재차 기각 — 같은 의미가 두 컬럼으로 갈라져
