@@ -328,9 +328,18 @@ def commerce_load_silver():
         # 그래서 이게 성공하면 Airflow 가 DagRun 을 success 로 마킹해 **실패가 통째로 가려진다**
         # (실측: build_detail_catalog 실패 → load_details 미실행 → detail 0건인데 DAG 는 초록).
         # 리포트는 실패해도 나가야 하므로 all_done 은 유지하고, 보고 후 예외로 상태를 바로잡는다.
+        #
+        # 상태 조회는 REST v2(`common.ops.airflow_meta`) — Airflow 3 컨텍스트의 dag_run 엔
+        # 태스크 나열용 구 ORM 메서드가 없다(실측: 매 실행 AttributeError 로 이 태스크가
+        # 죽어, 전 태스크 성공 run 이 실패로 찍히고 재시도마다 리포트가 중복 발송됐다).
+        # 조회 실패도 예외로 남긴다 — '모른다'를 성공으로 접으면 위 초록 위장이 되살아난다.
+        from common.ops.airflow_meta import task_instance_states
+
+        states = (task_instance_states("commerce_load_silver", str(dr.run_id))
+                  if dr else {})
         failed = sorted(
-            ti.task_id for ti in (dr.get_task_instances() if dr else [])
-            if ti.task_id != "report_silver" and ti.state in ("failed", "upstream_failed")
+            task_id for task_id, state in states.items()
+            if task_id != "report_silver" and state in ("failed", "upstream_failed")
         )
         if failed:
             raise AirflowException(

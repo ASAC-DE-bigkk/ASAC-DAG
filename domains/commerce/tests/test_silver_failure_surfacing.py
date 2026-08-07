@@ -38,7 +38,11 @@ def test_report_silver_raises_when_an_upstream_task_failed():
     # 보고가 먼저, 예외가 나중 — 순서가 뒤집히면 실패 시 리포트가 안 나간다
     assert body.index("report_silver_run") < body.index("AirflowException")
     assert "upstream_failed" in body and '"failed"' in body
-    assert 'ti.task_id != "report_silver"' in body   # 자기 자신은 제외
+    assert 'task_id != "report_silver"' in body   # 자기 자신은 제외
+    # 상태 조회는 REST v2 — 컨텍스트 dag_run 의 구 ORM API(get_task_instances)는 Airflow 3 에
+    # 없다(실측: 매 실행 AttributeError → 전 태스크 성공 run 이 실패로 찍히고 리포트 중복 발송).
+    assert "task_instance_states" in body
+    assert "get_task_instances" not in body
 
 
 def test_upstream_failure_detection_covers_both_states():
