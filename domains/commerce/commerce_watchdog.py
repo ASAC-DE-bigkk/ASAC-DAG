@@ -66,22 +66,26 @@ def _today_collect_ran(storage, prefix: str, today: str) -> bool:
 def _layer_state(dag_id: str, today: str) -> str:
     """오늘(KST) 해당 DAG 상태: 'success'|'failed'|'running'|... | 'missing'(이력만) | 'inactive'(이력 없음).
 
-    Airflow 메타 DagRun 을 직접 조회(LocalExecutor — 태스크에서 DB 접근 가능). 조회 실패는 'query_error'.
+    Airflow 메타 DagRun 을 **REST API v2** 로 조회한다(`common.ops.airflow_meta`). Airflow 3 부터
+    태스크 프로세스는 ORM 을 못 쓴다 — 예전 `create_session()` 경로는 매 실행 실패한다.
+    조회 실패는 감시가 파이프라인을 죽이지 않게 'query_error' 로 접는다.
     """
     try:
-        from airflow.models import DagRun
-        from airflow.utils.session import create_session
-        with create_session() as session:
-            runs = (session.query(DagRun)
-                    .filter(DagRun.dag_id == dag_id)
-                    .order_by(DagRun.start_date.desc()).limit(30).all())
-            if not runs:
-                return "inactive"
-            for r in runs:
-                st = getattr(r, "start_date", None)
-                if st and st.astimezone(KST).strftime("%Y-%m-%d") == today:
-                    return str(getattr(r, "state", "") or "unknown")
-            return "missing"
+        from datetime import datetime as _dt
+
+        from common.ops.airflow_meta import iter_dag_runs
+
+        runs = list(iter_dag_runs(dag_id=dag_id, limit=30))
+        if not runs:
+            return "inactive"
+        for r in runs:
+            raw = r.get("start_date")
+            if not raw:
+                continue
+            st = _dt.fromisoformat(str(raw))
+            if st.astimezone(KST).strftime("%Y-%m-%d") == today:
+                return str(r.get("state") or "unknown")
+        return "missing"
     except Exception as exc:  # noqa: BLE001 — 감지 실패가 태스크를 죽이지 않게
         log.warning("watchdog: %s DagRun 조회 실패(무시): %s", dag_id, type(exc).__name__)
         return "query_error"
