@@ -43,10 +43,10 @@ def _glossary_row(vocab="commerce:major", stamp="t1"):
             "origin": "commerce", "source_type": "warehouse", "exported_at": stamp}
 
 
-def _run(monkeypatch, spy, *, columns=(), ext=(), patterns=(), glossary=(),
+def _run(monkeypatch, spy, *, columns=(), ext=(), patterns=(), display=(), glossary=(),
          published=None, stamp="t1"):
     monkeypatch.setattr(se, "_d1", spy.d1)
-    se._publish_handoff("token", list(columns), list(ext), list(patterns),
+    se._publish_handoff("token", list(columns), list(ext), list(patterns), list(display),
                         list(glossary), published or {}, stamp)
 
 
@@ -173,3 +173,75 @@ def test_failed_label_source_leaves_previous_vocabulary_rows(monkeypatch):
     spy = _D1Spy()
     _run(monkeypatch, spy, glossary=[_glossary_row(vocab="commerce:major")])  # event_type 부재 run
     assert not [s for s in spy.sqls if "commerce:event_type" in s]
+
+
+# ── 표시 메타 d1_catalog_display (서빙 계약 v1.10 · ASAC-DAG#706) ──────────────────
+# commerce 는 공용 publisher(`common/serving/publisher.py`)가 아니라 자체 `_publish_handoff`
+# 로 게시한다. 그래서 계약에 display 가 들어와도 **이 파일이 함께 바뀌지 않으면 한 행도
+# 안 나간다** — 도메인 채택이 "선언뿐"이 아니었던 이유. 아래가 그 경로를 못박는다.
+
+_SPEC_ARGS = ("gold_license_dong_summary", "d1_dong_summary", "d1_direct", "SELECT 1", (1, 10))
+_GRID_ARGS = ("gold_license_geo_grid", "d1_geo_grid_detail", "d1_rollup", "SELECT 1", (1, 10))
+
+
+def _display_row(pid="commerce_dong_summary", pub="pub-1"):
+    return {"product_id": pid, "title": "우리 동네 상권 요약", "summary": "행정동별 업소 현황입니다.",
+            "caveat": None, "use_cases": '["상권 분석"]', "publication_id": pub}
+
+
+def test_display_row_is_upserted_never_dropped(monkeypatch):
+    spy = _D1Spy()
+    _run(monkeypatch, spy, display=[_display_row()],
+         published={"commerce_dong_summary": "pub-1"})
+
+    assert not [s for s in spy.sqls if "DROP TABLE" in s]
+    upserts = [s for s in spy.sqls if s.startswith('INSERT OR REPLACE INTO "d1_catalog_display"')]
+    assert upserts and "우리 동네 상권 요약" in upserts[0] and "pub-1" in upserts[0]
+
+
+def test_undeclared_product_publishes_no_display_row_and_clears_stale(monkeypatch):
+    """미선언은 빈 값으로 꾸미지 않는다 — upsert 0건 + 옛 행 정리(#706 '빈 제목 금지')."""
+    spy = _D1Spy()
+    _run(monkeypatch, spy, published={"commerce_dong_summary": "pub-1"})
+
+    assert not [s for s in spy.sqls if s.startswith('INSERT OR REPLACE INTO "d1_catalog_display"')]
+    stale = [s for s in spy.sqls if "d1_catalog_display" in s and s.startswith("DELETE")]
+    assert stale and "commerce_dong_summary" in stale[0]
+
+
+def test_display_publish_does_not_touch_other_domain_tables(monkeypatch):
+    """신규 표라 공유 표를 건드릴 이유가 없다 — 컬럼 추가안을 철회한 근거의 회귀 단언."""
+    spy = _D1Spy()
+    _run(monkeypatch, spy, display=[_display_row()],
+         published={"commerce_dong_summary": "pub-1"})
+
+    for shared in ("_catalog", "d1_meta", "_request_log", "_publication_ledger"):
+        assert not [s for s in spy.sqls if f'"{shared}"' in s]
+
+
+def test_contract_display_becomes_a_row():
+    sv = {"display": {"title": "우리 동네 상권 요약", "summary": "행정동별 업소 현황입니다.",
+                      "use_cases": ["상권 분석", "입지 검토"]}}
+    row = se._display_row(se.Serve(*_SPEC_ARGS), sv, "commerce_dong_summary", "pub-1")
+
+    assert row["title"] == "우리 동네 상권 요약"
+    assert row["use_cases"] == '["상권 분석", "입지 검토"]'
+    assert row["caveat"] is None                     # 미선언은 NULL — 빈 문자열이 아니다
+
+
+def test_missing_declaration_yields_no_row():
+    assert se._display_row(se.Serve(*_SPEC_ARGS), {}, "commerce_dong_summary", "pub-1") is None
+
+
+def test_one_model_two_products_get_distinct_titles():
+    """geo_grid 는 한 모델이 overview·detail 두 제품을 낳는다 — 같은 제목이 나란히 서면 안 된다."""
+    sv = {"display": {"title": "상권 밀집 격자", "summary": "500m 격자 밀도입니다."},
+          "d1_display": {"d1_geo_grid_detail": {"title": "상권 밀집 격자(업종별)",
+                                                "summary": "격자 × 업종 상세입니다."}}}
+    detail = se._display_row(se.Serve(*_GRID_ARGS), sv, "commerce_geo_grid_detail", "pub-1")
+    overview = se._display_row(
+        se.Serve(*_GRID_ARGS[:1], "d1_geo_grid_overview", *_GRID_ARGS[2:]),
+        sv, "commerce_geo_grid_overview", "pub-1")
+
+    assert detail["title"] == "상권 밀집 격자(업종별)"
+    assert overview["title"] == "상권 밀집 격자"      # 덮어쓰기 없는 제품은 계약 필드 그대로

@@ -9,6 +9,43 @@
 
 ---
 
+## 2026-08-07
+
+### 98. 표시 메타(display) 채택 — 계약 v1.10 게시 경로를 commerce export 에 낸다
+
+request:
+- 실버·골드 라인을 재개하기 전에 ASAC-DAG#706(표시 메타를 서빙 계약에 넣자)에 commerce 가
+  대응했는지 확인하라. 확인 결과를 보고 작업 시행을 지시했다.
+
+response:
+- 실측: 계약(v1.10)·게시(`d1_catalog_display`)·소비(`/api/v1/catalog`)는 이미 완비돼 있고
+  **commerce 만 0/22 미선언**이었다. citydata 12 · culture 7 · transit 5 · traffic_weather 10 은
+  채택 완료 — commerce 가 마지막 도메인이다.
+- 이슈 본문은 "도메인이 할 일은 선언뿐, 코드는 없다"였는데 **commerce 에는 맞지 않았다.**
+  다른 도메인은 공용 `common/serving/publisher.publish_product_meta` 로 게시하지만 commerce 는
+  자체 `_publish_handoff` 를 쓴다. `_handoff_rows` 가 3-tuple(columns/ext/patterns)이고 upsert
+  루프도 3종 하드코딩이라, dbt 에 선언만 해서는 **한 행도 안 나갔다.**
+- `serving_export.py`: `_display_row()` 추가, `_handoff_rows` → 4-tuple, `_publish_handoff` 에
+  `d1_catalog_display` upsert + 잔여 정리(ext 와 같은 단일 키 스코프) 추가. 미선언 제품은 행을
+  만들지 않고 옛 행만 지운다 — 빈 문자열로 채우면 화면이 "제목이 있는 척" 한다(#706 방침).
+- `d1_display`(commerce 확장) 추가: `gold_license_geo_grid` 한 모델이 overview·detail 두 제품을
+  낳아 계약 필드 하나로는 같은 제목이 나란히 선다. `usage_patterns[].d1_table` 과 같은 라우팅.
+- ASAC-DBT `_commerce_gold__models.yml` 22종에 `meta.serving.display` 선언(+ geo_grid 덮어쓰기 1건).
+  문안은 기존 `description`·`product_question` 을 소비자 문장으로 다듬어 썼다.
+- 검증: 계약 validator 57모델 0결함 · commerce dags 489 passed(신규 6) · dbt serving_contract
+  58 passed · `python -m security` PASS(차단 0). 전 도메인 계약 밖 `meta.display` 잔재 0건.
+
+decision:
+- **덮어쓰기를 `display` 안에 넣는 안**은 버렸다. validator 가 display 하위 키를 스펙 밖이면
+  오타로 잡는다(`display_unknown_field`) — 계약을 고쳐 달라고 하는 대신 형제 키로 뺐다.
+- **제목을 자동 생성**(테이블명 접두 제거 등)하는 안은 버렸다. 이슈 §5-(B)가 같은 우회를 이미
+  기각했다 — `description` 은 기계·API 소비자용이라 화면 제목으로 쓸 수 없다.
+- **공용 `publish_product_meta` 로 갈아타는 안**은 미뤘다. commerce 자체 게시기는 밴드 게이트·
+  glossary·무변경 게이트가 얽혀 있어 이번 범위(표 하나 추가)에서 바꿀 일이 아니다. 다시 볼 조건:
+  공용 publisher 가 이 셋을 흡수했을 때.
+- **`commerce_flow_daily`(iceberg_api)도 선언**했다. D1 제품이 아니라 게시되지 않지만, 티어가
+  바뀌면 그날 바로 실린다. 선언 비용이 0 이고 22종 서식이 균일해진다.
+
 ## 2026-08-05
 
 ### 96. D1 서빙 계약 문서 정정 — "commerce 는 #478 비종속" 이 9일간 코드와 반대였음
