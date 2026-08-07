@@ -22,11 +22,11 @@ import time
 from datetime import datetime, timezone
 
 from bronze.clients import SeoulAuthError, SeoulOpenApiClient, parse_page
-from bronze import incremental
+from bronze import incremental, schema_guard
 from bronze.validators import assess_completeness
 from commerce_core import paths
 from commerce_core.hashing import sha256_hex
-from commerce_core.notify import notify_schema_drift
+from commerce_core.notify import notify_quality_event, notify_schema_drift
 from commerce_core.schemas import (
     CANONICAL_MAPPING_VERSION, DOMAIN, SOURCE_SYSTEM, Dataset,
     canonicalize_dataset_row, detect_row_format,
@@ -51,38 +51,78 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
     short = dataset.short
     object_key = None
     incr: dict | None = None
+    guard: dict | None = None
+    quarantine_object: str | None = None
     # 수집 **완료(status==ok)** 일 때만 증분 처리(랜딩→정렬→비교→증분→diff 이동).
     # status!=ok(중간 중단)은 증분/이동을 수행하지 않는다 — 랜딩/구 diff 는 그대로 남아
     # 파일명 날짜(구 날짜 잔존=중단)로 구분된다.
     if status == "ok" and raw_pages:
-        def _rows():
-            for p in raw_pages:
-                for row in parse_page(p, dataset.service_name).rows:
-                    # 키 표준 전환은 정렬·normalize·검증키보다 먼저 적용해야 컬럼명만 바뀐 기존 행을
-                    # 신규로 오인하지 않는다. 값은 변경하지 않고, 불완전한 매핑은 예외로 중단한다.
-                    yield canonicalize_dataset_row(dataset, row)
-        collect_date = paths.run_collect_date(bronze_run_id) or base["observed_date"]
-        prev_target, prev_keyfile = incremental.find_diff_target(
-            storage, dir_prefix=paths.diff_target_prefix(prefix=prefix, short=short))
-        tmp = tempfile.mkdtemp(prefix=f"bronze-{short}-")
-        try:
-            incr = incremental.incremental_store(
-                storage, rows=_rows(), tmp_dir=tmp,
-                landing_key=paths.bronze_full_landing_key(
-                    prefix=prefix, run_id=bronze_run_id, short=short),
-                increment_key=paths.bronze_object_key(
-                    prefix=prefix, run_id=bronze_run_id, short=short),
-                target_key=paths.bronze_diff_target_key(
-                    prefix=prefix, short=short, collect_date=collect_date),
-                target_key_file=paths.bronze_diff_target_keyfile(
-                    prefix=prefix, short=short, collect_date=collect_date),
-                prev_target_key=prev_target, prev_target_keyfile=prev_keyfile,
-                # 정본 변환 데이터셋은 소스가 timestamp 갱신을 보장한다는 공식 계약이 없으므로
-                # 첫 일치에서 끊지 않고 전체 정렬본을 비교해 실제 변경분 누락을 막는다.
-                stop_on_aligned_match=(dataset.canonical_fmt or dataset.fmt) == dataset.fmt)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        object_key = incr.get("increment_key")   # 증분 파일 키(동일=None: 마커만)
+        # ── 스키마 관문(#732 재발 방지): 정렬·diff 로 가기 **전에** 키셋을 기준선과 대조 ──
+        # 별칭표가 아는 개명(v2 12종)은 정본화로 흡수돼 통과하고, 별칭표 밖의 새 개명·필드
+        # 변화만 걸린다. 걸리면 diff-target·증분을 건드리지 않고 원문을 격리해 브론즈 이후
+        # 라인으로의 전파를 끊는다(격리 run 의 변경분은 다음 정상 수집의 diff 가 재흡수).
+        sample_pages = [raw_pages[0]] + ([raw_pages[-1]] if len(raw_pages) > 1 else [])
+        sample_rows = [parse_page(p, dataset.service_name).rows for p in sample_pages]
+        incoming_keys = schema_guard.sample_canonical_keys(dataset, sample_rows)
+        guard = schema_guard.check(
+            storage, prefix=prefix, dataset=dataset, incoming_keys=incoming_keys)
+        if guard["status"] == schema_guard.CHANGED:
+            all_rows = [parse_page(p, dataset.service_name).rows for p in raw_pages]
+            quarantine_object = schema_guard.quarantine_rows(
+                storage, prefix=prefix, run_id=bronze_run_id, dataset=dataset,
+                pages_rows=all_rows)
+            status = schema_guard.STATUS_QUARANTINED   # != ok → incomplete 마커·비게시
+            n_rows = sum(len(r) for r in all_rows)
+            notify_quality_event(
+                task="commerce_raw.schema_guard", level="error",
+                title=f"스키마 변경 감지 — {short} 수집 격리·처리 중단",
+                description=(
+                    f"`{short}` 응답 키셋이 기준선과 다릅니다. 증분·diff-target 을 변경하지 "
+                    "않고 원문을 격리했습니다 — 브론즈·실버·골드로 전파되지 않습니다. "
+                    "조치: ①격리 원문으로 개명 여부 확인 ②개명이면 별칭표를 값 검증과 함께 "
+                    "확장(ASAC-DAG#732 절차) ③정당한 변화면 scripts/schema_guard_accept.py "
+                    "--apply 로 기준선 승인 → 다음 수집이 재흡수합니다."),
+                metrics={
+                    "settled_rows": n_rows, "affected_rows": n_rows,
+                    "affected_ratio_pct": 100.0,
+                    "added_keys": ",".join(guard["added"][:20]) or "-",
+                    "removed_keys": ",".join(guard["removed"][:20]) or "-",
+                    "quarantine_key": quarantine_object,
+                },
+                context={"short": short, "bronze_run_id": bronze_run_id})
+        else:
+            def _rows():
+                for p in raw_pages:
+                    for row in parse_page(p, dataset.service_name).rows:
+                        # 키 표준 전환은 정렬·normalize·검증키보다 먼저 적용해야 컬럼명만 바뀐 기존 행을
+                        # 신규로 오인하지 않는다. 값은 변경하지 않고, 불완전한 매핑은 예외로 중단한다.
+                        yield canonicalize_dataset_row(dataset, row)
+            collect_date = paths.run_collect_date(bronze_run_id) or base["observed_date"]
+            prev_target, prev_keyfile = incremental.find_diff_target(
+                storage, dir_prefix=paths.diff_target_prefix(prefix=prefix, short=short))
+            tmp = tempfile.mkdtemp(prefix=f"bronze-{short}-")
+            try:
+                incr = incremental.incremental_store(
+                    storage, rows=_rows(), tmp_dir=tmp,
+                    landing_key=paths.bronze_full_landing_key(
+                        prefix=prefix, run_id=bronze_run_id, short=short),
+                    increment_key=paths.bronze_object_key(
+                        prefix=prefix, run_id=bronze_run_id, short=short),
+                    target_key=paths.bronze_diff_target_key(
+                        prefix=prefix, short=short, collect_date=collect_date),
+                    target_key_file=paths.bronze_diff_target_keyfile(
+                        prefix=prefix, short=short, collect_date=collect_date),
+                    prev_target_key=prev_target, prev_target_keyfile=prev_keyfile,
+                    # 정본 변환 데이터셋은 소스가 timestamp 갱신을 보장한다는 공식 계약이 없으므로
+                    # 첫 일치에서 끊지 않고 전체 정렬본을 비교해 실제 변경분 누락을 막는다.
+                    stop_on_aligned_match=(dataset.canonical_fmt or dataset.fmt) == dataset.fmt)
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+            object_key = incr.get("increment_key")   # 증분 파일 키(동일=None: 마커만)
+            # 성공 적재 후에만 기준선 전진(부트스트랩 포함) — 실패 run 이 기준선을 오염하지 않게
+            schema_guard.record_baseline(
+                storage, prefix=prefix, dataset=dataset, keys=incoming_keys,
+                run_id=bronze_run_id)
 
     marker_type = paths.MARKER_COMPLETED if status == "ok" else paths.MARKER_INCOMPLETE
     marker_key = paths.bronze_marker_key(prefix=prefix, run_id=bronze_run_id,
@@ -110,6 +150,11 @@ def _write_bronze(storage: Storage, *, prefix: str, bronze_run_id: str, dataset:
         marker.update({"verification_key": incr["key"], "increment_mode": incr["mode"],
                        "increment_count": incr["increment_count"], "sorted_row_count": incr["count"],
                        "diff_target_key": incr["target_key"]})
+    if guard and guard["status"] != schema_guard.OK:   # 관문 리니지(부트스트랩·격리)
+        marker["schema_guard"] = {
+            "verdict": guard["status"], "added": guard["added"][:50],
+            "removed": guard["removed"][:50],
+            **({"quarantine_key": quarantine_object} if quarantine_object else {})}
     error = redact(error) if error else error   # 저장 전 시크릿 마스킹(§2.5)
     if error:
         marker["error"] = error
