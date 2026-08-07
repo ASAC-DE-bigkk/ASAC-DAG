@@ -53,6 +53,7 @@ def test_traffic_serving_export_delegates_core_flow_products_to_common_publisher
             "traffic_flow_anomaly_current",
         ],
         "exact_domain_contracts": True,
+        "partitioned_domain_scope": True,
         "require_public_projection": True,
         "verify_content_parity": True,
         "publication_scope_metadata_key": "product_ids",
@@ -92,3 +93,11 @@ def test_traffic_export_subscribes_only_to_the_validated_gold_terminal_asset():
 
     assert "TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET" in source
     assert "schedule=schedule_asset(TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET)" in source
+
+
+def test_traffic_publishers_declare_their_partitioned_contract_scope():
+    core_source = DAG_PATH.read_text(encoding="utf-8")
+    cross_source = (DAG_PATH.parent / "traffic_cross_domain_serving_export.py").read_text(encoding="utf-8")
+
+    assert "partitioned_domain_scope=True" in core_source
+    assert "partitioned_domain_scope=True" in cross_source

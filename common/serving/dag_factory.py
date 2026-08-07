@@ -147,7 +147,7 @@ def resolve_publication_product_ids(
         raise RuntimeError("serving publication scope must be a product ID list")
 
     selected = tuple(raw_scope)
-    if not selected or any(
+    if any(
         not isinstance(product_id, str) or not product_id.strip()
         for product_id in selected
     ):
@@ -170,6 +170,7 @@ def _load_export_contracts(
     *,
     exact_domain_contracts: bool,
     require_public_projection: bool = False,
+    partitioned_domain_scope: bool = False,
 ):
     from common.serving.contract import load_contracts, load_domain_contracts
 
@@ -179,6 +180,7 @@ def _load_export_contracts(
             domain,
             product_ids,
             require_public_projection=require_public_projection,
+            allow_partitioned_scope=partitioned_domain_scope,
         )
     return load_contracts(
         manifest_path,
@@ -305,6 +307,7 @@ def build_serving_export_dag(
     require_public_projection: bool = False,
     verify_content_parity: bool = False,
     publication_scope_metadata_key: str | None = None,
+    partitioned_domain_scope: bool = False,
 ):
     """Build a serving-export DAG for one domain. Returns an Airflow ``DAG``."""
     import os
@@ -331,6 +334,7 @@ def build_serving_export_dag(
             product_ids,
             exact_domain_contracts=exact_domain_contracts,
             require_public_projection=require_public_projection,
+            partitioned_domain_scope=partitioned_domain_scope,
         )
         if not contracts:
             raise RuntimeError(f"{domain}: product_ids {list(product_ids)} 에 해당하는 enabled 계약이 없다")
@@ -339,6 +343,9 @@ def build_serving_export_dag(
             product_ids,
             metadata_key=publication_scope_metadata_key,
         )
+        if not publication_product_ids:
+            print(f"[serving:{domain}] published=0 skipped=0 of 0 products (empty terminal scope)")
+            return
         selected_ids = set(publication_product_ids)
         contracts = [
             contract for contract in contracts if contract.product_id in selected_ids

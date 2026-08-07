@@ -118,6 +118,20 @@ def test_publication_scope_fails_closed_without_a_valid_subset(context):
         )
 
 
+def test_publication_scope_accepts_an_explicit_empty_terminal_scope():
+    context = {
+        "triggering_asset_events": {
+            "terminal": [types.SimpleNamespace(extra={"product_ids": []})]
+        }
+    }
+
+    assert dag_factory.resolve_publication_product_ids(
+        context,
+        ("incident", "flow"),
+        metadata_key="product_ids",
+    ) == ()
+
+
 def test_non_target_serving_wrappers_do_not_opt_into_content_parity(monkeypatch):
     from pathlib import Path
 
