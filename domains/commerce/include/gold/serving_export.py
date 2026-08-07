@@ -12,9 +12,10 @@ PROJECT.md §4(서빙 = D1 선별 export) · docs/DB/gold/opus-serving-build-ins
 브랜치 통합). commerce 소유 **데이터** 테이블만 DROP+CREATE 로 교체하고, **공유
 `_catalog`/`d1_meta` 는 upsert(DROP 금지)** — 타 도메인 행 보존(transit 규약 승계).
 (`_request_log` 는 게이트웨이 소유라 여기서 만들지도 쓰지도 않는다 — #681.)
-핸드오프 보조 4종(`d1_catalog_columns`/`d1_catalog_ext`/`d1_usage_patterns`/`d1_catalog_glossary`)은
-#638 공통 규약으로 **전 도메인 공용 테이블**이 됐다 — 자연키 upsert 만(전량 교체 금지),
-스키마 정본은 `common/serving/d1_client.HANDOFF_COLUMN_TYPES`.
+핸드오프 보조 5종(`d1_catalog_columns`/`d1_catalog_ext`/`d1_usage_patterns`/`d1_catalog_display`/
+`d1_catalog_glossary`)은 #638 공통 규약으로 **전 도메인 공용 테이블**이 됐다 — 자연키 upsert 만
+(전량 교체 금지), 스키마 정본은 `common/serving/d1_client.HANDOFF_COLUMN_TYPES`.
+`d1_catalog_display` 는 서빙 계약 v1.10(ASAC-DAG#706)이 추가한 표시 메타 표다.
 
 `_catalog` 스키마 정본 = **`common/serving/d1_client.py` 의 `CATALOG_COLUMNS`/`CATALOG_DDL`
 (15컬럼, #478 Serving Contract v1 §3.4)** — 자체 축약 스키마(8컬럼) 금지. 정본과 다른 컬럼
@@ -489,8 +490,37 @@ def _load_serving_meta() -> dict[str, dict]:
 
 
 # ── MCP/API 개발 핸드오프 보조 테이블(commerce 소유 d1_*) — 계보: dbt yml→manifest→여기→D1 ──
-def _handoff_rows(spec, m: dict, col_defs: list, publication_id: str) -> tuple[list, dict, list]:
-    """(columns_rows, ext_row, pattern_rows) — d1_catalog_{columns,ext}/d1_usage_patterns 용.
+def _display_row(spec, sv: dict, pid: str, publication_id: str) -> dict | None:
+    """d1_catalog_display 행(v1.10 · ASAC-DAG#706) — 사람이 읽는 표시 메타. 미선언은 None.
+
+    정본은 계약 필드 `meta.serving.display`(title·summary + 선택 caveat·use_cases)다. 다만
+    commerce 는 **한 모델이 여러 D1 제품을 낳는 경우**가 있어(`gold_license_geo_grid` →
+    overview·detail) 모델 하나에 제목이 하나뿐이면 두 제품이 같은 이름으로 화면에 나란히
+    선다. 그래서 `usage_patterns[].d1_table` 라우팅과 같은 방식으로 **d1_table 별 덮어쓰기**
+    `meta.serving.d1_display` 를 둔다 — 1:1 제품은 이 키가 없고 계약 필드를 그대로 쓴다.
+
+    덮어쓰기를 `display` **안**에 못 넣는 이유: 계약 validator 가 display 하위 키를
+    required/optional 밖이면 오타로 잡는다(`display_unknown_field`). 그래서 형제 키다.
+
+    미선언은 빈 문자열로 꾸미지 않는다 — 행 자체를 안 만든다. 화면은 `product_id` 로
+    내려앉는 게 정상이고(#706), 빈 제목은 "제목이 있는 척"이라 더 나쁘다.
+    """
+    override = (sv.get("d1_display") or {}).get(spec.d1_table)
+    display = override if isinstance(override, dict) else sv.get("display")
+    if not isinstance(display, dict) or not display.get("title"):
+        return None
+    use_cases = display.get("use_cases")
+    return {"product_id": pid,
+            "title": display.get("title"), "summary": display.get("summary"),
+            "caveat": display.get("caveat"),
+            "use_cases": (json.dumps(list(use_cases), ensure_ascii=False)
+                          if isinstance(use_cases, list) and use_cases else None),
+            "publication_id": publication_id}
+
+
+def _handoff_rows(spec, m: dict, col_defs: list,
+                  publication_id: str) -> tuple[list, dict, list, dict | None]:
+    """(columns_rows, ext_row, pattern_rows, display_row) — d1_catalog_* / d1_usage_patterns 용.
 
     공유 `_catalog` 의 columns JSON 은 전 도메인이 name/type 관행이라 건드리지 않고(동형 유지),
     컬럼 역할·그레인/PK 계보·검증 질의 패턴은 공용 보조 테이블로 게시한다(#638 공통 규약) —
@@ -545,7 +575,7 @@ def _handoff_rows(spec, m: dict, col_defs: list, publication_id: str) -> tuple[l
                 # 자연키 (product_id, pattern_id) 필수 + 한 모델→다제품(geo_grid)용 d1_table 라우팅.
                 if p.get("sql") and p.get("pattern_id")
                 and p.get("d1_table", spec.d1_table) == spec.d1_table]
-    return col_rows, ext_row, pat_rows
+    return col_rows, ext_row, pat_rows, _display_row(spec, sv, pid, publication_id)
 
 
 def _glossary_rows(cur, catalog: str, qschema: str, exported_at: str) -> list[dict]:
@@ -606,8 +636,9 @@ _PID_RE = re.compile(r"^[a-z0-9_:]+$")
 
 
 def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_rows: list,
-                     glossary_rows: list, published: dict[str, str], glossary_stamp: str) -> None:
-    """보조 4종 **자연키 upsert** 게시(#638 §3 — 전량 교체 금지, 공용 스키마 정본 소비).
+                     display_rows: list, glossary_rows: list, published: dict[str, str],
+                     glossary_stamp: str) -> None:
+    """보조 5종 **자연키 upsert** 게시(#638 §3 — 전량 교체 금지, 공용 스키마 정본 소비).
 
     절차는 전 도메인 동일하며 **제품 단위**로 돈다(#638 §3 원자성 경계): 제품마다 ① 이번
     게시본 행을 자연키로 upsert → ② 이번 선언에 없는 잔여 행 삭제. columns/patterns 정리는
@@ -650,8 +681,9 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
     columns_by_pid: dict[str, list] = {}
     ext_by_pid: dict[str, list] = {}
     patterns_by_pid: dict[str, list] = {}
+    display_by_pid: dict[str, list] = {}
     for grouped, rows in ((columns_by_pid, columns_rows), (ext_by_pid, ext_rows),
-                          (patterns_by_pid, pattern_rows)):
+                          (patterns_by_pid, pattern_rows), (display_by_pid, display_rows)):
         for row in rows:
             grouped.setdefault(str(row.get("product_id")), []).append(row)
 
@@ -663,7 +695,8 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
         product_patterns = patterns_by_pid.get(pid, [])
         for table, rows in (("d1_catalog_columns", product_columns),
                             ("d1_catalog_ext", ext_by_pid.get(pid, [])),
-                            ("d1_usage_patterns", product_patterns)):
+                            ("d1_usage_patterns", product_patterns),
+                            ("d1_catalog_display", display_by_pid.get(pid, []))):
             for statement in handoff_upsert_statements(table, rows):
                 _d1(statement, token)   # security: allow-sql — 공용 빌더(식별자 상수, 값 이스케이프)
         _d1(handoff_prune_statement(
@@ -671,6 +704,9 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
         _d1(handoff_stale_delete_statement("d1_catalog_ext", pid, publication_id), token)  # security: allow-sql — 공용 빌더
         _d1(handoff_prune_statement(
             "d1_usage_patterns", pid, [str(r["pattern_id"]) for r in product_patterns]), token)  # security: allow-sql — 공용 빌더
+        # display 를 내린(또는 아직 안 쓴) 제품의 옛 행이 남지 않게 — ext 와 같은 단일 키 스코프라
+        # 판별도 같다. 미선언 제품은 upsert 가 0건이고 이 삭제만 돌아 행이 없는 상태로 수렴한다.
+        _d1(handoff_stale_delete_statement("d1_catalog_display", pid, publication_id), token)  # security: allow-sql — 공용 빌더
 
     # 레지스트리 게이트(#638 §5-5) — 미등록·정본 불일치 어휘는 게시 거부(해당 어휘만, run 은 진행)
     violations = glossary_registry_violations(glossary_rows)
@@ -690,9 +726,10 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
             _d1('DELETE FROM "d1_catalog_glossary" WHERE "vocabulary_id" = '
                 + _lit(vocabulary_id) + ";", token)   # security: allow-sql — 상수 어휘, _lit 이스케이프
 
-    log.info("[serving export] 핸드오프 메타 upsert: columns=%d ext=%d patterns=%d glossary=%d "
-             "(잔여 정리 — 제품 %d종·어휘 %d종)", len(columns_rows), len(ext_rows),
-             len(pattern_rows), len(glossary_rows), len(published), len(vocabularies))
+    log.info("[serving export] 핸드오프 메타 upsert: columns=%d ext=%d patterns=%d display=%d "
+             "glossary=%d (잔여 정리 — 제품 %d종·어휘 %d종)", len(columns_rows), len(ext_rows),
+             len(pattern_rows), len(display_rows), len(glossary_rows), len(published),
+             len(vocabularies))
 
 
 def _check_contract_drift(meta: dict[str, dict]) -> None:
@@ -915,6 +952,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     handoff_cols: list = []          # MCP/API 핸드오프 보조 테이블 행(성공 스왑분)
     handoff_ext: list = []
     handoff_pats: list = []
+    handoff_display: list = []       # 표시 메타(#706) — 선언한 제품만 행이 생긴다
     public_evidence_rows: list[tuple] = []
     try:
         cur = conn.cursor()
@@ -1037,8 +1075,10 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                 "snapshot_at": now, "source_table": spec.source, "tier": spec.tier,
                 "d1_row_count": n, "payload_hash": fingerprint, "rewritten": not reuse}
             # MCP/API 핸드오프 계보(게시 스냅샷 기준) — publication_id 로 게시본을 식별한다
-            cr, er, pr = _handoff_rows(spec, m, col_defs, publication_id)
+            cr, er, pr, dr = _handoff_rows(spec, m, col_defs, publication_id)
             handoff_cols.extend(cr); handoff_ext.append(er); handoff_pats.extend(pr)
+            if dr:
+                handoff_display.append(dr)
             published["commerce_" + spec.d1_table[3:]] = publication_id   # 잔여 정리 스코프
             if product_id == PUBLIC_EVIDENCE_PRODUCT_ID:
                 actual_d1_rows = _d1_row_count(spec.d1_table, token)
@@ -1067,7 +1107,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
         _upsert_catalog(catalog_rows, token, cat_columns)   # 공유 _catalog(성공분만 upsert — 타 도메인·스킵분 행 보존)
         _upsert_meta(meta_rows, token)
         _upsert_publish_state(state_rows, token)
-        _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats,
+        _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats, handoff_display,
                          _glossary_rows(cur, catalog, qschema, now), published, now)
         _publish_public_evidence(token, public_evidence_rows)
     finally:

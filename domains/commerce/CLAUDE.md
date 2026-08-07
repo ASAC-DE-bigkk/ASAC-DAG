@@ -1033,9 +1033,13 @@ Serving Contract v1/v1.1** 이다. commerce 는 2026-07-22 그 스레드에서 �
     `publication_mode`·`zero_policy` = **22/22**
   - #478 v1.1 `publication_trigger` 22 · `event_time` 3 · `freshness_slo_minutes` 3(조건부 필수 충족)
   - #478 선택 `product_question` 22 · `shape` 22 · `partial_policy` 21 / 외부 공개 `external` 22
+  - 계약 v1.10(#706) `display`(title·summary + 선택 caveat·use_cases) = **22/22**(2026-08-07 채택)
   - **commerce 확장**(같은 블록 안에 얹는다 — 별도 네임스페이스 금지):
-    `serving_tier`(`d1_direct`/`d1_rollup`/`iceberg_api`)·`d1_table`·`usage_patterns`·
+    `serving_tier`(`d1_direct`/`d1_rollup`/`iceberg_api`)·`d1_table`·`d1_display`·`usage_patterns`·
     `source_evidence`·`quality_coverage`·`public_projection`·`public_primary_key`
+- **핸드오프 보조표를 계약이 늘리면 `_publish_handoff` 를 함께 고쳐야 한다.** commerce 는 공용
+  `common/serving/publisher.publish_product_meta` 를 쓰지 않고 자체 게시기를 쓴다 — 다른 도메인은
+  "dbt 선언뿐"이지만 여기는 아니다(#706 실측: 선언만 하면 0행 게시).
   - #478 이 금지한 것은 **다른 이름의 규약을 병행 선언하는 것**(이중 선언)이지 확장 자체가 아니다.
 - **소비**: `include/gold/serving_export.py` 가 `meta.serving.*` 를 읽어 `_catalog` 15컬럼
   (`product_id`·`external`·`product_question`·`event_time` 등)을 채운다 — **선언이 곧 게시 결과**다.
