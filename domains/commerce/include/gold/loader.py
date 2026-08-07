@@ -24,6 +24,7 @@ import logging
 import os
 
 from bronze.warehouse import _connect, _qualified
+from commerce_core.schemas import COLUMN_ALIASES_V2
 from security.dbio import assert_identifier
 
 log = logging.getLogger(__name__)
@@ -182,14 +183,34 @@ def defend_member(cur, qschema: str, obj: str, member: str, wm) -> None:
     cur.fetchall()
 
 
+def _payload_expr(column: str) -> str:
+    """payload 1컬럼의 추출식 — v1 정본 키 우선, 없으면 v2 별칭(#COLUMN_ALIASES_V2).
+
+    detail 은 실버의 **정규화 컬럼이 아니라 원형 보존된 `record_json`** 에서 payload 를 뽑는다.
+    그래서 silver 의 `lf()` 별칭이 여기엔 적용되지 않고, 원천이 v2 로 전환하면 그 컬럼이 통째로
+    빈다 — 2026-08-04 `mail_order_sale` 실측: `$.UPTAENM` 0건 / `$.BZSTAT_SE_NM` 386,800건.
+    `uptaenm` 은 `gold_detail_uptae_mix` 의 GROUP BY 축이자 `where uptaenm is not null` 조건이라,
+    비면 그 행이 집계에서 탈락하고 외부 공개 제품(`d1_uptae_rollup`)이 조용히 축소된다.
+
+    **컬럼 이름·개수·타입은 그대로다** — 값 해석만 v1/v2 양쪽을 본다(coalesce). v1 이 있으면
+    종전과 동일한 값이므로 기존 행의 의미도 변하지 않는다.
+    """
+    v1 = assert_identifier(column.upper(), field="detail payload column")
+    v2 = COLUMN_ALIASES_V2.get(v1)
+    if not v2:
+        return f", json_extract_scalar(record_json, '$.{v1}')"
+    v2 = assert_identifier(v2, field="detail payload v2 alias")
+    return (f", coalesce(json_extract_scalar(record_json, '$.{v1}'),"
+            f" json_extract_scalar(record_json, '$.{v2}'))")
+
+
 def detail_insert_sql(qschema: str, detail: dict, *, bucket: tuple[int, int] | None = None) -> str:
     """멤버 1개 증분 적재문 — silver history 에서 payload 를 json 추출해 append.
 
     바인딩 순서: (member, wm) — wm 은 member_watermark() **스냅샷**(전 버킷 공통 창).
     bucket=(b,k) 면 content_hash 버킷 서브청크(대형 멤버 heap 바운드)."""
     _assert_detail_safe(detail)
-    payload_exprs = "".join(
-        f", json_extract_scalar(record_json, '$.{c.upper()}')" for c in detail["payload"])
+    payload_exprs = "".join(_payload_expr(c) for c in detail["payload"])
     cols = ", ".join(DETAIL_KEY_COLUMNS + tuple(detail["payload"]))
     part_pred = ""
     if bucket is not None:

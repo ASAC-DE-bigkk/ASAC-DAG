@@ -18,8 +18,9 @@ desc, lastmodts desc` 와 일치.
 OGDP_INST_CD/MNG_NO)을 해석한다. 이걸 안 하면 v2(환경 13종) row 는 v1 키가 전무해 sort_key 가
 전부 `(0,0,'','')` 로 붕괴 → 정렬이 페이지네이션(무순서) 순서로 무너지고, 같은 데이터도 매 수집이
 위치 어긋남으로 **전량 신규(오탐)**로 방출된다(수질오염·대기배출 등 매일 수천 건 오탐의 원인).
-**내용 동일성 판정·저장(normalize/verification_key)은 원본 그대로**(§2.2 원천 보존) — 키 해석만
-정본화한다. 정렬키가 바뀌므로(v2) 배포 후 `bronze.resort` 1회로 기존 diff-target 재정렬 필요(#193 동일 절차).
+기본 데이터셋은 내용 동일성 판정·저장(normalize/verification_key)을 응답 키 그대로 수행한다.
+단, registry가 source/canonical 형식을 다르게 선언한 데이터셋은 호출 전에 가역 키 치환을 끝낸 row가
+들어온다. 따라서 정렬·해시·diff·영구 증분이 모두 같은 정본 키를 사용한다.
 
 계약:
 - row = dict(파싱된 인허가 레코드). 정렬키 = 위 3키 — 결정적 전순서.
@@ -294,13 +295,14 @@ def incremental_store(storage, *, rows: Iterable[dict], tmp_dir: str,
                       landing_key: str, increment_key: str,
                       target_key: str, target_key_file: str,
                       prev_target_key: str | None = None,
-                      prev_target_keyfile: str | None = None) -> dict:
+                      prev_target_keyfile: str | None = None,
+                      stop_on_aligned_match: bool = True) -> dict:
     """오늘 rows 를 확정 흐름대로 스토리지에 반영:
 
     ① 오늘 정렬 full 을 run 폴더 `_full/`(landing_key)에 **먼저 저장** — 이후 단계가
        중단돼도 수집분이 보존된다(랜딩 잔존 = 그 run 중단의 증거).
     ② 이전 diff(prev_target_key, 날짜 무관 발견본)와 비교 — 검증키 동일이면 identical,
-       상이면 정렬 병합 diff(**같은 정보가 정렬 위치에서 일치하면 비교 중단**).
+       상이면 정렬 병합 diff. `stop_on_aligned_match=True`일 때만 첫 정렬 일치에서 비교를 중단한다.
     ③ 다른 내용(신규/변경 row)만 증분으로 increment_key(run 폴더)에 저장.
        첫 수집(prev 없음)은 full 자체가 증분(save=full).
     ④ 오늘 정렬 full 을 landing → target_key(diff, **수집일 태깅**)로 **이동**:
@@ -339,7 +341,7 @@ def incremental_store(storage, *, rows: Iterable[dict], tmp_dir: str,
         inc = 0
         with open(increment_path, "w", encoding="utf-8") as out:
             for r in diff_new_rows(read_rows(today_sorted_path), read_rows(prev_path),
-                                   stop_on_aligned_match=True):
+                                   stop_on_aligned_match=stop_on_aligned_match):
                 out.write(json.dumps(r, ensure_ascii=False)); out.write("\n"); inc += 1
         if inc > 0:
             with open(increment_path, "rb") as f:

@@ -11,6 +11,63 @@
 
 ## 2026-08-07
 
+### 99. 도메인 고유 필드 54쌍 정본화 — 전환은 표준 25필드만 바꾼 게 아니었다
+
+request:
+- 브론즈 재적재 복구가 잘 되는지 확인하고 실버·골드 라인을 자동 시행하라. 진행 중 "현재까지의
+  작업 방식이 타당한지 검증해줘" — 방식 자체의 재검증을 요청했다.
+
+response:
+- 재적재된 브론즈는 정상(12종 v2 키 0 · 원래-v2 13종 불변)이었으나, 실버 진입 전 payload↔물리
+  컬럼 전수 대조에서 **11테이블 35컬럼 불일치**를 발견 — 08-04 전환이 **업종 고유 필드까지**
+  개명했고 1차 정본화(표준 25필드)가 그걸 놓쳐 raw 에 표준 v1+고유 v2 혼합 키가 남아 있었다.
+- 짝은 손 추정을 버리고 데이터에서 유도: 시대 분리(collected_at 08-03 12:00Z 컷) → 시대별
+  필드셋 diff → 같은 업소(mgtno)의 **비공란 값 일치율 99% 이상**만 채택. 46쌍 실증
+  (99.994~100%), 값이 전부 빈 8필드는 소거법(개명 집합이 닫혀 구·신 개수가 전 데이터셋 대칭).
+- `DATASET_COLUMN_ALIASES_V2`(데이터셋 스코프 오버레이) 신설 + `canonicalize_row(extra_aliases=)`
+  확장. 전역표에 못 넣는 근거: v2 이름 충돌(groundwater `CAPT`→`CPTL` vs mutual_aid
+  `CAPTSCALE`→`CPTL`). 매핑 버전 `.2`. 테스트 6종 추가(충돌·적용 경로·전단사·fail-closed).
+- 2차 raw 재보정 `migrate_v2_domain_fields_2026_08_07.py`(별건 MIGRATION_ID — 1차 영수증
+  가드가 같은 id 재실행을 no-op 시킨다): 17파일 61,210행, v2 키 잔존 0 검증. 반보정 브론즈
+  61,210행 재삭제(실버 전파 0 확인, DELETE 는 분류기 차단으로 사용자 직접 실행) → 워터마크
+  12종 재되감기(백업 별건) → 브론즈 재적재 → 실버·골드·export 체인 재가동.
+- 검증 방식의 결함 3건을 실측으로 잡고 고쳤다: ①이름 추정 짝 오류(emission_repair 교차 —
+  값 검증이 적발) ②빈값끼리 일치 부풀림("78.9% 일치"의 실체가 빈값 116건) ③observed_date
+  시대 컷 오분류(전환 증분 관측일=전날).
+- 실패 실버 run 들의 사이드 이펙트 전수 점검(사용자 요청): 실질 지뢰는 **실버 DONE 마커
+  17건 잔재** 하나 — `load_details` 는 죽었지만 그 앞 `mark_silver_done` 이 성공해, 마커
+  기반 증분(`silver_unmarked_publishable_predicate`)이 보정 run 전부를 건너뛰고 초록으로
+  끝날 상태였다(초록 위장). `clear_stale_silver_markers_v2_switch.py`(dry-run 기본)로 백업
+  후 삭제 + `sync_state_files()` 로 R2 스냅샷 동기화(스냅샷이 낡으면 복원 시 DONE 부활).
+  카탈로그의 v2형 payload 12건은 다음 run 의 `build_detail_catalog` 재계산으로 자가 치유
+  확인, 실버 본체·detail 테이블 오염 0 실측(잔재 마커가 역설적으로 반보정 유입도 막았다).
+- 복구 완주 후 실측에서 마지막 잔재 2건 발견·치유. **`silver_license_entity` 가 v2 시절
+  content_hash 를 보유**(8/4~8/6 run 들의 dbt 는 성공했었고 ③④ 정리 대상이 아니었으며
+  증분 워터마크가 재계산을 비켜감) → gold `uptae_mix` 의 entity⋈detail **content_hash 조인이
+  4종 22,834행을 탈락**시킴(feed·distribution 이 D1 롤업에서 실종된 실원인 — detail 백필
+  문제가 아니었다. distribution 은 food_sanitation 클러스터 복귀 시 epoch 워터마크로 과거분
+  19,618행이 이미 자동 백필돼 있었다). dbt `include_datasets` 분기로 12종 61,161행 재계산
+  → 불일치 0. **`silver_license_entity_history` 유령 버전 25,188행**(정본 history 에 없는
+  해시 — 값 동일·해시만 다른 가짜 버전, change_activity 버전수 부풀림)은
+  `purge_entity_history_phantoms_v2_switch.py`(dry-run·백업, 판정식은 삭제 시점 재계산)로
+  정리 — Trino DELETE 가 대상 별칭을 지원하지 않아 DELETE 문만 테이블명 상관참조.
+- `report_silver` 의 구 ORM 태스크 나열(AttributeError)을 REST v2 로 교체 — 전 태스크 성공
+  run 이 실패로 찍히고 재시도마다 리포트가 중복 발송되던 원인(실버 리포트 2통 사고).
+  `airflow_meta.task_instance_states()` 신설. 전제였던 401 은 FAB 계정 비밀번호를 `.env`
+  선언값으로 재정렬해 해소 — logship·watchdog REST 경로도 함께 풀림.
+
+decision:
+- **물리 테이블에 v2 컬럼 추가(ALTER)안**은 재차 기각 — 같은 의미가 두 컬럼으로 갈라져
+  `gold_detail_area_profile` 등이 전환 후 값을 통째로 놓친다(uptaenm 사고와 동형).
+- **증거 없는 8필드를 짝짓지 않고 보류하는 안**은 뒤집었다 — 보류하면 caregiver_academy 의
+  payload `del_ymd`↔물리 `deleteymd` 불일치로 실버가 확실히 재실패한다. 전 행이 빈값이라
+  오짝이어도 현재 데이터 영향이 0이고 백업으로 가역적이라 소거법 채택+근거 주석이 낫다.
+  값이 들어오기 시작하면 재검증한다.
+- **1차 때 도메인 필드를 못 본 원인**: 전수조사 범위를 표준 25필드로 좁혔다. payload↔물리
+  전수 대조를 1차 재적재 전에 돌렸으면 재적재 1회를 아꼈다 — "실패한 필드가 아니라 필드 공간
+  전체를 검증"이 교훈. 카탈로그 fmt 비교가 응답 형식(d.fmt)을 받아 정본화 13종이 매일
+  fmt_mismatch 로 보고될 잡음은 확인만 하고 보류(동작은 실측 기준이라 정상, 별건 정리).
+
 ### 98. 표시 메타(display) 채택 — 계약 v1.10 게시 경로를 commerce export 에 낸다
 
 request:
@@ -45,6 +102,32 @@ decision:
   공용 publisher 가 이 셋을 흡수했을 때.
 - **`commerce_flow_daily`(iceberg_api)도 선언**했다. D1 제품이 아니라 게시되지 않지만, 티어가
   바뀌면 그날 바로 실린다. 선언 비용이 0 이고 22종 서식이 균일해진다.
+
+### 97. 통신판매업 v2→v1 Raw 정본화와 전량 증분 오탐 차단
+
+request:
+- 2026-08-04 통신판매업 응답 컬럼이 v1에서 v2로 바뀐 뒤 937,245행이 모두 신규처럼 잡혀 Bronze가
+  장시간 실행됐다. 검증 표본 22,348행×25필드 중 557,350건(99.758%)이 같고 1,350건은 실제 갱신
+  필드에 집중된 결과를 토대로, v2 키를 v1 키로 바꾼 뒤 실제 변경분만 남기도록 요청했다.
+- 중단한 Bronze의 부분 적재가 자동 원복되는지 확인하고, 기적재 데이터의 중복 적재와 Silver/Gold
+  계약 변경 없이 기존 흐름을 유지하도록 요청했다.
+
+response:
+- registry에 실제 응답 `format: v2`와 비교·저장 `canonical_format: v1`을 분리 선언했다. 검증된
+  25개 필드를 1:1로 키 치환하고 값은 그대로 둔 뒤 정렬·해시·diff한다. source/canonical 형식과
+  매핑 버전을 마커에 기록하며, 누락·추가·혼합 필드는 실패 처리한다.
+- 통신판매업은 첫 동일 행에서 비교를 끊지 않고 전체 정렬본을 비교한다. 전체 API 조회·외부 정렬은
+  유지되지만 Raw 영구 증분과 Bronze에는 실제 신규·변경 행만 전달된다.
+- 실행 중이던 `mail_order_sale / 2026-08-04_000001_299` mapped task를 식별해 DAG를 일시중지하고
+  해당 task를 종료했다. Trino 배치 자동 커밋분은 실행 단위로 명시 정리한 뒤 재실행한다.
+
+decision:
+- Silver/Gold 모델을 v2로 확장하는 방식은 채택하지 않았다. Raw에서 기존 v1 정본 계약으로 되돌리면
+  downstream의 `record_json`과 공통 컬럼 계약을 그대로 유지할 수 있어 변경 범위와 재처리 비용이 작다.
+- timestamp가 바뀐다는 가정에 기대는 조기 종료는 이 데이터셋에 쓰지 않는다. 소스의 공식 보장이
+  확인되지 않았고, 전체 비교는 읽기 비용만 늘릴 뿐 기적재 행을 다시 쓰지는 않는다.
+- Bronze 중단을 자동 원복으로 보지 않는다. PyIceberg 경로와 달리 현재 Trino 경로의 DELETE와 각
+  INSERT 배치는 한 트랜잭션으로 묶이지 않으므로, 부분 커밋을 식별해 삭제하는 절차를 계약으로 삼는다.
 
 ## 2026-08-05
 

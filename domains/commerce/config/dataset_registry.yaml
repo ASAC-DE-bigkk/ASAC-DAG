@@ -778,6 +778,8 @@ datasets:
     sub_category: "animal"
     schedule: "daily"
     service_name: "LOCALDATA_020306"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16013"
     name_ko: "서울시 사료제조업 인허가 정보"
     short: "feed_manufacturing"
@@ -786,6 +788,8 @@ datasets:
     sub_category: "animal"
     schedule: "daily"
     service_name: "LOCALDATA_020405"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16083"
     name_ko: "서울시 유통전문판매업 인허가 정보"
     short: "distribution_sale"
@@ -793,6 +797,8 @@ datasets:
     sub_category: "sales"
     schedule: "daily"
     service_name: "LOCALDATA_072217"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16096"
     name_ko: "서울시 대규모점포 인허가 정보"
     short: "large_store"
@@ -815,6 +821,8 @@ datasets:
     sub_category: "sales"
     schedule: "daily"
     service_name: "LOCALDATA_082602"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16099"
     name_ko: "서울시 전화권유판매업 인허가 정보"
     short: "telemarketing_sale"
@@ -829,6 +837,8 @@ datasets:
     sub_category: "sales"
     schedule: "daily"
     service_name: "LOCALDATA_082604"   # 통신판매업 — 신규 최대 total≈932,949
+    format: "v2"                       # 실제 응답(2026-08-04 전환)
+    canonical_format: "v1"             # 정렬·diff·영구 Raw 증분은 기존 v1 키 계약 유지
   - oa_id: "OA-16101"
     name_ko: "서울시 후원방문판매업체 인허가 정보"
     short: "sponsored_door_sale"
@@ -920,6 +930,8 @@ datasets:
     sub_category: "groundwater"
     schedule: "daily"
     service_name: "LOCALDATA_092901"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16114"
     name_ko: "서울시 지하수영향조사기관 인허가 정보"
     short: "groundwater_survey"
@@ -927,6 +939,8 @@ datasets:
     sub_category: "groundwater"
     schedule: "daily"
     service_name: "LOCALDATA_092902"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16115"
     name_ko: "서울시 지하수정화업체 인허가 정보"
     short: "groundwater_purification"
@@ -934,6 +948,8 @@ datasets:
     sub_category: "groundwater"
     schedule: "daily"
     service_name: "LOCALDATA_092903"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16123"
     name_ko: "서울시 배출가스전문정비사업자(확인검사대행자) 인허가 정보"
     short: "emission_repair_agent"
@@ -942,6 +958,8 @@ datasets:
     sub_category: "emission"
     schedule: "daily"
     service_name: "LOCALDATA_093009"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16143"
     name_ko: "서울시 담배도매업 인허가 정보"
     short: "tobacco_wholesale"
@@ -971,6 +989,8 @@ datasets:
     sub_category: "funeral"
     schedule: "daily"
     service_name: "LOCALDATA_114701"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16153"
     name_ko: "서울시 요양보호사교육기관 인허가 정보"
     short: "caregiver_academy"
@@ -979,6 +999,8 @@ datasets:
     sub_category: "education"
     schedule: "daily"
     service_name: "LOCALDATA_114901"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16154"
     name_ko: "서울시 장례지도사 교육기관 인허가 정보"
     short: "funeral_director_academy"
@@ -987,6 +1009,8 @@ datasets:
     sub_category: "education"
     schedule: "daily"
     service_name: "LOCALDATA_114902"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16155"
     name_ko: "서울시 무료직업소개소 인허가 정보"
     short: "free_job_agency"
@@ -995,6 +1019,8 @@ datasets:
     sub_category: "job_agency"
     schedule: "daily"
     service_name: "LOCALDATA_115001"
+    format: "v2"                       # 2026-08-04 원천 전환(실측)
+    canonical_format: "v1"             # 정렬·diff·Raw 증분은 v1 정본 유지
   - oa_id: "OA-16156"
     name_ko: "서울시 유료직업소개소 인허가 정보"
     short: "paid_job_agency"

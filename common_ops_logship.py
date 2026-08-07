@@ -25,7 +25,7 @@ import os
 import shutil
 import sys
 import tarfile
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -69,18 +69,21 @@ def common_ops_logship():
     @task
     def ship_logs() -> dict:
         """종결 run 로그 번들 → ops 존 업로드(검증) → 로컬 제거. 전 도메인."""
-        from airflow.models import DagRun
-        from airflow.utils.session import create_session
-
+        from common.ops.airflow_meta import terminal_run_states
         from common.storage import resolve_storage
 
-        terminal: dict[tuple[str, str], str] = {}
+        # Airflow 3 은 태스크 프로세스의 ORM 접근을 막는다(BlockedDBSession) — REST API v2 로 읽는다.
+        # 조회가 실패하면 여기서 죽는 게 맞다: 빈 목록으로 진행하면 종결 판정이 전부 거짓이 되어
+        # **실행 중인 run 의 로그까지 지울** 수 있다(모른다 ≠ 없다).
+        runs = terminal_run_states()
+        terminal: dict[tuple[str, str], str] = {k: str(v["state"]) for k, v in runs.items()}
         started: dict[tuple[str, str], object] = {}
-        with create_session() as session:
-            for run in session.query(DagRun).filter(
-                    DagRun.state.in_(("success", "failed"))).all():
-                terminal[(run.dag_id, run.run_id)] = run.state
-                started[(run.dag_id, run.run_id)] = run.start_date
+        for key, meta in runs.items():
+            raw = meta.get("start_date")
+            try:
+                started[key] = datetime.fromisoformat(str(raw)) if raw else None
+            except ValueError:
+                started[key] = None
 
         # 배포 환경이 정한 저장소를 그대로 쓴다 — 로컬·운영을 코드가 아니라 값이 가른다.
         storage = resolve_storage()

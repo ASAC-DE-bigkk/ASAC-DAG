@@ -65,6 +65,9 @@ def test_format_values():
     assert bad == [], f"format 위반: {bad}"
     envs = [d for d in registry.all_datasets() if d.category == "environment"]
     assert envs and all(d.fmt == "v2" for d in envs), "environment 은 format v2 이어야"
+    bad_canonical = [(d.short, d.canonical_fmt) for d in registry.all_datasets()
+                     if d.canonical_fmt not in ("v1", "v2")]
+    assert bad_canonical == [], f"canonical_format 위반: {bad_canonical}"
 
 
 # ── v1/v2 컬럼 별칭 정규화(schemas) ──────────────────────────────────────────────
