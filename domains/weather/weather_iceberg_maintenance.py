@@ -67,12 +67,14 @@ def maintenance_pool_for_table(table: str) -> str:
 
 
 DEFAULT_PARAM_VALUES = {
-    "target": "dev",
+    # The shared deployment runs the weekly maintenance against prod by default.
+    # A manual dev canary remains possible through an explicit run conf.
+    "target": "prod",
     "retention": "7d",
     "tables": CANONICAL_TABLES,
 }
 DEFAULT_PARAMS = {
-    "target": Param("dev", enum=["dev", "prod"]),
+    "target": Param("prod", enum=["dev", "prod"]),
     "retention": Param("7d", enum=["7d"]),
     "tables": Param(
         list(CANONICAL_TABLES),
