@@ -183,6 +183,35 @@ def test_manifest_factory_keeps_trino_wiring_out_of_the_dag(monkeypatch):
     assert runtime.build_traffic_manifest() is sentinel_manifest
 
 
+def test_landing_lifecycle_runtime_wires_slot_receipts_with_same_r2_factory(
+    monkeypatch,
+):
+    captured: dict[str, object] = {}
+    slot_receipts = object()
+    monkeypatch.setattr(runtime, "build_traffic_landing", lambda: object())
+    monkeypatch.setattr(runtime, "build_traffic_snapshot_receipts", lambda: object())
+    monkeypatch.setattr(
+        runtime,
+        "build_traffic_collection_slot_receipts",
+        lambda: slot_receipts,
+        raising=False,
+    )
+    monkeypatch.setattr(runtime, "TrafficRunLedger", lambda: object())
+    monkeypatch.setattr(
+        runtime,
+        "IncidentLandingLifecycle",
+        lambda **kwargs: captured.setdefault("lifecycle", kwargs),
+    )
+
+    lifecycle = runtime.build_incident_landing_lifecycle()
+
+    assert lifecycle is captured["lifecycle"]
+    assert captured["lifecycle"]["slot_receipts"] is slot_receipts
+    assert captured["lifecycle"]["slot_for_logical_date"].__name__ == (
+        "traffic_incident_slot"
+    )
+
+
 def test_incident_materializer_runtime_replays_legacy_raw_before_loading(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -205,6 +234,11 @@ def test_incident_materializer_runtime_replays_legacy_raw_before_loading(monkeyp
 
     monkeypatch.setattr(runtime, "build_traffic_landing", lambda: Landing())
     monkeypatch.setattr(runtime, "build_traffic_snapshot_receipts", lambda: object())
+    monkeypatch.setattr(
+        runtime,
+        "build_traffic_collection_slot_receipts",
+        lambda: object(),
+    )
     monkeypatch.setattr(runtime, "build_traffic_manifest", lambda: object())
     monkeypatch.setattr(runtime, "IncidentMaterializer", lambda **kwargs: kwargs)
 
@@ -258,6 +292,11 @@ def test_incident_materializer_preflight_initializes_fresh_bronze_tables(monkeyp
         find_verified,
     )
     monkeypatch.setattr(runtime, "build_traffic_snapshot_receipts", lambda: object())
+    monkeypatch.setattr(
+        runtime,
+        "build_traffic_collection_slot_receipts",
+        lambda: object(),
+    )
     monkeypatch.setattr(runtime, "build_traffic_manifest", lambda: object())
     monkeypatch.setattr(runtime, "IncidentMaterializer", lambda **kwargs: kwargs)
 
@@ -297,6 +336,11 @@ def test_incident_materializer_runtime_rejects_legacy_raw_hash_mismatch(monkeypa
 
     monkeypatch.setattr(runtime, "build_traffic_landing", lambda: Landing())
     monkeypatch.setattr(runtime, "build_traffic_snapshot_receipts", lambda: object())
+    monkeypatch.setattr(
+        runtime,
+        "build_traffic_collection_slot_receipts",
+        lambda: object(),
+    )
     monkeypatch.setattr(runtime, "build_traffic_manifest", lambda: object())
     monkeypatch.setattr(runtime, "IncidentMaterializer", lambda **kwargs: kwargs)
 

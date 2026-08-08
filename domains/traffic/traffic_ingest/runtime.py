@@ -16,6 +16,7 @@ from traffic_ingest.common.runtime import (
     r2_env,
     trino_cursor,
 )
+from traffic_ingest.collection_slots import traffic_incident_slot
 from traffic_ingest.landing import TrafficLanding
 from traffic_ingest.incident_pipeline import (
     IncidentLandingLifecycle,
@@ -176,10 +177,10 @@ def build_traffic_manifest() -> TrafficRunManifest:
     return TrafficRunManifest(trino_cursor)
 
 
-def build_traffic_snapshot_receipts() -> TrafficSnapshotReceipts:
+def _build_traffic_r2_storage():
     from common.storage import build_storage
 
-    storage = build_storage(
+    return build_storage(
         "r2",
         bucket=r2_env("R2_BUCKET_NAME"),
         endpoint=r2_env("R2_ENDPOINT"),
@@ -187,7 +188,17 @@ def build_traffic_snapshot_receipts() -> TrafficSnapshotReceipts:
         secret=r2_env("R2_SECRET_ACCESS_KEY"),
         region="auto",
     )
+
+
+def build_traffic_snapshot_receipts() -> TrafficSnapshotReceipts:
+    storage = _build_traffic_r2_storage()
     return TrafficSnapshotReceipts(storage)
+
+
+def build_traffic_collection_slot_receipts():
+    from common.collection_slots.receipts import CollectionSlotReceipts
+
+    return CollectionSlotReceipts(_build_traffic_r2_storage())
 
 
 def build_incident_landing_lifecycle() -> IncidentLandingLifecycle:
@@ -198,6 +209,8 @@ def build_incident_landing_lifecycle() -> IncidentLandingLifecycle:
         ledger=TrafficRunLedger(),
         landing=build_traffic_landing(),
         receipts=build_traffic_snapshot_receipts(),
+        slot_receipts=build_traffic_collection_slot_receipts(),
+        slot_for_logical_date=traffic_incident_slot,
         clock=lambda: datetime.now(timezone.utc),
     )
 
@@ -317,4 +330,6 @@ def build_incident_materializer() -> IncidentMaterializer:
         verified_receipts=verified_receipts,
         recover_legacy_raw_result=recover_legacy_raw_result,
         clock=lambda: datetime.now(timezone.utc),
+        slot_receipts=build_traffic_collection_slot_receipts(),
+        slot_for_logical_date=traffic_incident_slot,
     )

@@ -30,8 +30,15 @@ class LandingBatch:
         }
 
 
-def _lifecycle(events, *, collect_error=None, failed_ledger_error=None):
+def _lifecycle(
+    events,
+    *,
+    collect_error=None,
+    failed_ledger_error=None,
+    expected_receipt_error=None,
+):
     from traffic_ingest.incident_pipeline import IncidentLandingLifecycle
+    from traffic_ingest.collection_slots import traffic_incident_slot
 
     class Ledger:
         def record(self, **kwargs):
@@ -51,11 +58,24 @@ def _lifecycle(events, *, collect_error=None, failed_ledger_error=None):
             events.append(("receipt", receipt))
             return "receipt/LANDED.json"
 
+    class SlotReceipts:
+        def record_expected(self, slot):
+            events.append(("slot_expected", slot))
+            if expected_receipt_error:
+                raise expected_receipt_error
+            return "receipt/expected.json"
+
+        def record_outcome(self, outcome):
+            events.append(("slot_outcome", outcome))
+            return "receipt/outcome.json"
+
     return IncidentLandingLifecycle(
         runtime_guard=lambda: events.append(("runtime_guard", None)),
         ledger=Ledger(),
         landing=Landing(),
         receipts=Receipts(),
+        slot_receipts=SlotReceipts(),
+        slot_for_logical_date=traffic_incident_slot,
         clock=lambda: datetime(2026, 7, 16, 0, 5, 3, tzinfo=timezone.utc),
     )
 
@@ -74,13 +94,16 @@ def test_landing_lifecycle_records_durable_state_in_order():
     )
 
     assert [event[0:2] for event in events] == [
+        ("slot_expected", events[0][1]),
         ("ledger", "STARTED"),
         ("runtime_guard", None),
         ("collect", RunIdentity("traffic_incident_landing", "scheduled__snapshot-1")),
-        ("receipt", events[3][1]),
+        ("receipt", events[4][1]),
         ("ledger", "SUCCESS"),
     ]
-    receipt = events[3][1]
+    slot = events[0][1]
+    assert slot.collection_slot_at == "2026-07-16T00:05:00+00:00"
+    receipt = events[4][1]
     assert receipt.snapshot_run_id == "scheduled__snapshot-1"
     assert receipt.snapshot_at == "2026-07-16T00:05:02+00:00"
     assert receipt.raw_result == outcome.raw_result
@@ -118,7 +141,32 @@ def test_landing_lifecycle_records_failed_without_masking_collection_error():
         ("ledger", "STARTED"),
         ("ledger", "FAILED"),
     ]
+    outcome = next(event[1] for event in events if event[0] == "slot_outcome")
+    assert outcome.collection_state == "collection_failed"
+    assert outcome.recovery_state == "pending"
+    assert outcome.recovery_class == "none"
+    assert outcome.gap_reason_code == "landing_failed"
     assert not any(event[0] == "receipt" for event in events)
+
+
+def test_landing_lifecycle_stops_before_topis_when_expected_receipt_fails():
+    from traffic_ingest.landing import RunIdentity, TrafficLandingRequest
+
+    events = []
+    lifecycle = _lifecycle(
+        events,
+        expected_receipt_error=RuntimeError("collection receipt unavailable"),
+    )
+
+    with pytest.raises(RuntimeError, match="collection receipt unavailable"):
+        lifecycle.run(
+            run=RunIdentity("traffic_incident_landing", "scheduled__snapshot-1"),
+            logical_date="2026-07-16T00:05:00+00:00",
+            request=TrafficLandingRequest(1, 1000, 1000),
+        )
+
+    assert [event[0] for event in events] == ["slot_expected", "ledger"]
+    assert events[-1] == ("ledger", "FAILED")
 
 
 def test_landing_outcome_aggregates_multiple_payload_hashes_deterministically():

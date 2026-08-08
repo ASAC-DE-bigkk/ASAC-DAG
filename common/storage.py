@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,23 @@ class Storage(ABC):
     def write_json(self, key: str, obj: Any) -> None:
         self.write_text(key, json.dumps(obj, ensure_ascii=False, indent=2))
 
+    def write_bytes_if_absent(self, key: str, data: bytes) -> bool:
+        """Write once when the backend can guarantee an atomic create.
+
+        Control-plane receipts must never implement this with ``exists`` followed by
+        ``write``: concurrent retries could otherwise overwrite conflicting evidence.
+        Backends that do not provide an atomic create fail closed.
+        """
+        raise NotImplementedError(
+            "Storage backend does not support atomic write-if-absent"
+        )
+
+    def write_json_if_absent(self, key: str, obj: Any) -> bool:
+        return self.write_bytes_if_absent(
+            key,
+            json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+
     def read_json(self, key: str) -> Any:
         return json.loads(self.read_bytes(key).decode("utf-8"))
 
@@ -100,6 +118,27 @@ class LocalStorage(Storage):
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_bytes(data)
         tmp.replace(p)
+
+    def write_bytes_if_absent(self, key: str, data: bytes) -> bool:
+        """Atomically link a completed temporary file only when ``key`` is absent."""
+        target = self._path(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(data)
+            temporary_path = Path(temporary.name)
+        try:
+            os.link(temporary_path, target)
+        except FileExistsError:
+            return False
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        return True
 
     def read_bytes(self, key: str) -> bytes:
         return self._path(key).read_bytes()
@@ -142,6 +181,33 @@ class R2Storage(Storage):
 
     def write_bytes(self, key: str, data: bytes) -> None:
         self._s3.put_object(Bucket=self.bucket, Key=key, Body=data)
+
+    def write_bytes_if_absent(self, key: str, data: bytes) -> bool:
+        """Conditionally create one R2 object without overwriting slot evidence."""
+        from botocore.exceptions import ClientError
+
+        for _ in range(3):
+            try:
+                self._s3.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=data,
+                    IfNoneMatch="*",
+                )
+                return True
+            except ClientError as exc:
+                response = exc.response or {}
+                error = response.get("Error", {})
+                code = str(error.get("Code", ""))
+                status = int((response.get("ResponseMetadata", {}) or {}).get(
+                    "HTTPStatusCode", 0
+                ))
+                if code == "PreconditionFailed" or status == 412:
+                    return False
+                if code == "ConditionalRequestConflict" or status == 409:
+                    continue
+                raise
+        raise RuntimeError("R2 conditional write conflicted repeatedly")
 
     def read_bytes(self, key: str) -> bytes:
         return self._s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()

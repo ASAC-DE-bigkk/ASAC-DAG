@@ -34,6 +34,7 @@ def _receipt(run_id: str, snapshot_at: str):
             "expected_rows": 4,
             "list_total_count": 4,
             "is_publishable": True,
+            "result_code": "INFO-000",
         },
         event_at=snapshot_at,
     )
@@ -113,6 +114,78 @@ def test_materializer_preserves_landing_run_ids_and_publishes_latest_batch_event
     assert [event for event in events if event[0] == "materialized"] == [
         ("materialized", "snapshot-1"),
         ("materialized", "snapshot-2"),
+    ]
+
+
+def test_materializer_records_valid_zero_slot_outcome_after_verification_before_ack():
+    from traffic_ingest.collection_slots import traffic_incident_slot
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    events = []
+    receipt = _receipt("snapshot-zero", "2026-07-16T00:05:00+00:00")
+    receipt.raw_result.update(
+        {
+            "expected_rows": 0,
+            "parsed_rows": 0,
+            "list_total_count": 0,
+            "manifest_key": "raw/snapshot-zero/_manifest.json",
+        }
+    )
+
+    class Receipts:
+        def pending(self, *, limit):
+            assert limit == 1
+            return [receipt]
+
+        def record_materialized(self, value):
+            events.append(("materialized", value.snapshot_run_id))
+
+    class SlotReceipts:
+        def record_outcome(self, outcome):
+            events.append(("slot_outcome", outcome))
+            return "ops/control/state/collection_slots/event.json"
+
+    class Manifest:
+        def start(self, *_args, **_kwargs):
+            return None
+
+        def publish(self, *_args, **_kwargs):
+            return None
+
+        def fail(self, *_args, **_kwargs):
+            pytest.fail("verified zero-row snapshot must not fail")
+
+    def verify(_result, _snapshot_run_id):
+        events.append(("verify", receipt.snapshot_run_id))
+        return 0
+
+    IncidentMaterializer(
+        receipts=Receipts(),
+        manifest=Manifest(),
+        load=lambda raw_result, _snapshot_run_id: {
+            "raw_object_keys": raw_result["raw_object_keys"],
+            "inserted": 0,
+            "expected_rows": 0,
+            "page_count": 1,
+            "is_publishable": True,
+        },
+        verify=verify,
+        clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
+        slot_receipts=SlotReceipts(),
+        slot_for_logical_date=traffic_incident_slot,
+    ).run(
+        materializer_dag_id="traffic_incident_bronze",
+        materializer_run_id="asset__materializer-1",
+        limit=1,
+    )
+
+    outcome = next(event[1] for event in events if event[0] == "slot_outcome")
+    assert outcome.collection_state == "source_empty_valid"
+    assert outcome.source_result_code == "INFO-000"
+    assert [event[0] for event in events] == [
+        "verify",
+        "slot_outcome",
+        "materialized",
     ]
 
 
