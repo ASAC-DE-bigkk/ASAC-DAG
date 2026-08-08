@@ -1,0 +1,24 @@
+{
+  "_comment": "P0 테이블 스코프 감사기 회귀 데이터. 게이트웨이 JS 이식판이 이 케이스를 전부 통과해야 한다. allowlist 예시 = {gold_transit_dong_now} (한 제품). expect=pass 는 감사 통과(안전), expect=block 은 차단(위험).",
+  "allowlist_example": ["gold_transit_dong_now"],
+  "cases": [
+    {"name": "clean_direct", "sql": "SELECT gu FROM gold_transit_dong_now WHERE gu = :gu", "expect": "pass"},
+    {"name": "clean_cte", "sql": "WITH s AS (SELECT gu FROM gold_transit_dong_now) SELECT * FROM s", "expect": "pass"},
+    {"name": "clean_limit_n", "sql": "SELECT gu FROM gold_transit_dong_now ORDER BY 1 LIMIT :n", "expect": "pass"},
+    {"name": "param_named_from", "sql": "SELECT gu FROM gold_transit_dong_now WHERE ymd BETWEEN :from AND :to", "expect": "pass"},
+    {"name": "json_each_array_in", "sql": "SELECT gu FROM gold_transit_dong_now WHERE gu IN (SELECT value FROM json_each(:gus))", "expect": "pass"},
+    {"name": "leak_keys_direct", "sql": "SELECT key_hash FROM _keys", "expect": "block"},
+    {"name": "leak_other_domain", "sql": "SELECT * FROM gold_weather_place_risk_window", "expect": "block"},
+    {"name": "comma_join_keys", "sql": "SELECT k.key_hash, k.email FROM gold_transit_dong_now c, _keys k", "expect": "block"},
+    {"name": "comma_join_usage", "sql": "SELECT u.count FROM gold_transit_dong_now c, _usage u LIMIT :n", "expect": "block"},
+    {"name": "comma_join_pragma_tvf", "sql": "SELECT t.name FROM gold_transit_dong_now c, pragma_table_info('_keys') t", "expect": "block"},
+    {"name": "derived_then_comma_keys", "sql": "SELECT * FROM (SELECT 1) x, _keys", "expect": "block"},
+    {"name": "scalar_subquery_comma", "sql": "SELECT c.gu, (SELECT k.email FROM gold_transit_dong_now x, _keys k LIMIT 1) AS leak FROM gold_transit_dong_now c", "expect": "block"},
+    {"name": "schema_qualified_keys", "sql": "SELECT email FROM gold_transit_dong_now c, main._keys", "expect": "block"},
+    {"name": "stacked_write", "sql": "SELECT 1 FROM gold_transit_dong_now; DROP TABLE _keys", "expect": "block"},
+    {"name": "pragma_direct", "sql": "SELECT * FROM pragma_table_info('_keys')", "expect": "block"},
+    {"name": "write_delete", "sql": "DELETE FROM gold_transit_dong_now", "expect": "block"},
+    {"name": "attach_db", "sql": "ATTACH DATABASE 'x' AS y", "expect": "block"},
+    {"name": "bad_limit_name", "sql": "SELECT gu FROM gold_transit_dong_now LIMIT :rows", "expect": "block"}
+  ]
+}

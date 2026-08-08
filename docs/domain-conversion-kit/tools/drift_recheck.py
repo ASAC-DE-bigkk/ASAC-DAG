@@ -93,22 +93,42 @@ def main():
     files = []
     for s in args.source:
         files.extend(sorted(gmod.glob(s, recursive=True)))
+    # 방어: 실 D1 실행 전 정적 감사 게이트(precheck 와 동일). 게시 테이블 밖(내부표 등) 참조
+    # 패턴은 실행하지 않는다 — 이 하네스가 _keys 유출 벡터가 되지 않게.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from pattern_audit import audit_pattern_sql
+
     pats = []
+    allow_tables = set()
     for f in files:
         try:
             d = yaml.safe_load(open(f, encoding="utf-8"))
         except Exception:
             continue
         for m in (d.get("models") or []):
-            for p in (_sv(m).get("usage_patterns") or []):
+            sv = _sv(m)
+            if not sv:
+                continue
+            dt = sv.get("d1_table")
+            for t in (dt if isinstance(dt, list) else [dt] if dt else [m.get("name")]):
+                if t:
+                    allow_tables.add(str(t).lower())
+            for p in (sv.get("usage_patterns") or []):
+                if p.get("d1_table"):
+                    allow_tables.add(str(p["d1_table"]).lower())
                 if p.get("sql") and p.get("pattern_id"):
                     if args.verified_only and not p.get("verified_at"):
                         continue
                     pats.append(p)
+    allow = frozenset(allow_tables)
 
-    drift_fail, row_drift, skipped = [], [], []
+    drift_fail, row_drift, skipped, blocked = [], [], [], []
     ok = 0
     for p in pats:
+        guard = audit_pattern_sql(p["sql"], allow)
+        if guard:
+            blocked.append({"pattern_id": p["pattern_id"], "reason": guard[:2]})
+            continue
         body, missing = _sub(p["sql"], _vals(p["sql"]))
         if body is None:
             skipped.append({"pattern_id": p["pattern_id"], "missing": missing})
@@ -124,12 +144,13 @@ def main():
             drift_fail.append({"pattern_id": p["pattern_id"], "error": type(exc).__name__})
         print(f"  {'FAIL' if drift_fail and drift_fail[-1]['pattern_id']==p['pattern_id'] else 'ok  '} {p['pattern_id']}")
     report = {"total": len(pats), "ok": ok, "drift_fail": drift_fail,
-              "row_drift": row_drift, "skipped": skipped}
+              "row_drift": row_drift, "skipped": skipped, "blocked": blocked}
     if args.out:
         Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     print(json.dumps({"total": len(pats), "ok": ok, "drift_fail": len(drift_fail),
-                      "row_drift": len(row_drift), "skipped": len(skipped)}, ensure_ascii=False))
-    return 1 if drift_fail else 0
+                      "row_drift": len(row_drift), "skipped": len(skipped),
+                      "blocked": len(blocked)}, ensure_ascii=False))
+    return 1 if (drift_fail or blocked) else 0
 
 
 if __name__ == "__main__":
