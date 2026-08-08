@@ -1,0 +1,784 @@
+# culture — 검증 통과 신규 패턴 draft (미적용, 구성만 하면 삽입)
+# 총 47건 · 실 D1 read-검증 통과 · 정적 감사 통과 · verified_rows 스탬핑 대기
+
+### 삽입 대상 모델: gold_culture_activity_by_dong  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "activity_ranking_flex"
+              question_ko: "원하는 지표(공연·전시·행사·축제·무료·교육 등)로 자치구 또는 행정동을 문화활동 순으로 정렬하면 어디가 상위(또는 하위)인가?"
+              axes: "차원(구/동) × 지표 스위치 × 정렬방향 × 기간 랭킹 — 기존 exhibition_dongs/free_edu_dongs의 상위호환"
+              verified_rows: 0                # 실 D1 실측: [6, 10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-01~08-31 전시 기준 상위 행정동은 소공동(중구)이 12건으로 1위."
+              sql: |
+                -- :dim=dong, :metric=exhibitions, :dir=desc, :from=2026-07-01, :to=2026-08-31, :n=10
+                SELECT CASE :dim WHEN 'gu' THEN gu ELSE admin_dong END AS dim_value,
+                       MAX(gu) AS gu,
+                       SUM(CASE :metric
+                             WHEN 'performances' THEN performances_count
+                             WHEN 'events' THEN events_count
+                             WHEN 'exhibitions' THEN exhibitions_count
+                             WHEN 'kopis_festivals' THEN kopis_festivals_count
+                             WHEN 'festival' THEN festival_events_count
+                             WHEN 'free' THEN free_events_count
+                             WHEN 'edu' THEN edu_experience_events_count
+                             WHEN 'sejong' THEN sejong_count
+                             WHEN 'kcisa' THEN kcisa_count
+                             ELSE activities_count END) AS metric_value
+                FROM gold_culture_activity_by_dong
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY CASE :dim WHEN 'gu' THEN gu ELSE admin_dong END
+                HAVING metric_value > 0
+                ORDER BY CASE WHEN :dir='asc' THEN metric_value END ASC,
+                         CASE WHEN :dir='desc' THEN metric_value END DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, having, sort, filter_range]
+            - pattern_id: "gu_daily_trend"
+              question_ko: "우리 자치구 전체(동 합산)의 문화활동이 날짜별로 얼마나 잡혀 있나 — 늘고 있나, 줄고 있나?"
+              axes: "필터(gu) + 기간 — 날짜별 동 합산 시계열(구 단위). 기존 dong_activity_trend(단일 동)의 구 집계 형제"
+              verified_rows: 0                # 실 D1 실측: [60, 60] (스탬핑 대기)
+              insight_sample_ko: "종로구는 활동이 잡힌 가장 최근 날짜인 2026-08-29에 문화활동 7건(공연 1·행사 4)."
+              sql: |
+                -- :gu=종로구, :from=2026-07-01, :to=2026-08-31, :n=60
+                SELECT event_date,
+                       SUM(activities_count) AS activities,
+                       SUM(performances_count) AS performances,
+                       SUM(events_count) AS events,
+                       SUM(exhibitions_count) AS exhibitions,
+                       COUNT(*) AS dongs_reporting
+                FROM gold_culture_activity_by_dong
+                WHERE gu = :gu AND event_date BETWEEN :from AND :to
+                GROUP BY event_date
+                HAVING SUM(activities_count) > 0
+                ORDER BY event_date DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, having, sort]
+            - pattern_id: "free_share_dongs"
+              question_ko: "전체 문화활동 대비 무료 행사 비중이 높은 동네(행정동)는 어디인가?"
+              axes: "동 랭킹 — free/activities 비율 DESC, 최소 활동수 임계값(HAVING). 기존 free_edu_dongs(절대건수)의 비율판"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "활동 20건 이상 동네 중 증산동(은평구)은 22건이 전부 무료(무료 비중 100%)."
+              sql: |
+                -- :from=2026-07-01, :to=2026-08-31, :min_activities=20, :n=10
+                SELECT admin_dong, gu,
+                       SUM(free_events_count) AS free_cnt,
+                       SUM(activities_count) AS total_cnt,
+                       ROUND(SUM(free_events_count) * 100.0 / SUM(activities_count), 1) AS free_pct
+                FROM gold_culture_activity_by_dong
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY admin_dong, gu
+                HAVING SUM(activities_count) >= :min_activities
+                ORDER BY free_pct DESC, total_cnt DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, having, filter_range, sort]
+            - pattern_id: "festival_occurrences"
+              question_ko: "축제가 실제로 열리는(열렸던) 동네와 날짜는 언제 어디인가?"
+              axes: "단면/필터 — (KOPIS 축제 + 기타 축제) 카운트가 임계값 이상인 (동, 날짜) 행 나열"
+              verified_rows: 0                # 실 D1 실측: [20, 20] (스탬핑 대기)
+              insight_sample_ko: "혜화동(종로구)은 2026-07-28에 축제 6건(KOPIS 5·기타 1)으로 가장 몰림."
+              sql: |
+                -- :from=2026-07-01, :min_festivals=1, :n=20
+                SELECT event_date, admin_dong, gu,
+                       kopis_festivals_count, festival_events_count,
+                       (kopis_festivals_count + festival_events_count) AS festival_total,
+                       activities_count
+                FROM gold_culture_activity_by_dong
+                WHERE event_date >= :from
+                  AND (kopis_festivals_count + festival_events_count) >= :min_festivals
+                ORDER BY festival_total DESC, event_date
+                LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "multi_dong_compare"
+              question_ko: "관심 있는 여러 동네를 골라 문화활동을 나란히 비교하면?"
+              axes: "다중선택(배열) 단면 — 선택한 행정동들의 기간 합산 지표 비교"
+              verified_rows: 0                # 실 D1 실측: [3, 1] (스탬핑 대기)
+              insight_sample_ko: "선택한 세 동네 중 신촌동(서대문구)이 기간 합산 활동 23건(공연 13·무료 5)으로 최다."
+              sql: |
+                -- :dongs=["신촌동","염창동","신월1동"], :from=2026-07-01, :to=2026-08-31, :n=20
+                SELECT admin_dong, gu,
+                       SUM(activities_count) AS activities,
+                       SUM(performances_count) AS performances,
+                       SUM(exhibitions_count) AS exhibitions,
+                       SUM(free_events_count) AS free_events
+                FROM gold_culture_activity_by_dong
+                WHERE admin_dong IN (SELECT value FROM json_each(:dongs))
+                  AND event_date BETWEEN :from AND :to
+                GROUP BY admin_dong, gu
+                ORDER BY activities DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_set, filter_range, sort]
+            - pattern_id: "activity_type_mix"
+              question_ko: "이 자치구(또는 서울 전체)의 문화활동은 어떤 유형(공연·행사·전시·축제)이 주를 이루나?"
+              axes: "분포/비율 — 유형별 기간 합산과 비중(UNPIVOT), gu 센티널로 특정 구 또는 전체(ALL)"
+              verified_rows: 0                # 실 D1 실측: [4, 4] (스탬핑 대기)
+              insight_sample_ko: "2026-07-01~08-31 종로구는 공연이 492건으로 4개 유형 중 63.2%를 차지."
+              sql: |
+                -- :gu=종로구, :from=2026-07-01, :to=2026-08-31
+                WITH agg AS (
+                  SELECT SUM(performances_count) AS performances,
+                         SUM(events_count) AS events,
+                         SUM(exhibitions_count) AS exhibitions,
+                         SUM(kopis_festivals_count) AS festivals
+                  FROM gold_culture_activity_by_dong
+                  WHERE (:gu = 'ALL' OR gu = :gu) AND event_date BETWEEN :from AND :to
+                )
+                SELECT t.activity_type, t.cnt,
+                       ROUND(t.cnt * 100.0 / NULLIF(t.performances + t.events + t.exhibitions + t.festivals, 0), 1) AS pct
+                FROM (
+                  SELECT 'performances' AS activity_type, performances AS cnt, performances, events, exhibitions, festivals FROM agg
+                  UNION ALL SELECT 'events', events, performances, events, exhibitions, festivals FROM agg
+                  UNION ALL SELECT 'exhibitions', exhibitions, performances, events, exhibitions, festivals FROM agg
+                  UNION ALL SELECT 'festivals', festivals, performances, events, exhibitions, festivals FROM agg
+                ) t
+                ORDER BY t.cnt DESC
+              requires: [select_columns, aggregate, subquery, filter_range, sort]
+
+### 삽입 대상 모델: gold_culture_booking_curve  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "rank_climbers"
+              question_ko: "첫 등장 대비 최근 예매 순위가 오른(상승세) 공연은?"
+              axes: "랭킹 — (first_rank - last_rank) DESC, 최소 체류일 임계"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "첫 등장 40위였던 뮤지컬 '디어 에반 핸슨 (Musical Dear Evan Hansen) [서울]'이 최근 9위까지 올라 31계단 상승, 차트 34일째로 상승세가 가장 뚜렷했다."
+              sql: |
+                -- :min_days=7, :n=10
+                SELECT performance_name, genre, venue_name, first_rank, last_rank,
+                       first_rank - last_rank AS rank_gain, days_on_chart
+                FROM gold_culture_booking_curve
+                WHERE days_on_chart >= :min_days
+                ORDER BY rank_gain DESC, days_on_chart DESC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "fading_from_peak"
+              question_ko: "정점을 찍은 뒤 최근 순위가 크게 떨어진(식은) 공연은?"
+              axes: "랭킹 — (last_rank - best_rank) DESC, 낙폭 임계"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "'Stray Kids World Tour: RUN IT [서울]'은 7월 4일 최고 1위를 찍은 뒤 최근 49위로 48계단 하락, 정점 대비 낙폭이 가장 컸다."
+              sql: |
+                -- :min_drop=5, :n=10
+                SELECT performance_name, genre, venue_name, best_rank, best_rank_date,
+                       last_rank, last_rank - best_rank AS drop_from_peak, days_on_chart
+                FROM gold_culture_booking_curve
+                WHERE last_rank - best_rank >= :min_drop
+                ORDER BY drop_from_peak DESC, best_rank ASC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "slow_burners"
+              question_ko: "뒤늦게 입소문이 나 한참 만에 정점에 오른 슬로우버너 공연은?"
+              axes: "필터(days_to_peak>=min, best_rank<=top) — days_to_peak DESC"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "'디어 에반 핸슨 (Musical Dear Evan Hansen) [서울]'은 첫 등장 40일 만인 8월 8일에야 최고 9위에 올라, 뒤늦게 정점을 찍은 슬로우버너였다."
+              sql: |
+                -- :min_peak_days=10, :top=20, :n=10
+                SELECT performance_name, genre, venue_name, days_to_peak, best_rank,
+                       best_rank_date, days_on_chart
+                FROM gold_culture_booking_curve
+                WHERE days_to_peak >= :min_peak_days AND best_rank <= :top
+                ORDER BY days_to_peak DESC, best_rank ASC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "venue_leaderboard"
+              question_ko: "예매 성적 좋은 공연이 자주 열리는 공연장은? (공연장별 실적)"
+              axes: "공연장 랭킹 — 집계 MIN(best_rank) ASC, 최소 공연수 HAVING"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "'올림픽공원 KSPO DOME(체조경기장)'은 차트 진입작 8편으로 최고 1위, 평균 최고순위 11.1위·평균 체류 20.6일로 예매 강세 공연장 1위였다."
+              sql: |
+                -- :min_shows=2, :n=10
+                SELECT venue_name, COUNT(*) AS shows,
+                       MIN(best_rank) AS top_rank,
+                       ROUND(AVG(best_rank), 1) AS avg_best_rank,
+                       ROUND(AVG(days_on_chart), 1) AS avg_days_on_chart
+                FROM gold_culture_booking_curve
+                GROUP BY venue_name
+                HAVING COUNT(*) >= :min_shows
+                ORDER BY top_rank ASC, avg_best_rank ASC LIMIT :n
+              requires: [select_columns, aggregate, group_by, having, sort]
+            - pattern_id: "genre_summary"
+              question_ko: "장르별 예매 차트 성적 요약(작품 수·평균 최고순위·평균 체류일·평균 정점 도달일)은?"
+              axes: "장르 분포 — 집계, shows DESC / avg_best_rank ASC"
+              verified_rows: 0                # 실 D1 실측: [7, 3] (스탬핑 대기)
+              insight_sample_ko: "'대중음악'이 차트 진입 52편으로 가장 많고, 평균 최고순위 22.6위·평균 체류 16.9일·평균 정점 도달 6.8일이었다."
+              sql: |
+                -- :n=10
+                SELECT genre, COUNT(*) AS shows,
+                       MIN(best_rank) AS top_rank,
+                       ROUND(AVG(best_rank), 1) AS avg_best_rank,
+                       ROUND(AVG(days_on_chart), 1) AS avg_days_on_chart,
+                       ROUND(AVG(days_to_peak), 1) AS avg_days_to_peak
+                FROM gold_culture_booking_curve
+                GROUP BY genre
+                ORDER BY shows DESC, avg_best_rank ASC LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "pre_open_anticipation"
+              question_ko: "아직 개막 전인데 이미 예매 순위 상위에 오른 기대작은?"
+              axes: "필터(event_start_date > today, best_rank<=top) — best_rank ASC"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "개막(9월 18일) 전인데도 'NCT 127 5TH TOUR, NEO CITY: THE REDLINE [서울]'이 이미 최고 2위(8월 8일)에 올라 개막 전 기대작 1위였다."
+              sql: |
+                -- :today=2026-08-09, :top=30, :n=10
+                SELECT performance_name, genre, venue_name, event_start_date,
+                       best_rank, best_rank_date, days_on_chart
+                FROM gold_culture_booking_curve
+                WHERE event_start_date > :today AND best_rank <= :top
+                ORDER BY best_rank ASC, event_start_date ASC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "currently_running"
+              question_ko: "지금 공연 중이면서 예매 순위에도 걸려 있는(지금 볼 수 있는) 작품은?"
+              axes: "필터(event_start<=today<=event_end) — best_rank ASC"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "공연 중(7/10~10/18)인 뮤지컬 '드라큘라 [서울]'은 최고·최근 순위가 모두 1위, 차트 41일째로 지금 볼 수 있는 최상위작이었다."
+              sql: |
+                -- :today=2026-08-09, :n=10
+                SELECT performance_name, genre, venue_name, event_start_date, event_end_date,
+                       best_rank, last_rank, days_on_chart
+                FROM gold_culture_booking_curve
+                WHERE event_start_date <= :today AND event_end_date >= :today
+                ORDER BY best_rank ASC, last_rank ASC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "flex_ranking"
+              question_ko: "장르(전체/특정)를 골라 원하는 지표·정렬로 예매 차트 상위작을 보고 싶다"
+              axes: "랭킹 — 차원/지표/정렬 스위치 + 장르 센티널 (steady_sellers 상위호환)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "전체 장르에서 최고순위 기준 1위는 뮤지컬 '드라큘라 [서울]'(최고 1위, 차트 41일, 첫 3위→최근 1위)였다."
+              sql: |
+                -- :genre=ALL, :metric=best_rank, :dir=asc, :n=10
+                SELECT performance_name, genre, venue_name,
+                       best_rank, days_on_chart, days_to_peak, first_rank, last_rank
+                FROM gold_culture_booking_curve
+                WHERE (:genre = 'ALL' OR genre = :genre)
+                ORDER BY
+                  CASE :metric WHEN 'best_rank' THEN best_rank
+                               WHEN 'days_on_chart' THEN days_on_chart
+                               WHEN 'days_to_peak' THEN days_to_peak
+                               WHEN 'last_rank' THEN last_rank END
+                  * CASE WHEN :dir = 'asc' THEN 1 ELSE -1 END
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+
+### 삽입 대상 모델: gold_culture_boxoffice_daily  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "perf_rank_history"
+              question_ko: "이 공연의 예매 순위가 그동안 어떻게 움직였나?"
+              axes: "시계열 — 특정 공연 필터, snapshot_date ASC 궤적"
+              verified_rows: 0                # 실 D1 실측: [15, 41] (스탬핑 대기)
+              insight_sample_ko: "엘리자벳은 7/25~8/8 15개 스냅샷에 걸쳐 추적되며, 7/25 기준 6위(관람 25일차, 모멘텀 falling)에서 출발한다."
+              sql: |
+                -- :perf=엘리자벳, :from=2026-07-25, :to=2026-08-08, :n=30
+                SELECT snapshot_date, rank_no, rank_delta_3d, days_on_chart, momentum_status
+                FROM gold_culture_boxoffice_daily
+                WHERE performance_name = :perf AND snapshot_date BETWEEN :from AND :to
+                ORDER BY snapshot_date ASC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "rank_movers"
+              question_ko: "최근 3일간 예매 순위가 가장 크게 뛴(또는 떨어진) 공연은?"
+              axes: "최신 스냅샷 랭킹 — rank_delta_3d 정렬 방향 스위치(급등/급락)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "최신 스냅샷(8/8) 기준 순위가 가장 크게 오른 공연은 aespa LIVE TOUR -SYNK: COMPLaeXITY-(대중음악, 고척스카이돔)로 3일 전 35위에서 22위로 +13 상승했다."
+              sql: |
+                -- :dir=desc, :n=10
+                SELECT rank_no, performance_name, genre, venue_name, rank_prev_3d, rank_delta_3d
+                FROM gold_culture_boxoffice_daily
+                WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM gold_culture_boxoffice_daily)
+                  AND rank_delta_3d IS NOT NULL
+                ORDER BY CASE WHEN :dir='desc' THEN rank_delta_3d END DESC,
+                         CASE WHEN :dir='asc' THEN rank_delta_3d END ASC,
+                         rank_no ASC
+                LIMIT :n
+              requires: [select_columns, subquery, filter_null, sort]
+            - pattern_id: "genre_share_on_date"
+              question_ko: "이 날짜 예매 상위권은 어떤 장르가 얼마나 차지했나?"
+              axes: "분포 — 특정 스냅샷 장르별 편수·점유율"
+              verified_rows: 0                # 실 D1 실측: [6, 6] (스탬핑 대기)
+              insight_sample_ko: "8/8 상위 50편 중 대중음악이 22편(44.0%)으로 최다이며, 이 장르의 최고 순위는 2위였다."
+              sql: |
+                -- :date=2026-08-08, :n=10
+                SELECT genre,
+                       COUNT(*) AS shows,
+                       ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS share_pct,
+                       MIN(rank_no) AS best_rank
+                FROM gold_culture_boxoffice_daily
+                WHERE snapshot_date = :date
+                GROUP BY genre
+                ORDER BY shows DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, window, sort]
+            - pattern_id: "chart_presence_by_dim"
+              question_ko: "기간 동안 예매 상위권에 이름을 가장 많이 올린 공연장/자치구/장르는?"
+              axes: "차원 스위치(venue/gu/genre) — 기간 합산 차트 슬롯수 랭킹"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "8/1~8/8 동안 올림픽공원 KSPO DOME(체조경기장)이 27개 차트 슬롯(공연 7편, 최고 2위)으로 상위권에 가장 자주 올랐다."
+              sql: |
+                -- :dim=venue, :from=2026-08-01, :to=2026-08-08, :n=10
+                SELECT CASE :dim WHEN 'gu' THEN gu WHEN 'genre' THEN genre ELSE venue_name END AS dim_value,
+                       COUNT(*) AS chart_slots,
+                       COUNT(DISTINCT performance_id) AS shows,
+                       MIN(rank_no) AS best_rank
+                FROM gold_culture_boxoffice_daily
+                WHERE snapshot_date BETWEEN :from AND :to
+                GROUP BY dim_value
+                HAVING dim_value IS NOT NULL
+                ORDER BY chart_slots DESC, best_rank ASC LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, having, sort]
+            - pattern_id: "consistent_chart_leaders"
+              question_ko: "최근 기간 동안 꾸준히 상위권(K위 이내)을 지킨 공연은?"
+              axes: "랭킹 — 기간 내 top-K 진입 일수 DESC, 평균 순위 tie-break"
+              verified_rows: 0                # 실 D1 실측: [10, 7] (스탬핑 대기)
+              insight_sample_ko: "7/25~8/8 15일 내내 top10을 지킨 드라큘라 [서울](뮤지컬)이 최고 1위·평균 1.3위로 가장 꾸준했다."
+              sql: |
+                -- :from=2026-07-25, :to=2026-08-08, :topk=10, :min_days=5, :n=10
+                SELECT performance_name, genre,
+                       COUNT(*) AS days_in_top,
+                       MIN(rank_no) AS best_rank,
+                       ROUND(AVG(rank_no), 1) AS avg_rank
+                FROM gold_culture_boxoffice_daily
+                WHERE snapshot_date BETWEEN :from AND :to AND rank_no <= :topk
+                GROUP BY performance_id, performance_name, genre
+                HAVING days_in_top >= :min_days
+                ORDER BY days_in_top DESC, avg_rank ASC LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, having, sort]
+            - pattern_id: "ending_soon_still_ranked"
+              question_ko: "곧 끝나는데 아직 예매 상위권인, 놓치면 아쉬운 '막차' 공연은?"
+              axes: "최신 스냅샷 필터 — event_end_date 임박 윈도우, 종료일 ASC"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "8/8~8/23 종료 예정 중 aespa LIVE TOUR -SYNK: COMPLaeXITY-(대중음악, 고척스카이돔, 8/8 종료)가 22위로 아직 상위권에 남아 있는 막차 공연이다."
+              sql: |
+                -- :today=2026-08-08, :until=2026-08-23, :n=10
+                SELECT rank_no, performance_name, genre, venue_name, event_end_date, days_on_chart
+                FROM gold_culture_boxoffice_daily
+                WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM gold_culture_boxoffice_daily)
+                  AND event_end_date BETWEEN :today AND :until
+                ORDER BY event_end_date ASC, rank_no ASC LIMIT :n
+              requires: [select_columns, subquery, filter_range, sort]
+            - pattern_id: "multi_genre_top"
+              question_ko: "이 장르들(예: 뮤지컬·연극) 중에서 지금 예매 상위 공연은?"
+              axes: "최신 스냅샷 필터(다중 장르 IN) — rank_no ASC"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "뮤지컬·연극 중 최신 스냅샷(8/8) 1위는 드라큘라 [서울](뮤지컬, LG아트센터 서울 LG SIGNATURE 홀, 관람 41일차)이다."
+              sql: |
+                -- :genres=["뮤지컬","연극"], :n=10
+                SELECT rank_no, performance_name, genre, venue_name, days_on_chart
+                FROM gold_culture_boxoffice_daily
+                WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM gold_culture_boxoffice_daily)
+                  AND genre IN (SELECT value FROM json_each(:genres))
+                ORDER BY rank_no ASC LIMIT :n
+              requires: [select_columns, subquery, filter_set, sort]
+
+### 삽입 대상 모델: gold_culture_calendar_density  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "type_leaderboard"
+              question_ko: "어떤 종류(전시·공연·축제 등)의 문화행사가 달력을 가장 많이 채우나?"
+              axes: "종류 분포 랭킹 — busiest_type별 메인 일수·누적 건수 DESC (기간·구 센티널)"
+              verified_rows: 0                # 실 D1 실측: [5, 4] (스탬핑 대기)
+              insight_sample_ko: "2026-08~2027-02 서울 전역에서 'event' 종류가 145일 동안 그날의 메인이었고 해당 종류 누적 1,529건으로 1위(평균 집중도 0.584)."
+              sql: |
+                -- :gu=ALL, :from=2026-08-01, :to=2027-02-28, :n=10
+                SELECT busiest_type,
+                       COUNT(*) AS lead_days,
+                       SUM(busiest_type_count) AS type_events,
+                       ROUND(AVG(concentration), 3) AS avg_conc
+                FROM gold_culture_calendar_density
+                WHERE event_date BETWEEN :from AND :to
+                  AND (:gu = 'ALL' OR gu = :gu)
+                GROUP BY busiest_type
+                ORDER BY type_events DESC LIMIT :n
+              requires: [select_columns, filter_range, aggregate, group_by, sort]
+            - pattern_id: "gu_leaderboard_by_metric"
+              question_ko: "자치구를 원하는 기준(총량·일평균·종류 다양성·집중도)으로 줄세우면 어디가 상위인가?"
+              axes: "구 랭킹 — 지표 스위치(events/per_day/diversity/concentration) DESC"
+              verified_rows: 0                # 실 D1 실측: [15, 15] (스탬핑 대기)
+              insight_sample_ko: "총량 기준 1위는 중구로 기간 누적 4,338건(하루 평균 40.5건), 하루 평균 종류 수 3.59, 평균 집중도 0.548."
+              sql: |
+                -- :metric=events, :from=2026-08-01, :to=2027-02-28, :n=15
+                SELECT gu,
+                       SUM(total_events) AS events,
+                       ROUND(SUM(total_events) * 1.0 / COUNT(DISTINCT event_date), 1) AS per_day,
+                       ROUND(AVG(distinct_types), 2) AS avg_types,
+                       ROUND(AVG(concentration), 3) AS avg_conc
+                FROM gold_culture_calendar_density
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY gu
+                ORDER BY CASE :metric
+                           WHEN 'events' THEN SUM(total_events)
+                           WHEN 'per_day' THEN SUM(total_events) * 1.0 / COUNT(DISTINCT event_date)
+                           WHEN 'diversity' THEN AVG(distinct_types)
+                           WHEN 'concentration' THEN AVG(concentration)
+                         END DESC
+                LIMIT :n
+              requires: [select_columns, filter_range, aggregate, group_by, sort]
+            - pattern_id: "type_lead_by_gu"
+              question_ko: "특정 종류(공연·축제 등)가 주로 어느 자치구에서 그날의 메인이 되나?"
+              axes: "구 랭킹 — busiest_type 고정 후 메인 일수 DESC (종류×구 교차)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "공연(performance)이 메인인 날이 가장 많은 구는 서초구로 기간 중 39일, 누적 183건(평균 집중도 0.496)."
+              sql: |
+                -- :type=performance, :from=2026-08-01, :to=2027-02-28, :n=10
+                SELECT gu,
+                       COUNT(*) AS lead_days,
+                       SUM(busiest_type_count) AS type_events,
+                       ROUND(AVG(concentration), 3) AS avg_conc
+                FROM gold_culture_calendar_density
+                WHERE busiest_type = :type AND event_date BETWEEN :from AND :to
+                GROUP BY gu
+                ORDER BY lead_days DESC, type_events DESC LIMIT :n
+              requires: [select_columns, filter_range, aggregate, group_by, sort]
+            - pattern_id: "variety_or_focus_days"
+              question_ko: "이 구에서 행사 종류가 다양하게 고루 열리는 날(또는 한 종류로 쏠린 날)은 언제인가?"
+              axes: "단면 랭킹 — concentration 정렬 방향 스위치(asc=다양/desc=쏠림), total_events 임계값"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "중구에서 가장 고르게 분산된 날은 2027-01-03로 총 9건이 3종류에 걸쳐 열려 집중도 0.333(공연이 최다)."
+              sql: |
+                -- :gu=중구, :from=2026-08-01, :to=2027-02-28, :dir=asc, :min_events=5, :n=10
+                SELECT event_date, total_events, distinct_types, busiest_type, concentration
+                FROM gold_culture_calendar_density
+                WHERE gu = :gu AND event_date BETWEEN :from AND :to
+                  AND total_events >= :min_events
+                ORDER BY CASE WHEN :dir = 'asc' THEN concentration END ASC,
+                         CASE WHEN :dir = 'desc' THEN concentration END DESC,
+                         total_events DESC
+                LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "days_by_type_selection"
+              question_ko: "이 구에서 내가 고른 종류들(예: 행사·공연)이 그날의 메인인 날들을 시간순으로 보여줘."
+              axes: "다중값 필터 — busiest_type IN(배열) + 기간, event_date ASC"
+              verified_rows: 0                # 실 D1 실측: [15, 15] (스탬핑 대기)
+              insight_sample_ko: "중구에서 행사·공연이 메인인 가장 이른 날은 2026-08-03로 event가 19건(총 31건, 집중도 0.613)."
+              sql: |
+                -- :gu=중구, :types=["event","performance"], :from=2026-08-01, :to=2027-02-28, :n=15
+                SELECT event_date, busiest_type, busiest_type_count, total_events, concentration
+                FROM gold_culture_calendar_density
+                WHERE gu = :gu
+                  AND event_date BETWEEN :from AND :to
+                  AND busiest_type IN (SELECT value FROM json_each(:types))
+                ORDER BY event_date LIMIT :n
+              requires: [select_columns, filter_range, filter_set, sort]
+            - pattern_id: "city_daily_density"
+              question_ko: "서울 전체로 보면 어느 날에 문화행사가 가장 몰리나(도시 전역 일자별 밀도)?"
+              axes: "일자 집계 랭킹 — 전 구 합산 total_events DESC"
+              verified_rows: 0                # 실 D1 실측: [31, 31] (스탬핑 대기)
+              insight_sample_ko: "기간 중 서울 전역 합산이 가장 큰 날은 2026-08-08로 총 268건(메인 종류 126건)."
+              sql: |
+                -- :from=2026-08-01, :to=2027-02-28, :n=31
+                SELECT event_date,
+                       SUM(total_events) AS events,
+                       COUNT(DISTINCT gu) AS active_gus,
+                       SUM(busiest_type_count) AS lead_events
+                FROM gold_culture_calendar_density
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY event_date
+                ORDER BY events DESC LIMIT :n
+              requires: [select_columns, filter_range, aggregate, group_by, sort]
+            - pattern_id: "weekday_density_profile"
+              question_ko: "요일별로 보면 문화행사가 주로 언제 몰리나(주중 vs 주말)?"
+              axes: "요일 분포 — strftime 파생 요일별 합산·평균 DESC (구 센티널)"
+              verified_rows: 0                # 실 D1 실측: [7, 7] (스탬핑 대기)
+              insight_sample_ko: "서울 전역 기준 행사가 가장 몰리는 요일은 토요일(dow=6)로 기간 합산 930건, 하루 평균 22.1건(0=일~6=토)."
+              sql: |
+                -- :gu=ALL, :from=2026-08-01, :to=2027-02-28, :n=7
+                SELECT CAST(strftime('%w', event_date) AS INTEGER) AS dow,
+                       COUNT(*) AS day_rows,
+                       SUM(total_events) AS events,
+                       ROUND(AVG(total_events), 1) AS avg_events,
+                       ROUND(AVG(concentration), 3) AS avg_conc
+                FROM gold_culture_calendar_density
+                WHERE event_date BETWEEN :from AND :to
+                  AND (:gu = 'ALL' OR gu = :gu)
+                GROUP BY dow
+                ORDER BY events DESC LIMIT :n
+              requires: [select_columns, filter_range, aggregate, group_by, sort]
+
+### 삽입 대상 모델: gold_culture_dine_around  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "gu_dine_ranking"
+              question_ko: "행사 관람 후 외식하기에 자치구 전체로 보면 어디가 가장 좋은가?"
+              axes: "구 랭킹(집계) — has_dining 동 묶어 AVG(dine_around_score) DESC, 동수 임계"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "행정동 5개 이상 자치구 중 중구가 평균 dine-around 점수 0.535로 1위(동 10개·예정행사 1,837건·활성식당 10,184곳). 동 3개뿐인 소형 구를 임계값으로 걸러 대표성을 확보한 순위."
+              sql: |
+                -- :min_dongs=5, :n=10
+                SELECT gu, COUNT(*) AS dongs, SUM(events_upcoming_90d) AS events,
+                       SUM(dining_active_cnt) AS dining, ROUND(AVG(dine_around_score),3) AS avg_score
+                FROM gold_culture_dine_around
+                WHERE has_dining_data = 1
+                GROUP BY gu HAVING COUNT(*) >= :min_dongs
+                ORDER BY avg_score DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, having, sort]
+            - pattern_id: "dining_rich_culture_poor"
+              question_ko: "식당은 넘치는데 예정 문화행사가 거의 없어 유동 인구 유인이 아쉬운 동네는?"
+              axes: "갭 탐지(역방향) — dining_stock_pctl 상위 ∩ culture_events_pctl 하위"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "보라매동(관악구)은 식당 3,451곳(외식 재고 상위 98.6%)이지만 예정 문화행사 백분위가 0으로, 외식 인프라 대비 행사 유인이 사실상 없다. 기존 culture_rich_dining_poor(행사 많고 식당 부족)의 정반대 축."
+              sql: |
+                -- :dining_min=0.7, :culture_max=0.3, :n=10
+                SELECT admin_dong, gu, dining_active_cnt, dining_opened_365d,
+                       dining_stock_pctl, culture_events_pctl
+                FROM gold_culture_dine_around
+                WHERE has_dining_data = 1
+                  AND dining_stock_pctl >= :dining_min
+                  AND culture_events_pctl <= :culture_max
+                ORDER BY dining_stock_pctl DESC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "emerging_dining_dongs"
+              question_ko: "예정 행사가 많은 동네 중 최근 1년 새 식당이 가장 활발히 생기는(뜨는) 상권은?"
+              axes: "동 랭킹 — 행사 임계 하 dining_opened_365d DESC (신선도)"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "예정행사 20건 이상 동네 중 목1동(양천구)이 최근 1년 신규 개업 814곳으로 가장 활발(활성 2,004곳·예정행사 49건). 재고(dining_active_cnt)가 아닌 개업 신선도로 본 성장 상권."
+              sql: |
+                -- :min_events=20, :n=10
+                SELECT admin_dong, gu, events_upcoming_90d, dining_active_cnt, dining_opened_365d
+                FROM gold_culture_dine_around
+                WHERE has_dining_data = 1 AND events_upcoming_90d >= :min_events
+                ORDER BY dining_opened_365d DESC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "dining_turnover_ratio"
+              question_ko: "외식 상권 회전(신규개업/현재영업 비율)이 가장 빠른 동네는?"
+              axes: "동 랭킹 — 비율 dining_opened_365d/dining_active_cnt DESC (분모 임계로 안정화)"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "활성 식당 200곳 이상 동네 중 압구정동(강남구)의 신규개업/활성 비율이 1.43으로 최고(활성 411·최근1년 개업 589) — 개·폐업 회전이 매우 빠른 상권. 절대량이 아닌 비율 축이라 규모가 다른 동네를 공평 비교."
+              sql: |
+                -- :min_active=200, :n=10
+                SELECT admin_dong, gu, dining_active_cnt, dining_opened_365d,
+                       ROUND(dining_opened_365d * 1.0 / dining_active_cnt, 3) AS new_ratio
+                FROM gold_culture_dine_around
+                WHERE has_dining_data = 1 AND dining_active_cnt >= :min_active
+                ORDER BY new_ratio DESC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "flexible_dong_ranking"
+              question_ko: "동네를 원하는 지표(예정행사·공연·식당수·신규개업·종합점수)로 상위/하위 정렬해 보고 싶다."
+              axes: "동 랭킹(스위치) — 지표·정렬방향 가변, NULL 제외"
+              verified_rows: 0                # 실 D1 실측: [10, 5, 10] (스탬핑 대기)
+              insight_sample_ko: "지표=신규개업·내림차순이면 목1동(양천구)이 최근 1년 814곳으로 1위; 지표=종합점수면 종로1·2·3·4가동(종로구)이 0.98로 최상. 고정 hotspots(점수 DESC)를 지표·방향 스위치로 일반화한 상위호환."
+              sql: |
+                -- :metric=opened, :dir=desc, :n=10
+                SELECT admin_dong, gu,
+                       (CASE :metric WHEN 'events' THEN events_upcoming_90d
+                                     WHEN 'performances' THEN performances_upcoming_90d
+                                     WHEN 'dining' THEN dining_active_cnt
+                                     WHEN 'opened' THEN dining_opened_365d
+                                     ELSE dine_around_score END) AS m
+                FROM gold_culture_dine_around
+                WHERE (CASE :metric WHEN 'events' THEN events_upcoming_90d
+                                    WHEN 'performances' THEN performances_upcoming_90d
+                                    WHEN 'dining' THEN dining_active_cnt
+                                    WHEN 'opened' THEN dining_opened_365d
+                                    ELSE dine_around_score END) IS NOT NULL
+                ORDER BY CASE WHEN :dir='asc' THEN m END ASC,
+                         CASE WHEN :dir='desc' THEN m END DESC LIMIT :n
+              requires: [select_columns, filter_null, sort]
+            - pattern_id: "gu_multi_compare"
+              question_ko: "관심 자치구 몇 곳(예: 마포·성동·용산)만 놓고 외식 나들이 좋은 동네를 한 번에 비교하려면?"
+              axes: "다중 구 교차 비교 — dine_around_score DESC"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "마포·성동·용산 중 서교동(마포구)이 dine-around 0.956으로 최상(예정행사 248건·활성식당 2,992곳). 단일 구만 보는 gu_dine_summary와 달리 임의 구 집합을 한 번에 순위화."
+              sql: |
+                -- :gus=["마포구","성동구","용산구"], :n=10
+                SELECT admin_dong, gu, events_upcoming_90d, dining_active_cnt, dine_around_score
+                FROM gold_culture_dine_around
+                WHERE has_dining_data = 1
+                  AND gu IN (SELECT value FROM json_each(:gus))
+                ORDER BY dine_around_score DESC LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "score_distribution"
+              question_ko: "동네들의 dine-around 종합점수는 어떻게 분포하나 — 최상위 밴드에 몇 개 동이 있나?"
+              axes: "분포 — dine_around_score 밴드별 동 수·평균 예정행사 (구 센티널)"
+              verified_rows: 0                # 실 D1 실측: [5, 4] (스탬핑 대기)
+              insight_sample_ko: "외식 데이터 있는 219개 동 중 dine-around 0.8 이상 최상위 밴드에 28개 동이 속하며 이들의 평균 예정행사는 235.2건. 구 센티널로 특정 구(예: 강남구) 내부 분포로 좁혀 볼 수도 있음."
+              sql: |
+                -- :gu=ALL, :n=10
+                SELECT CASE WHEN dine_around_score >= 0.8 THEN '1_0.8-1.0'
+                            WHEN dine_around_score >= 0.6 THEN '2_0.6-0.8'
+                            WHEN dine_around_score >= 0.4 THEN '3_0.4-0.6'
+                            WHEN dine_around_score >= 0.2 THEN '4_0.2-0.4'
+                            ELSE '5_0.0-0.2' END AS score_band,
+                       COUNT(*) AS dongs, ROUND(AVG(events_upcoming_90d),1) AS avg_events
+                FROM gold_culture_dine_around
+                WHERE has_dining_data = 1 AND (:gu = 'ALL' OR gu = :gu)
+                GROUP BY score_band ORDER BY score_band LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+
+### 삽입 대상 모델: gold_culture_event_crowd  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "weekend_lift_by_gu"
+              question_ko: "주중 대비 주말에 유독 더 붐비는 자치구는? (나들이·상권 성격)"
+              axes: "구 랭킹 — 조건부 집계 주말/주중 혼잡비(weekend_lift) DESC"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "광진구는 주말 평균 혼잡 1.69로 주중 1.25보다 1.35배 높아, 주중 대비 주말에 가장 붐비는 자치구였다."
+              sql: |
+                -- :min_samples=200, :n=10
+                SELECT gu,
+                       ROUND(AVG(CASE WHEN day_of_week IN (6,7) THEN avg_congest_score END), 2) AS weekend_congest,
+                       ROUND(AVG(CASE WHEN day_of_week BETWEEN 1 AND 5 THEN avg_congest_score END), 2) AS weekday_congest,
+                       ROUND(AVG(CASE WHEN day_of_week IN (6,7) THEN avg_congest_score END)
+                             / AVG(CASE WHEN day_of_week BETWEEN 1 AND 5 THEN avg_congest_score END), 3) AS weekend_lift
+                FROM gold_culture_event_crowd
+                GROUP BY gu
+                HAVING SUM(crowd_samples) >= :min_samples
+                ORDER BY weekend_lift DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, having, sort]
+            - pattern_id: "peak_slot_per_gu"
+              question_ko: "자치구별로 한 주 중 가장 붐비는 시점(요일·시간)은 언제인가?"
+              axes: "구별 argmax — 상관 서브쿼리로 gu당 최혼잡 슬롯 1개, avg_congest_score DESC"
+              verified_rows: 0                # 실 D1 실측: [24, 5] (스탬핑 대기)
+              insight_sample_ko: "은평구는 금요일(요일=5) 19시에 혼잡도 4.0('붐빔')·평균 10,419명으로 한 주 중 가장 붐비는 시점을 찍었다."
+              sql: |
+                -- :n=24
+                SELECT gu, day_of_week, hour_of_day, typical_congest, avg_congest_score, avg_ppltn
+                FROM gold_culture_event_crowd e
+                WHERE e.rowid = (SELECT x.rowid FROM gold_culture_event_crowd x
+                                 WHERE x.gu = e.gu
+                                 ORDER BY x.avg_congest_score DESC, x.avg_ppltn DESC LIMIT 1)
+                ORDER BY avg_congest_score DESC, avg_ppltn DESC LIMIT :n
+              requires: [select_columns, subquery, sort]
+            - pattern_id: "congest_mix_for_gu"
+              question_ko: "이 구는 한 주 168시간 중 혼잡 등급(여유·보통·약간 붐빔·붐빔)이 각각 몇 시간이고 비율은?"
+              axes: "단일 구 분포 — typical_congest 그룹 카운트 + 구성비 window"
+              verified_rows: 0                # 실 D1 실측: [3, 3] (스탬핑 대기)
+              insight_sample_ko: "강남구는 한 주 168시간 중 98시간(58.3%)이 '여유' 등급으로, 상주 인구는 많아도(해당 등급 평균 약 14,649명) 면적 대비로는 대체로 한산한 편이었다."
+              sql: |
+                -- :gu=강남구, :n=10
+                SELECT typical_congest,
+                       COUNT(*) AS slots,
+                       ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS pct,
+                       ROUND(AVG(avg_ppltn)) AS mean_ppltn
+                FROM gold_culture_event_crowd
+                WHERE gu = :gu
+                GROUP BY typical_congest
+                ORDER BY slots DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, window, sort]
+            - pattern_id: "city_hourly_rhythm"
+              question_ko: "서울 전체(전 자치구 평균)로 볼 때 하루 중 시간대별 혼잡 리듬은? (요일 지정 또는 전체)"
+              axes: "시간대 분포 — 전 자치구 평균, day_of_week 센티널, hour_of_day 오름차순"
+              verified_rows: 0                # 실 D1 실측: [24, 24] (스탬핑 대기)
+              insight_sample_ko: "서울 전체 평균으로 0시(자정)는 혼잡 1.02·약 6,940명으로 하루의 한산한 기준선을 이뤘고, 시간대를 따라 낮 혼잡이 올라간다(시간 오름차순 출력)."
+              sql: |
+                -- :dow=ALL, :n=24
+                SELECT hour_of_day,
+                       ROUND(AVG(avg_congest_score), 2) AS congest,
+                       ROUND(AVG(avg_ppltn)) AS mean_ppltn
+                FROM gold_culture_event_crowd
+                WHERE (:dow = 'ALL' OR day_of_week = :dow)
+                GROUP BY hour_of_day
+                ORDER BY hour_of_day LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "compare_gu_at_slot"
+              question_ko: "후보로 고른 여러 자치구를 특정 요일·시간의 혼잡도로 나란히 비교하고 싶다."
+              axes: "다중 구 단면 — json_each 배열 IN, 요일·시간 고정, avg_congest_score DESC"
+              verified_rows: 0                # 실 D1 실측: [3, 3] (스탬핑 대기)
+              insight_sample_ko: "토요일(요일=6) 20시 기준 강남·마포·종로 중 마포구가 혼잡 2.5('약간 붐빔')·약 21,232명으로 가장 붐볐다."
+              sql: |
+                -- :gus=["강남구","마포구","종로구"], :dow=6, :hour=20, :n=10
+                SELECT gu, avg_ppltn, avg_congest_score, typical_congest, crowd_samples
+                FROM gold_culture_event_crowd
+                WHERE gu IN (SELECT value FROM json_each(:gus))
+                  AND day_of_week = :dow AND hour_of_day = :hour
+                ORDER BY avg_congest_score DESC, avg_ppltn DESC LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "congest_spread_by_gu"
+              question_ko: "시간대에 따라 붐빔 편차가 큰(사람이 확 몰리는) 구와 하루 종일 평탄한 구는?"
+              axes: "구 랭킹 — MAX-MIN 혼잡 편차(congest_spread) DESC, 최소 표본 임계"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "은평구는 시간대별 혼잡 편차가 3.0(최저 1.0~최고 4.0)으로 가장 커, 인구는 최저 3,250~최고 10,419명으로 붐빌 땐 확 몰리는 자치구였다."
+              sql: |
+                -- :min_samples=200, :n=10
+                SELECT gu,
+                       ROUND(MAX(avg_congest_score) - MIN(avg_congest_score), 2) AS congest_spread,
+                       MAX(avg_ppltn) AS peak_ppltn,
+                       MIN(avg_ppltn) AS trough_ppltn,
+                       ROUND(AVG(avg_congest_score), 2) AS mean_congest
+                FROM gold_culture_event_crowd
+                GROUP BY gu
+                HAVING SUM(crowd_samples) >= :min_samples
+                ORDER BY congest_spread DESC, peak_ppltn DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, having, sort]
+            - pattern_id: "gu_slots_ranked"
+              question_ko: "이 구의 요일×시간 슬롯을 원하는 지표(혼잡/인구)와 정렬(한산순/붐빔순)로, 신뢰 표본 이상만 골라 랭킹하고 싶다."
+              axes: "단일 구 슬롯 랭킹 — 지표/정렬 스위치 + 표본 임계 (quiet_hours_in_gu 상위호환)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "강남구에서 혼잡도 기준 가장 붐비는 슬롯은 화요일(요일=2) 13시로 혼잡 3.0('약간 붐빔')·평균 40,754명(표본 311)이었다."
+              sql: |
+                -- :gu=강남구, :min_samples=100, :metric=congest, :dir=desc, :n=10
+                SELECT day_of_week, hour_of_day, typical_congest, avg_congest_score, avg_ppltn, crowd_samples
+                FROM gold_culture_event_crowd
+                WHERE gu = :gu AND crowd_samples >= :min_samples
+                ORDER BY
+                  (CASE :metric WHEN 'ppltn' THEN avg_ppltn ELSE avg_congest_score END)
+                  * CASE WHEN :dir = 'asc' THEN 1 ELSE -1 END
+                LIMIT :n
+              requires: [select_columns, filter_range, sort]
+
+### 삽입 대상 모델: gold_culture_event_schedule  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "counts_by_dim"
+              question_ko: "기간에 겹치는 행사 수를 구·동·장르·공연장·유형 중 원하는 기준으로 상위(또는 하위) N을 보여줘."
+              axes: "차원 랭킹 — 기간 겹침 COUNT 정렬(구/동/장르/공연장/유형 스위치, asc/desc)"
+              verified_rows: 0                # 실 D1 실측: [10, 10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-08-01 이후 겹치는 행사를 구 기준으로 세면 종로구가 102건(무료 10건)으로 1위다. :dim을 venue_name·category·admin_dong·event_type로 바꾸면 같은 창에서 공연장·장르·행정동·유형별 랭킹이 되고, :dir로 최다/최소를 뒤집을 수 있다."
+              sql: |
+                -- :dim=gu, :from=2026-08-01, :to=2026-12-31, :dir=desc, :n=10
+                SELECT CASE :dim WHEN 'admin_dong' THEN admin_dong
+                                WHEN 'category' THEN category
+                                WHEN 'venue_name' THEN venue_name
+                                WHEN 'event_type' THEN event_type
+                                ELSE gu END AS dim_value,
+                       COUNT(*) AS events,
+                       SUM(CASE WHEN is_free='무료' THEN 1 ELSE 0 END) AS free_events
+                FROM gold_culture_event_schedule
+                WHERE event_start_date <= :to AND event_end_date >= :from
+                GROUP BY CASE :dim WHEN 'admin_dong' THEN admin_dong
+                                   WHEN 'category' THEN category
+                                   WHEN 'venue_name' THEN venue_name
+                                   WHEN 'event_type' THEN event_type
+                                   ELSE gu END
+                ORDER BY CASE WHEN :dir='asc' THEN events END ASC,
+                         CASE WHEN :dir='desc' THEN events END DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, sort]
+            - pattern_id: "free_ratio_by_gu"
+              question_ko: "가격 정보가 있는 행사만 놓고 볼 때 무료 행사 비율이 높은 자치구는 어디인가?"
+              axes: "구 랭킹 — 무료 비율 DESC(가격정보 보유 임계값)"
+              verified_rows: 0                # 실 D1 실측: [15, 15] (스탬핑 대기)
+              insight_sample_ko: "2026년 시작 행사 중 유·무료 표기가 있는 건만 보면 무료 비율은 송파구 88.1%(무료 37/판정 42)로 가장 높다. is_free가 비어 있는 행사(대부분 공연)는 분모에서 제외하고, :min_known으로 표본이 얇은 구를 걸러 낸다."
+              sql: |
+                -- :from=2026-01-01, :to=2026-12-31, :min_known=30, :n=15
+                SELECT gu,
+                       SUM(CASE WHEN is_free='무료' THEN 1 ELSE 0 END) AS free_events,
+                       SUM(CASE WHEN is_free IN ('무료','유료') THEN 1 ELSE 0 END) AS priced_known,
+                       ROUND(100.0 * SUM(CASE WHEN is_free='무료' THEN 1 ELSE 0 END)
+                             / NULLIF(SUM(CASE WHEN is_free IN ('무료','유료') THEN 1 ELSE 0 END), 0), 1) AS free_pct
+                FROM gold_culture_event_schedule
+                WHERE event_start_date BETWEEN :from AND :to
+                GROUP BY gu
+                HAVING priced_known >= :min_known
+                ORDER BY free_pct DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, having, filter_null, sort]
+            - pattern_id: "long_running_events"
+              question_ko: "특정 날짜에 진행 중인 행사 중 가장 오래(장기) 운영하는 전시·공연은 무엇인가?"
+              axes: "랭킹 — 특정일 진행 중 행사 run_days DESC(장르 센티널)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-08-01 기준 진행 중 행사 중 최장기는 성동구 성수 소극장의 연극 '영시기 [서울 성수]'로 393일(2025-08-01~2026-08-29) 운영이다. :category를 '연극'처럼 특정 장르로 바꾸면 그 장르 안에서, 'ALL'이면 전 장르 통합으로 순위가 나온다."
+              sql: |
+                -- :on_date=2026-08-01, :category=ALL, :n=10
+                SELECT title, category, event_type, venue_name, gu,
+                       event_start_date, event_end_date,
+                       CAST(julianday(event_end_date) - julianday(event_start_date) AS INT) AS run_days
+                FROM gold_culture_event_schedule
+                WHERE event_start_date <= :on_date AND event_end_date >= :on_date
+                  AND (:category = 'ALL' OR category = :category)
+                ORDER BY run_days DESC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "multi_gu_agenda"
+              question_ko: "내가 자주 다니는 여러 자치구(예: 성동·마포·종로)에서 이 기간에 겹치는 행사를 한 번에 보여줘."
+              axes: "다중 구 단면 — 기간 겹침 목록(event_start_date ASC)"
+              verified_rows: 0                # 실 D1 실측: [20, 20] (스탬핑 대기)
+              insight_sample_ko: "성동·마포·종로 3개 구에서 2026-08-01~08-15에 겹치는 행사를 시작일 순으로 묶으면 첫 행은 성동구 성수 소극장의 연극 '영시기 [서울 성수]'(2025-08-01~2026-08-29)다. 기존 단일 구 창(gu_window)의 다중 선택 상위호환으로, :gus JSON 배열에 원하는 구를 넣는다."
+              sql: |
+                -- :gus=["성동구","마포구","종로구"], :from=2026-08-01, :to=2026-08-15, :n=20
+                SELECT gu, title, category, venue_name, is_free, event_start_date, event_end_date
+                FROM gold_culture_event_schedule
+                WHERE gu IN (SELECT value FROM json_each(:gus))
+                  AND event_start_date <= :to AND event_end_date >= :from
+                ORDER BY event_start_date, gu LIMIT :n
+              requires: [select_columns, filter_set, filter_range, subquery, sort]
+            - pattern_id: "monthly_event_histogram"
+              question_ko: "행사가 몇 월에 몰리나? 시작월별 행사 수(무료·장르 다양성 포함) 추이를 보여줘."
+              axes: "시계열/분포 — 월별 시작 행사 수(구 센티널)"
+              verified_rows: 0                # 실 D1 실측: [12, 7] (스탬핑 대기)
+              insight_sample_ko: "서울 전역 시작월별 행사 수는 2026-01 296건(무료 24, 장르 14종)으로 출발해 봄·여름으로 갈수록 늘어난다. :gu를 '종로구'처럼 특정 구로 좁히면 그 구만의 월별 추이가 되고, 'ALL'이면 전역 분포가 된다."
+              sql: |
+                -- :from=2026-01-01, :to=2026-12-31, :gu=ALL, :n=24
+                SELECT substr(event_start_date, 1, 7) AS month,
+                       COUNT(*) AS events,
+                       SUM(CASE WHEN is_free='무료' THEN 1 ELSE 0 END) AS free_events,
+                       COUNT(DISTINCT category) AS categories
+                FROM gold_culture_event_schedule
+                WHERE event_start_date BETWEEN :from AND :to
+                  AND (:gu = 'ALL' OR gu = :gu)
+                GROUP BY month ORDER BY month LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, sort]
+

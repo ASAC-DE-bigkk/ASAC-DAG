@@ -1,0 +1,1075 @@
+{
+ "domain": "transit",
+ "accepted": [
+  {
+   "pattern_id": "rank_dim_by_metric_window",
+   "question_ko": "요즘 어느 동네(또는 자치구)가 버스 혼잡/지하철 대기/주차 점유가 가장 심한가(또는 가장 여유로운가)?",
+   "axes": "차원(동/구) 랭킹 — 지표·정렬·기간 스위치, 관측 시간 임계값 이상만. busiest_dongs_at_hour(단일 시각·버스만)의 상위호환(기간 평균·다지표·양방향·구 집계)",
+   "sql": "-- :dim=gu, :metric=bus_congestion, :from=2026-07-20, :to=2026-07-26, :min_hours=20, :dir=desc, :n=10\nWITH base AS (\n  SELECT CASE :dim WHEN 'gu' THEN substr(admin_dong_code, 1, 5) ELSE admin_dong_code END AS dim_value,\n    CASE :metric\n      WHEN 'bus_congestion' THEN bus_congestion_avg\n      WHEN 'subway_wait' THEN subway_wait_avg_s\n      WHEN 'subway_arrivals' THEN subway_arrival_cnt\n      WHEN 'parking_occupancy' THEN parking_occupancy_avg\n      WHEN 'bus_full' THEN bus_full_ratio\n      WHEN 'subway_last_train' THEN subway_last_train_cnt\n      ELSE bus_congestion_avg END AS m\n  FROM gold_transit_dong_hourly\n  WHERE substr(hour_at, 1, 10) BETWEEN :from AND :to\n)\nSELECT dim_value,\n       ROUND(AVG(m), 3) AS metric_value,\n       COUNT(m) AS observed_hours\nFROM base\nWHERE m IS NOT NULL\nGROUP BY dim_value\nHAVING COUNT(m) >= :min_hours\nORDER BY CASE WHEN :dir = 'asc' THEN metric_value END ASC,\n         CASE WHEN :dir = 'desc' THEN metric_value END DESC\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "subquery",
+    "aggregate",
+    "group_by",
+    "filter_range",
+    "filter_null",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dim": "gu",
+     "metric": "bus_congestion",
+     "from": "2026-07-20",
+     "to": "2026-07-26",
+     "min_hours": 20,
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "dim": "dong",
+     "metric": "subway_wait",
+     "from": "2026-07-20",
+     "to": "2026-07-26",
+     "min_hours": 8,
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "dim": "gu",
+     "metric": "parking_occupancy",
+     "from": "2026-07-20",
+     "to": "2026-07-26",
+     "min_hours": 10,
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "dim": "dong",
+     "metric": "bus_congestion",
+     "from": "2026-07-20",
+     "to": "2026-07-26",
+     "min_hours": 8,
+     "dir": "asc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10,
+    10,
+    10
+   ],
+   "insight_sample_ko": "2026-07-20~26 자치구(행정동코드 앞 5자리) 평균 버스 혼잡 1위는 11650, 평균 6.012 (관측 171시간).",
+   "composition_idiom": "차원 스위치(:dim dong/gu) + 지표 스위치(:metric) + 정렬 방향 스위치(:dir) + 기간 창(:from/:to) + 임계값(HAVING :min_hours)",
+   "table": "gold_transit_dong_hourly",
+   "product_id": "transit_dong_hourly",
+   "real_rows_by_combo": [
+    10,
+    10,
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "dong_typical_day_profile",
+   "question_ko": "이 동네의 하루 리듬은? 시간대별로 버스·지하철·주차가 어떻게 달라지나?",
+   "axes": "단일 동 시간대(0-23) 프로파일 — 버스 혼잡·지하철 도착/대기·주차 점유 다지표 평균을 한 행에. dong_peak_hours(버스 단일지표 상위 n시각)의 다지표 프로파일판",
+   "sql": "-- :dong=1150064000\nSELECT substr(hour_at, 12, 2) AS hh,\n       ROUND(AVG(bus_congestion_avg), 3) AS bus_congestion,\n       ROUND(AVG(subway_arrival_cnt), 1) AS subway_arrivals,\n       ROUND(AVG(subway_wait_avg_s), 0) AS subway_wait_s,\n       ROUND(AVG(parking_occupancy_avg), 3) AS parking_occupancy,\n       COUNT(*) AS observed_hours\nFROM gold_transit_dong_hourly\nWHERE admin_dong_code = :dong\nGROUP BY hh\nORDER BY hh",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dong": "1150064000"
+    },
+    {
+     "dong": "1114060500"
+    }
+   ],
+   "rows_by_combo": [
+    17,
+    18
+   ],
+   "insight_sample_ko": "동 1150064000의 00시대 평균 — 버스 혼잡 3.0, 지하철 도착 190.5건, 대기 375초, 주차 점유 0.605 (관측 2시간).",
+   "composition_idiom": null,
+   "table": "gold_transit_dong_hourly",
+   "product_id": "transit_dong_hourly",
+   "real_rows_by_combo": [
+    24,
+    24
+   ]
+  },
+  {
+   "pattern_id": "dong_dayofweek_profile",
+   "question_ko": "이 동네는 요일에 따라 혼잡/대기 패턴이 어떻게 다른가? 주중과 주말 중 언제 더 붐비나?",
+   "axes": "단일 동 요일(0=일~6=토)별 지표 평균 — 지표 스위치. 시간대(hour-of-day) 축과 직교하는 요일 축",
+   "sql": "-- :dong=1150064000, :metric=bus_congestion\nSELECT strftime('%w', hour_at) AS dow,\n       ROUND(AVG(CASE :metric\n         WHEN 'bus_congestion' THEN bus_congestion_avg\n         WHEN 'subway_wait' THEN subway_wait_avg_s\n         WHEN 'subway_arrivals' THEN subway_arrival_cnt\n         WHEN 'parking_occupancy' THEN parking_occupancy_avg\n         ELSE bus_congestion_avg END), 3) AS metric_value,\n       COUNT(*) AS observed_hours\nFROM gold_transit_dong_hourly\nWHERE admin_dong_code = :dong\nGROUP BY dow\nORDER BY dow",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dong": "1150064000",
+     "metric": "bus_congestion"
+    },
+    {
+     "dong": "1114060500",
+     "metric": "parking_occupancy"
+    }
+   ],
+   "rows_by_combo": [
+    7,
+    6
+   ],
+   "insight_sample_ko": "동 1150064000의 일요일(dow=0) 평균 버스 혼잡 3.0 (관측 1시간 — 레플리카 표본).",
+   "composition_idiom": "지표 스위치(:metric)",
+   "table": "gold_transit_dong_hourly",
+   "product_id": "transit_dong_hourly",
+   "real_rows_by_combo": [
+    7,
+    7
+   ]
+  },
+  {
+   "pattern_id": "city_hourly_trend",
+   "question_ko": "서울 전체로 이 기간 시간대별 대중교통 이용/혼잡 추이는?",
+   "axes": "서울 전체 시간별 타임라인 — 동 합산 지하철 도착·버스 대수와 평균 버스 혼잡. 동 단위 dong_day_timeline과 직교하는 도시 전역 시계열",
+   "sql": "-- :from=2026-07-20, :to=2026-07-20, :n=200\nSELECT substr(hour_at, 1, 13) AS hour_slot,\n       COUNT(DISTINCT admin_dong_code) AS dongs,\n       SUM(subway_arrival_cnt) AS subway_arrivals,\n       SUM(bus_veh_cnt) AS bus_vehicles,\n       ROUND(AVG(bus_congestion_avg), 3) AS bus_congestion\nFROM gold_transit_dong_hourly\nWHERE substr(hour_at, 1, 10) BETWEEN :from AND :to\nGROUP BY hour_slot\nORDER BY hour_slot\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from": "2026-07-20",
+     "to": "2026-07-20",
+     "n": 200
+    },
+    {
+     "from": "2026-07-23",
+     "to": "2026-07-24",
+     "n": 200
+    }
+   ],
+   "rows_by_combo": [
+    22,
+    47
+   ],
+   "insight_sample_ko": "2026-07-20 00시 서울 57개 동 합산 — 지하철 도착 379건, 버스 303대, 평균 버스 혼잡 3.087.",
+   "composition_idiom": "기간 창(:from/:to)",
+   "table": "gold_transit_dong_hourly",
+   "product_id": "transit_dong_hourly",
+   "real_rows_by_combo": [
+    23,
+    48
+   ]
+  },
+  {
+   "pattern_id": "dong_metric_threshold_hours",
+   "question_ko": "이 동네에서 버스 혼잡(또는 지하철 대기/주차 점유)이 임계값을 넘긴 시간은 언제였나?",
+   "axes": "단일 동 임계 초과 시간 목록 — 지표 스위치·임계값, 지표값 DESC(가장 심했던 순). dong_day_timeline(특정 하루 전체)과 달리 전체 이력에서 극단 시각만 추출",
+   "sql": "-- :dong=1114057000, :metric=bus_congestion, :thr=4, :n=20\nWITH base AS (\n  SELECT hour_at, bus_congestion_avg, bus_veh_cnt, subway_wait_avg_s,\n    CASE :metric\n      WHEN 'bus_congestion' THEN bus_congestion_avg\n      WHEN 'subway_wait' THEN subway_wait_avg_s\n      WHEN 'parking_occupancy' THEN parking_occupancy_avg\n      WHEN 'bus_full' THEN bus_full_ratio\n      ELSE bus_congestion_avg END AS m\n  FROM gold_transit_dong_hourly\n  WHERE admin_dong_code = :dong\n)\nSELECT hour_at, ROUND(m, 3) AS metric_value,\n       bus_congestion_avg, bus_veh_cnt, subway_wait_avg_s\nFROM base\nWHERE m >= :thr\nORDER BY m DESC\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "subquery",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dong": "1114057000",
+     "metric": "bus_congestion",
+     "thr": 4,
+     "n": 20
+    },
+    {
+     "dong": "1168064000",
+     "metric": "subway_wait",
+     "thr": 600,
+     "n": 20
+    },
+    {
+     "dong": "1114060500",
+     "metric": "parking_occupancy",
+     "thr": 0.5,
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    18,
+    2,
+    20
+   ],
+   "insight_sample_ko": "동 1114057000에서 버스 혼잡 4 이상인 시간 18건, 최고는 2026-07-24 23시 혼잡 16.75(버스 4대).",
+   "composition_idiom": "지표 스위치(:metric) + 임계값(:thr)",
+   "table": "gold_transit_dong_hourly",
+   "product_id": "transit_dong_hourly",
+   "real_rows_by_combo": [
+    20,
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "dongs_rank_at_hour_metric",
+   "question_ko": "이 시각에 지하철 대기(또는 버스 혼잡/주차 점유)가 가장 심했던(또는 가장 여유로운) 동네는?",
+   "axes": "특정 시각 고정 동 랭킹 — 지표·정렬 방향 스위치. busiest_dongs_at_hour(버스 혼잡·DESC 고정)의 상위호환(지하철·주차 포함, 양방향)",
+   "sql": "-- :at=2026-07-20 11:00:00, :metric=subway_wait, :dir=desc, :n=10\nWITH base AS (\n  SELECT admin_dong_code, bus_veh_cnt, subway_arrival_cnt,\n    CASE :metric\n      WHEN 'bus_congestion' THEN bus_congestion_avg\n      WHEN 'subway_wait' THEN subway_wait_avg_s\n      WHEN 'subway_arrivals' THEN subway_arrival_cnt\n      WHEN 'parking_occupancy' THEN parking_occupancy_avg\n      WHEN 'bus_full' THEN bus_full_ratio\n      ELSE bus_congestion_avg END AS m\n  FROM gold_transit_dong_hourly\n  WHERE substr(hour_at, 1, 19) = :at\n)\nSELECT admin_dong_code, ROUND(m, 3) AS metric_value, bus_veh_cnt, subway_arrival_cnt\nFROM base\nWHERE m IS NOT NULL\nORDER BY CASE WHEN :dir = 'asc' THEN m END ASC,\n         CASE WHEN :dir = 'desc' THEN m END DESC\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "subquery",
+    "filter_set",
+    "filter_null",
+    "sort"
+   ],
+   "combos": [
+    {
+     "at": "2026-07-20 11:00:00",
+     "metric": "subway_wait",
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "at": "2026-07-23 19:00:00",
+     "metric": "bus_congestion",
+     "dir": "desc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "2026-07-20 11시 지하철 대기 최장 동은 1171053100, 758.25초(버스 25대·지하철 도착 80건).",
+   "composition_idiom": "지표 스위치(:metric) + 정렬 방향 스위치(:dir)",
+   "table": "gold_transit_dong_hourly",
+   "product_id": "transit_dong_hourly",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "dong_congestion_band_distribution",
+   "question_ko": "이 동네의 버스 혼잡도는 어느 구간에 얼마나 분포하나?",
+   "axes": "단일 동 버스 혼잡도 밴드 분포 — 밴드별 시간수·평균 버스대수·평균 만차비율. 랭킹/타임라인과 다른 분포(히스토그램) 축",
+   "sql": "-- :dong=1114057000\nSELECT CASE\n         WHEN bus_congestion_avg < 3 THEN '1_calm'\n         WHEN bus_congestion_avg < 4 THEN '2_normal'\n         WHEN bus_congestion_avg < 6 THEN '3_busy'\n         ELSE '4_severe' END AS congestion_band,\n       COUNT(*) AS hours,\n       ROUND(AVG(bus_veh_cnt), 1) AS avg_vehicles,\n       ROUND(AVG(bus_full_ratio), 3) AS avg_full_ratio\nFROM gold_transit_dong_hourly\nWHERE admin_dong_code = :dong AND bus_congestion_avg IS NOT NULL\nGROUP BY congestion_band\nORDER BY congestion_band",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_set",
+    "filter_null",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dong": "1114057000"
+    },
+    {
+     "dong": "1150064000"
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    1
+   ],
+   "insight_sample_ko": "동 1114057000은 3개 혼잡 밴드에 분포 — 최저 밴드 2_normal 3시간(평균 3.0대), 상위 밴드에 severe 구간 존재.",
+   "composition_idiom": null,
+   "table": "gold_transit_dong_hourly",
+   "product_id": "transit_dong_hourly",
+   "real_rows_by_combo": [
+    3,
+    1
+   ]
+  },
+  {
+   "pattern_id": "dongs_ranked_by_metric",
+   "question_ko": "지금 선택한 교통 지표 기준으로 가장 높은(또는 낮은) 동네는? (버스 혼잡·지하철 대기·주차 여유·버스 대수 중 선택, 특정 구로 좁힐 수 있음)",
+   "axes": "동 랭킹 — 선택 지표(버스혼잡/지하철대기/주차여유/버스대수) 값, 정렬 방향 스위치, 구 센티널",
+   "sql": "-- :metric=subway_wait, :gu=ALL, :dir=desc, :n=10\nSELECT admin_dong, gu,\n       CASE :metric WHEN 'bus_congestion' THEN bus_congestion_avg\n                    WHEN 'subway_wait' THEN subway_wait_min\n                    WHEN 'parking_avail' THEN parking_avail_pct\n                    ELSE bus_veh_cnt END AS metric_value\nFROM gold_transit_dong_now\nWHERE (:gu = 'ALL' OR gu = :gu)\n  AND CASE :metric WHEN 'bus_congestion' THEN bus_congestion_avg\n                   WHEN 'subway_wait' THEN subway_wait_min\n                   WHEN 'parking_avail' THEN parking_avail_pct\n                   ELSE bus_veh_cnt END IS NOT NULL\nORDER BY CASE WHEN :dir='asc' THEN metric_value END ASC,\n         CASE WHEN :dir='desc' THEN metric_value END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_null",
+    "sort"
+   ],
+   "combos": [
+    {
+     "metric": "subway_wait",
+     "gu": "ALL",
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "metric": "bus_congestion",
+     "gu": "강남구",
+     "dir": "desc",
+     "n": 5
+    },
+    {
+     "metric": "parking_avail",
+     "gu": "ALL",
+     "dir": "asc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    5,
+    10
+   ],
+   "insight_sample_ko": "지하철 대기(subway_wait) 내림차순 전체 1위는 관악구 중앙동으로 대기 33.7분.",
+   "composition_idiom": "지표 스위치 + 정렬 방향 스위치 + 센티널(gu=ALL)",
+   "table": "gold_transit_dong_now",
+   "product_id": "transit_dong_now",
+   "real_rows_by_combo": [
+    10,
+    5,
+    10
+   ]
+  },
+  {
+   "pattern_id": "gu_transit_rollup_ranked",
+   "question_ko": "지금 자치구별로 선택한 교통 지표의 동 평균이 가장 높은(또는 낮은) 구는?",
+   "axes": "자치구 집계 랭킹 — 선택 지표 동 평균, 정렬 방향 스위치",
+   "sql": "-- :metric=bus_congestion, :dir=desc, :n=10\nWITH agg AS (\n  SELECT gu, COUNT(*) AS dong_cnt,\n         AVG(CASE :metric WHEN 'bus_congestion' THEN bus_congestion_avg\n                          WHEN 'subway_wait' THEN subway_wait_min\n                          WHEN 'parking_avail' THEN parking_avail_pct\n                          ELSE bus_veh_cnt END) AS metric_avg\n  FROM gold_transit_dong_now\n  GROUP BY gu)\nSELECT gu, dong_cnt, ROUND(metric_avg, 2) AS metric_avg\nFROM agg\nWHERE metric_avg IS NOT NULL\nORDER BY CASE WHEN :dir='asc' THEN metric_avg END ASC,\n         CASE WHEN :dir='desc' THEN metric_avg END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "subquery",
+    "sort"
+   ],
+   "combos": [
+    {
+     "metric": "bus_congestion",
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "metric": "parking_avail",
+     "dir": "asc",
+     "n": 10
+    },
+    {
+     "metric": "subway_wait",
+     "dir": "desc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10,
+    10
+   ],
+   "insight_sample_ko": "버스 혼잡 평균 내림차순 1위는 서초구(관측 동 18개, 평균 5.6).",
+   "composition_idiom": "지표 스위치 + 정렬 방향 스위치",
+   "table": "gold_transit_dong_now",
+   "product_id": "transit_dong_now",
+   "real_rows_by_combo": [
+    10,
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "bus_grade_distribution",
+   "question_ko": "지금 버스 혼잡 등급(여유/보통/혼잡) 분포는 어떤가? (전체 또는 특정 구)",
+   "axes": "분포 — 버스 혼잡 등급별 동 개수·비율, 구 센티널",
+   "sql": "-- :gu=ALL\nSELECT bus_congestion_grade,\n       COUNT(*) AS dong_cnt,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct\nFROM gold_transit_dong_now\nWHERE bus_congestion_grade IS NOT NULL\n  AND (:gu = 'ALL' OR gu = :gu)\nGROUP BY bus_congestion_grade\nORDER BY dong_cnt DESC\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "window",
+    "filter_null",
+    "filter_set"
+   ],
+   "combos": [
+    {
+     "gu": "ALL"
+    },
+    {
+     "gu": "강남구"
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    2
+   ],
+   "insight_sample_ko": "전체 등급 관측된 414개 동 중 버스 '여유'가 362개(87.4%)로 대다수.",
+   "composition_idiom": "센티널(gu=ALL) + 윈도우 비율",
+   "table": "gold_transit_dong_now",
+   "product_id": "transit_dong_now",
+   "real_rows_by_combo": [
+    3,
+    2
+   ]
+  },
+  {
+   "pattern_id": "hard_transit_dongs_now",
+   "question_ko": "지금 버스도 혼잡하고 지하철 대기도 긴, 대중교통으로 다니기 가장 힘든 동네는?",
+   "axes": "교차 단면 — 버스 혼잡 AND 지하철 대기 임계 이상, 대기 DESC",
+   "sql": "-- :min_wait=5, :n=10\nSELECT admin_dong, gu, bus_congestion_grade, bus_congestion_avg, subway_wait_min\nFROM gold_transit_dong_now\nWHERE bus_congestion_grade = '혼잡'\n  AND subway_wait_min >= :min_wait\nORDER BY subway_wait_min DESC, bus_congestion_avg DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_wait": 5,
+     "n": 10
+    },
+    {
+     "min_wait": 3,
+     "n": 10
+    },
+    {
+     "min_wait": 10,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    5,
+    6,
+    5
+   ],
+   "insight_sample_ko": "min_wait=5 기준 1위는 영등포구 당산2동 — 버스 혼잡(평균 7.5)에 지하철 대기 21.9분.",
+   "composition_idiom": "임계값(subway_wait)",
+   "table": "gold_transit_dong_now",
+   "product_id": "transit_dong_now",
+   "real_rows_by_combo": [
+    5,
+    6,
+    5
+   ]
+  },
+  {
+   "pattern_id": "compare_selected_dongs",
+   "question_ko": "이 동네들의 지금 교통 상태(버스·지하철·주차)를 나란히 비교하면?",
+   "axes": "다중 선택 단면 — 선택한 동네들 현재 스냅샷 비교",
+   "sql": "-- :codes=[\"1156060500\",\"1154551000\",\"1114059000\"] — admin_dong_code 배열(동명은 구 간 중복이라 코드로 지정)\nSELECT admin_dong, gu, bus_congestion_grade, bus_congestion_avg,\n       subway_wait_min, parking_avail_pct\nFROM gold_transit_dong_now\nWHERE admin_dong_code IN (SELECT value FROM json_each(:codes))\nORDER BY admin_dong\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "subquery",
+    "sort"
+   ],
+   "combos": [
+    {
+     "codes": "[\"1156060500\",\"1154551000\",\"1114059000\"]"
+    },
+    {
+     "codes": "[\"1156060500\",\"1114059000\"]"
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    2
+   ],
+   "insight_sample_ko": "3개 동 비교 시 금천구 가산동은 버스 여유(평균 3.0)·지하철 대기 1.0분·주차 여유 60%.",
+   "composition_idiom": "배열 IN json_each",
+   "table": "gold_transit_dong_now",
+   "product_id": "transit_dong_now",
+   "real_rows_by_combo": [
+    3,
+    2
+   ]
+  },
+  {
+   "pattern_id": "easy_drive_dongs_now",
+   "question_ko": "지금 주차 여유가 넉넉하고 버스도 안 붐비는(차 대기 편한) 동네는?",
+   "axes": "교차 랭킹 — 주차 여유 임계 이상 AND 버스 여유 등급, 여유% DESC",
+   "sql": "-- :min_avail=50, :n=10\nSELECT admin_dong, gu, parking_avail_pct, parking_lot_cnt,\n       bus_congestion_grade, bus_congestion_avg\nFROM gold_transit_dong_now\nWHERE parking_avail_pct >= :min_avail\n  AND bus_congestion_grade = '여유'\nORDER BY parking_avail_pct DESC, bus_congestion_avg ASC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_avail": 50,
+     "n": 10
+    },
+    {
+     "min_avail": 70,
+     "n": 10
+    },
+    {
+     "min_avail": 30,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10,
+    10
+   ],
+   "insight_sample_ko": "min_avail=50 기준 1위는 성동구 옥수동 — 주차 여유 94%에 버스 여유(평균 3.0).",
+   "composition_idiom": "임계값(parking_avail)",
+   "table": "gold_transit_dong_now",
+   "product_id": "transit_dong_now",
+   "real_rows_by_combo": [
+    10,
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "gu_bus_congested_share",
+   "question_ko": "지금 관할 동네 중 버스가 혼잡한 동네 비율이 가장 높은(또는 낮은) 구는?",
+   "axes": "자치구 비율 랭킹 — 버스 혼잡 등급 동 비율, 정렬 방향 스위치",
+   "sql": "-- :dir=desc, :n=10\nSELECT gu,\n       COUNT(*) AS dong_cnt,\n       SUM(CASE WHEN bus_congestion_grade = '혼잡' THEN 1 ELSE 0 END) AS congested_cnt,\n       ROUND(100.0 * SUM(CASE WHEN bus_congestion_grade = '혼잡' THEN 1 ELSE 0 END) / COUNT(*), 1) AS congested_pct\nFROM gold_transit_dong_now\nWHERE bus_congestion_grade IS NOT NULL\nGROUP BY gu\nORDER BY CASE WHEN :dir='asc' THEN congested_pct END ASC,\n         CASE WHEN :dir='desc' THEN congested_pct END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_null",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "dir": "asc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "혼잡 동 비율 내림차순 1위는 서초구 — 18개 동 중 7개(38.9%)가 혼잡.",
+   "composition_idiom": "정렬 방향 스위치",
+   "table": "gold_transit_dong_now",
+   "product_id": "transit_dong_now",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "accessibility_by_dim",
+   "question_ko": "자치구·행사유형·지하철노선 중 어느 축이 대중교통/주차 접근성이 좋은가?",
+   "axes": "차원별 집계·랭킹(구/유형/노선 스위치) — 지표(건수/평균역거리) + 정렬방향 스위치",
+   "sql": "-- :dim=event_type, :sort=cnt, :dir=desc, :n=10\nSELECT CASE :dim WHEN 'event_type' THEN event_type\n            WHEN 'route' THEN nearest_station_route\n            ELSE gu END AS dim_value,\n       COUNT(*) AS event_cnt,\n       ROUND(AVG(nearest_station_dist_m), 1) AS avg_station_dist_m,\n       ROUND(AVG(stations_within_800m), 2) AS avg_stations_800m,\n       ROUND(AVG(nearest_parking_full_prob), 3) AS avg_parking_full_prob\nFROM gold_transit_event_access\nGROUP BY dim_value\nORDER BY CASE WHEN :sort='dist' AND :dir='asc'  THEN AVG(nearest_station_dist_m) END ASC,\n         CASE WHEN :sort='dist' AND :dir='desc' THEN AVG(nearest_station_dist_m) END DESC,\n         CASE WHEN :sort='cnt'  AND :dir='asc'  THEN COUNT(*) END ASC,\n         CASE WHEN :sort='cnt'  AND :dir='desc' THEN COUNT(*) END DESC\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dim": "event_type",
+     "sort": "cnt",
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "dim": "gu",
+     "sort": "dist",
+     "dir": "asc",
+     "n": 10
+    },
+    {
+     "dim": "route",
+     "sort": "dist",
+     "dir": "desc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    6,
+    10,
+    10
+   ],
+   "insight_sample_ko": "행사유형(dim=event_type)으로 집계하면 공연(performance)이 520건으로 가장 많고, 최근접 지하철역까지 평균 474.1m·800m 내 역 1.84개로 접근성이 양호하다.",
+   "composition_idiom": "차원 스위치(:dim gu/event_type/route) + 지표/정렬방향 스위치(:sort,:dir)",
+   "table": "gold_transit_event_access",
+   "product_id": "transit_event_access",
+   "real_rows_by_combo": [
+    6,
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "events_by_subway",
+   "question_ko": "이 지하철역(또는 이 호선)으로 갈 수 있는 진행 중 행사는?",
+   "axes": "필터(역/노선 센티널, 미종료) — 최근접 역 거리 ASC",
+   "sql": "-- :station=광화문(세종문화회관), :route=ALL, :today=2026-08-05, :n=10\nSELECT title, venue_name, gu, nearest_station_name, nearest_station_route,\n       nearest_station_dist_m, event_start_date, event_end_date\nFROM gold_transit_event_access\nWHERE event_end_date >= :today\n  AND (:station = 'ALL' OR nearest_station_name = :station)\n  AND (:route = 'ALL' OR nearest_station_route = :route)\nORDER BY nearest_station_dist_m ASC, event_start_date DESC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "station": "광화문(세종문화회관)",
+     "route": "ALL",
+     "today": "2026-08-05",
+     "n": 10
+    },
+    {
+     "station": "ALL",
+     "route": "4호선",
+     "today": "2026-08-05",
+     "n": 10
+    },
+    {
+     "station": "혜화",
+     "route": "4호선",
+     "today": "2026-08-05",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10,
+    10
+   ],
+   "insight_sample_ko": "광화문(세종문화회관)역 인근 미종료 행사 중 가장 가까운 건 역에서 35m 거리의 '2026 해치마당 미디어월 두 번째 전시'(종로구)다.",
+   "composition_idiom": "센티널(전체: :station='ALL' / :route='ALL')",
+   "table": "gold_transit_event_access",
+   "product_id": "transit_event_access",
+   "real_rows_by_combo": [
+    10,
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "most_subway_options_events",
+   "question_ko": "도보권(800m) 지하철 선택지가 가장 많은 행사는?",
+   "axes": "행사 랭킹(미종료, 역 개수 임계) — 800m 내 역 개수 DESC, 최근접 거리 ASC",
+   "sql": "-- :today=2026-08-05, :min_st=3, :n=10\nSELECT title, venue_name, gu, stations_within_800m,\n       nearest_station_name, nearest_station_route, nearest_station_dist_m\nFROM gold_transit_event_access\nWHERE event_end_date >= :today AND stations_within_800m >= :min_st\nORDER BY stations_within_800m DESC, nearest_station_dist_m ASC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "today": "2026-08-05",
+     "min_st": 3,
+     "n": 10
+    },
+    {
+     "today": "2026-08-05",
+     "min_st": 6,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "800m 내 지하철역이 10개나 되는 중구 푸르지오아트홀의 '오스카 피터슨 탄생 100주년 기념 콘서트'가 대중교통 선택지가 가장 많은 행사다(최근접 을지로4가 63m).",
+   "composition_idiom": "임계값(:min_st)",
+   "table": "gold_transit_event_access",
+   "product_id": "transit_event_access",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "station_access_distribution",
+   "question_ko": "행사들의 지하철 접근성은 초역세권/도보권/외곽으로 어떻게 분포하나?",
+   "axes": "분포·비율(미종료, 구 센티널) — 거리 버킷별 건수와 비중(%)",
+   "sql": "-- :gu=ALL, :today=2026-08-05\nSELECT CASE WHEN nearest_station_dist_m <= 250 THEN '1_초역세권_250m'\n            WHEN nearest_station_dist_m <= 800 THEN '2_도보권_800m'\n            ELSE '3_외곽_800m초과' END AS access_band,\n       COUNT(*) AS event_cnt,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct\nFROM gold_transit_event_access\nWHERE event_end_date >= :today AND (:gu = 'ALL' OR gu = :gu)\nGROUP BY access_band\nORDER BY access_band",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "window",
+    "filter_range"
+   ],
+   "combos": [
+    {
+     "gu": "ALL",
+     "today": "2026-08-05"
+    },
+    {
+     "gu": "종로구",
+     "today": "2026-08-05"
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    3
+   ],
+   "insight_sample_ko": "미종료 행사 전체(1434건)의 551건(38.4%)이 지하철역 250m 이내 초역세권에 있다. 종로구만 보면 그 비중이 73.4%로 훨씬 높다.",
+   "composition_idiom": "센티널(전체: :gu='ALL') + CASE 버킷 + window 비율(SUM OVER())",
+   "table": "gold_transit_event_access",
+   "product_id": "transit_event_access",
+   "real_rows_by_combo": [
+    3,
+    3
+   ]
+  },
+  {
+   "pattern_id": "transit_desert_events",
+   "question_ko": "도보권 지하철역이 아예 없어 셔틀·자차가 필요한 행사는?",
+   "axes": "단면(미종료, 800m 내 역 0개, 구 센티널) — 최근접 역 거리 DESC(접근성 최악순)",
+   "sql": "-- :gu=ALL, :today=2026-08-05, :n=10\nSELECT title, venue_name, gu, nearest_station_name, nearest_station_dist_m,\n       nearest_parking_name, nearest_parking_dist_m, parkings_within_500m\nFROM gold_transit_event_access\nWHERE event_end_date >= :today\n  AND stations_within_800m = 0\n  AND (:gu = 'ALL' OR gu = :gu)\nORDER BY nearest_station_dist_m DESC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "ALL",
+     "today": "2026-08-05",
+     "n": 10
+    },
+    {
+     "gu": "서초구",
+     "today": "2026-08-05",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "도보권(800m) 지하철역이 하나도 없는 행사 중 최악은 최근접역이 3237m나 떨어진 종로구 서울시립 미술아카이브 프로그램이다(인근 500m 주차장도 0개).",
+   "composition_idiom": "센티널(전체: :gu='ALL') + 임계(stations_within_800m = 0)",
+   "table": "gold_transit_event_access",
+   "product_id": "transit_event_access",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "both_modes_events",
+   "question_ko": "지하철도 가깝고 주차도 여유 있는, 대중교통·자차 모두 편한 행사는?",
+   "axes": "행사 랭킹(미종료, 역·주차장 개수 임계) — 도보권 역+주차장 합 DESC",
+   "sql": "-- :today=2026-08-05, :min_st=1, :min_pk=1, :n=10\nSELECT title, venue_name, gu,\n       stations_within_800m, nearest_station_dist_m,\n       parkings_within_500m, nearest_parking_dist_m, nearest_parking_full_prob\nFROM gold_transit_event_access\nWHERE event_end_date >= :today\n  AND stations_within_800m >= :min_st\n  AND parkings_within_500m >= :min_pk\nORDER BY (stations_within_800m + parkings_within_500m) DESC,\n         nearest_station_dist_m ASC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "today": "2026-08-05",
+     "min_st": 1,
+     "min_pk": 1,
+     "n": 10
+    },
+    {
+     "today": "2026-08-05",
+     "min_st": 2,
+     "min_pk": 2,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "지하철·주차 모두 편한 행사 1위는 800m 내 역 10개·500m 내 주차장 11개(인근 주차장 평시 만차확률 0)인 중구 푸르지오아트홀의 '오스카 피터슨 탄생 100주년' 공연이다.",
+   "composition_idiom": "임계값(:min_st, :min_pk)",
+   "table": "gold_transit_event_access",
+   "product_id": "transit_event_access",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "events_in_selected_gus",
+   "question_ko": "선택한 여러 자치구에서 (특정 유형의) 진행 중 행사를 한꺼번에 보려면?",
+   "axes": "다중 선택 필터(구 배열 IN + 유형 센티널, 미종료) — 시작일 최신순",
+   "sql": "-- :gus=[\"종로구\",\"서초구\",\"마포구\"], :type=ALL, :today=2026-08-05, :n=20\nSELECT gu, title, venue_name, event_type, event_start_date, event_end_date,\n       nearest_station_name, nearest_station_dist_m\nFROM gold_transit_event_access\nWHERE event_end_date >= :today\n  AND gu IN (SELECT value FROM json_each(:gus))\n  AND (:type = 'ALL' OR event_type = :type)\nORDER BY event_start_date DESC, event_ref LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "subquery",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gus": "[\"종로구\",\"서초구\",\"마포구\"]",
+     "type": "ALL",
+     "today": "2026-08-05",
+     "n": 20
+    },
+    {
+     "gus": "[\"중구\"]",
+     "type": "performance",
+     "today": "2026-08-05",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    18
+   ],
+   "insight_sample_ko": "종로·서초·마포 세 구의 미종료 행사를 시작일 최신순으로 보면 12/29 예술의전당 '함신익과 심포니 송 마스터즈 시리즈'(서초구)가 가장 나중 일정이다.",
+   "composition_idiom": "배열 IN(json_each) + 센티널(전체: :type='ALL')",
+   "table": "gold_transit_event_access",
+   "product_id": "transit_event_access",
+   "real_rows_by_combo": [
+    20,
+    18
+   ]
+  },
+  {
+   "pattern_id": "named_full_lots_in_gu_at_slot",
+   "question_ko": "이 자치구에서 (요일)(시각)에 평소 만차가 잦은 주차장은 어디인가?",
+   "axes": "주차장 랭킹(요일·시각 고정, 구 센티널) — 지표/정렬 스위치, 표본 신뢰도 하한 · full_risk 조인으로 주차장 이름 노출",
+   "sql": "-- :gu=11110(법정 구코드; ALL=서울 전체), :dow=4(목요일; 1=월..7=일), :hh=7, :metric=full_prob, :dir=desc, :min_n=6, :n=10\nSELECT r.parking_name, r.gu_code, r.admin_dong_code, p.base_n,\n       ROUND(p.occ_avg, 3) AS occ_avg, ROUND(p.full_prob, 3) AS full_prob\nFROM gold_transit_parking_profile p\nJOIN gold_transit_parking_full_risk r ON r.parking_id = p.parking_id\nWHERE p.dow = :dow AND p.hh = :hh AND (:gu = 'ALL' OR r.gu_code = :gu) AND p.base_n >= :min_n\nORDER BY CASE WHEN :dir = 'asc' THEN (CASE :metric WHEN 'occ_avg' THEN p.occ_avg ELSE p.full_prob END) END ASC,\n         CASE WHEN :dir = 'desc' THEN (CASE :metric WHEN 'occ_avg' THEN p.occ_avg ELSE p.full_prob END) END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "join",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "11110",
+     "dow": 4,
+     "hh": 7,
+     "metric": "full_prob",
+     "dir": "desc",
+     "min_n": 6,
+     "n": 10
+    },
+    {
+     "gu": "ALL",
+     "dow": 5,
+     "hh": 16,
+     "metric": "occ_avg",
+     "dir": "desc",
+     "min_n": 6,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "종로구(11110) 주차장 중 목요일 07시에 평소 만차가 가장 잦은 곳은 '청계3(창경궁로_남) 공영주차장(시)'로, 만차확률 0.4·평균 점유율 0.722(표본 8버킷).",
+   "composition_idiom": "센티널(:gu=ALL) + 지표 스위치(:metric) + 정렬 방향 스위치(:dir) + 표본 임계값(base_n>=:min_n); 교차 테이블 조인(full_risk로 이름/구)",
+   "table": "gold_transit_parking_profile",
+   "product_id": "transit_parking_profile",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "lot_top_busy_slots",
+   "question_ko": "이 주차장이 평소 가장 만차되기 쉬운 요일·시간대 조합은?",
+   "axes": "주차장 내부 (요일×시간) 셀 랭킹 — 지표 스위치, 표본 신뢰도 하한",
+   "sql": "-- :lot=173840, :metric=full_prob, :min_n=6, :n=10\nSELECT dow, hh, base_n, ROUND(occ_avg, 3) AS occ_avg, ROUND(full_prob, 3) AS full_prob\nFROM gold_transit_parking_profile\nWHERE parking_id = :lot AND base_n >= :min_n\nORDER BY (CASE :metric WHEN 'occ_avg' THEN occ_avg ELSE full_prob END) DESC, base_n DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "lot": "173840",
+     "metric": "full_prob",
+     "min_n": 6,
+     "n": 10
+    },
+    {
+     "lot": "1367804",
+     "metric": "occ_avg",
+     "min_n": 8,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "173840 주차장이 가장 만차되기 쉬운 시간대 1위는 화요일(dow=2) 19시로, 만차확률 1.0·평균 점유율 0.988(표본 12버킷).",
+   "composition_idiom": "지표 스위치(:metric) + 표본 임계값(base_n>=:min_n)",
+   "table": "gold_transit_parking_profile",
+   "product_id": "transit_parking_profile",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "lot_weekday_weekend_by_hour",
+   "question_ko": "이 주차장은 시간대별로 평일과 주말 중 언제 더 붐비나?",
+   "axes": "시간대(hh) 단면 — 평일(dow 1-5)/주말(dow 6-7) 조건부 집계 피벗(점유율·만차확률 동시)",
+   "sql": "-- :lot=1367804, :min_n=4\nSELECT hh,\n       ROUND(AVG(CASE WHEN dow BETWEEN 1 AND 5 THEN occ_avg END), 3) AS weekday_occ,\n       ROUND(AVG(CASE WHEN dow IN (6, 7) THEN occ_avg END), 3) AS weekend_occ,\n       ROUND(AVG(CASE WHEN dow BETWEEN 1 AND 5 THEN full_prob END), 3) AS weekday_full_prob,\n       ROUND(AVG(CASE WHEN dow IN (6, 7) THEN full_prob END), 3) AS weekend_full_prob\nFROM gold_transit_parking_profile\nWHERE parking_id = :lot AND base_n >= :min_n\nGROUP BY hh\nORDER BY hh\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "lot": "1367804",
+     "min_n": 4
+    },
+    {
+     "lot": "173840",
+     "min_n": 6
+    }
+   ],
+   "rows_by_combo": [
+    23,
+    22
+   ],
+   "insight_sample_ko": "1367804 주차장은 00시 점유율이 평일 0.545·주말 0.554로 거의 같고, 두 경우 모두 만차확률은 0이다(시간대별 24행으로 평일/주말 격차를 한눈에).",
+   "composition_idiom": "조건부 집계 피벗(평일 dow 1-5 / 주말 dow 6-7) + 표본 임계값(base_n>=:min_n)",
+   "table": "gold_transit_parking_profile",
+   "product_id": "transit_parking_profile",
+   "real_rows_by_combo": [
+    24,
+    24
+   ]
+  },
+  {
+   "pattern_id": "lot_full_risk_windows",
+   "question_ko": "이 주차장은 이 요일에 몇 시대에 만차 위험이 높나?",
+   "axes": "필터(주차장, 요일) — 만차확률 임계값 이상 시간대만, 시간 오름차순 타임라인",
+   "sql": "-- :lot=173840, :dow=5(금요일; 1=월..7=일), :min_p=0.5, :min_n=6, :n=24\nSELECT hh, base_n, ROUND(occ_avg, 3) AS occ_avg, ROUND(full_prob, 3) AS full_prob\nFROM gold_transit_parking_profile\nWHERE parking_id = :lot AND dow = :dow AND base_n >= :min_n AND full_prob >= :min_p\nORDER BY hh\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "lot": "173840",
+     "dow": 5,
+     "min_p": 0.5,
+     "min_n": 6,
+     "n": 24
+    },
+    {
+     "lot": "1512161",
+     "dow": 4,
+     "min_p": 0.8,
+     "min_n": 6,
+     "n": 24
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    6
+   ],
+   "insight_sample_ko": "173840 주차장은 금요일 만차 위험(만차확률 0.5 이상) 시간대가 00시부터 나타나며, 00시 만차확률 1.0·평균 점유율 0.997.",
+   "composition_idiom": "임계값(full_prob>=:min_p) + 표본 임계값(base_n>=:min_n)",
+   "table": "gold_transit_parking_profile",
+   "product_id": "transit_parking_profile",
+   "real_rows_by_combo": [
+    14,
+    13
+   ]
+  },
+  {
+   "pattern_id": "chronically_full_lots",
+   "question_ko": "평상시 어느 시간대든 거의 늘 만차라 자리 찾기 어려운 주차장은?",
+   "axes": "주차장 랭킹(프로파일 전체 집계) — 요일·시간칸 평균 만차확률/점유율 DESC, 커버리지 하한",
+   "sql": "-- :metric=full_prob, :min_cells=20, :n=15\nSELECT parking_id,\n       COUNT(*) AS cells,\n       SUM(base_n) AS obs_total,\n       ROUND(AVG(occ_avg), 3) AS occ_avg_all,\n       ROUND(AVG(full_prob), 3) AS full_prob_all\nFROM gold_transit_parking_profile\nGROUP BY parking_id\nHAVING COUNT(*) >= :min_cells\nORDER BY (CASE :metric WHEN 'occ_avg' THEN AVG(occ_avg) ELSE AVG(full_prob) END) DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "metric": "full_prob",
+     "min_cells": 20,
+     "n": 15
+    },
+    {
+     "metric": "occ_avg",
+     "min_cells": 30,
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    15,
+    15
+   ],
+   "insight_sample_ko": "평상시 거의 항상 만차인 주차장 1위는 173005로, 관측된 46개 요일·시간칸(총 396버킷) 전부에서 평균 만차확률 1.0·평균 점유율 1.0.",
+   "composition_idiom": "지표 스위치(:metric) + 커버리지 임계값(HAVING COUNT(*)>=:min_cells)",
+   "table": "gold_transit_parking_profile",
+   "product_id": "transit_parking_profile",
+   "real_rows_by_combo": [
+    15,
+    15
+   ]
+  },
+  {
+   "pattern_id": "lot_dow_profile_at_hour",
+   "question_ko": "이 주차장은 특정 시각 기준으로 요일별 혼잡도가 어떻게 다른가?",
+   "axes": "필터(주차장, 시각 고정) — 요일(dow) 단면, 요일 오름차순",
+   "sql": "-- :lot=173752, :hh=18\nSELECT dow, base_n, ROUND(occ_avg, 3) AS occ_avg, ROUND(full_prob, 3) AS full_prob\nFROM gold_transit_parking_profile\nWHERE parking_id = :lot AND hh = :hh\nORDER BY dow\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "lot": "173752",
+     "hh": 18
+    },
+    {
+     "lot": "173047",
+     "hh": 18
+    }
+   ],
+   "rows_by_combo": [
+    6,
+    6
+   ],
+   "insight_sample_ko": "173752 주차장의 18시 점유율은 화요일(dow=2) 0.449·만차확률 0에서 시작해 요일 순으로 이어지며, 요일별 혼잡 편차를 비교할 수 있다.",
+   "composition_idiom": null,
+   "table": "gold_transit_parking_profile",
+   "product_id": "transit_parking_profile",
+   "real_rows_by_combo": [
+    7,
+    7
+   ]
+  }
+ ],
+ "audit_fail": [],
+ "run_fail": [],
+ "zero_first_combo": [],
+ "n_accepted": 27
+}

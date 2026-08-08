@@ -1,0 +1,2166 @@
+{
+ "domain": "traffic_weather",
+ "accepted": [
+  {
+   "pattern_id": "speed_profile_by_time_dim",
+   "question_ko": "현재 스냅샷을 관측 시각의 시(hour) 또는 요일 기준으로 묶으면 시간축별 평균 속도·통행시간은 어떻습니까?",
+   "axes": "관측 시간 차원 스위치(시/요일) 집계 — 시간 버킷 ASC",
+   "sql": "-- :dim=hour\nSELECT CASE WHEN :dim = 'dow' THEN kst_day_of_week ELSE kst_hour END AS time_bucket,\n       count(*) AS link_count,\n       round(avg(flow_speed), 1) AS avg_flow_speed,\n       round(avg(flow_travel_time), 1) AS avg_flow_travel_time\nFROM gold_traffic_flow_anomaly_current\nGROUP BY CASE WHEN :dim = 'dow' THEN kst_day_of_week ELSE kst_hour END\nORDER BY time_bucket ASC\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dim": "hour"
+    },
+    {
+     "dim": "dow"
+    }
+   ],
+   "rows_by_combo": [
+    21,
+    6
+   ],
+   "insight_sample_ko": "관측 시각 시(hour) 기준으로 0시대에 마지막 관측된 링크는 2곳이며 평균 속도 63.0km/h, 평균 통행시간 78.0초로, 시간축별 현재 속도 분포를 한눈에 보여준다.",
+   "composition_idiom": "차원 스위치(:dim = hour/dow)",
+   "table": "gold_traffic_flow_anomaly_current",
+   "product_id": "traffic_flow_anomaly_current",
+   "real_rows_by_combo": [
+    20,
+    6
+   ]
+  },
+  {
+   "pattern_id": "snapshot_for_links",
+   "question_ko": "여러 도로 링크의 현재 속도와 평소 기준선 비교 스냅샷을 한 번에 보고 싶습니다.",
+   "axes": "링크 다중 선택(배열 IN) — 링크 ID ASC",
+   "sql": "-- :link_ids=[\"1110008800\",\"1220031300\",\"1050015000\"]\nSELECT link_id, observed_at_kst, flow_speed, median_flow_speed, p25_flow_speed, p75_flow_speed,\n       round(flow_speed - median_flow_speed, 1) AS speed_vs_median, baseline_state\nFROM gold_traffic_flow_anomaly_current\nWHERE link_id IN (SELECT value FROM json_each(:link_ids))\nORDER BY link_id\n",
+   "requires": [
+    "select_columns",
+    "filter_set"
+   ],
+   "combos": [
+    {
+     "link_ids": "[\"1110008800\",\"1220031300\",\"1050015000\"]"
+    },
+    {
+     "link_ids": "[\"1140024200\",\"1150003100\"]"
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    2
+   ],
+   "insight_sample_ko": "링크 1050015000는 현재 13.2km/h로 평소 중앙값 13.8km/h보다 0.6km/h 낮으며(p25 12.8·p75 13.8, insufficient_history), 지정한 세 링크를 한 요청으로 비교 조회한다.",
+   "composition_idiom": "배열 IN(json_each)",
+   "table": "gold_traffic_flow_anomaly_current",
+   "product_id": "traffic_flow_anomaly_current",
+   "real_rows_by_combo": [
+    3,
+    2
+   ]
+  },
+  {
+   "pattern_id": "outside_typical_band_links",
+   "question_ko": "현재 속도가 평소 사분위 범위(p25~p75) 밖으로 벗어난 링크는 어디입니까? 느린 쪽/빠른 쪽을 선택할 수 있습니다.",
+   "axes": "IQR 밴드 이탈 방향 스위치(하단/상단) — 중앙값 대비 편차 정렬",
+   "sql": "-- :band_side=below, :n=20\nSELECT link_id, observed_at_kst, flow_speed, p25_flow_speed, median_flow_speed, p75_flow_speed,\n       round(flow_speed - median_flow_speed, 1) AS speed_vs_median, baseline_state\nFROM gold_traffic_flow_anomaly_current\nWHERE median_flow_speed IS NOT NULL\n  AND ( (:band_side = 'below' AND flow_speed < p25_flow_speed)\n     OR (:band_side = 'above' AND flow_speed > p75_flow_speed) )\nORDER BY CASE WHEN :band_side = 'below' THEN flow_speed - median_flow_speed END ASC,\n         CASE WHEN :band_side = 'above' THEN flow_speed - median_flow_speed END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_null",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "band_side": "below",
+     "n": 20
+    },
+    {
+     "band_side": "above",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "밴드 하단 이탈에서 링크 1130000400가 현재 47.0km/h로 평소 p25 65.0·중앙값 74.0을 크게 밑돌아 중앙값 대비 -27.0km/h로 가장 심하게 느리다.",
+   "composition_idiom": "차원/정렬 스위치(:band_side = below/above) + 라이브 밴드 비교(anomaly_direction 미채움 대체)",
+   "table": "gold_traffic_flow_anomaly_current",
+   "product_id": "traffic_flow_anomaly_current",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "relative_to_baseline_links",
+   "question_ko": "매칭 프로파일이 있는 링크 중 현재 속도가 평소 중앙값 대비 지정 폭 이상 느려지거나 빨라진 링크는 어디입니까?",
+   "axes": "중앙값 대비 방향 스위치(느림/빠름)·최소 편차 임계값 — 편차 정렬",
+   "sql": "-- :direction=slower, :min_abs_delta=0, :n=20\nSELECT link_id, observed_at_kst, flow_speed, median_flow_speed,\n       round(flow_speed - median_flow_speed, 1) AS speed_delta,\n       round(flow_speed * 1.0 / median_flow_speed, 3) AS speed_ratio, baseline_state\nFROM gold_traffic_flow_anomaly_current\nWHERE median_flow_speed IS NOT NULL AND median_flow_speed > 0\n  AND ( (:direction = 'slower' AND median_flow_speed - flow_speed >= :min_abs_delta)\n     OR (:direction = 'faster' AND flow_speed - median_flow_speed >= :min_abs_delta) )\nORDER BY CASE WHEN :direction = 'slower' THEN flow_speed - median_flow_speed END ASC,\n         CASE WHEN :direction = 'faster' THEN flow_speed - median_flow_speed END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_null",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "direction": "slower",
+     "min_abs_delta": 0,
+     "n": 20
+    },
+    {
+     "direction": "faster",
+     "min_abs_delta": 5,
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    18
+   ],
+   "insight_sample_ko": "느려진 방향에서 링크 1130000400가 현재 47.0km/h로 평소 중앙값 74.0 대비 -27.0km/h(비율 0.635)로 가장 크게 둔화됐다. speed_delta_from_median이 아직 비어 있어도 중앙값에서 라이브로 산출한다.",
+   "composition_idiom": "차원/정렬 스위치(:direction = slower/faster) + 임계값(:min_abs_delta)",
+   "table": "gold_traffic_flow_anomaly_current",
+   "product_id": "traffic_flow_anomaly_current",
+   "real_rows_by_combo": [
+    20,
+    18
+   ]
+  },
+  {
+   "pattern_id": "widest_typical_speed_band_links",
+   "question_ko": "과거 같은 요일·시간대 기준으로 평소 속도 변동폭(p75-p25)이 가장 큰, 즉 기준선 변동성이 큰 링크는 어디입니까?",
+   "axes": "평소 속도 밴드폭(p75-p25) 정렬 — 밴드폭 DESC",
+   "sql": "-- :n=20\nSELECT link_id, kst_day_of_week, kst_hour, p25_flow_speed, median_flow_speed, p75_flow_speed,\n       round(p75_flow_speed - p25_flow_speed, 1) AS typical_speed_band_width,\n       distinct_observation_date_count\nFROM gold_traffic_flow_anomaly_current\nWHERE p25_flow_speed IS NOT NULL\nORDER BY p75_flow_speed - p25_flow_speed DESC, link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_null",
+    "sort"
+   ],
+   "combos": [
+    {
+     "n": 20
+    },
+    {
+     "n": 5
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    5
+   ],
+   "insight_sample_ko": "링크 1120001700(금요일 18시)의 평소 속도 밴드폭이 33.0km/h(p25 58.0~p75 91.0)로 가장 넓어, 같은 시간대라도 속도가 크게 출렁여 기준선 신뢰도가 낮음을 시사한다.",
+   "composition_idiom": null,
+   "table": "gold_traffic_flow_anomaly_current",
+   "product_id": "traffic_flow_anomaly_current",
+   "real_rows_by_combo": [
+    20,
+    5
+   ]
+  },
+  {
+   "pattern_id": "baseline_maturity_breakdown",
+   "question_ko": "최신 스냅샷에서 기준선 상태와 확보된 이력 일수(distinct_observation_date_count)별 링크 수 분포는 어떻습니까?",
+   "axes": "기준선 상태 × 이력 일수 교차 집계 — 상태·일수 ASC",
+   "sql": "SELECT baseline_state, distinct_observation_date_count,\n       count(*) AS link_count,\n       round(avg(profile_observation_count), 2) AS avg_profile_obs\nFROM gold_traffic_flow_anomaly_current\nGROUP BY baseline_state, distinct_observation_date_count\nORDER BY baseline_state, distinct_observation_date_count\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {}
+   ],
+   "rows_by_combo": [
+    3
+   ],
+   "insight_sample_ko": "insufficient_history 링크 139곳이 이력 1일만 확보(평균 프로파일 관측 1.89회)했고, no_matching_profile 145곳은 이력 0일이라, 대표성(representative) 기준선까지 이력 축적이 더 필요한 콜드스타트 상태임을 보여준다.",
+   "composition_idiom": null,
+   "table": "gold_traffic_flow_anomaly_current",
+   "product_id": "traffic_flow_anomaly_current",
+   "real_rows_by_combo": [
+    3
+   ]
+  },
+  {
+   "pattern_id": "rank_flow_change_by_metric",
+   "question_ko": "속도 변화 또는 통행시간 변화 지표를 골라, 원하는 방향으로 가장 많이 변한 링크를 보고 싶습니다.",
+   "axes": "지표(속도 변화/통행시간 변화)·정렬 방향·상태 스위치 — 선택 지표 정렬",
+   "sql": "-- :metric=speed_change, :dir=asc, :state=ALL, :n=20\nSELECT link_id, observed_at_kst, flow_speed, previous_flow_speed, flow_speed_change,\n       flow_travel_time, previous_flow_travel_time, flow_travel_time_change, speed_change_state\nFROM gold_traffic_flow_change_latest\nWHERE speed_change_state <> 'no_prior_observation'\n  AND (:state = 'ALL' OR speed_change_state = :state)\nORDER BY\n  CASE WHEN :dir='asc' THEN (CASE :metric WHEN 'travel_time_change' THEN flow_travel_time_change ELSE flow_speed_change END) END ASC,\n  CASE WHEN :dir='desc' THEN (CASE :metric WHEN 'travel_time_change' THEN flow_travel_time_change ELSE flow_speed_change END) END DESC,\n  link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "metric": "speed_change",
+     "dir": "asc",
+     "state": "ALL",
+     "n": 20
+    },
+    {
+     "metric": "travel_time_change",
+     "dir": "asc",
+     "state": "speed_increased",
+     "n": 10
+    },
+    {
+     "metric": "speed_change",
+     "dir": "desc",
+     "state": "speed_increased",
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    10,
+    15
+   ],
+   "insight_sample_ko": "속도 변화 지표를 오름차순으로 보면 링크 1060004100 이 직전 74.0→현재 35.0 km/h로 39 km/h 하락해 낙폭이 가장 컸다.",
+   "composition_idiom": "지표 스위치 + 정렬 방향 스위치 + 센티널(:state=ALL)",
+   "table": "gold_traffic_flow_change_latest",
+   "product_id": "traffic_flow_change_latest",
+   "real_rows_by_combo": [
+    20,
+    10,
+    15
+   ]
+  },
+  {
+   "pattern_id": "relative_speed_change_ranking",
+   "question_ko": "절대 속도 변화가 아니라 직전 속도 대비 비율(%)로 가장 크게 느려지거나 빨라진 링크는 어디입니까?",
+   "axes": "모드(감속/가속) 스위치 — 직전 속도 대비 변화율 정렬",
+   "sql": "-- :mode=slowdown, :n=20\nSELECT link_id, observed_at_kst, flow_speed, previous_flow_speed, flow_speed_change,\n       round(100.0 * flow_speed_change / previous_flow_speed, 1) AS speed_change_pct, speed_change_state\nFROM gold_traffic_flow_change_latest\nWHERE previous_flow_speed > 0\n  AND ((:mode='slowdown' AND flow_speed_change < 0) OR (:mode='speedup' AND flow_speed_change > 0))\nORDER BY\n  CASE WHEN :mode='slowdown' THEN 100.0 * flow_speed_change / previous_flow_speed END ASC,\n  CASE WHEN :mode='speedup'  THEN 100.0 * flow_speed_change / previous_flow_speed END DESC,\n  link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "mode": "slowdown",
+     "n": 20
+    },
+    {
+     "mode": "speedup",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "상대 감속 1위는 링크 1030000400 으로 직전 54.0→현재 18.0 km/h, 즉 -66.7%로 절대값이 큰 링크와는 다른 순위가 드러난다.",
+   "composition_idiom": "모드 스위치 + 정렬 방향 스위치",
+   "table": "gold_traffic_flow_change_latest",
+   "product_id": "traffic_flow_change_latest",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "compound_flow_shift",
+   "question_ko": "속도 하락과 통행시간 증가가 동시에 나타난 혼잡 심화 링크(또는 그 반대의 소통 개선 링크)는 어디입니까?",
+   "axes": "모드(혼잡 심화/소통 개선) 스위치 — 두 지표 동시 이동 필터·통행시간 변화 정렬",
+   "sql": "-- :mode=congestion, :n=20\nSELECT link_id, observed_at_kst, flow_speed, flow_speed_change, flow_travel_time,\n       flow_travel_time_change, speed_change_state\nFROM gold_traffic_flow_change_latest\nWHERE (:mode='congestion' AND flow_speed_change < 0 AND flow_travel_time_change > 0)\n   OR (:mode='relief'     AND flow_speed_change > 0 AND flow_travel_time_change < 0)\nORDER BY\n  CASE WHEN :mode='congestion' THEN flow_travel_time_change END DESC,\n  CASE WHEN :mode='relief'     THEN flow_travel_time_change END ASC,\n  link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "mode": "congestion",
+     "n": 20
+    },
+    {
+     "mode": "relief",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "혼잡 심화 1위 링크 1180031700 은 속도 15.8 km/h 하락과 통행시간 315초 증가가 동시에 나타나(현재 10.2 km/h) 정체 발생 신호가 가장 강했다.",
+   "composition_idiom": "모드 스위치 + 정렬 방향 스위치",
+   "table": "gold_traffic_flow_change_latest",
+   "product_id": "traffic_flow_change_latest",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "speed_change_magnitude_distribution",
+   "question_ko": "직전 관측이 있는 링크들의 속도 변화가 급락·소폭·무변화·소폭 상승·급등 구간에 어떻게 분포합니까?",
+   "axes": "속도 변화 크기 버킷 분포 — 버킷별 링크 수",
+   "sql": "SELECT\n  CASE\n    WHEN flow_speed_change <= -10 THEN '1_drop_ge_10'\n    WHEN flow_speed_change < 0   THEN '2_drop_lt_10'\n    WHEN flow_speed_change = 0   THEN '3_unchanged'\n    WHEN flow_speed_change < 10  THEN '4_rise_lt_10'\n    ELSE '5_rise_ge_10'\n  END AS speed_change_bucket,\n  count(*) AS link_count,\n  min(flow_speed_change) AS min_change,\n  max(flow_speed_change) AS max_change\nFROM gold_traffic_flow_change_latest\nWHERE speed_change_state <> 'no_prior_observation'\nGROUP BY speed_change_bucket\nORDER BY speed_change_bucket\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {}
+   ],
+   "rows_by_combo": [
+    5
+   ],
+   "insight_sample_ko": "비교 가능한 222개 링크의 속도 변화 분포는 10 km/h 이상 급락 13개, 10 미만 하락 98개, 무변화 5개, 10 미만 상승 89개, 10 이상 급등 17개로, 소폭 변동에 크게 몰려 있다.",
+   "composition_idiom": null,
+   "table": "gold_traffic_flow_change_latest",
+   "product_id": "traffic_flow_change_latest",
+   "real_rows_by_combo": [
+    5
+   ]
+  },
+  {
+   "pattern_id": "significant_speed_change_links",
+   "question_ko": "속도가 지정한 기준(km/h) 이상으로 변한 링크는 상승·하락 방향을 가리지 않고 모두 몇 곳이며 어디입니까?",
+   "axes": "절대 속도 변화 임계값 필터 — 절대 변화 DESC",
+   "sql": "-- :min_abs_change=10, :n=100\nSELECT link_id, observed_at_kst, flow_speed, previous_flow_speed, flow_speed_change,\n       flow_travel_time_change, speed_change_state\nFROM gold_traffic_flow_change_latest\nWHERE abs(flow_speed_change) >= :min_abs_change\nORDER BY abs(flow_speed_change) DESC, link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_abs_change": 10,
+     "n": 100
+    },
+    {
+     "min_abs_change": 20,
+     "n": 100
+    }
+   ],
+   "rows_by_combo": [
+    30,
+    12
+   ],
+   "insight_sample_ko": "속도가 10 km/h 이상 변한 링크는 30곳이며, 변화 폭이 가장 큰 링크 1190000500 은 직전 29.0→현재 75.0 km/h로 46 km/h 상승했다.",
+   "composition_idiom": "임계값",
+   "table": "gold_traffic_flow_change_latest",
+   "product_id": "traffic_flow_change_latest",
+   "real_rows_by_combo": [
+    30,
+    12
+   ]
+  },
+  {
+   "pattern_id": "stale_comparison_interval",
+   "question_ko": "현재와 직전 관측 사이 간격이 지정한 분(minute) 이상으로 벌어져 변화값 해석에 주의가 필요한 링크는 어디입니까?",
+   "axes": "관측 간격 임계값 필터 — 간격(분) DESC",
+   "sql": "-- :min_gap_minutes=60, :n=20\nSELECT link_id, observed_at_kst, previous_observed_at_kst,\n       cast((julianday(observed_at_kst) - julianday(previous_observed_at_kst)) * 24 * 60 as integer) AS gap_minutes,\n       flow_speed_change, flow_travel_time_change, speed_change_state\nFROM gold_traffic_flow_change_latest\nWHERE speed_change_state <> 'no_prior_observation'\n  AND (julianday(observed_at_kst) - julianday(previous_observed_at_kst)) * 24 * 60 >= :min_gap_minutes\nORDER BY gap_minutes DESC, link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_gap_minutes": 60,
+     "n": 20
+    },
+    {
+     "min_gap_minutes": 30,
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "직전 관측이 60분 이상 지난 링크 중 1210005200 은 간격이 11173분(약 7.8일, 직전 2026-07-31 21:48 → 현재 2026-08-08 16:02)으로 가장 길어, 이 변화값은 직전 대비 즉각 변화로 보기 어렵다.",
+   "composition_idiom": "임계값",
+   "table": "gold_traffic_flow_change_latest",
+   "product_id": "traffic_flow_change_latest",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "ranked_links_for_hour_switch",
+   "question_ko": "특정 시간대에 관측된 링크를 속도 또는 통행시간 기준으로, 오름/내림차순을 골라 순위대로 보고 싶습니다.",
+   "axes": "시간대 필터 — 지표(속도/통행시간)·정렬 방향 스위치 랭킹",
+   "sql": "-- :hour_at=2026-07-31 21:00:00, :metric=speed, :dir=asc, :n=20\nSELECT link_id, hour_at, flow_speed, flow_travel_time, congestion_rank, hotspot_state, observed_link_count\nFROM gold_traffic_flow_congestion_hotspots_hourly\nWHERE hour_at = :hour_at\nORDER BY CASE WHEN :metric='speed' AND :dir='asc' THEN flow_speed END ASC,\n         CASE WHEN :metric='speed' AND :dir='desc' THEN flow_speed END DESC,\n         CASE WHEN :metric='travel_time' AND :dir='asc' THEN flow_travel_time END ASC,\n         CASE WHEN :metric='travel_time' AND :dir='desc' THEN flow_travel_time END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "hour_at": "2026-07-31 21:00:00",
+     "metric": "speed",
+     "dir": "asc",
+     "n": 20
+    },
+    {
+     "hour_at": "2026-07-31 21:00:00",
+     "metric": "travel_time",
+     "dir": "desc",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "2026-07-31 21:00:00에 속도 기준 가장 느린 링크는 1080002500으로 7.0km/h(혼잡 순위 1위, 통행시간 415초, 관측 링크 47개)입니다.",
+   "composition_idiom": "지표 스위치(speed/travel_time) + 정렬 방향 스위치(asc/desc)",
+   "table": "gold_traffic_flow_congestion_hotspots_hourly",
+   "product_id": "traffic_flow_congestion_hotspots_hourly",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "longest_travel_time_in_window",
+   "question_ko": "특정 시간 범위에서 통행시간이 가장 길었던 링크·시각은 어디입니까?",
+   "axes": "시간 범위·가용 품질 필터 — flow_travel_time DESC",
+   "sql": "-- :from_at=2026-07-30 00:00:00, :to_at=2026-08-10 00:00:00, :n=20\nSELECT link_id, hour_at, flow_speed, flow_travel_time, congestion_rank, hotspot_state\nFROM gold_traffic_flow_congestion_hotspots_hourly\nWHERE hour_at >= :from_at AND hour_at < :to_at\n  AND flow_value_quality = 'available'\nORDER BY flow_travel_time DESC, hour_at ASC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_at": "2026-07-30 00:00:00",
+     "to_at": "2026-08-10 00:00:00",
+     "n": 20
+    },
+    {
+     "from_at": "2026-08-07 00:00:00",
+     "to_at": "2026-08-08 00:00:00",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "관측 창 전체에서 통행시간이 가장 길었던 링크는 1220003800(2026-07-31 13:00:00)으로 1080초, 속도 10.0km/h(혼잡 순위 2위)입니다.",
+   "composition_idiom": null,
+   "table": "gold_traffic_flow_congestion_hotspots_hourly",
+   "product_id": "traffic_flow_congestion_hotspots_hourly",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "hour_of_day_speed_profile",
+   "question_ko": "관측 창에서 하루 중 몇 시(시간대)에 평균 속도가 가장 낮습니까?",
+   "axes": "시간 범위 필터 — 시(hour-of-day) 파생 차원 집계, 평균 속도 ASC",
+   "sql": "-- :from_at=2026-07-30 00:00:00, :to_at=2026-08-10 00:00:00\nSELECT substr(hour_at, 12, 2) AS hour_of_day, count(*) AS observation_count,\n       round(avg(flow_speed), 1) AS avg_flow_speed, min(flow_speed) AS min_flow_speed,\n       round(avg(flow_travel_time), 1) AS avg_flow_travel_time\nFROM gold_traffic_flow_congestion_hotspots_hourly\nWHERE hour_at >= :from_at AND hour_at < :to_at\nGROUP BY hour_of_day\nORDER BY avg_flow_speed ASC\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_at": "2026-07-30 00:00:00",
+     "to_at": "2026-08-10 00:00:00"
+    },
+    {
+     "from_at": "2026-08-04 00:00:00",
+     "to_at": "2026-08-09 00:00:00"
+    }
+   ],
+   "rows_by_combo": [
+    24,
+    23
+   ],
+   "insight_sample_ko": "관측 창 전체에서 시 기준 평균 속도가 가장 낮은 시간대는 18시로 평균 19.7km/h(관측 29건, 최저 6.2km/h, 평균 통행시간 278초)입니다.",
+   "composition_idiom": null,
+   "table": "gold_traffic_flow_congestion_hotspots_hourly",
+   "product_id": "traffic_flow_congestion_hotspots_hourly",
+   "real_rows_by_combo": [
+    24,
+    23
+   ]
+  },
+  {
+   "pattern_id": "worst_congestion_hours",
+   "question_ko": "관측 창에서 저속 hotspot 링크가 충분히 관측된 시각 중 가장 혼잡(평균 속도 최저)했던 시간은 언제입니까?",
+   "axes": "시간 범위·hotspot 상태 필터 — 시각별 집계, 최소 관측 링크 임계값, 평균 속도 ASC",
+   "sql": "-- :from_at=2026-07-30 00:00:00, :to_at=2026-08-10 00:00:00, :min_links=5, :n=20\nSELECT hour_at, count(*) AS hotspot_link_count, round(avg(flow_speed), 1) AS avg_flow_speed,\n       min(flow_speed) AS min_flow_speed, max(flow_travel_time) AS max_flow_travel_time\nFROM gold_traffic_flow_congestion_hotspots_hourly\nWHERE hour_at >= :from_at AND hour_at < :to_at\n  AND hotspot_state = 'lowest_speed_top_10'\nGROUP BY hour_at\nHAVING count(*) >= :min_links\nORDER BY avg_flow_speed ASC, min_flow_speed ASC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "filter_set",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_at": "2026-07-30 00:00:00",
+     "to_at": "2026-08-10 00:00:00",
+     "min_links": 5,
+     "n": 20
+    },
+    {
+     "from_at": "2026-07-30 00:00:00",
+     "to_at": "2026-08-10 00:00:00",
+     "min_links": 10,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    10
+   ],
+   "insight_sample_ko": "저속 top-10 링크가 5개 이상 관측된 시각 중 평균 속도가 가장 낮았던 시간은 2026-07-31 12:00:00으로 링크 10개 평균 11.9km/h(최저 8.4km/h, 최대 통행시간 274초)입니다.",
+   "composition_idiom": "임계값(HAVING min_links)",
+   "table": "gold_traffic_flow_congestion_hotspots_hourly",
+   "product_id": "traffic_flow_congestion_hotspots_hourly",
+   "real_rows_by_combo": [
+    20,
+    10
+   ]
+  },
+  {
+   "pattern_id": "persistent_severe_congestion",
+   "question_ko": "관측 창에서 지정한 속도 이하로 여러 시간 반복 관측된, 만성적으로 심하게 막히는 링크는 어디입니까?",
+   "axes": "시간 범위·속도 임계값 필터 — 링크별 발생 시간 집계, 최소 시간 임계값, 발생 시간 DESC",
+   "sql": "-- :max_speed=10, :min_hours=2, :from_at=2026-07-30 00:00:00, :to_at=2026-08-10 00:00:00, :n=20\nSELECT link_id, count(*) AS severe_hour_count, min(flow_speed) AS min_flow_speed,\n       round(avg(flow_speed), 1) AS avg_flow_speed, max(flow_travel_time) AS max_flow_travel_time\nFROM gold_traffic_flow_congestion_hotspots_hourly\nWHERE hour_at >= :from_at AND hour_at < :to_at\n  AND flow_value_quality = 'available'\n  AND flow_speed <= :max_speed\nGROUP BY link_id\nHAVING count(*) >= :min_hours\nORDER BY severe_hour_count DESC, min_flow_speed ASC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "filter_set",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_at": "2026-07-30 00:00:00",
+     "to_at": "2026-08-10 00:00:00",
+     "max_speed": 10,
+     "min_hours": 2,
+     "n": 20
+    },
+    {
+     "from_at": "2026-07-30 00:00:00",
+     "to_at": "2026-08-10 00:00:00",
+     "max_speed": 15,
+     "min_hours": 3,
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    5,
+    13
+   ],
+   "insight_sample_ko": "속도 10km/h 이하가 2시간 이상 반복된 링크는 5곳이며, 최다는 1010009500으로 13시간(최저 2.0km/h, 평균 6.6km/h, 최대 통행시간 247초)입니다.",
+   "composition_idiom": "임계값(flow_speed<=max_speed + HAVING min_hours)",
+   "table": "gold_traffic_flow_congestion_hotspots_hourly",
+   "product_id": "traffic_flow_congestion_hotspots_hourly",
+   "real_rows_by_combo": [
+    5,
+    13
+   ]
+  },
+  {
+   "pattern_id": "hotspot_share_by_link",
+   "question_ko": "관측 창에서 관측된 시간 대비 저속 hotspot으로 잡힌 비중이 가장 높은, 즉 가장 일관되게 막히는 링크는 어디입니까?",
+   "axes": "시간 범위 필터 — 링크별 hotspot 시간/관측 시간 비율, 최소 관측 임계값, 비율 DESC",
+   "sql": "-- :min_observed_hours=5, :from_at=2026-07-30 00:00:00, :to_at=2026-08-10 00:00:00, :n=20\nSELECT link_id, count(*) AS observed_hour_count,\n       sum(CASE WHEN hotspot_state = 'lowest_speed_top_10' THEN 1 ELSE 0 END) AS hotspot_hour_count,\n       round(1.0 * sum(CASE WHEN hotspot_state = 'lowest_speed_top_10' THEN 1 ELSE 0 END) / count(*), 3) AS hotspot_share,\n       min(flow_speed) AS min_flow_speed\nFROM gold_traffic_flow_congestion_hotspots_hourly\nWHERE hour_at >= :from_at AND hour_at < :to_at\nGROUP BY link_id\nHAVING count(*) >= :min_observed_hours\nORDER BY hotspot_share DESC, observed_hour_count DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_at": "2026-07-30 00:00:00",
+     "to_at": "2026-08-10 00:00:00",
+     "min_observed_hours": 5,
+     "n": 20
+    },
+    {
+     "from_at": "2026-07-30 00:00:00",
+     "to_at": "2026-08-10 00:00:00",
+     "min_observed_hours": 10,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    10
+   ],
+   "insight_sample_ko": "관측 5시간 이상 링크 중 hotspot 비중이 가장 높은 곳은 1240000900으로 관측 8시간 전부 저속 top-10(비중 1.0, 최저 13.9km/h)입니다.",
+   "composition_idiom": "비율(hotspot 비중) + 임계값(HAVING min_observed_hours)",
+   "table": "gold_traffic_flow_congestion_hotspots_hourly",
+   "product_id": "traffic_flow_congestion_hotspots_hourly",
+   "real_rows_by_combo": [
+    20,
+    10
+   ]
+  },
+  {
+   "pattern_id": "congestion_for_link_set",
+   "question_ko": "내가 지정한 여러 링크(예: 통근 경로)의 관측 창 내 시간별 혼잡 이력을 한 번에 보고 싶습니다.",
+   "axes": "다중 링크 배열·시간 범위 필터 — 링크·시각 ASC",
+   "sql": "-- :link_ids=[\"1010009500\",\"1000021700\",\"1210013400\"], :from_at=2026-07-30 00:00:00, :to_at=2026-08-10 00:00:00, :n=200\nSELECT link_id, hour_at, flow_speed, flow_travel_time, congestion_rank, hotspot_state, observed_link_count\nFROM gold_traffic_flow_congestion_hotspots_hourly\nWHERE link_id IN (SELECT value FROM json_each(:link_ids))\n  AND hour_at >= :from_at AND hour_at < :to_at\nORDER BY link_id, hour_at ASC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "link_ids": "[\"1010009500\",\"1000021700\",\"1210013400\"]",
+     "from_at": "2026-07-30 00:00:00",
+     "to_at": "2026-08-10 00:00:00",
+     "n": 200
+    },
+    {
+     "link_ids": "[\"1210023300\",\"1080003000\"]",
+     "from_at": "2026-08-04 00:00:00",
+     "to_at": "2026-08-09 00:00:00",
+     "n": 100
+    }
+   ],
+   "rows_by_combo": [
+    114,
+    12
+   ],
+   "insight_sample_ko": "지정한 링크 3개(1010009500·1000021700·1210013400)의 관측 창 내 시간별 이력 114행이 반환되며, 첫 행은 1000021700 2026-08-04 18:00 속도 19.0km/h(혼잡 순위 3위)입니다.",
+   "composition_idiom": "배열 IN(json_each) 다중 링크 선택",
+   "table": "gold_traffic_flow_congestion_hotspots_hourly",
+   "product_id": "traffic_flow_congestion_hotspots_hourly",
+   "real_rows_by_combo": [
+    115,
+    12
+   ]
+  },
+  {
+   "pattern_id": "network_flow_summary",
+   "question_ko": "현재 값이 있는 서울 전체 링크의 속도·통행시간 요약(개수·평균·최저·최고)은 무엇입니까?",
+   "axes": "available 상태 필터 — 네트워크 전체 단일행 집계",
+   "sql": "SELECT count(*) AS available_link_count,\n       round(avg(flow_speed), 1) AS avg_flow_speed,\n       min(flow_speed) AS min_flow_speed,\n       max(flow_speed) AS max_flow_speed,\n       round(avg(flow_travel_time), 1) AS avg_flow_travel_time,\n       min(flow_travel_time) AS min_flow_travel_time,\n       max(flow_travel_time) AS max_flow_travel_time\nFROM gold_traffic_flow_link_latest\nWHERE flow_value_quality = 'available'\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "filter_set"
+   ],
+   "combos": [],
+   "rows_by_combo": [
+    1
+   ],
+   "insight_sample_ko": "현재 값이 있는 링크 288개의 평균 속도는 27.9 km/h(최저 6.1, 최고 90.0), 평균 통행시간은 145.5초(최저 6, 최고 657)입니다.",
+   "composition_idiom": null,
+   "table": "gold_traffic_flow_link_latest",
+   "product_id": "traffic_flow_link_latest",
+   "real_rows_by_combo": [
+    1
+   ]
+  },
+  {
+   "pattern_id": "speed_band_distribution",
+   "question_ko": "현재 링크들을 속도 구간(20 미만·20~40·40~60·60 이상)으로 나누면 각 구간의 링크 수와 평균은 어떻습니까?",
+   "axes": "속도 구간 분류 집계 — 구간 분포 히스토그램",
+   "sql": "SELECT CASE\n         WHEN flow_speed < 20 THEN '01_under_20'\n         WHEN flow_speed < 40 THEN '02_20_to_40'\n         WHEN flow_speed < 60 THEN '03_40_to_60'\n         ELSE '04_60_plus'\n       END AS speed_band,\n       count(*) AS link_count,\n       round(avg(flow_speed), 1) AS avg_flow_speed,\n       round(avg(flow_travel_time), 1) AS avg_flow_travel_time\nFROM gold_traffic_flow_link_latest\nWHERE flow_value_quality = 'available'\nGROUP BY speed_band\nORDER BY speed_band\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort",
+    "filter_set"
+   ],
+   "combos": [],
+   "rows_by_combo": [
+    4
+   ],
+   "insight_sample_ko": "속도 20 km/h 미만 구간에 115개 링크가 몰려 있고(평균 14.8 km/h), 이 구간의 평균 통행시간은 170.6초입니다.",
+   "composition_idiom": null,
+   "table": "gold_traffic_flow_link_latest",
+   "product_id": "traffic_flow_link_latest",
+   "real_rows_by_combo": [
+    4
+   ]
+  },
+  {
+   "pattern_id": "links_ranked_by_metric",
+   "question_ko": "선택한 지표(속도 또는 통행시간)와 정렬 방향으로 현재 링크 순위를 보고 싶습니다.",
+   "axes": "available 필터 — 지표·정렬 방향 스위치 랭킹",
+   "sql": "-- :metric=flow_speed, :dir=asc, :n=20\nSELECT link_id, flow_speed, flow_travel_time, flow_value_quality, observed_at_kst\nFROM gold_traffic_flow_link_latest\nWHERE flow_value_quality = 'available'\nORDER BY\n  CASE WHEN :dir = 'asc' THEN (CASE :metric WHEN 'flow_travel_time' THEN flow_travel_time ELSE flow_speed END) END ASC,\n  CASE WHEN :dir = 'desc' THEN (CASE :metric WHEN 'flow_travel_time' THEN flow_travel_time ELSE flow_speed END) END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "metric": "flow_speed",
+     "dir": "asc",
+     "n": 20
+    },
+    {
+     "metric": "flow_travel_time",
+     "dir": "desc",
+     "n": 20
+    },
+    {
+     "metric": "flow_speed",
+     "dir": "desc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20,
+    10
+   ],
+   "insight_sample_ko": "속도 오름차순(가장 느린 순)으로 보면 1위는 링크 1010003300으로 현재 속도 6.1 km/h, 통행시간 381초입니다.",
+   "composition_idiom": "지표 스위치 + 정렬 방향 스위치",
+   "table": "gold_traffic_flow_link_latest",
+   "product_id": "traffic_flow_link_latest",
+   "real_rows_by_combo": [
+    20,
+    20,
+    10
+   ]
+  },
+  {
+   "pattern_id": "congested_links_below_speed",
+   "question_ko": "현재 속도가 지정한 임계값 이하로 떨어진(정체) 링크는 어디입니까?",
+   "axes": "available·속도 임계값 필터 — flow_speed ASC",
+   "sql": "-- :max_speed=20, :n=50\nSELECT link_id, flow_speed, flow_travel_time, observed_at_kst\nFROM gold_traffic_flow_link_latest\nWHERE flow_value_quality = 'available' AND flow_speed <= :max_speed\nORDER BY flow_speed ASC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "max_speed": 20,
+     "n": 50
+    },
+    {
+     "max_speed": 40,
+     "n": 50
+    }
+   ],
+   "rows_by_combo": [
+    50,
+    50
+   ],
+   "insight_sample_ko": "속도 20 km/h 이하 링크 중 가장 느린 곳은 1010003300으로 6.1 km/h, 통행시간 381초입니다.",
+   "composition_idiom": "임계값(속도 상한)",
+   "table": "gold_traffic_flow_link_latest",
+   "product_id": "traffic_flow_link_latest",
+   "real_rows_by_combo": [
+    50,
+    50
+   ]
+  },
+  {
+   "pattern_id": "congestion_share_below_speed",
+   "question_ko": "현재 값이 있는 링크 중 지정한 속도 임계값 이하인 링크의 비율은 얼마입니까?",
+   "axes": "available·속도 임계값 — 정체 링크 비율 단일행",
+   "sql": "-- :max_speed=20\nSELECT count(*) AS available_link_count,\n       sum(CASE WHEN flow_speed <= :max_speed THEN 1 ELSE 0 END) AS congested_link_count,\n       round(100.0 * sum(CASE WHEN flow_speed <= :max_speed THEN 1 ELSE 0 END) / count(*), 1) AS congested_pct\nFROM gold_traffic_flow_link_latest\nWHERE flow_value_quality = 'available'\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "filter_set"
+   ],
+   "combos": [
+    {
+     "max_speed": 20
+    },
+    {
+     "max_speed": 40
+    }
+   ],
+   "rows_by_combo": [
+    1,
+    1
+   ],
+   "insight_sample_ko": "현재 값이 있는 288개 링크 중 119개(41.3%)가 속도 20 km/h 이하입니다.",
+   "composition_idiom": "임계값(속도 상한) + 비율",
+   "table": "gold_traffic_flow_link_latest",
+   "product_id": "traffic_flow_link_latest",
+   "real_rows_by_combo": [
+    1,
+    1
+   ]
+  },
+  {
+   "pattern_id": "links_for_id_set",
+   "question_ko": "관심 있는 여러 링크의 현재 속도·통행시간 스냅샷을 한 번에 보고 싶습니다.",
+   "axes": "링크 ID 다중 선택 필터 — link_id ASC",
+   "sql": "-- :link_ids=[\"1010009500\",\"1140024200\",\"1150003100\"]\nSELECT link_id, flow_speed, flow_travel_time, flow_value_quality, observed_at_kst, collected_at_kst\nFROM gold_traffic_flow_link_latest\nWHERE link_id IN (SELECT value FROM json_each(:link_ids))\nORDER BY link_id\n",
+   "requires": [
+    "select_columns",
+    "filter_set"
+   ],
+   "combos": [
+    {
+     "link_ids": "[\"1010009500\",\"1140024200\",\"1150003100\"]"
+    },
+    {
+     "link_ids": "[\"1010003300\",\"1210006500\"]"
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    2
+   ],
+   "insight_sample_ko": "요청한 3개 링크 중 1010009500은 현재 속도 12.3 km/h, 통행시간 40초로 관측되었습니다.",
+   "composition_idiom": "배열 IN(json_each)",
+   "table": "gold_traffic_flow_link_latest",
+   "product_id": "traffic_flow_link_latest",
+   "real_rows_by_combo": [
+    3,
+    2
+   ]
+  },
+  {
+   "pattern_id": "hourly_speed_curve",
+   "question_ko": "요일별(또는 전체) 시간대에 따른 서울 링크 평균 속도 곡선은 어떻게 나타납니까?",
+   "axes": "요일 센티널 필터 — 시간대 집계, 평균/최저/최고 속도",
+   "sql": "-- :day=5\nSELECT kst_hour, count(*) AS profile_count, sum(observation_count) AS total_observations, round(avg(avg_flow_speed), 1) AS mean_speed, min(min_flow_speed) AS min_speed, max(max_flow_speed) AS max_speed\nFROM gold_traffic_flow_link_time_profile\nWHERE (:day = 0 OR kst_day_of_week = :day)\nGROUP BY kst_hour\nORDER BY kst_hour ASC\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "day": 0
+    },
+    {
+     "day": 5
+    }
+   ],
+   "rows_by_combo": [
+    24,
+    23
+   ],
+   "insight_sample_ko": "요일 전체(:day=0) 기준 0시 시간대는 프로파일 6건에서 평균 41.0km/h(최저 13.8, 최고 70.0)로 집계됐다.",
+   "composition_idiom": "센티널(전체): (:day = 0 OR kst_day_of_week = :day)",
+   "table": "gold_traffic_flow_link_time_profile",
+   "product_id": "traffic_flow_link_time_profile",
+   "real_rows_by_combo": [
+    24,
+    23
+   ]
+  },
+  {
+   "pattern_id": "rush_window_slowest_links",
+   "question_ko": "특정 시간대 창(예: 출근 7~9시) 기준으로 평균 속도가 가장 느린 링크는 어디입니까?",
+   "axes": "시간대 창 필터 + 링크 집계 — 표본 하한(HAVING), 평균 속도 ASC",
+   "sql": "-- :from_hour=7, :to_hour=9, :min_total_observations=2, :n=20\nSELECT link_id, count(*) AS slot_count, sum(observation_count) AS total_observations, round(avg(avg_flow_speed), 1) AS mean_speed, round(avg(avg_flow_travel_time), 1) AS mean_travel_time\nFROM gold_traffic_flow_link_time_profile\nWHERE kst_hour >= :from_hour AND kst_hour <= :to_hour\nGROUP BY link_id\nHAVING sum(observation_count) >= :min_total_observations\nORDER BY mean_speed ASC, link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_hour": 7,
+     "to_hour": 9,
+     "min_total_observations": 2,
+     "n": 20
+    },
+    {
+     "from_hour": 21,
+     "to_hour": 23,
+     "min_total_observations": 1,
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "출근 시간대(7~9시) 창에서 링크 1040002000이 평균 12.1km/h(평균 통행시간 91.5초)로 가장 느렸다.",
+   "composition_idiom": "임계값(HAVING): sum(observation_count) >= :min_total_observations",
+   "table": "gold_traffic_flow_link_time_profile",
+   "product_id": "traffic_flow_link_time_profile",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "day_of_week_profile_for_link",
+   "question_ko": "특정 링크는 어느 요일에 더 혼잡합니까? 요일별 평균 속도·통행시간 기준선은 무엇입니까?",
+   "axes": "링크 필터 — 요일 집계, 평균 속도·통행시간",
+   "sql": "-- :link_id='1010009500'\nSELECT kst_day_of_week, count(*) AS slot_count, sum(observation_count) AS total_observations, round(avg(avg_flow_speed), 1) AS mean_speed, round(avg(avg_flow_travel_time), 1) AS mean_travel_time\nFROM gold_traffic_flow_link_time_profile\nWHERE link_id = :link_id\nGROUP BY kst_day_of_week\nORDER BY kst_day_of_week ASC\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "link_id": "1010009500"
+    },
+    {
+     "link_id": "1000021700"
+    }
+   ],
+   "rows_by_combo": [
+    6,
+    5
+   ],
+   "insight_sample_ko": "링크 1010009500은 요일 2에서 4개 시간대 평균 15.6km/h, 평균 통행시간 36.8초로 집계됐다.",
+   "composition_idiom": null,
+   "table": "gold_traffic_flow_link_time_profile",
+   "product_id": "traffic_flow_link_time_profile",
+   "real_rows_by_combo": [
+    6,
+    5
+   ]
+  },
+  {
+   "pattern_id": "slowest_slot_per_link",
+   "question_ko": "각 링크가 가장 혼잡한(평균 속도가 가장 낮은) 요일·시간대는 언제입니까?",
+   "axes": "표본 하한 필터 — 링크별 최저 속도 슬롯(윈도우 순위=1), 평균 속도 ASC",
+   "sql": "-- :min_observation_count=1, :n=20\nWITH ranked AS (\n  SELECT link_id, kst_day_of_week, kst_hour, observation_count, avg_flow_speed, avg_flow_travel_time,\n         row_number() OVER (PARTITION BY link_id ORDER BY avg_flow_speed ASC, kst_day_of_week, kst_hour) AS speed_rank\n  FROM gold_traffic_flow_link_time_profile\n  WHERE observation_count >= :min_observation_count\n)\nSELECT link_id, kst_day_of_week, kst_hour, observation_count, avg_flow_speed, avg_flow_travel_time\nFROM ranked\nWHERE speed_rank = 1\nORDER BY avg_flow_speed ASC, link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "window",
+    "subquery",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_observation_count": 1,
+     "n": 20
+    },
+    {
+     "min_observation_count": 2,
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    15
+   ],
+   "insight_sample_ko": "각 링크의 최저 속도 시간대만 추리면 링크 1010009500의 요일3 09시가 평균 4.0km/h로 전체 최하위였다.",
+   "composition_idiom": "윈도우 순위: row_number() OVER (PARTITION BY link_id ORDER BY avg_flow_speed ASC)",
+   "table": "gold_traffic_flow_link_time_profile",
+   "product_id": "traffic_flow_link_time_profile",
+   "real_rows_by_combo": [
+    20,
+    15
+   ]
+  },
+  {
+   "pattern_id": "compare_links_at_time_slot",
+   "question_ko": "선택한 여러 링크의 같은 요일·시간대 속도 프로파일을 나란히 비교하면 어떻습니까?",
+   "axes": "링크 배열 IN + 요일·시간 필터 — 평균 속도 ASC",
+   "sql": "-- :link_ids='[\"1010009500\",\"1190003200\",\"1220003800\"]', :kst_day_of_week=5, :kst_hour=13\nSELECT link_id, kst_day_of_week, kst_hour, observation_count, avg_flow_speed, min_flow_speed, max_flow_speed, avg_flow_travel_time\nFROM gold_traffic_flow_link_time_profile\nWHERE link_id IN (SELECT value FROM json_each(:link_ids))\n  AND kst_day_of_week = :kst_day_of_week\n  AND kst_hour = :kst_hour\nORDER BY avg_flow_speed ASC, link_id\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "subquery",
+    "sort"
+   ],
+   "combos": [
+    {
+     "link_ids": "[\"1010009500\",\"1190003200\",\"1220003800\"]",
+     "kst_day_of_week": 5,
+     "kst_hour": 13
+    },
+    {
+     "link_ids": "[\"1120006300\",\"1240002000\"]",
+     "kst_day_of_week": 4,
+     "kst_hour": 13
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    2
+   ],
+   "insight_sample_ko": "요일5 13시에 선택한 3개 링크 중 1010009500이 평균 8.24km/h(2.0~10.8)로 가장 느렸다.",
+   "composition_idiom": "배열 IN(json_each): link_id IN (SELECT value FROM json_each(:link_ids))",
+   "table": "gold_traffic_flow_link_time_profile",
+   "product_id": "traffic_flow_link_time_profile",
+   "real_rows_by_combo": [
+    3,
+    2
+   ]
+  },
+  {
+   "pattern_id": "link_coverage_ranking",
+   "question_ko": "프로파일 커버리지(관측된 요일·시간대)가 가장 넓은 링크는 어디입니까?",
+   "axes": "링크 집계 — 슬롯 수 하한(HAVING), 프로파일 슬롯 수 DESC",
+   "sql": "-- :min_slots=1, :n=20\nSELECT link_id, count(*) AS profiled_slot_count, count(DISTINCT kst_day_of_week) AS day_count, count(DISTINCT kst_hour) AS hour_count, sum(observation_count) AS total_observations\nFROM gold_traffic_flow_link_time_profile\nGROUP BY link_id\nHAVING count(*) >= :min_slots\nORDER BY profiled_slot_count DESC, total_observations DESC, link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_slots": 1,
+     "n": 20
+    },
+    {
+     "min_slots": 3,
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "커버리지가 가장 넓은 링크는 1010009500으로 58개 시간대(6개 요일·24개 시각)·관측 258건을 보유했다.",
+   "composition_idiom": "임계값(HAVING): count(*) >= :min_slots",
+   "table": "gold_traffic_flow_link_time_profile",
+   "product_id": "traffic_flow_link_time_profile",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "flexible_profile_ranking",
+   "question_ko": "요일·시간대(전체 가능)와 지표(속도/통행시간/속도범위)·정렬 방향을 지정해 프로파일을 순위화하면 어떻습니까?",
+   "axes": "요일·시간 센티널 + 표본 하한 — 지표/정렬 스위치 랭킹",
+   "sql": "-- :day=4, :hour=13, :metric='avg_flow_speed', :min_observation_count=1, :dir='asc', :n=20\nSELECT link_id, kst_day_of_week, kst_hour, observation_count, avg_flow_speed, avg_flow_travel_time,\n       max_flow_speed - min_flow_speed AS speed_range,\n       CASE :metric WHEN 'travel_time' THEN avg_flow_travel_time WHEN 'speed_range' THEN max_flow_speed - min_flow_speed ELSE avg_flow_speed END AS metric_value\nFROM gold_traffic_flow_link_time_profile\nWHERE (:day = 0 OR kst_day_of_week = :day)\n  AND (:hour = -1 OR kst_hour = :hour)\n  AND observation_count >= :min_observation_count\nORDER BY CASE WHEN :dir = 'asc' THEN CASE :metric WHEN 'travel_time' THEN avg_flow_travel_time WHEN 'speed_range' THEN max_flow_speed - min_flow_speed ELSE avg_flow_speed END END ASC,\n         CASE WHEN :dir = 'desc' THEN CASE :metric WHEN 'travel_time' THEN avg_flow_travel_time WHEN 'speed_range' THEN max_flow_speed - min_flow_speed ELSE avg_flow_speed END END DESC,\n         link_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "day": 4,
+     "hour": 13,
+     "metric": "avg_flow_speed",
+     "min_observation_count": 1,
+     "dir": "asc",
+     "n": 20
+    },
+    {
+     "day": 0,
+     "hour": -1,
+     "metric": "travel_time",
+     "min_observation_count": 2,
+     "dir": "desc",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    16,
+    20
+   ],
+   "insight_sample_ko": "요일4 13시를 평균 속도 오름차순으로 정렬하면 링크 1010009500이 10.1km/h로 1위(가장 느림)였다.",
+   "composition_idiom": "지표 스위치(CASE :metric) + 정렬 방향 스위치(:dir) + 센티널(:day/:hour)",
+   "table": "gold_traffic_flow_link_time_profile",
+   "product_id": "traffic_flow_link_time_profile",
+   "real_rows_by_combo": [
+    16,
+    20
+   ]
+  },
+  {
+   "pattern_id": "city_incident_weather_snapshot",
+   "question_ko": "특정 평가 시각에 서울 전체의 교통 돌발·날씨 요약(전체 행정동, 돌발 발생 동수·총 돌발, 강수 동수, 완전 커버리지 동수, 평균 기온·습도·풍속)은 무엇입니까?",
+   "axes": "평가 시각 필터 — 서울 전역 단일행 롤업(날씨 커버리지 임계값)",
+   "sql": "-- :hour_at=2026-08-09 01:00:00, :required_category_count=6\nSELECT min(hour_at) AS hour_at, count(*) AS dong_count, sum(has_incident) AS incident_dong_count, sum(incident_count) AS incident_total, sum(is_precipitating) AS precipitating_dong_count, sum(CASE WHEN weather_category_coverage_count >= :required_category_count THEN 1 ELSE 0 END) AS full_weather_coverage_dong_count, round(avg(tmp_value_num),1) AS avg_tmp, round(avg(reh_value_num),1) AS avg_reh, round(avg(wsd_value_num),1) AS avg_wsd, min(tmp_value_num) AS min_tmp, max(tmp_value_num) AS max_tmp FROM gold_traffic_incident_x_weather_current_hourly WHERE hour_at = :hour_at",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "aggregate"
+   ],
+   "combos": [
+    {
+     "hour_at": "2026-08-09 01:00:00",
+     "required_category_count": 6
+    },
+    {
+     "hour_at": "2026-08-09 01:00:00",
+     "required_category_count": 5
+    }
+   ],
+   "rows_by_combo": [
+    1,
+    1
+   ],
+   "insight_sample_ko": "2026-08-09 01:00 기준 서울 426개 행정동 중 6개 동에서 돌발 총 6건이 발생했고 강수 예보 동은 0개, 날씨 6개 카테고리를 모두 확보한 동은 426개이며 평균기온 25.9도·평균습도 69.8%·평균풍속 2.3m/s입니다.",
+   "composition_idiom": "임계값(날씨 커버리지 기준)",
+   "table": "gold_traffic_incident_x_weather_current_hourly",
+   "product_id": "traffic_incident_x_weather_current_hourly",
+   "real_rows_by_combo": [
+    1,
+    1
+   ]
+  },
+  {
+   "pattern_id": "place_metric_ranking",
+   "question_ko": "선택한 기상 지표(기온·습도·풍속·강수확률)와 정렬 방향으로 현재 예보 장소를 순위 매기면 어디입니까?",
+   "axes": "지표·정렬 방향 스위치 — 선택 지표 값 순위",
+   "sql": "-- :metric=temp, :dir=desc, :n=20\nSELECT place_id, place_name, admin_dong, gu, forecast_at, temp_c, humidity_pct, wind_ms, precip_prob_pct,\n       CASE :metric WHEN 'temp' THEN temp_c WHEN 'humidity' THEN humidity_pct WHEN 'wind' THEN wind_ms WHEN 'precip' THEN precip_prob_pct END AS metric_value\nFROM gold_weather_place_current_outlook\nORDER BY CASE WHEN :dir='asc' THEN CASE :metric WHEN 'temp' THEN temp_c WHEN 'humidity' THEN humidity_pct WHEN 'wind' THEN wind_ms WHEN 'precip' THEN precip_prob_pct END END ASC NULLS LAST,\n         CASE WHEN :dir='desc' THEN CASE :metric WHEN 'temp' THEN temp_c WHEN 'humidity' THEN humidity_pct WHEN 'wind' THEN wind_ms WHEN 'precip' THEN precip_prob_pct END END DESC NULLS LAST,\n         place_name\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "sort"
+   ],
+   "combos": [
+    {
+     "metric": "temp",
+     "dir": "desc",
+     "n": 20
+    },
+    {
+     "metric": "humidity",
+     "dir": "desc",
+     "n": 20
+    },
+    {
+     "metric": "temp",
+     "dir": "asc",
+     "n": 20
+    },
+    {
+     "metric": "wind",
+     "dir": "desc",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20,
+    20,
+    20
+   ],
+   "insight_sample_ko": "기온 내림차순 상위 20곳은 모두 29℃대이며 첫 행은 송파구 가락1동(29℃·습도 70%·풍속 4.2㎧). :metric=humidity면 관악구 난향동(습도 75%)이, :dir=asc면 은평구 갈현제1동(27℃)이 최상단으로 바뀜. 기존 hottest_places_now·strong_wind_places_now를 하나로 일반화하고 최저기온·습도 순위까지 열어줌.",
+   "composition_idiom": "지표 스위치(:metric)+정렬 방향 스위치(:dir)",
+   "table": "gold_weather_place_current_outlook",
+   "product_id": "weather_place_current_outlook",
+   "real_rows_by_combo": [
+    20,
+    20,
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "gu_weather_summary",
+   "question_ko": "자치구별 현재 예보의 평균 기온·습도·풍속과 장소 수는 얼마입니까?",
+   "axes": "자치구 집계 — 평균 기온 DESC",
+   "sql": "SELECT gu_code, gu, count(*) AS place_count,\n       round(avg(temp_c), 1) AS avg_temp_c, min(temp_c) AS min_temp_c, max(temp_c) AS max_temp_c,\n       round(avg(humidity_pct), 1) AS avg_humidity_pct, round(avg(wind_ms), 2) AS avg_wind_ms,\n       max(precip_prob_pct) AS max_precip_prob_pct\nFROM gold_weather_place_current_outlook\nGROUP BY gu_code, gu\nORDER BY avg_temp_c DESC, gu",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {}
+   ],
+   "rows_by_combo": [
+    25
+   ],
+   "insight_sample_ko": "자치구 25곳 요약에서 평균 기온 최상단은 강남구(장소 22곳, 평균 29.0℃, 평균 습도 69.1%, 평균 풍속 4.2㎧, 최대 강수확률 0%).",
+   "composition_idiom": null,
+   "table": "gold_weather_place_current_outlook",
+   "product_id": "weather_place_current_outlook",
+   "real_rows_by_combo": [
+    25
+   ]
+  },
+  {
+   "pattern_id": "muggy_places_threshold",
+   "question_ko": "기온과 습도가 동시에 임계 이상인 무더운 장소는 어디입니까?",
+   "axes": "기온·습도 임계 교차 필터 — 기온 DESC, 습도 DESC",
+   "sql": "-- :min_temp_c=28, :min_humidity_pct=70, :n=50\nSELECT place_id, place_name, admin_dong, gu, temp_c, humidity_pct, wind_ms, forecast_at\nFROM gold_weather_place_current_outlook\nWHERE temp_c >= :min_temp_c AND humidity_pct >= :min_humidity_pct\nORDER BY temp_c DESC, humidity_pct DESC, place_name\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_temp_c": 28,
+     "min_humidity_pct": 70,
+     "n": 50
+    },
+    {
+     "min_temp_c": 29,
+     "min_humidity_pct": 70,
+     "n": 50
+    }
+   ],
+   "rows_by_combo": [
+    50,
+    50
+   ],
+   "insight_sample_ko": "기온 28℃·습도 70% 이상 무더운 장소는 141곳(상한 50건 표시), 첫 행은 송파구 가락1동(29℃·습도 70%). 임계를 29℃로 올리면 81곳으로 좁혀짐.",
+   "composition_idiom": "임계값 교차 필터(기온·습도 동시)",
+   "table": "gold_weather_place_current_outlook",
+   "product_id": "weather_place_current_outlook",
+   "real_rows_by_combo": [
+    50,
+    50
+   ]
+  },
+  {
+   "pattern_id": "compare_named_places",
+   "question_ko": "지정한 여러 장소명의 현재 예보를 한 번에 비교하면 어떻습니까?",
+   "axes": "장소명 배열 다중 선택 — 장소명 ASC",
+   "sql": "-- :names=[\"잠실본동\",\"가락1동\",\"송파1동\"]\nSELECT place_id, place_name, admin_dong, gu, forecast_at, temp_c, humidity_pct, wind_ms, precip_prob_pct, sky_label, pty_label\nFROM gold_weather_place_current_outlook\nWHERE place_name IN (SELECT value FROM json_each(:names))\nORDER BY place_name",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "subquery"
+   ],
+   "combos": [
+    {
+     "names": "[\"잠실본동\",\"가락1동\",\"송파1동\"]"
+    },
+    {
+     "names": "[\"가회동\",\"남영동\",\"공덕동\",\"개포1동\"]"
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    4
+   ],
+   "insight_sample_ko": "요청한 3개 장소가 모두 반환되고 첫 행 송파구 가락1동은 29℃·습도 70%·맑음·강수없음(forecast_at 2026-08-08 20:00). 자치구가 다른 4곳을 넣어도 각 장소 행이 그대로 반환됨.",
+   "composition_idiom": "배열 IN(json_each) 다중 선택",
+   "table": "gold_weather_place_current_outlook",
+   "product_id": "weather_place_current_outlook",
+   "real_rows_by_combo": [
+    3,
+    4
+   ]
+  },
+  {
+   "pattern_id": "outlook_collection_freshness",
+   "question_ko": "현재 예보 수집이 가장 최근인(또는 가장 오래된) 장소는 어디입니까?",
+   "axes": "수집 시각 정렬 방향 스위치 — 수집 시각 최신/최오래",
+   "sql": "-- :dir=desc, :n=20\nSELECT place_id, place_name, admin_dong, gu, forecast_collected_at_max, forecast_issued_at_max, forecast_at\nFROM gold_weather_place_current_outlook\nORDER BY CASE WHEN :dir='asc' THEN forecast_collected_at_max END ASC,\n         CASE WHEN :dir='desc' THEN forecast_collected_at_max END DESC,\n         place_name\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dir": "desc",
+     "n": 20
+    },
+    {
+     "dir": "asc",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "수집 최신순 최상단은 서초구 내곡동(2026-08-08 09:32:16 수집). :dir=asc로 바꾸면 도봉구 도봉제1동(09:19:40)이 가장 오래 전 수집으로, 스냅샷 내 수집 지연 편차가 약 12분임을 보여줌.",
+   "composition_idiom": "정렬 방향 스위치(:dir)",
+   "table": "gold_weather_place_current_outlook",
+   "product_id": "weather_place_current_outlook",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "place_current_by_name_search",
+   "question_ko": "장소명이나 별칭에 특정 문자열이 들어간 장소의 현재 예보는 무엇입니까?",
+   "axes": "장소명·별칭 부분일치 검색 — 장소명 ASC",
+   "sql": "-- :q=잠실, :n=50\nSELECT place_id, place_name, alias_names, admin_dong, gu, forecast_at, temp_c, humidity_pct, precip_prob_pct, sky_label, pty_label\nFROM gold_weather_place_current_outlook\nWHERE place_name LIKE '%' || :q || '%' OR alias_names LIKE '%' || :q || '%'\nORDER BY place_name\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "q": "잠실",
+     "n": 50
+    },
+    {
+     "q": "가락",
+     "n": 50
+    }
+   ],
+   "rows_by_combo": [
+    6,
+    3
+   ],
+   "insight_sample_ko": "'잠실'로 검색하면 6곳이 잡히고 첫 행은 송파구 잠실2동(29℃·맑음·강수없음). '가락'은 3곳. place_id를 모르는 소비자가 이름만으로 현재 예보에 접근하는 경로.",
+   "composition_idiom": "이름 부분일치(LIKE) 검색",
+   "table": "gold_weather_place_current_outlook",
+   "product_id": "weather_place_current_outlook",
+   "real_rows_by_combo": [
+    6,
+    3
+   ]
+  },
+  {
+   "pattern_id": "nearest_places_to_point",
+   "question_ko": "지정한 위경도 좌표에서 가장 가까운 장소의 현재 예보는 무엇입니까?",
+   "axes": "좌표 근접 정렬 — 제곱거리 ASC",
+   "sql": "-- :lat=37.5033, :lon=127.0864, :n=10\nSELECT place_id, place_name, admin_dong, gu, latitude, longitude, temp_c, humidity_pct, precip_prob_pct, sky_label, pty_label,\n       (latitude - :lat) * (latitude - :lat) + (longitude - :lon) * (longitude - :lon) AS dist_sq\nFROM gold_weather_place_current_outlook\nORDER BY dist_sq ASC, place_name\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "sort"
+   ],
+   "combos": [
+    {
+     "lat": 37.5033,
+     "lon": 127.0864,
+     "n": 10
+    },
+    {
+     "lat": 37.49375,
+     "lon": 127.107686,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "좌표(37.5033, 127.0864)에서 가장 가까운 장소는 송파구 잠실본동(29℃·맑음·강수없음)으로 사실상 동일 좌표. 다른 좌표(37.49375, 127.107686)를 넣으면 가락1동이 최근접으로 바뀜.",
+   "composition_idiom": "좌표 근접 정렬(제곱거리)",
+   "table": "gold_weather_place_current_outlook",
+   "product_id": "weather_place_current_outlook",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "forecast_change_timeline_for_place",
+   "question_ko": "특정 장소에서 예보 대상일별로 최신 발표가 직전 발표 대비 어떻게 달라졌는지 시간순으로 보고 싶습니다.",
+   "axes": "장소 필터 — 예보일 시계열(forecast_date ASC)",
+   "sql": "-- :place_id=seoul_admd_1111053000\nSELECT place_id, place_name, gu, forecast_date, change_state, min_temp_change_c, max_temp_change_c, max_precip_prob_change_pct, latest_forecast_hour_count, previous_forecast_hour_count FROM gold_weather_place_forecast_change_daily WHERE place_id = :place_id ORDER BY forecast_date ASC",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "place_id": "seoul_admd_1111053000"
+    },
+    {
+     "place_id": "seoul_admd_1111051500"
+    }
+   ],
+   "rows_by_combo": [
+    6,
+    6
+   ],
+   "insight_sample_ko": "종로구 사직동은 6개 예보일 중 2026-08-08만 20시 발표에서 바뀌었고(최고기온 -3°C·최대강수확률 -20%p, 예보 시간 6→3시간), 08-09~08-13은 unchanged.",
+   "composition_idiom": null,
+   "table": "gold_weather_place_forecast_change_daily",
+   "product_id": "weather_place_forecast_change_daily",
+   "real_rows_by_combo": [
+    6,
+    6
+   ]
+  },
+  {
+   "pattern_id": "temp_change_by_area_for_date",
+   "question_ko": "특정 예보일에 지역(자치구 또는 행정동)별로 최신 발표의 기온·강수확률 예보가 평균 얼마나 바뀌었습니까?",
+   "axes": "예보일 필터 · 지역 집계(차원 스위치) — 평균 변화(지표 스위치) ASC",
+   "sql": "-- :forecast_date=2026-08-08, :dim=gu, :metric=max_temp, :n=25\nSELECT CASE :dim WHEN 'admin_dong' THEN admin_dong ELSE gu END AS area, count(*) AS place_count, sum(CASE WHEN change_state='changed' THEN 1 ELSE 0 END) AS changed_count, round(avg(max_temp_change_c),2) AS avg_max_temp_change_c, min(max_temp_change_c) AS min_max_temp_change_c, round(avg(max_precip_prob_change_pct),2) AS avg_max_precip_prob_change_pct FROM gold_weather_place_forecast_change_daily WHERE forecast_date = :forecast_date GROUP BY CASE :dim WHEN 'admin_dong' THEN admin_dong ELSE gu END ORDER BY CASE :metric WHEN 'max_precip' THEN avg_max_precip_prob_change_pct ELSE avg_max_temp_change_c END ASC, area LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "forecast_date": "2026-08-08",
+     "dim": "gu",
+     "metric": "max_temp",
+     "n": 25
+    },
+    {
+     "forecast_date": "2026-08-08",
+     "dim": "admin_dong",
+     "metric": "max_precip",
+     "n": 30
+    }
+   ],
+   "rows_by_combo": [
+    25,
+    30
+   ],
+   "insight_sample_ko": "2026-08-08 발표에서 자치구별 평균 최고기온 하락이 가장 큰 곳은 동대문구로 15개 장소가 평균 -4.0°C(평균 최대강수확률 -20%p) 내려갔다.",
+   "composition_idiom": "차원 스위치(:dim=gu/admin_dong) + 지표 스위치(:metric)",
+   "table": "gold_weather_place_forecast_change_daily",
+   "product_id": "weather_place_forecast_change_daily",
+   "real_rows_by_combo": [
+    25,
+    30
+   ]
+  },
+  {
+   "pattern_id": "forecast_movers_by_metric_direction",
+   "question_ko": "특정 예보일에 선택한 지표(최고기온/최저기온/최대강수확률)가 가장 크게 내려가거나 올라간 장소는 어디입니까? (자치구 지정 또는 전체)",
+   "axes": "예보일·자치구 센티널 필터 — 지표 변화(지표·방향 스위치) 정렬",
+   "sql": "-- :forecast_date=2026-08-08, :metric=max_temp, :dir=asc, :gu=ALL, :n=20\nSELECT place_id, place_name, gu, forecast_date, change_state, min_temp_change_c, max_temp_change_c, max_precip_prob_change_pct, CASE :metric WHEN 'min_temp' THEN min_temp_change_c WHEN 'max_precip' THEN max_precip_prob_change_pct ELSE max_temp_change_c END AS metric_change FROM gold_weather_place_forecast_change_daily WHERE forecast_date = :forecast_date AND (:gu = 'ALL' OR gu = :gu) AND CASE :metric WHEN 'min_temp' THEN min_temp_change_c WHEN 'max_precip' THEN max_precip_prob_change_pct ELSE max_temp_change_c END <> 0 ORDER BY CASE WHEN :dir='asc' THEN CASE :metric WHEN 'min_temp' THEN min_temp_change_c WHEN 'max_precip' THEN max_precip_prob_change_pct ELSE max_temp_change_c END END ASC, CASE WHEN :dir='desc' THEN CASE :metric WHEN 'min_temp' THEN min_temp_change_c WHEN 'max_precip' THEN max_precip_prob_change_pct ELSE max_temp_change_c END END DESC, place_name LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "forecast_date": "2026-08-08",
+     "metric": "max_temp",
+     "dir": "asc",
+     "gu": "ALL",
+     "n": 20
+    },
+    {
+     "forecast_date": "2026-08-08",
+     "metric": "max_precip",
+     "dir": "asc",
+     "gu": "종로구",
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    15
+   ],
+   "insight_sample_ko": "2026-08-08 발표에서 최고기온 예보가 가장 크게 내려간 장소는 송파구 가락1동으로 -4°C(최대강수확률 -20%p).",
+   "composition_idiom": "지표 스위치(:metric) + 정렬 방향 스위치(:dir) + 센티널(:gu=ALL)",
+   "table": "gold_weather_place_forecast_change_daily",
+   "product_id": "weather_place_forecast_change_daily",
+   "real_rows_by_combo": [
+    20,
+    15
+   ]
+  },
+  {
+   "pattern_id": "forecasts_dropping_precipitation",
+   "question_ko": "직전 KMA 발표에는 강수 시작 시각이 있었으나 최신 발표에서 강수 예보가 사라진(비/눈 예보가 빠진) 장소는 어디입니까?",
+   "axes": "강수 시작 시각 NULL 전이 필터 — 강수확률 변화 ASC",
+   "sql": "-- :n=100\nSELECT place_id, place_name, gu, forecast_date, previous_first_precipitation_at, latest_first_precipitation_at, previous_max_precip_prob_pct, latest_max_precip_prob_pct, max_precip_prob_change_pct FROM gold_weather_place_forecast_change_daily WHERE previous_first_precipitation_at IS NOT NULL AND latest_first_precipitation_at IS NULL ORDER BY max_precip_prob_change_pct ASC, place_name LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_null",
+    "sort"
+   ],
+   "combos": [
+    {
+     "n": 100
+    },
+    {
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    100,
+    20
+   ],
+   "insight_sample_ko": "구로구 가리봉동은 직전 17시 발표엔 18:00 강수 시작 예보가 있었으나 20시 발표에서 강수 예보가 빠졌고, 최대강수확률이 60%→0%로 내려갔다.",
+   "composition_idiom": null,
+   "table": "gold_weather_place_forecast_change_daily",
+   "product_id": "weather_place_forecast_change_daily",
+   "real_rows_by_combo": [
+    100,
+    20
+   ]
+  },
+  {
+   "pattern_id": "forecast_change_for_places",
+   "question_ko": "관심 장소 여러 곳을 골라 특정 예보일의 예보 변경 내역을 한 번에 비교하고 싶습니다.",
+   "axes": "장소 배열·예보일 필터 — 장소명 ASC",
+   "sql": "-- :place_ids=[\"seoul_admd_1111051500\",\"seoul_admd_1111053000\",\"seoul_admd_1111054000\"], :forecast_date=2026-08-08\nSELECT place_id, place_name, gu, forecast_date, change_state, min_temp_change_c, max_temp_change_c, max_precip_prob_change_pct, latest_issued_at, previous_issued_at FROM gold_weather_place_forecast_change_daily WHERE forecast_date = :forecast_date AND place_id IN (SELECT value FROM json_each(:place_ids)) ORDER BY place_name",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "place_ids": "[\"seoul_admd_1111051500\",\"seoul_admd_1111053000\",\"seoul_admd_1111054000\"]",
+     "forecast_date": "2026-08-08"
+    },
+    {
+     "place_ids": "[\"seoul_admd_1111051500\",\"seoul_admd_1111054000\"]",
+     "forecast_date": "2026-08-09"
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    2
+   ],
+   "insight_sample_ko": "지정한 3개 장소(청운효자동·사직동·삼청동)의 2026-08-08 예보 변경 중 사직동은 최고기온 -3°C·최대강수확률 -20%p(20시 발표 vs 17시 발표).",
+   "composition_idiom": "배열 IN(json_each) 다중 선택",
+   "table": "gold_weather_place_forecast_change_daily",
+   "product_id": "weather_place_forecast_change_daily",
+   "real_rows_by_combo": [
+    3,
+    2
+   ]
+  },
+  {
+   "pattern_id": "change_intensity_over_date_range",
+   "question_ko": "특정 예보일 범위에서 날짜별 예보 변경 강도(변경 장소 수·평균 최고기온 하락폭·평균 최대강수확률 변화)는 어떻게 됩니까?",
+   "axes": "예보일 범위 집계 — 날짜별 변화 강도, forecast_date ASC",
+   "sql": "-- :from_date=2026-08-08, :to_date=2026-08-14\nSELECT forecast_date, count(*) AS place_count, sum(CASE WHEN change_state='changed' THEN 1 ELSE 0 END) AS changed_count, round(avg(max_temp_change_c),2) AS avg_max_temp_change_c, min(max_temp_change_c) AS min_max_temp_change_c, round(avg(max_precip_prob_change_pct),2) AS avg_max_precip_prob_change_pct, min(max_precip_prob_change_pct) AS min_max_precip_prob_change_pct FROM gold_weather_place_forecast_change_daily WHERE forecast_date >= :from_date AND forecast_date < :to_date GROUP BY forecast_date ORDER BY forecast_date ASC",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_date": "2026-08-08",
+     "to_date": "2026-08-14"
+    },
+    {
+     "from_date": "2026-08-08",
+     "to_date": "2026-08-10"
+    }
+   ],
+   "rows_by_combo": [
+    6,
+    2
+   ],
+   "insight_sample_ko": "2026-08-08 예보일은 427곳 전부가 변경되어 평균 최고기온 -3.56°C·평균 최대강수확률 -28.43%p(최소 -60%p) 내려갔고, 08-09 이후는 변화가 없었다.",
+   "composition_idiom": "기간 창(:from_date/:to_date) + 집계",
+   "table": "gold_weather_place_forecast_change_daily",
+   "product_id": "weather_place_forecast_change_daily",
+   "real_rows_by_combo": [
+    6,
+    2
+   ]
+  },
+  {
+   "pattern_id": "precipitation_edge_hour_distribution",
+   "question_ko": "예보상 강수가 시작(또는 종료)되는 시각별로 장소가 몇 곳입니까?",
+   "axes": "시작/종료 시각 축 전환 집계 — 장소 수 DESC",
+   "sql": "-- :edge=start\nSELECT CASE :edge WHEN 'end' THEN window_end_at ELSE window_start_at END AS window_edge_at,\n       count(*) AS place_count\nFROM gold_weather_place_precipitation_window\nGROUP BY CASE :edge WHEN 'end' THEN window_end_at ELSE window_start_at END\nORDER BY place_count DESC, window_edge_at ASC\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "edge": "start"
+    },
+    {
+     "edge": "end"
+    }
+   ],
+   "rows_by_combo": [
+    4,
+    4
+   ],
+   "insight_sample_ko": "강수 시작 시각(edge=start) 기준 18시에 시작하는 장소가 135곳으로 가장 많습니다.",
+   "composition_idiom": "차원 스위치(:edge — 시작/종료 시각 축 전환)",
+   "table": "gold_weather_place_precipitation_window",
+   "product_id": "weather_place_precipitation_window",
+   "real_rows_by_combo": [
+    4,
+    4
+   ]
+  },
+  {
+   "pattern_id": "active_precipitation_at_instant",
+   "question_ko": "특정 시각에 강수 예보 구간이 진행 중인(그 시각을 포함하는) 장소는 어디입니까?",
+   "axes": "기준 시각 포함 필터 — 장소 ID ASC",
+   "sql": "-- :at=2026-08-08 17:00:00, :n=100\nSELECT place_id, window_start_at, window_end_at\nFROM gold_weather_place_precipitation_window\nWHERE window_start_at <= :at AND window_end_at >= :at\nORDER BY place_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "at": "2026-08-08 17:00:00",
+     "n": 100
+    },
+    {
+     "at": "2026-08-08 18:00:00",
+     "n": 100
+    }
+   ],
+   "rows_by_combo": [
+    38,
+    100
+   ],
+   "insight_sample_ko": "2026-08-08 17시 시점에 강수가 진행 중인 장소는 38곳입니다(예: seoul_admd_1154567000).",
+   "composition_idiom": null,
+   "table": "gold_weather_place_precipitation_window",
+   "product_id": "weather_place_precipitation_window",
+   "real_rows_by_combo": [
+    38,
+    100
+   ]
+  },
+  {
+   "pattern_id": "precipitation_windows_by_edge_in_range",
+   "question_ko": "특정 시간 범위에 강수가 시작(또는 종료)되는 구간은 무엇입니까?",
+   "axes": "시작/종료 시각 축 전환·시간 범위 필터 — 해당 시각 ASC",
+   "sql": "-- :edge=end, :from_at=2026-08-08 16:00:00, :to_at=2026-08-08 18:00:00, :n=100\nSELECT place_id, window_start_at, window_end_at\nFROM gold_weather_place_precipitation_window\nWHERE (CASE :edge WHEN 'end' THEN window_end_at ELSE window_start_at END) >= :from_at\n  AND (CASE :edge WHEN 'end' THEN window_end_at ELSE window_start_at END) < :to_at\nORDER BY (CASE :edge WHEN 'end' THEN window_end_at ELSE window_start_at END) ASC, place_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "edge": "end",
+     "from_at": "2026-08-08 16:00:00",
+     "to_at": "2026-08-08 18:00:00",
+     "n": 100
+    },
+    {
+     "edge": "start",
+     "from_at": "2026-08-08 16:00:00",
+     "to_at": "2026-08-08 18:00:00",
+     "n": 100
+    }
+   ],
+   "rows_by_combo": [
+    45,
+    45
+   ],
+   "insight_sample_ko": "강수 종료(edge=end) 기준 16~18시에 그치는 장소는 45곳이며, 가장 이른 종료는 16시(seoul_admd_1165066000)입니다.",
+   "composition_idiom": "차원 스위치(:edge — 시작/종료 시각 축 전환), 기존 시작-범위 고정 패턴의 상위호환",
+   "table": "gold_weather_place_precipitation_window",
+   "product_id": "weather_place_precipitation_window",
+   "real_rows_by_combo": [
+    45,
+    45
+   ]
+  },
+  {
+   "pattern_id": "precipitation_duration_distribution",
+   "question_ko": "예보된 강수 구간의 지속 시간(시간 수)별 장소 수 분포는 어떻습니까?",
+   "axes": "지속 시간 집계 — 지속 시간 ASC",
+   "sql": "SELECT cast((julianday(window_end_at) - julianday(window_start_at)) * 24 as integer) + 1 AS duration_hours,\n       count(*) AS place_count\nFROM gold_weather_place_precipitation_window\nGROUP BY duration_hours\nORDER BY duration_hours ASC\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {}
+   ],
+   "rows_by_combo": [
+    2
+   ],
+   "insight_sample_ko": "지속 1시간 강수 구간이 146곳으로 가장 많고, 2시간 구간은 37곳입니다.",
+   "composition_idiom": null,
+   "table": "gold_weather_place_precipitation_window",
+   "product_id": "weather_place_precipitation_window",
+   "real_rows_by_combo": [
+    2
+   ]
+  },
+  {
+   "pattern_id": "active_place_count_by_hour",
+   "question_ko": "예보 시각대별로 강수 예보 구간이 진행 중인 장소 수는 어떻게 변합니까?",
+   "axes": "예보 시각 그리드 자기조인 집계 — 시각 ASC 시계열",
+   "sql": "WITH hrs AS (\n  SELECT window_start_at AS h FROM gold_weather_place_precipitation_window\n  UNION\n  SELECT window_end_at FROM gold_weather_place_precipitation_window\n)\nSELECT hrs.h AS hour_at, count(*) AS active_place_count\nFROM hrs\nJOIN gold_weather_place_precipitation_window w\n  ON w.window_start_at <= hrs.h AND w.window_end_at >= hrs.h\nGROUP BY hrs.h\nORDER BY hrs.h ASC\n",
+   "requires": [
+    "select_columns",
+    "subquery",
+    "join",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {}
+   ],
+   "rows_by_combo": [
+    4
+   ],
+   "insight_sample_ko": "16시 시점 강수 진행 장소는 44곳으로, 시각대별 강수 진행 장소 수 곡선의 시작점입니다.",
+   "composition_idiom": null,
+   "table": "gold_weather_place_precipitation_window",
+   "product_id": "weather_place_precipitation_window",
+   "real_rows_by_combo": [
+    4
+   ]
+  },
+  {
+   "pattern_id": "precipitation_windows_for_place_set",
+   "question_ko": "지정한 여러 장소들의 강수 예보 구간을 한 번에 보고 싶습니다.",
+   "axes": "다중 장소 IN 필터 — 강수 시작 시각 ASC",
+   "sql": "-- :places=[\"seoul_admd_1165051000\",\"seoul_admd_1138065000\",\"seoul_admd_1117057000\"], :n=100\nSELECT place_id, window_start_at, window_end_at\nFROM gold_weather_place_precipitation_window\nWHERE place_id IN (SELECT value FROM json_each(:places))\nORDER BY window_start_at ASC, place_id\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "places": "[\"seoul_admd_1165051000\",\"seoul_admd_1138065000\",\"seoul_admd_1117057000\"]",
+     "n": 100
+    },
+    {
+     "places": "[\"seoul_admd_1165052000\",\"seoul_admd_1165053100\"]",
+     "n": 100
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    2
+   ],
+   "insight_sample_ko": "지정한 3개 장소 중 seoul_admd_1165051000은 16~17시에 강수가 예보되어 있습니다.",
+   "composition_idiom": "배열 IN(json_each) — 다중 장소 선택",
+   "table": "gold_weather_place_precipitation_window",
+   "product_id": "weather_place_precipitation_window",
+   "real_rows_by_combo": [
+    3,
+    2
+   ]
+  },
+  {
+   "pattern_id": "precipitation_windows_in_gu",
+   "question_ko": "특정 자치구에서 강수가 예보된 동과 그 시간 구간은 무엇입니까?",
+   "axes": "자치구 필터(장소 라벨 조인) — 강수 시작 시각 ASC",
+   "sql": "-- :gu_code=11500, :n=100\nSELECT w.place_id, o.place_name, o.admin_dong, o.gu, w.window_start_at, w.window_end_at\nFROM gold_weather_place_precipitation_window w\nJOIN gold_weather_place_current_outlook o ON o.place_id = w.place_id\nWHERE o.gu_code = :gu_code\nORDER BY w.window_start_at ASC, o.place_name\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "join",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu_code": "11500",
+     "n": 100
+    },
+    {
+     "gu_code": "11620",
+     "n": 100
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "자치구 11500(강서구)에서 강수가 예보된 동은 20곳이며, 첫 구간은 18시에 시작합니다.",
+   "composition_idiom": null,
+   "table": "gold_weather_place_precipitation_window",
+   "product_id": "weather_place_precipitation_window",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "precipitation_window_place_count_by_gu",
+   "question_ko": "자치구별로 강수 구간이 예보된 동 수와 가장 이른 시작·가장 늦은 종료 시각은 얼마입니까?",
+   "axes": "자치구 집계(장소 라벨 조인) — 동 수 DESC",
+   "sql": "-- :n=25\nSELECT o.gu_code, o.gu, count(*) AS place_count,\n       min(w.window_start_at) AS earliest_window_start_at,\n       max(w.window_end_at) AS latest_window_end_at\nFROM gold_weather_place_precipitation_window w\nJOIN gold_weather_place_current_outlook o ON o.place_id = w.place_id\nGROUP BY o.gu_code, o.gu\nORDER BY place_count DESC, o.gu_code\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "join",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "n": 25
+    },
+    {
+     "n": 5
+    }
+   ],
+   "rows_by_combo": [
+    14,
+    5
+   ],
+   "insight_sample_ko": "강수 구간이 있는 자치구는 14곳이며, 가장 많은 곳은 자치구 11500(강서구)으로 20개 동입니다.",
+   "composition_idiom": null,
+   "table": "gold_weather_place_precipitation_window",
+   "product_id": "weather_place_precipitation_window",
+   "real_rows_by_combo": [
+    14,
+    5
+   ]
+  },
+  {
+   "pattern_id": "place_risk_forecast_timeline",
+   "question_ko": "특정 장소의 위험 후보 예보를 시간순으로 볼 때 기온·풍속·강수확률과 위험 플래그는 어떻게 이어집니까?",
+   "axes": "장소 필터 — 예보 시각 ASC로 측정값·위험 플래그 시계열",
+   "sql": "-- :place_id=seoul_admd_1171056200\nSELECT place_id, place_name, gu, forecast_at, temp_c, wind_ms, precip_prob_pct, pty_code, heat_risk, cold_risk, heavy_rain_risk, snow_risk, wind_risk, risk_labels\nFROM gold_weather_place_risk_window\nWHERE place_id = :place_id\nORDER BY forecast_at ASC",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "place_id": "seoul_admd_1171056200"
+    },
+    {
+     "place_id": "seoul_admd_1174065000"
+    }
+   ],
+   "rows_by_combo": [
+    17,
+    16
+   ],
+   "insight_sample_ko": "송파구 방이2동은 2026-08-08 11시부터 총 17개 예보 시각이 폭염후보이며, 첫 시각 기온 33도·풍속 4.0 m/s·강수확률 0%였다.",
+   "composition_idiom": null,
+   "table": "gold_weather_place_risk_window",
+   "product_id": "weather_place_risk_window",
+   "real_rows_by_combo": [
+    21,
+    21
+   ]
+  },
+  {
+   "pattern_id": "top_places_by_metric_at_time",
+   "question_ko": "특정 예보 시각에 (기온/풍속/강수확률 중 고른 지표로) 가장 높거나 낮은 위험 후보 장소는 어디입니까?",
+   "axes": "예보 시각·자치구 센티널 필터 — 선택 지표를 선택 방향으로 정렬한 단면 랭킹",
+   "sql": "-- :forecast_at=2026-08-08 15:00:00, :gu=ALL, :metric=wind_ms, :dir=desc, :n=15\nSELECT place_id, place_name, gu, forecast_at, temp_c, wind_ms, precip_prob_pct, pty_code\nFROM gold_weather_place_risk_window\nWHERE forecast_at = :forecast_at\n  AND (:gu = 'ALL' OR gu = :gu)\nORDER BY CASE WHEN :dir='asc' THEN (CASE :metric WHEN 'temp_c' THEN temp_c WHEN 'wind_ms' THEN wind_ms ELSE precip_prob_pct END) END ASC,\n         CASE WHEN :dir='desc' THEN (CASE :metric WHEN 'temp_c' THEN temp_c WHEN 'wind_ms' THEN wind_ms ELSE precip_prob_pct END) END DESC,\n         place_name\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "forecast_at": "2026-08-08 15:00:00",
+     "gu": "ALL",
+     "metric": "wind_ms",
+     "dir": "desc",
+     "n": 15
+    },
+    {
+     "forecast_at": "2026-08-08 13:00:00",
+     "gu": "강남구",
+     "metric": "temp_c",
+     "dir": "desc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    15,
+    6
+   ],
+   "insight_sample_ko": "2026-08-08 15시 예보에서 풍속이 가장 높은 위험 후보 장소는 강동구 강일동(풍속 5.2 m/s, 기온 35도)이었다.",
+   "composition_idiom": "지표 스위치(:metric) · 정렬 방향 스위치(:dir) · 센티널(:gu='ALL')",
+   "table": "gold_weather_place_risk_window",
+   "product_id": "weather_place_risk_window",
+   "real_rows_by_combo": [
+    15,
+    10
+   ]
+  },
+  {
+   "pattern_id": "peak_temp_by_place",
+   "question_ko": "예보 기간 동안 예보 최고기온이 지정 임계값 이상으로 가장 높았던 위험 후보 장소는 어디입니까?",
+   "axes": "예보 시각 범위 필터 + 장소 집계 — 최고기온 임계값(HAVING) 후 peak_temp DESC",
+   "sql": "-- :from_at=2026-08-07 00:00:00, :to_at=2026-08-13 00:00:00, :min_peak_temp=35, :n=20\nSELECT place_id, place_name, gu, max(temp_c) AS peak_temp_c, max(wind_ms) AS peak_wind_ms, count(*) AS risk_hour_count\nFROM gold_weather_place_risk_window\nWHERE forecast_at >= :from_at AND forecast_at < :to_at\nGROUP BY place_id, place_name, gu\nHAVING max(temp_c) >= :min_peak_temp\nORDER BY peak_temp_c DESC, risk_hour_count DESC, place_name\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_at": "2026-08-07 00:00:00",
+     "to_at": "2026-08-13 00:00:00",
+     "min_peak_temp": 35,
+     "n": 20
+    },
+    {
+     "from_at": "2026-08-07 00:00:00",
+     "to_at": "2026-08-13 00:00:00",
+     "min_peak_temp": 36,
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "2026-08-07~12 예보 창에서 예보 최고기온 36도로 가장 높은 축에 든 장소에는 종로구 가회동이 포함됐고, 해당 장소의 폭염후보 예보 시각은 4건이었다.",
+   "composition_idiom": "임계값(HAVING max(temp_c)) · 기간 창",
+   "table": "gold_weather_place_risk_window",
+   "product_id": "weather_place_risk_window",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "risk_exposure_by_area",
+   "question_ko": "예보 기간 동안 위험 후보 노출(예보 건수·장소 수·최고기온)이 큰 지역은 자치구/행정동 중 어느 단위로 보든 어디입니까?",
+   "axes": "예보 시각 범위 필터 + 지역 차원 스위치(자치구/행정동) 집계 — 위험 건수 DESC",
+   "sql": "-- :dim=gu, :from_at=2026-08-08 00:00:00, :to_at=2026-08-09 00:00:00, :n=25\nSELECT CASE :dim WHEN 'gu' THEN gu ELSE admin_dong END AS area, count(*) AS risk_hour_count, count(DISTINCT place_id) AS place_count, max(temp_c) AS peak_temp_c, max(wind_ms) AS peak_wind_ms\nFROM gold_weather_place_risk_window\nWHERE forecast_at >= :from_at AND forecast_at < :to_at\nGROUP BY CASE :dim WHEN 'gu' THEN gu ELSE admin_dong END\nORDER BY risk_hour_count DESC, area\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dim": "gu",
+     "from_at": "2026-08-08 00:00:00",
+     "to_at": "2026-08-09 00:00:00",
+     "n": 25
+    },
+    {
+     "dim": "admin_dong",
+     "from_at": "2026-08-08 00:00:00",
+     "to_at": "2026-08-09 00:00:00",
+     "n": 25
+    }
+   ],
+   "rows_by_combo": [
+    18,
+    25
+   ],
+   "insight_sample_ko": "2026-08-08 하루 예보 기준 폭염후보 예보 건수가 가장 많은 자치구는 송파구로, 126건·장소 20곳·최고기온 35도·최고풍속 5.6 m/s였다.",
+   "composition_idiom": "차원 스위치(:dim gu/admin_dong)",
+   "table": "gold_weather_place_risk_window",
+   "product_id": "weather_place_risk_window",
+   "real_rows_by_combo": [
+    25,
+    25
+   ]
+  },
+  {
+   "pattern_id": "risk_load_by_forecast_time",
+   "question_ko": "예보 기간 안에서 위험 후보로 표시된 장소 수와 최고기온이 예보 시각마다 어떻게 달라집니까?",
+   "axes": "예보 시각 범위 필터 + 예보 시각 집계 — 시각 ASC 시계열(장소 수·최고기온·최고풍속·최고강수확률)",
+   "sql": "-- :from_at=2026-08-08 00:00:00, :to_at=2026-08-09 00:00:00\nSELECT forecast_at, count(DISTINCT place_id) AS place_count, max(temp_c) AS peak_temp_c, max(wind_ms) AS peak_wind_ms, max(precip_prob_pct) AS peak_precip_prob_pct\nFROM gold_weather_place_risk_window\nWHERE forecast_at >= :from_at AND forecast_at < :to_at\nGROUP BY forecast_at\nORDER BY forecast_at ASC",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_at": "2026-08-08 00:00:00",
+     "to_at": "2026-08-09 00:00:00"
+    },
+    {
+     "from_at": "2026-08-07 00:00:00",
+     "to_at": "2026-08-13 00:00:00"
+    }
+   ],
+   "rows_by_combo": [
+    7,
+    22
+   ],
+   "insight_sample_ko": "2026-08-08 예보 창의 첫 시각 11시에는 39개 장소가 폭염후보로 표시됐고 그 시각 최고기온은 33도였다.",
+   "composition_idiom": null,
+   "table": "gold_weather_place_risk_window",
+   "product_id": "weather_place_risk_window",
+   "real_rows_by_combo": [
+    8,
+    24
+   ]
+  },
+  {
+   "pattern_id": "risk_windows_for_gu_set",
+   "question_ko": "선택한 여러 자치구의 위험 후보 예보를 한 시간 범위에서 함께 보고 싶습니다.",
+   "axes": "자치구 다중 선택(배열 IN) + 예보 시각 범위 필터 — 자치구·시각 ASC",
+   "sql": "-- :gus=[\"강남구\",\"송파구\"], :from_at=2026-08-08 00:00:00, :to_at=2026-08-09 00:00:00, :n=100\nSELECT place_id, place_name, gu, forecast_at, temp_c, wind_ms, precip_prob_pct, pty_code\nFROM gold_weather_place_risk_window\nWHERE gu IN (SELECT value FROM json_each(:gus))\n  AND forecast_at >= :from_at AND forecast_at < :to_at\nORDER BY gu, forecast_at ASC, place_name\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "subquery",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gus": "[\"강남구\",\"송파구\"]",
+     "from_at": "2026-08-08 00:00:00",
+     "to_at": "2026-08-09 00:00:00",
+     "n": 100
+    },
+    {
+     "gus": "[\"종로구\",\"중구\",\"용산구\"]",
+     "from_at": "2026-08-07 00:00:00",
+     "to_at": "2026-08-13 00:00:00",
+     "n": 100
+    }
+   ],
+   "rows_by_combo": [
+    100,
+    100
+   ],
+   "insight_sample_ko": "강남·송파 두 자치구의 2026-08-08 폭염후보 예보를 모으면 상한 100건에 걸렸고, 첫 행은 강남구 개포2동 11시(기온 33도·강수확률 0%)였다.",
+   "composition_idiom": "배열 IN(json_each(:gus))",
+   "table": "gold_weather_place_risk_window",
+   "product_id": "weather_place_risk_window",
+   "real_rows_by_combo": [
+    100,
+    100
+   ]
+  },
+  {
+   "pattern_id": "high_precip_probability_windows",
+   "question_ko": "폭염 후보 예보 중에서도 강수확률이 지정 하한 이상으로 높아 소나기가 겹칠 수 있는 장소·시각은 무엇입니까?",
+   "axes": "강수확률 하한 + 예보 시각 범위 필터 — 강수확률 DESC",
+   "sql": "-- :min_precip_prob_pct=20, :from_at=2026-08-07 00:00:00, :to_at=2026-08-13 00:00:00, :n=50\nSELECT place_id, place_name, gu, forecast_at, precip_prob_pct, pty_code, temp_c, wind_ms\nFROM gold_weather_place_risk_window\nWHERE precip_prob_pct >= :min_precip_prob_pct\n  AND forecast_at >= :from_at AND forecast_at < :to_at\nORDER BY precip_prob_pct DESC, forecast_at ASC, place_name\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_precip_prob_pct": 20,
+     "from_at": "2026-08-07 00:00:00",
+     "to_at": "2026-08-13 00:00:00",
+     "n": 50
+    },
+    {
+     "min_precip_prob_pct": 50,
+     "from_at": "2026-08-07 00:00:00",
+     "to_at": "2026-08-13 00:00:00",
+     "n": 50
+    }
+   ],
+   "rows_by_combo": [
+    50,
+    20
+   ],
+   "insight_sample_ko": "폭염후보 예보 중 강수확률 20% 이상 상위는 강수확률 60%·강수형태 4(소나기) 구간에 몰렸고, 송파구 가락1동 2026-08-08 17시(기온 34도·풍속 5.1 m/s)가 그 예다.",
+   "composition_idiom": "임계값(precip_prob_pct 하한) · 기간 창",
+   "table": "gold_weather_place_risk_window",
+   "product_id": "weather_place_risk_window",
+   "real_rows_by_combo": [
+    50,
+    50
+   ]
+  },
+  {
+   "pattern_id": "temp_severity_distribution",
+   "question_ko": "예보 기간 동안 위험 후보 예보가 예보 기온대별로 얼마나 분포합니까?",
+   "axes": "예보 시각 범위 필터 + 기온 집계 — 기온대별 예보 건수·장소 수 분포(기온 DESC)",
+   "sql": "-- :from_at=2026-08-07 00:00:00, :to_at=2026-08-13 00:00:00\nSELECT temp_c, count(*) AS risk_hour_count, count(DISTINCT place_id) AS place_count, count(DISTINCT forecast_at) AS forecast_hour_count\nFROM gold_weather_place_risk_window\nWHERE forecast_at >= :from_at AND forecast_at < :to_at\nGROUP BY temp_c\nORDER BY temp_c DESC",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from_at": "2026-08-07 00:00:00",
+     "to_at": "2026-08-13 00:00:00"
+    },
+    {
+     "from_at": "2026-08-08 00:00:00",
+     "to_at": "2026-08-09 00:00:00"
+    }
+   ],
+   "rows_by_combo": [
+    4,
+    3
+   ],
+   "insight_sample_ko": "2026-08-07~12 예보 창에서 최고기온대인 36도 구간은 예보 43건(장소 43곳, 예보 시각 1개)으로 폭염 정점 구간이었다.",
+   "composition_idiom": null,
+   "table": "gold_weather_place_risk_window",
+   "product_id": "weather_place_risk_window",
+   "real_rows_by_combo": [
+    5,
+    3
+   ]
+  }
+ ],
+ "audit_fail": [],
+ "run_fail": [],
+ "zero_first_combo": [
+  {
+   "key": "gold_traffic_incident_x_weather_current_hourly/incident_rollup_by_gu",
+   "rows_by_combo": [
+    0,
+    0
+   ]
+  },
+  {
+   "key": "gold_traffic_incident_x_weather_current_hourly/gu_incident_rate",
+   "rows_by_combo": [
+    0,
+    0
+   ]
+  },
+  {
+   "key": "gold_traffic_incident_x_weather_current_hourly/incident_dongs_by_weather_threshold",
+   "rows_by_combo": [
+    0,
+    0
+   ]
+  },
+  {
+   "key": "gold_traffic_incident_x_weather_current_hourly/selected_gus_incident_status",
+   "rows_by_combo": [
+    0,
+    0
+   ]
+  }
+ ],
+ "n_accepted": 62
+}

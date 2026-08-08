@@ -1,0 +1,1755 @@
+{
+ "domain": "culture",
+ "accepted": [
+  {
+   "pattern_id": "activity_ranking_flex",
+   "question_ko": "원하는 지표(공연·전시·행사·축제·무료·교육 등)로 자치구 또는 행정동을 문화활동 순으로 정렬하면 어디가 상위(또는 하위)인가?",
+   "axes": "차원(구/동) × 지표 스위치 × 정렬방향 × 기간 랭킹 — 기존 exhibition_dongs/free_edu_dongs의 상위호환",
+   "sql": "-- :dim=dong, :metric=exhibitions, :dir=desc, :from=2026-07-01, :to=2026-08-31, :n=10\nSELECT CASE :dim WHEN 'gu' THEN gu ELSE admin_dong END AS dim_value,\n       MAX(gu) AS gu,\n       SUM(CASE :metric\n             WHEN 'performances' THEN performances_count\n             WHEN 'events' THEN events_count\n             WHEN 'exhibitions' THEN exhibitions_count\n             WHEN 'kopis_festivals' THEN kopis_festivals_count\n             WHEN 'festival' THEN festival_events_count\n             WHEN 'free' THEN free_events_count\n             WHEN 'edu' THEN edu_experience_events_count\n             WHEN 'sejong' THEN sejong_count\n             WHEN 'kcisa' THEN kcisa_count\n             ELSE activities_count END) AS metric_value\nFROM gold_culture_activity_by_dong\nWHERE event_date BETWEEN :from AND :to\nGROUP BY CASE :dim WHEN 'gu' THEN gu ELSE admin_dong END\nHAVING metric_value > 0\nORDER BY CASE WHEN :dir='asc' THEN metric_value END ASC,\n         CASE WHEN :dir='desc' THEN metric_value END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort",
+    "filter_range"
+   ],
+   "combos": [
+    {
+     "dim": "dong",
+     "metric": "exhibitions",
+     "dir": "desc",
+     "from": "2026-07-01",
+     "to": "2026-08-31",
+     "n": 10
+    },
+    {
+     "dim": "gu",
+     "metric": "performances",
+     "dir": "desc",
+     "from": "2026-07-01",
+     "to": "2026-08-31",
+     "n": 10
+    },
+    {
+     "dim": "dong",
+     "metric": "free",
+     "dir": "asc",
+     "from": "2026-07-01",
+     "to": "2026-08-31",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    6,
+    10,
+    10
+   ],
+   "insight_sample_ko": "2026-07-01~08-31 전시 기준 상위 행정동은 소공동(중구)이 12건으로 1위.",
+   "composition_idiom": "차원 스위치 + 지표 스위치 + 정렬 방향 스위치",
+   "table": "gold_culture_activity_by_dong",
+   "product_id": "culture_activity_by_dong",
+   "real_rows_by_combo": [
+    6,
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "gu_daily_trend",
+   "question_ko": "우리 자치구 전체(동 합산)의 문화활동이 날짜별로 얼마나 잡혀 있나 — 늘고 있나, 줄고 있나?",
+   "axes": "필터(gu) + 기간 — 날짜별 동 합산 시계열(구 단위). 기존 dong_activity_trend(단일 동)의 구 집계 형제",
+   "sql": "-- :gu=종로구, :from=2026-07-01, :to=2026-08-31, :n=60\nSELECT event_date,\n       SUM(activities_count) AS activities,\n       SUM(performances_count) AS performances,\n       SUM(events_count) AS events,\n       SUM(exhibitions_count) AS exhibitions,\n       COUNT(*) AS dongs_reporting\nFROM gold_culture_activity_by_dong\nWHERE gu = :gu AND event_date BETWEEN :from AND :to\nGROUP BY event_date\nHAVING SUM(activities_count) > 0\nORDER BY event_date DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_range",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "종로구",
+     "from": "2026-07-01",
+     "to": "2026-08-31",
+     "n": 60
+    },
+    {
+     "gu": "강남구",
+     "from": "2026-07-01",
+     "to": "2026-08-31",
+     "n": 60
+    }
+   ],
+   "rows_by_combo": [
+    23,
+    23
+   ],
+   "insight_sample_ko": "종로구는 활동이 잡힌 가장 최근 날짜인 2026-08-29에 문화활동 7건(공연 1·행사 4).",
+   "composition_idiom": null,
+   "table": "gold_culture_activity_by_dong",
+   "product_id": "culture_activity_by_dong",
+   "real_rows_by_combo": [
+    60,
+    60
+   ]
+  },
+  {
+   "pattern_id": "free_share_dongs",
+   "question_ko": "전체 문화활동 대비 무료 행사 비중이 높은 동네(행정동)는 어디인가?",
+   "axes": "동 랭킹 — free/activities 비율 DESC, 최소 활동수 임계값(HAVING). 기존 free_edu_dongs(절대건수)의 비율판",
+   "sql": "-- :from=2026-07-01, :to=2026-08-31, :min_activities=20, :n=10\nSELECT admin_dong, gu,\n       SUM(free_events_count) AS free_cnt,\n       SUM(activities_count) AS total_cnt,\n       ROUND(SUM(free_events_count) * 100.0 / SUM(activities_count), 1) AS free_pct\nFROM gold_culture_activity_by_dong\nWHERE event_date BETWEEN :from AND :to\nGROUP BY admin_dong, gu\nHAVING SUM(activities_count) >= :min_activities\nORDER BY free_pct DESC, total_cnt DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "having",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from": "2026-07-01",
+     "to": "2026-08-31",
+     "min_activities": 20,
+     "n": 10
+    },
+    {
+     "from": "2026-07-01",
+     "to": "2026-08-31",
+     "min_activities": 50,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    5
+   ],
+   "insight_sample_ko": "활동 20건 이상 동네 중 증산동(은평구)은 22건이 전부 무료(무료 비중 100%).",
+   "composition_idiom": "임계값(HAVING)",
+   "table": "gold_culture_activity_by_dong",
+   "product_id": "culture_activity_by_dong",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "festival_occurrences",
+   "question_ko": "축제가 실제로 열리는(열렸던) 동네와 날짜는 언제 어디인가?",
+   "axes": "단면/필터 — (KOPIS 축제 + 기타 축제) 카운트가 임계값 이상인 (동, 날짜) 행 나열",
+   "sql": "-- :from=2026-07-01, :min_festivals=1, :n=20\nSELECT event_date, admin_dong, gu,\n       kopis_festivals_count, festival_events_count,\n       (kopis_festivals_count + festival_events_count) AS festival_total,\n       activities_count\nFROM gold_culture_activity_by_dong\nWHERE event_date >= :from\n  AND (kopis_festivals_count + festival_events_count) >= :min_festivals\nORDER BY festival_total DESC, event_date\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from": "2026-07-01",
+     "min_festivals": 1,
+     "n": 20
+    },
+    {
+     "from": "2026-06-01",
+     "min_festivals": 2,
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "혜화동(종로구)은 2026-07-28에 축제 6건(KOPIS 5·기타 1)으로 가장 몰림.",
+   "composition_idiom": "임계값(WHERE)",
+   "table": "gold_culture_activity_by_dong",
+   "product_id": "culture_activity_by_dong",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "multi_dong_compare",
+   "question_ko": "관심 있는 여러 동네를 골라 문화활동을 나란히 비교하면?",
+   "axes": "다중선택(배열) 단면 — 선택한 행정동들의 기간 합산 지표 비교",
+   "sql": "-- :dongs=[\"신촌동\",\"염창동\",\"신월1동\"], :from=2026-07-01, :to=2026-08-31, :n=20\nSELECT admin_dong, gu,\n       SUM(activities_count) AS activities,\n       SUM(performances_count) AS performances,\n       SUM(exhibitions_count) AS exhibitions,\n       SUM(free_events_count) AS free_events\nFROM gold_culture_activity_by_dong\nWHERE admin_dong IN (SELECT value FROM json_each(:dongs))\n  AND event_date BETWEEN :from AND :to\nGROUP BY admin_dong, gu\nORDER BY activities DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_set",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dongs": "[\"신촌동\",\"염창동\",\"신월1동\"]",
+     "from": "2026-07-01",
+     "to": "2026-08-31",
+     "n": 20
+    },
+    {
+     "dongs": "[\"신촌동\"]",
+     "from": "2026-06-01",
+     "to": "2026-08-31",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    1
+   ],
+   "insight_sample_ko": "선택한 세 동네 중 신촌동(서대문구)이 기간 합산 활동 23건(공연 13·무료 5)으로 최다.",
+   "composition_idiom": "배열 IN(json_each)",
+   "table": "gold_culture_activity_by_dong",
+   "product_id": "culture_activity_by_dong",
+   "real_rows_by_combo": [
+    3,
+    1
+   ]
+  },
+  {
+   "pattern_id": "activity_type_mix",
+   "question_ko": "이 자치구(또는 서울 전체)의 문화활동은 어떤 유형(공연·행사·전시·축제)이 주를 이루나?",
+   "axes": "분포/비율 — 유형별 기간 합산과 비중(UNPIVOT), gu 센티널로 특정 구 또는 전체(ALL)",
+   "sql": "-- :gu=종로구, :from=2026-07-01, :to=2026-08-31\nWITH agg AS (\n  SELECT SUM(performances_count) AS performances,\n         SUM(events_count) AS events,\n         SUM(exhibitions_count) AS exhibitions,\n         SUM(kopis_festivals_count) AS festivals\n  FROM gold_culture_activity_by_dong\n  WHERE (:gu = 'ALL' OR gu = :gu) AND event_date BETWEEN :from AND :to\n)\nSELECT t.activity_type, t.cnt,\n       ROUND(t.cnt * 100.0 / NULLIF(t.performances + t.events + t.exhibitions + t.festivals, 0), 1) AS pct\nFROM (\n  SELECT 'performances' AS activity_type, performances AS cnt, performances, events, exhibitions, festivals FROM agg\n  UNION ALL SELECT 'events', events, performances, events, exhibitions, festivals FROM agg\n  UNION ALL SELECT 'exhibitions', exhibitions, performances, events, exhibitions, festivals FROM agg\n  UNION ALL SELECT 'festivals', festivals, performances, events, exhibitions, festivals FROM agg\n) t\nORDER BY t.cnt DESC\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "subquery",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "종로구",
+     "from": "2026-07-01",
+     "to": "2026-08-31"
+    },
+    {
+     "gu": "ALL",
+     "from": "2026-07-01",
+     "to": "2026-08-31"
+    }
+   ],
+   "rows_by_combo": [
+    4,
+    4
+   ],
+   "insight_sample_ko": "2026-07-01~08-31 종로구는 공연이 492건으로 4개 유형 중 63.2%를 차지.",
+   "composition_idiom": "센티널(전체 ALL) + 분포(UNPIVOT)",
+   "table": "gold_culture_activity_by_dong",
+   "product_id": "culture_activity_by_dong",
+   "real_rows_by_combo": [
+    4,
+    4
+   ]
+  },
+  {
+   "pattern_id": "rank_climbers",
+   "question_ko": "첫 등장 대비 최근 예매 순위가 오른(상승세) 공연은?",
+   "axes": "랭킹 — (first_rank - last_rank) DESC, 최소 체류일 임계",
+   "sql": "-- :min_days=7, :n=10\nSELECT performance_name, genre, venue_name, first_rank, last_rank,\n       first_rank - last_rank AS rank_gain, days_on_chart\nFROM gold_culture_booking_curve\nWHERE days_on_chart >= :min_days\nORDER BY rank_gain DESC, days_on_chart DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_days": 7,
+     "n": 10
+    },
+    {
+     "min_days": 14,
+     "n": 5
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    5
+   ],
+   "insight_sample_ko": "첫 등장 40위였던 뮤지컬 '디어 에반 핸슨 (Musical Dear Evan Hansen) [서울]'이 최근 9위까지 올라 31계단 상승, 차트 34일째로 상승세가 가장 뚜렷했다.",
+   "composition_idiom": "임계값(:min_days)",
+   "table": "gold_culture_booking_curve",
+   "product_id": "culture_booking_curve",
+   "real_rows_by_combo": [
+    10,
+    5
+   ]
+  },
+  {
+   "pattern_id": "fading_from_peak",
+   "question_ko": "정점을 찍은 뒤 최근 순위가 크게 떨어진(식은) 공연은?",
+   "axes": "랭킹 — (last_rank - best_rank) DESC, 낙폭 임계",
+   "sql": "-- :min_drop=5, :n=10\nSELECT performance_name, genre, venue_name, best_rank, best_rank_date,\n       last_rank, last_rank - best_rank AS drop_from_peak, days_on_chart\nFROM gold_culture_booking_curve\nWHERE last_rank - best_rank >= :min_drop\nORDER BY drop_from_peak DESC, best_rank ASC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_drop": 5,
+     "n": 10
+    },
+    {
+     "min_drop": 10,
+     "n": 5
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    5
+   ],
+   "insight_sample_ko": "'Stray Kids World Tour: RUN IT [서울]'은 7월 4일 최고 1위를 찍은 뒤 최근 49위로 48계단 하락, 정점 대비 낙폭이 가장 컸다.",
+   "composition_idiom": "임계값(:min_drop)",
+   "table": "gold_culture_booking_curve",
+   "product_id": "culture_booking_curve",
+   "real_rows_by_combo": [
+    10,
+    5
+   ]
+  },
+  {
+   "pattern_id": "slow_burners",
+   "question_ko": "뒤늦게 입소문이 나 한참 만에 정점에 오른 슬로우버너 공연은?",
+   "axes": "필터(days_to_peak>=min, best_rank<=top) — days_to_peak DESC",
+   "sql": "-- :min_peak_days=10, :top=20, :n=10\nSELECT performance_name, genre, venue_name, days_to_peak, best_rank,\n       best_rank_date, days_on_chart\nFROM gold_culture_booking_curve\nWHERE days_to_peak >= :min_peak_days AND best_rank <= :top\nORDER BY days_to_peak DESC, best_rank ASC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_peak_days": 10,
+     "top": 20,
+     "n": 10
+    },
+    {
+     "min_peak_days": 5,
+     "top": 30,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "'디어 에반 핸슨 (Musical Dear Evan Hansen) [서울]'은 첫 등장 40일 만인 8월 8일에야 최고 9위에 올라, 뒤늦게 정점을 찍은 슬로우버너였다.",
+   "composition_idiom": "임계값(:min_peak_days/:top)",
+   "table": "gold_culture_booking_curve",
+   "product_id": "culture_booking_curve",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "venue_leaderboard",
+   "question_ko": "예매 성적 좋은 공연이 자주 열리는 공연장은? (공연장별 실적)",
+   "axes": "공연장 랭킹 — 집계 MIN(best_rank) ASC, 최소 공연수 HAVING",
+   "sql": "-- :min_shows=2, :n=10\nSELECT venue_name, COUNT(*) AS shows,\n       MIN(best_rank) AS top_rank,\n       ROUND(AVG(best_rank), 1) AS avg_best_rank,\n       ROUND(AVG(days_on_chart), 1) AS avg_days_on_chart\nFROM gold_culture_booking_curve\nGROUP BY venue_name\nHAVING COUNT(*) >= :min_shows\nORDER BY top_rank ASC, avg_best_rank ASC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_shows": 2,
+     "n": 10
+    },
+    {
+     "min_shows": 3,
+     "n": 5
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    5
+   ],
+   "insight_sample_ko": "'올림픽공원 KSPO DOME(체조경기장)'은 차트 진입작 8편으로 최고 1위, 평균 최고순위 11.1위·평균 체류 20.6일로 예매 강세 공연장 1위였다.",
+   "composition_idiom": "임계값(HAVING :min_shows)",
+   "table": "gold_culture_booking_curve",
+   "product_id": "culture_booking_curve",
+   "real_rows_by_combo": [
+    10,
+    5
+   ]
+  },
+  {
+   "pattern_id": "genre_summary",
+   "question_ko": "장르별 예매 차트 성적 요약(작품 수·평균 최고순위·평균 체류일·평균 정점 도달일)은?",
+   "axes": "장르 분포 — 집계, shows DESC / avg_best_rank ASC",
+   "sql": "-- :n=10\nSELECT genre, COUNT(*) AS shows,\n       MIN(best_rank) AS top_rank,\n       ROUND(AVG(best_rank), 1) AS avg_best_rank,\n       ROUND(AVG(days_on_chart), 1) AS avg_days_on_chart,\n       ROUND(AVG(days_to_peak), 1) AS avg_days_to_peak\nFROM gold_culture_booking_curve\nGROUP BY genre\nORDER BY shows DESC, avg_best_rank ASC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "n": 10
+    },
+    {
+     "n": 3
+    }
+   ],
+   "rows_by_combo": [
+    7,
+    3
+   ],
+   "insight_sample_ko": "'대중음악'이 차트 진입 52편으로 가장 많고, 평균 최고순위 22.6위·평균 체류 16.9일·평균 정점 도달 6.8일이었다.",
+   "composition_idiom": null,
+   "table": "gold_culture_booking_curve",
+   "product_id": "culture_booking_curve",
+   "real_rows_by_combo": [
+    7,
+    3
+   ]
+  },
+  {
+   "pattern_id": "pre_open_anticipation",
+   "question_ko": "아직 개막 전인데 이미 예매 순위 상위에 오른 기대작은?",
+   "axes": "필터(event_start_date > today, best_rank<=top) — best_rank ASC",
+   "sql": "-- :today=2026-08-09, :top=30, :n=10\nSELECT performance_name, genre, venue_name, event_start_date,\n       best_rank, best_rank_date, days_on_chart\nFROM gold_culture_booking_curve\nWHERE event_start_date > :today AND best_rank <= :top\nORDER BY best_rank ASC, event_start_date ASC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "today": "2026-08-09",
+     "top": 30,
+     "n": 10
+    },
+    {
+     "today": "2026-08-01",
+     "top": 20,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "개막(9월 18일) 전인데도 'NCT 127 5TH TOUR, NEO CITY: THE REDLINE [서울]'이 이미 최고 2위(8월 8일)에 올라 개막 전 기대작 1위였다.",
+   "composition_idiom": "기간 창(:today 이후)",
+   "table": "gold_culture_booking_curve",
+   "product_id": "culture_booking_curve",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "currently_running",
+   "question_ko": "지금 공연 중이면서 예매 순위에도 걸려 있는(지금 볼 수 있는) 작품은?",
+   "axes": "필터(event_start<=today<=event_end) — best_rank ASC",
+   "sql": "-- :today=2026-08-09, :n=10\nSELECT performance_name, genre, venue_name, event_start_date, event_end_date,\n       best_rank, last_rank, days_on_chart\nFROM gold_culture_booking_curve\nWHERE event_start_date <= :today AND event_end_date >= :today\nORDER BY best_rank ASC, last_rank ASC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "today": "2026-08-09",
+     "n": 10
+    },
+    {
+     "today": "2026-07-20",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "공연 중(7/10~10/18)인 뮤지컬 '드라큘라 [서울]'은 최고·최근 순위가 모두 1위, 차트 41일째로 지금 볼 수 있는 최상위작이었다.",
+   "composition_idiom": "기간 겹침(:today)",
+   "table": "gold_culture_booking_curve",
+   "product_id": "culture_booking_curve",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "flex_ranking",
+   "question_ko": "장르(전체/특정)를 골라 원하는 지표·정렬로 예매 차트 상위작을 보고 싶다",
+   "axes": "랭킹 — 차원/지표/정렬 스위치 + 장르 센티널 (steady_sellers 상위호환)",
+   "sql": "-- :genre=ALL, :metric=best_rank, :dir=asc, :n=10\nSELECT performance_name, genre, venue_name,\n       best_rank, days_on_chart, days_to_peak, first_rank, last_rank\nFROM gold_culture_booking_curve\nWHERE (:genre = 'ALL' OR genre = :genre)\nORDER BY\n  CASE :metric WHEN 'best_rank' THEN best_rank\n               WHEN 'days_on_chart' THEN days_on_chart\n               WHEN 'days_to_peak' THEN days_to_peak\n               WHEN 'last_rank' THEN last_rank END\n  * CASE WHEN :dir = 'asc' THEN 1 ELSE -1 END\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "genre": "ALL",
+     "metric": "best_rank",
+     "dir": "asc",
+     "n": 10
+    },
+    {
+     "genre": "뮤지컬",
+     "metric": "days_on_chart",
+     "dir": "desc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "전체 장르에서 최고순위 기준 1위는 뮤지컬 '드라큘라 [서울]'(최고 1위, 차트 41일, 첫 3위→최근 1위)였다.",
+   "composition_idiom": "차원/지표/정렬 스위치 + 센티널(:genre=ALL)",
+   "table": "gold_culture_booking_curve",
+   "product_id": "culture_booking_curve",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "perf_rank_history",
+   "question_ko": "이 공연의 예매 순위가 그동안 어떻게 움직였나?",
+   "axes": "시계열 — 특정 공연 필터, snapshot_date ASC 궤적",
+   "sql": "-- :perf=엘리자벳, :from=2026-07-25, :to=2026-08-08, :n=30\nSELECT snapshot_date, rank_no, rank_delta_3d, days_on_chart, momentum_status\nFROM gold_culture_boxoffice_daily\nWHERE performance_name = :perf AND snapshot_date BETWEEN :from AND :to\nORDER BY snapshot_date ASC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "perf": "엘리자벳",
+     "from": "2026-07-25",
+     "to": "2026-08-08",
+     "n": 30
+    },
+    {
+     "perf": "드라큘라 [서울]",
+     "from": "2026-06-29",
+     "to": "2026-08-08",
+     "n": 41
+    }
+   ],
+   "rows_by_combo": [
+    15,
+    41
+   ],
+   "insight_sample_ko": "엘리자벳은 7/25~8/8 15개 스냅샷에 걸쳐 추적되며, 7/25 기준 6위(관람 25일차, 모멘텀 falling)에서 출발한다.",
+   "composition_idiom": "기간 창(WHERE BETWEEN)",
+   "table": "gold_culture_boxoffice_daily",
+   "product_id": "culture_boxoffice_daily",
+   "real_rows_by_combo": [
+    15,
+    41
+   ]
+  },
+  {
+   "pattern_id": "rank_movers",
+   "question_ko": "최근 3일간 예매 순위가 가장 크게 뛴(또는 떨어진) 공연은?",
+   "axes": "최신 스냅샷 랭킹 — rank_delta_3d 정렬 방향 스위치(급등/급락)",
+   "sql": "-- :dir=desc, :n=10\nSELECT rank_no, performance_name, genre, venue_name, rank_prev_3d, rank_delta_3d\nFROM gold_culture_boxoffice_daily\nWHERE snapshot_date = (SELECT MAX(snapshot_date) FROM gold_culture_boxoffice_daily)\n  AND rank_delta_3d IS NOT NULL\nORDER BY CASE WHEN :dir='desc' THEN rank_delta_3d END DESC,\n         CASE WHEN :dir='asc' THEN rank_delta_3d END ASC,\n         rank_no ASC\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "subquery",
+    "filter_null",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "dir": "asc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "최신 스냅샷(8/8) 기준 순위가 가장 크게 오른 공연은 aespa LIVE TOUR -SYNK: COMPLaeXITY-(대중음악, 고척스카이돔)로 3일 전 35위에서 22위로 +13 상승했다.",
+   "composition_idiom": "정렬 방향 스위치",
+   "table": "gold_culture_boxoffice_daily",
+   "product_id": "culture_boxoffice_daily",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "genre_share_on_date",
+   "question_ko": "이 날짜 예매 상위권은 어떤 장르가 얼마나 차지했나?",
+   "axes": "분포 — 특정 스냅샷 장르별 편수·점유율",
+   "sql": "-- :date=2026-08-08, :n=10\nSELECT genre,\n       COUNT(*) AS shows,\n       ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS share_pct,\n       MIN(rank_no) AS best_rank\nFROM gold_culture_boxoffice_daily\nWHERE snapshot_date = :date\nGROUP BY genre\nORDER BY shows DESC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "window",
+    "sort"
+   ],
+   "combos": [
+    {
+     "date": "2026-08-08",
+     "n": 10
+    },
+    {
+     "date": "2026-07-30",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    6,
+    6
+   ],
+   "insight_sample_ko": "8/8 상위 50편 중 대중음악이 22편(44.0%)으로 최다이며, 이 장르의 최고 순위는 2위였다.",
+   "composition_idiom": null,
+   "table": "gold_culture_boxoffice_daily",
+   "product_id": "culture_boxoffice_daily",
+   "real_rows_by_combo": [
+    6,
+    6
+   ]
+  },
+  {
+   "pattern_id": "chart_presence_by_dim",
+   "question_ko": "기간 동안 예매 상위권에 이름을 가장 많이 올린 공연장/자치구/장르는?",
+   "axes": "차원 스위치(venue/gu/genre) — 기간 합산 차트 슬롯수 랭킹",
+   "sql": "-- :dim=venue, :from=2026-08-01, :to=2026-08-08, :n=10\nSELECT CASE :dim WHEN 'gu' THEN gu WHEN 'genre' THEN genre ELSE venue_name END AS dim_value,\n       COUNT(*) AS chart_slots,\n       COUNT(DISTINCT performance_id) AS shows,\n       MIN(rank_no) AS best_rank\nFROM gold_culture_boxoffice_daily\nWHERE snapshot_date BETWEEN :from AND :to\nGROUP BY dim_value\nHAVING dim_value IS NOT NULL\nORDER BY chart_slots DESC, best_rank ASC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_range",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dim": "venue",
+     "from": "2026-08-01",
+     "to": "2026-08-08",
+     "n": 10
+    },
+    {
+     "dim": "gu",
+     "from": "2026-08-01",
+     "to": "2026-08-08",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "8/1~8/8 동안 올림픽공원 KSPO DOME(체조경기장)이 27개 차트 슬롯(공연 7편, 최고 2위)으로 상위권에 가장 자주 올랐다.",
+   "composition_idiom": "차원 스위치",
+   "table": "gold_culture_boxoffice_daily",
+   "product_id": "culture_boxoffice_daily",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "consistent_chart_leaders",
+   "question_ko": "최근 기간 동안 꾸준히 상위권(K위 이내)을 지킨 공연은?",
+   "axes": "랭킹 — 기간 내 top-K 진입 일수 DESC, 평균 순위 tie-break",
+   "sql": "-- :from=2026-07-25, :to=2026-08-08, :topk=10, :min_days=5, :n=10\nSELECT performance_name, genre,\n       COUNT(*) AS days_in_top,\n       MIN(rank_no) AS best_rank,\n       ROUND(AVG(rank_no), 1) AS avg_rank\nFROM gold_culture_boxoffice_daily\nWHERE snapshot_date BETWEEN :from AND :to AND rank_no <= :topk\nGROUP BY performance_id, performance_name, genre\nHAVING days_in_top >= :min_days\nORDER BY days_in_top DESC, avg_rank ASC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_range",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from": "2026-07-25",
+     "to": "2026-08-08",
+     "topk": 10,
+     "min_days": 5,
+     "n": 10
+    },
+    {
+     "from": "2026-06-29",
+     "to": "2026-08-08",
+     "topk": 5,
+     "min_days": 10,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    7
+   ],
+   "insight_sample_ko": "7/25~8/8 15일 내내 top10을 지킨 드라큘라 [서울](뮤지컬)이 최고 1위·평균 1.3위로 가장 꾸준했다.",
+   "composition_idiom": "임계값(HAVING)",
+   "table": "gold_culture_boxoffice_daily",
+   "product_id": "culture_boxoffice_daily",
+   "real_rows_by_combo": [
+    10,
+    7
+   ]
+  },
+  {
+   "pattern_id": "ending_soon_still_ranked",
+   "question_ko": "곧 끝나는데 아직 예매 상위권인, 놓치면 아쉬운 '막차' 공연은?",
+   "axes": "최신 스냅샷 필터 — event_end_date 임박 윈도우, 종료일 ASC",
+   "sql": "-- :today=2026-08-08, :until=2026-08-23, :n=10\nSELECT rank_no, performance_name, genre, venue_name, event_end_date, days_on_chart\nFROM gold_culture_boxoffice_daily\nWHERE snapshot_date = (SELECT MAX(snapshot_date) FROM gold_culture_boxoffice_daily)\n  AND event_end_date BETWEEN :today AND :until\nORDER BY event_end_date ASC, rank_no ASC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "subquery",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "today": "2026-08-08",
+     "until": "2026-08-23",
+     "n": 10
+    },
+    {
+     "today": "2026-08-08",
+     "until": "2026-09-06",
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    15
+   ],
+   "insight_sample_ko": "8/8~8/23 종료 예정 중 aespa LIVE TOUR -SYNK: COMPLaeXITY-(대중음악, 고척스카이돔, 8/8 종료)가 22위로 아직 상위권에 남아 있는 막차 공연이다.",
+   "composition_idiom": "기간 창(event_end_date BETWEEN)",
+   "table": "gold_culture_boxoffice_daily",
+   "product_id": "culture_boxoffice_daily",
+   "real_rows_by_combo": [
+    10,
+    15
+   ]
+  },
+  {
+   "pattern_id": "multi_genre_top",
+   "question_ko": "이 장르들(예: 뮤지컬·연극) 중에서 지금 예매 상위 공연은?",
+   "axes": "최신 스냅샷 필터(다중 장르 IN) — rank_no ASC",
+   "sql": "-- :genres=[\"뮤지컬\",\"연극\"], :n=10\nSELECT rank_no, performance_name, genre, venue_name, days_on_chart\nFROM gold_culture_boxoffice_daily\nWHERE snapshot_date = (SELECT MAX(snapshot_date) FROM gold_culture_boxoffice_daily)\n  AND genre IN (SELECT value FROM json_each(:genres))\nORDER BY rank_no ASC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "subquery",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "genres": "[\"뮤지컬\",\"연극\"]",
+     "n": 10
+    },
+    {
+     "genres": "[\"대중음악\"]",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "뮤지컬·연극 중 최신 스냅샷(8/8) 1위는 드라큘라 [서울](뮤지컬, LG아트센터 서울 LG SIGNATURE 홀, 관람 41일차)이다.",
+   "composition_idiom": "배열 IN(json_each)",
+   "table": "gold_culture_boxoffice_daily",
+   "product_id": "culture_boxoffice_daily",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "type_leaderboard",
+   "question_ko": "어떤 종류(전시·공연·축제 등)의 문화행사가 달력을 가장 많이 채우나?",
+   "axes": "종류 분포 랭킹 — busiest_type별 메인 일수·누적 건수 DESC (기간·구 센티널)",
+   "sql": "-- :gu=ALL, :from=2026-08-01, :to=2027-02-28, :n=10\nSELECT busiest_type,\n       COUNT(*) AS lead_days,\n       SUM(busiest_type_count) AS type_events,\n       ROUND(AVG(concentration), 3) AS avg_conc\nFROM gold_culture_calendar_density\nWHERE event_date BETWEEN :from AND :to\n  AND (:gu = 'ALL' OR gu = :gu)\nGROUP BY busiest_type\nORDER BY type_events DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "ALL",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 10
+    },
+    {
+     "gu": "중구",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 5
+    }
+   ],
+   "rows_by_combo": [
+    4,
+    4
+   ],
+   "insight_sample_ko": "2026-08~2027-02 서울 전역에서 'event' 종류가 145일 동안 그날의 메인이었고 해당 종류 누적 1,529건으로 1위(평균 집중도 0.584).",
+   "composition_idiom": "센티널(전체) :gu='ALL'",
+   "table": "gold_culture_calendar_density",
+   "product_id": "culture_calendar_density",
+   "real_rows_by_combo": [
+    5,
+    4
+   ]
+  },
+  {
+   "pattern_id": "gu_leaderboard_by_metric",
+   "question_ko": "자치구를 원하는 기준(총량·일평균·종류 다양성·집중도)으로 줄세우면 어디가 상위인가?",
+   "axes": "구 랭킹 — 지표 스위치(events/per_day/diversity/concentration) DESC",
+   "sql": "-- :metric=events, :from=2026-08-01, :to=2027-02-28, :n=15\nSELECT gu,\n       SUM(total_events) AS events,\n       ROUND(SUM(total_events) * 1.0 / COUNT(DISTINCT event_date), 1) AS per_day,\n       ROUND(AVG(distinct_types), 2) AS avg_types,\n       ROUND(AVG(concentration), 3) AS avg_conc\nFROM gold_culture_calendar_density\nWHERE event_date BETWEEN :from AND :to\nGROUP BY gu\nORDER BY CASE :metric\n           WHEN 'events' THEN SUM(total_events)\n           WHEN 'per_day' THEN SUM(total_events) * 1.0 / COUNT(DISTINCT event_date)\n           WHEN 'diversity' THEN AVG(distinct_types)\n           WHEN 'concentration' THEN AVG(concentration)\n         END DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "metric": "events",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 15
+    },
+    {
+     "metric": "diversity",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "총량 기준 1위는 중구로 기간 누적 4,338건(하루 평균 40.5건), 하루 평균 종류 수 3.59, 평균 집중도 0.548.",
+   "composition_idiom": "지표 스위치(ORDER BY CASE :metric)",
+   "table": "gold_culture_calendar_density",
+   "product_id": "culture_calendar_density",
+   "real_rows_by_combo": [
+    15,
+    15
+   ]
+  },
+  {
+   "pattern_id": "type_lead_by_gu",
+   "question_ko": "특정 종류(공연·축제 등)가 주로 어느 자치구에서 그날의 메인이 되나?",
+   "axes": "구 랭킹 — busiest_type 고정 후 메인 일수 DESC (종류×구 교차)",
+   "sql": "-- :type=performance, :from=2026-08-01, :to=2027-02-28, :n=10\nSELECT gu,\n       COUNT(*) AS lead_days,\n       SUM(busiest_type_count) AS type_events,\n       ROUND(AVG(concentration), 3) AS avg_conc\nFROM gold_culture_calendar_density\nWHERE busiest_type = :type AND event_date BETWEEN :from AND :to\nGROUP BY gu\nORDER BY lead_days DESC, type_events DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "type": "performance",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 10
+    },
+    {
+     "type": "event",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    6,
+    8
+   ],
+   "insight_sample_ko": "공연(performance)이 메인인 날이 가장 많은 구는 서초구로 기간 중 39일, 누적 183건(평균 집중도 0.496).",
+   "composition_idiom": null,
+   "table": "gold_culture_calendar_density",
+   "product_id": "culture_calendar_density",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "variety_or_focus_days",
+   "question_ko": "이 구에서 행사 종류가 다양하게 고루 열리는 날(또는 한 종류로 쏠린 날)은 언제인가?",
+   "axes": "단면 랭킹 — concentration 정렬 방향 스위치(asc=다양/desc=쏠림), total_events 임계값",
+   "sql": "-- :gu=중구, :from=2026-08-01, :to=2027-02-28, :dir=asc, :min_events=5, :n=10\nSELECT event_date, total_events, distinct_types, busiest_type, concentration\nFROM gold_culture_calendar_density\nWHERE gu = :gu AND event_date BETWEEN :from AND :to\n  AND total_events >= :min_events\nORDER BY CASE WHEN :dir = 'asc' THEN concentration END ASC,\n         CASE WHEN :dir = 'desc' THEN concentration END DESC,\n         total_events DESC\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "중구",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "dir": "asc",
+     "min_events": 5,
+     "n": 10
+    },
+    {
+     "gu": "중구",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "dir": "desc",
+     "min_events": 5,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "중구에서 가장 고르게 분산된 날은 2027-01-03로 총 9건이 3종류에 걸쳐 열려 집중도 0.333(공연이 최다).",
+   "composition_idiom": "정렬 방향 스위치(:dir) + 임계값(:min_events)",
+   "table": "gold_culture_calendar_density",
+   "product_id": "culture_calendar_density",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "days_by_type_selection",
+   "question_ko": "이 구에서 내가 고른 종류들(예: 행사·공연)이 그날의 메인인 날들을 시간순으로 보여줘.",
+   "axes": "다중값 필터 — busiest_type IN(배열) + 기간, event_date ASC",
+   "sql": "-- :gu=중구, :types=[\"event\",\"performance\"], :from=2026-08-01, :to=2027-02-28, :n=15\nSELECT event_date, busiest_type, busiest_type_count, total_events, concentration\nFROM gold_culture_calendar_density\nWHERE gu = :gu\n  AND event_date BETWEEN :from AND :to\n  AND busiest_type IN (SELECT value FROM json_each(:types))\nORDER BY event_date LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "중구",
+     "types": "[\"event\",\"performance\"]",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 15
+    },
+    {
+     "gu": "서초구",
+     "types": "[\"performance\"]",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    15,
+    15
+   ],
+   "insight_sample_ko": "중구에서 행사·공연이 메인인 가장 이른 날은 2026-08-03로 event가 19건(총 31건, 집중도 0.613).",
+   "composition_idiom": "배열 IN(json_each) 다중 선택",
+   "table": "gold_culture_calendar_density",
+   "product_id": "culture_calendar_density",
+   "real_rows_by_combo": [
+    15,
+    15
+   ]
+  },
+  {
+   "pattern_id": "city_daily_density",
+   "question_ko": "서울 전체로 보면 어느 날에 문화행사가 가장 몰리나(도시 전역 일자별 밀도)?",
+   "axes": "일자 집계 랭킹 — 전 구 합산 total_events DESC",
+   "sql": "-- :from=2026-08-01, :to=2027-02-28, :n=31\nSELECT event_date,\n       SUM(total_events) AS events,\n       COUNT(DISTINCT gu) AS active_gus,\n       SUM(busiest_type_count) AS lead_events\nFROM gold_culture_calendar_density\nWHERE event_date BETWEEN :from AND :to\nGROUP BY event_date\nORDER BY events DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 31
+    },
+    {
+     "from": "2026-08-01",
+     "to": "2026-09-30",
+     "n": 31
+    }
+   ],
+   "rows_by_combo": [
+    31,
+    31
+   ],
+   "insight_sample_ko": "기간 중 서울 전역 합산이 가장 큰 날은 2026-08-08로 총 268건(메인 종류 126건).",
+   "composition_idiom": null,
+   "table": "gold_culture_calendar_density",
+   "product_id": "culture_calendar_density",
+   "real_rows_by_combo": [
+    31,
+    31
+   ]
+  },
+  {
+   "pattern_id": "weekday_density_profile",
+   "question_ko": "요일별로 보면 문화행사가 주로 언제 몰리나(주중 vs 주말)?",
+   "axes": "요일 분포 — strftime 파생 요일별 합산·평균 DESC (구 센티널)",
+   "sql": "-- :gu=ALL, :from=2026-08-01, :to=2027-02-28, :n=7\nSELECT CAST(strftime('%w', event_date) AS INTEGER) AS dow,\n       COUNT(*) AS day_rows,\n       SUM(total_events) AS events,\n       ROUND(AVG(total_events), 1) AS avg_events,\n       ROUND(AVG(concentration), 3) AS avg_conc\nFROM gold_culture_calendar_density\nWHERE event_date BETWEEN :from AND :to\n  AND (:gu = 'ALL' OR gu = :gu)\nGROUP BY dow\nORDER BY events DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "ALL",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 7
+    },
+    {
+     "gu": "중구",
+     "from": "2026-08-01",
+     "to": "2027-02-28",
+     "n": 7
+    }
+   ],
+   "rows_by_combo": [
+    7,
+    7
+   ],
+   "insight_sample_ko": "서울 전역 기준 행사가 가장 몰리는 요일은 토요일(dow=6)로 기간 합산 930건, 하루 평균 22.1건(0=일~6=토).",
+   "composition_idiom": "센티널(전체) :gu='ALL' + strftime 파생 요일",
+   "table": "gold_culture_calendar_density",
+   "product_id": "culture_calendar_density",
+   "real_rows_by_combo": [
+    7,
+    7
+   ]
+  },
+  {
+   "pattern_id": "gu_dine_ranking",
+   "question_ko": "행사 관람 후 외식하기에 자치구 전체로 보면 어디가 가장 좋은가?",
+   "axes": "구 랭킹(집계) — has_dining 동 묶어 AVG(dine_around_score) DESC, 동수 임계",
+   "sql": "-- :min_dongs=5, :n=10\nSELECT gu, COUNT(*) AS dongs, SUM(events_upcoming_90d) AS events,\n       SUM(dining_active_cnt) AS dining, ROUND(AVG(dine_around_score),3) AS avg_score\nFROM gold_culture_dine_around\nWHERE has_dining_data = 1\nGROUP BY gu HAVING COUNT(*) >= :min_dongs\nORDER BY avg_score DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_dongs": 5,
+     "n": 10
+    },
+    {
+     "min_dongs": 1,
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    15
+   ],
+   "insight_sample_ko": "행정동 5개 이상 자치구 중 중구가 평균 dine-around 점수 0.535로 1위(동 10개·예정행사 1,837건·활성식당 10,184곳). 동 3개뿐인 소형 구를 임계값으로 걸러 대표성을 확보한 순위.",
+   "composition_idiom": "임계값(HAVING min_dongs)",
+   "table": "gold_culture_dine_around",
+   "product_id": "culture_dine_around",
+   "real_rows_by_combo": [
+    10,
+    15
+   ]
+  },
+  {
+   "pattern_id": "dining_rich_culture_poor",
+   "question_ko": "식당은 넘치는데 예정 문화행사가 거의 없어 유동 인구 유인이 아쉬운 동네는?",
+   "axes": "갭 탐지(역방향) — dining_stock_pctl 상위 ∩ culture_events_pctl 하위",
+   "sql": "-- :dining_min=0.7, :culture_max=0.3, :n=10\nSELECT admin_dong, gu, dining_active_cnt, dining_opened_365d,\n       dining_stock_pctl, culture_events_pctl\nFROM gold_culture_dine_around\nWHERE has_dining_data = 1\n  AND dining_stock_pctl >= :dining_min\n  AND culture_events_pctl <= :culture_max\nORDER BY dining_stock_pctl DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dining_min": 0.7,
+     "culture_max": 0.3,
+     "n": 10
+    },
+    {
+     "dining_min": 0.6,
+     "culture_max": 0.4,
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    15
+   ],
+   "insight_sample_ko": "보라매동(관악구)은 식당 3,451곳(외식 재고 상위 98.6%)이지만 예정 문화행사 백분위가 0으로, 외식 인프라 대비 행사 유인이 사실상 없다. 기존 culture_rich_dining_poor(행사 많고 식당 부족)의 정반대 축.",
+   "composition_idiom": "이중 임계값(dining_stock_pctl 하한 · culture_events_pctl 상한)",
+   "table": "gold_culture_dine_around",
+   "product_id": "culture_dine_around",
+   "real_rows_by_combo": [
+    10,
+    15
+   ]
+  },
+  {
+   "pattern_id": "emerging_dining_dongs",
+   "question_ko": "예정 행사가 많은 동네 중 최근 1년 새 식당이 가장 활발히 생기는(뜨는) 상권은?",
+   "axes": "동 랭킹 — 행사 임계 하 dining_opened_365d DESC (신선도)",
+   "sql": "-- :min_events=20, :n=10\nSELECT admin_dong, gu, events_upcoming_90d, dining_active_cnt, dining_opened_365d\nFROM gold_culture_dine_around\nWHERE has_dining_data = 1 AND events_upcoming_90d >= :min_events\nORDER BY dining_opened_365d DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_events": 20,
+     "n": 10
+    },
+    {
+     "min_events": 5,
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    15
+   ],
+   "insight_sample_ko": "예정행사 20건 이상 동네 중 목1동(양천구)이 최근 1년 신규 개업 814곳으로 가장 활발(활성 2,004곳·예정행사 49건). 재고(dining_active_cnt)가 아닌 개업 신선도로 본 성장 상권.",
+   "composition_idiom": "임계값(min_events)",
+   "table": "gold_culture_dine_around",
+   "product_id": "culture_dine_around",
+   "real_rows_by_combo": [
+    10,
+    15
+   ]
+  },
+  {
+   "pattern_id": "dining_turnover_ratio",
+   "question_ko": "외식 상권 회전(신규개업/현재영업 비율)이 가장 빠른 동네는?",
+   "axes": "동 랭킹 — 비율 dining_opened_365d/dining_active_cnt DESC (분모 임계로 안정화)",
+   "sql": "-- :min_active=200, :n=10\nSELECT admin_dong, gu, dining_active_cnt, dining_opened_365d,\n       ROUND(dining_opened_365d * 1.0 / dining_active_cnt, 3) AS new_ratio\nFROM gold_culture_dine_around\nWHERE has_dining_data = 1 AND dining_active_cnt >= :min_active\nORDER BY new_ratio DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_active": 200,
+     "n": 10
+    },
+    {
+     "min_active": 100,
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    15
+   ],
+   "insight_sample_ko": "활성 식당 200곳 이상 동네 중 압구정동(강남구)의 신규개업/활성 비율이 1.43으로 최고(활성 411·최근1년 개업 589) — 개·폐업 회전이 매우 빠른 상권. 절대량이 아닌 비율 축이라 규모가 다른 동네를 공평 비교.",
+   "composition_idiom": "비율 파생 + 임계값(min_active 분모 안정화)",
+   "table": "gold_culture_dine_around",
+   "product_id": "culture_dine_around",
+   "real_rows_by_combo": [
+    10,
+    15
+   ]
+  },
+  {
+   "pattern_id": "flexible_dong_ranking",
+   "question_ko": "동네를 원하는 지표(예정행사·공연·식당수·신규개업·종합점수)로 상위/하위 정렬해 보고 싶다.",
+   "axes": "동 랭킹(스위치) — 지표·정렬방향 가변, NULL 제외",
+   "sql": "-- :metric=opened, :dir=desc, :n=10\nSELECT admin_dong, gu,\n       (CASE :metric WHEN 'events' THEN events_upcoming_90d\n                     WHEN 'performances' THEN performances_upcoming_90d\n                     WHEN 'dining' THEN dining_active_cnt\n                     WHEN 'opened' THEN dining_opened_365d\n                     ELSE dine_around_score END) AS m\nFROM gold_culture_dine_around\nWHERE (CASE :metric WHEN 'events' THEN events_upcoming_90d\n                    WHEN 'performances' THEN performances_upcoming_90d\n                    WHEN 'dining' THEN dining_active_cnt\n                    WHEN 'opened' THEN dining_opened_365d\n                    ELSE dine_around_score END) IS NOT NULL\nORDER BY CASE WHEN :dir='asc' THEN m END ASC,\n         CASE WHEN :dir='desc' THEN m END DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_null",
+    "sort"
+   ],
+   "combos": [
+    {
+     "metric": "opened",
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "metric": "score",
+     "dir": "desc",
+     "n": 5
+    },
+    {
+     "metric": "events",
+     "dir": "asc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    5,
+    10
+   ],
+   "insight_sample_ko": "지표=신규개업·내림차순이면 목1동(양천구)이 최근 1년 814곳으로 1위; 지표=종합점수면 종로1·2·3·4가동(종로구)이 0.98로 최상. 고정 hotspots(점수 DESC)를 지표·방향 스위치로 일반화한 상위호환.",
+   "composition_idiom": "지표 스위치 + 정렬 방향 스위치 + filter_null",
+   "table": "gold_culture_dine_around",
+   "product_id": "culture_dine_around",
+   "real_rows_by_combo": [
+    10,
+    5,
+    10
+   ]
+  },
+  {
+   "pattern_id": "gu_multi_compare",
+   "question_ko": "관심 자치구 몇 곳(예: 마포·성동·용산)만 놓고 외식 나들이 좋은 동네를 한 번에 비교하려면?",
+   "axes": "다중 구 교차 비교 — dine_around_score DESC",
+   "sql": "-- :gus=[\"마포구\",\"성동구\",\"용산구\"], :n=10\nSELECT admin_dong, gu, events_upcoming_90d, dining_active_cnt, dine_around_score\nFROM gold_culture_dine_around\nWHERE has_dining_data = 1\n  AND gu IN (SELECT value FROM json_each(:gus))\nORDER BY dine_around_score DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gus": "[\"마포구\",\"성동구\",\"용산구\"]",
+     "n": 10
+    },
+    {
+     "gus": "[\"강남구\",\"서초구\",\"송파구\"]",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "마포·성동·용산 중 서교동(마포구)이 dine-around 0.956으로 최상(예정행사 248건·활성식당 2,992곳). 단일 구만 보는 gu_dine_summary와 달리 임의 구 집합을 한 번에 순위화.",
+   "composition_idiom": "배열 IN json_each(다중 선택)",
+   "table": "gold_culture_dine_around",
+   "product_id": "culture_dine_around",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "score_distribution",
+   "question_ko": "동네들의 dine-around 종합점수는 어떻게 분포하나 — 최상위 밴드에 몇 개 동이 있나?",
+   "axes": "분포 — dine_around_score 밴드별 동 수·평균 예정행사 (구 센티널)",
+   "sql": "-- :gu=ALL, :n=10\nSELECT CASE WHEN dine_around_score >= 0.8 THEN '1_0.8-1.0'\n            WHEN dine_around_score >= 0.6 THEN '2_0.6-0.8'\n            WHEN dine_around_score >= 0.4 THEN '3_0.4-0.6'\n            WHEN dine_around_score >= 0.2 THEN '4_0.2-0.4'\n            ELSE '5_0.0-0.2' END AS score_band,\n       COUNT(*) AS dongs, ROUND(AVG(events_upcoming_90d),1) AS avg_events\nFROM gold_culture_dine_around\nWHERE has_dining_data = 1 AND (:gu = 'ALL' OR gu = :gu)\nGROUP BY score_band ORDER BY score_band LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "ALL",
+     "n": 10
+    },
+    {
+     "gu": "강남구",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    5,
+    4
+   ],
+   "insight_sample_ko": "외식 데이터 있는 219개 동 중 dine-around 0.8 이상 최상위 밴드에 28개 동이 속하며 이들의 평균 예정행사는 235.2건. 구 센티널로 특정 구(예: 강남구) 내부 분포로 좁혀 볼 수도 있음.",
+   "composition_idiom": "센티널(전체 ALL) + 분포 밴딩(CASE)",
+   "table": "gold_culture_dine_around",
+   "product_id": "culture_dine_around",
+   "real_rows_by_combo": [
+    5,
+    4
+   ]
+  },
+  {
+   "pattern_id": "weekend_lift_by_gu",
+   "question_ko": "주중 대비 주말에 유독 더 붐비는 자치구는? (나들이·상권 성격)",
+   "axes": "구 랭킹 — 조건부 집계 주말/주중 혼잡비(weekend_lift) DESC",
+   "sql": "-- :min_samples=200, :n=10\nSELECT gu,\n       ROUND(AVG(CASE WHEN day_of_week IN (6,7) THEN avg_congest_score END), 2) AS weekend_congest,\n       ROUND(AVG(CASE WHEN day_of_week BETWEEN 1 AND 5 THEN avg_congest_score END), 2) AS weekday_congest,\n       ROUND(AVG(CASE WHEN day_of_week IN (6,7) THEN avg_congest_score END)\n             / AVG(CASE WHEN day_of_week BETWEEN 1 AND 5 THEN avg_congest_score END), 3) AS weekend_lift\nFROM gold_culture_event_crowd\nGROUP BY gu\nHAVING SUM(crowd_samples) >= :min_samples\nORDER BY weekend_lift DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_samples": 200,
+     "n": 10
+    },
+    {
+     "min_samples": 20000,
+     "n": 24
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    15
+   ],
+   "insight_sample_ko": "광진구는 주말 평균 혼잡 1.69로 주중 1.25보다 1.35배 높아, 주중 대비 주말에 가장 붐비는 자치구였다.",
+   "composition_idiom": "조건부 집계(CASE 주말/주중) + 임계값(HAVING :min_samples)",
+   "table": "gold_culture_event_crowd",
+   "product_id": "culture_event_crowd",
+   "real_rows_by_combo": [
+    10,
+    15
+   ]
+  },
+  {
+   "pattern_id": "peak_slot_per_gu",
+   "question_ko": "자치구별로 한 주 중 가장 붐비는 시점(요일·시간)은 언제인가?",
+   "axes": "구별 argmax — 상관 서브쿼리로 gu당 최혼잡 슬롯 1개, avg_congest_score DESC",
+   "sql": "-- :n=24\nSELECT gu, day_of_week, hour_of_day, typical_congest, avg_congest_score, avg_ppltn\nFROM gold_culture_event_crowd e\nWHERE e.rowid = (SELECT x.rowid FROM gold_culture_event_crowd x\n                 WHERE x.gu = e.gu\n                 ORDER BY x.avg_congest_score DESC, x.avg_ppltn DESC LIMIT 1)\nORDER BY avg_congest_score DESC, avg_ppltn DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "subquery",
+    "sort"
+   ],
+   "combos": [
+    {
+     "n": 24
+    },
+    {
+     "n": 5
+    }
+   ],
+   "rows_by_combo": [
+    24,
+    5
+   ],
+   "insight_sample_ko": "은평구는 금요일(요일=5) 19시에 혼잡도 4.0('붐빔')·평균 10,419명으로 한 주 중 가장 붐비는 시점을 찍었다.",
+   "composition_idiom": null,
+   "table": "gold_culture_event_crowd",
+   "product_id": "culture_event_crowd",
+   "real_rows_by_combo": [
+    24,
+    5
+   ]
+  },
+  {
+   "pattern_id": "congest_mix_for_gu",
+   "question_ko": "이 구는 한 주 168시간 중 혼잡 등급(여유·보통·약간 붐빔·붐빔)이 각각 몇 시간이고 비율은?",
+   "axes": "단일 구 분포 — typical_congest 그룹 카운트 + 구성비 window",
+   "sql": "-- :gu=강남구, :n=10\nSELECT typical_congest,\n       COUNT(*) AS slots,\n       ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS pct,\n       ROUND(AVG(avg_ppltn)) AS mean_ppltn\nFROM gold_culture_event_crowd\nWHERE gu = :gu\nGROUP BY typical_congest\nORDER BY slots DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "window",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "강남구",
+     "n": 10
+    },
+    {
+     "gu": "종로구",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    3
+   ],
+   "insight_sample_ko": "강남구는 한 주 168시간 중 98시간(58.3%)이 '여유' 등급으로, 상주 인구는 많아도(해당 등급 평균 약 14,649명) 면적 대비로는 대체로 한산한 편이었다.",
+   "composition_idiom": "구성비 window(SUM(COUNT(*)) OVER())",
+   "table": "gold_culture_event_crowd",
+   "product_id": "culture_event_crowd",
+   "real_rows_by_combo": [
+    3,
+    3
+   ]
+  },
+  {
+   "pattern_id": "city_hourly_rhythm",
+   "question_ko": "서울 전체(전 자치구 평균)로 볼 때 하루 중 시간대별 혼잡 리듬은? (요일 지정 또는 전체)",
+   "axes": "시간대 분포 — 전 자치구 평균, day_of_week 센티널, hour_of_day 오름차순",
+   "sql": "-- :dow=ALL, :n=24\nSELECT hour_of_day,\n       ROUND(AVG(avg_congest_score), 2) AS congest,\n       ROUND(AVG(avg_ppltn)) AS mean_ppltn\nFROM gold_culture_event_crowd\nWHERE (:dow = 'ALL' OR day_of_week = :dow)\nGROUP BY hour_of_day\nORDER BY hour_of_day LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dow": "ALL",
+     "n": 24
+    },
+    {
+     "dow": 6,
+     "n": 24
+    }
+   ],
+   "rows_by_combo": [
+    24,
+    24
+   ],
+   "insight_sample_ko": "서울 전체 평균으로 0시(자정)는 혼잡 1.02·약 6,940명으로 하루의 한산한 기준선을 이뤘고, 시간대를 따라 낮 혼잡이 올라간다(시간 오름차순 출력).",
+   "composition_idiom": "센티널(:dow=ALL)",
+   "table": "gold_culture_event_crowd",
+   "product_id": "culture_event_crowd",
+   "real_rows_by_combo": [
+    24,
+    24
+   ]
+  },
+  {
+   "pattern_id": "compare_gu_at_slot",
+   "question_ko": "후보로 고른 여러 자치구를 특정 요일·시간의 혼잡도로 나란히 비교하고 싶다.",
+   "axes": "다중 구 단면 — json_each 배열 IN, 요일·시간 고정, avg_congest_score DESC",
+   "sql": "-- :gus=[\"강남구\",\"마포구\",\"종로구\"], :dow=6, :hour=20, :n=10\nSELECT gu, avg_ppltn, avg_congest_score, typical_congest, crowd_samples\nFROM gold_culture_event_crowd\nWHERE gu IN (SELECT value FROM json_each(:gus))\n  AND day_of_week = :dow AND hour_of_day = :hour\nORDER BY avg_congest_score DESC, avg_ppltn DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gus": "[\"강남구\",\"마포구\",\"종로구\"]",
+     "dow": 6,
+     "hour": 20,
+     "n": 10
+    },
+    {
+     "gus": "[\"구로구\",\"성동구\",\"강서구\"]",
+     "dow": 6,
+     "hour": 0,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    3
+   ],
+   "insight_sample_ko": "토요일(요일=6) 20시 기준 강남·마포·종로 중 마포구가 혼잡 2.5('약간 붐빔')·약 21,232명으로 가장 붐볐다.",
+   "composition_idiom": "배열 IN json_each(:gus)",
+   "table": "gold_culture_event_crowd",
+   "product_id": "culture_event_crowd",
+   "real_rows_by_combo": [
+    3,
+    3
+   ]
+  },
+  {
+   "pattern_id": "congest_spread_by_gu",
+   "question_ko": "시간대에 따라 붐빔 편차가 큰(사람이 확 몰리는) 구와 하루 종일 평탄한 구는?",
+   "axes": "구 랭킹 — MAX-MIN 혼잡 편차(congest_spread) DESC, 최소 표본 임계",
+   "sql": "-- :min_samples=200, :n=10\nSELECT gu,\n       ROUND(MAX(avg_congest_score) - MIN(avg_congest_score), 2) AS congest_spread,\n       MAX(avg_ppltn) AS peak_ppltn,\n       MIN(avg_ppltn) AS trough_ppltn,\n       ROUND(AVG(avg_congest_score), 2) AS mean_congest\nFROM gold_culture_event_crowd\nGROUP BY gu\nHAVING SUM(crowd_samples) >= :min_samples\nORDER BY congest_spread DESC, peak_ppltn DESC LIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "having",
+    "sort"
+   ],
+   "combos": [
+    {
+     "min_samples": 200,
+     "n": 10
+    },
+    {
+     "min_samples": 20000,
+     "n": 24
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    15
+   ],
+   "insight_sample_ko": "은평구는 시간대별 혼잡 편차가 3.0(최저 1.0~최고 4.0)으로 가장 커, 인구는 최저 3,250~최고 10,419명으로 붐빌 땐 확 몰리는 자치구였다.",
+   "composition_idiom": "임계값(HAVING :min_samples)",
+   "table": "gold_culture_event_crowd",
+   "product_id": "culture_event_crowd",
+   "real_rows_by_combo": [
+    10,
+    15
+   ]
+  },
+  {
+   "pattern_id": "gu_slots_ranked",
+   "question_ko": "이 구의 요일×시간 슬롯을 원하는 지표(혼잡/인구)와 정렬(한산순/붐빔순)로, 신뢰 표본 이상만 골라 랭킹하고 싶다.",
+   "axes": "단일 구 슬롯 랭킹 — 지표/정렬 스위치 + 표본 임계 (quiet_hours_in_gu 상위호환)",
+   "sql": "-- :gu=강남구, :min_samples=100, :metric=congest, :dir=desc, :n=10\nSELECT day_of_week, hour_of_day, typical_congest, avg_congest_score, avg_ppltn, crowd_samples\nFROM gold_culture_event_crowd\nWHERE gu = :gu AND crowd_samples >= :min_samples\nORDER BY\n  (CASE :metric WHEN 'ppltn' THEN avg_ppltn ELSE avg_congest_score END)\n  * CASE WHEN :dir = 'asc' THEN 1 ELSE -1 END\nLIMIT :n\n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gu": "강남구",
+     "metric": "congest",
+     "dir": "desc",
+     "min_samples": 100,
+     "n": 10
+    },
+    {
+     "gu": "마포구",
+     "metric": "ppltn",
+     "dir": "asc",
+     "min_samples": 50,
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "강남구에서 혼잡도 기준 가장 붐비는 슬롯은 화요일(요일=2) 13시로 혼잡 3.0('약간 붐빔')·평균 40,754명(표본 311)이었다.",
+   "composition_idiom": "지표/정렬 스위치(:metric/:dir) + 임계값(:min_samples)",
+   "table": "gold_culture_event_crowd",
+   "product_id": "culture_event_crowd",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "counts_by_dim",
+   "question_ko": "기간에 겹치는 행사 수를 구·동·장르·공연장·유형 중 원하는 기준으로 상위(또는 하위) N을 보여줘.",
+   "axes": "차원 랭킹 — 기간 겹침 COUNT 정렬(구/동/장르/공연장/유형 스위치, asc/desc)",
+   "sql": "-- :dim=gu, :from=2026-08-01, :to=2026-12-31, :dir=desc, :n=10\nSELECT CASE :dim WHEN 'admin_dong' THEN admin_dong\n                WHEN 'category' THEN category\n                WHEN 'venue_name' THEN venue_name\n                WHEN 'event_type' THEN event_type\n                ELSE gu END AS dim_value,\n       COUNT(*) AS events,\n       SUM(CASE WHEN is_free='무료' THEN 1 ELSE 0 END) AS free_events\nFROM gold_culture_event_schedule\nWHERE event_start_date <= :to AND event_end_date >= :from\nGROUP BY CASE :dim WHEN 'admin_dong' THEN admin_dong\n                   WHEN 'category' THEN category\n                   WHEN 'venue_name' THEN venue_name\n                   WHEN 'event_type' THEN event_type\n                   ELSE gu END\nORDER BY CASE WHEN :dir='asc' THEN events END ASC,\n         CASE WHEN :dir='desc' THEN events END DESC\nLIMIT :n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "dim": "gu",
+     "from": "2026-08-01",
+     "to": "2026-12-31",
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "dim": "venue_name",
+     "from": "2026-08-01",
+     "to": "2026-12-31",
+     "dir": "desc",
+     "n": 10
+    },
+    {
+     "dim": "category",
+     "from": "2026-01-01",
+     "to": "2026-12-31",
+     "dir": "asc",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10,
+    10
+   ],
+   "insight_sample_ko": "2026-08-01 이후 겹치는 행사를 구 기준으로 세면 종로구가 102건(무료 10건)으로 1위다. :dim을 venue_name·category·admin_dong·event_type로 바꾸면 같은 창에서 공연장·장르·행정동·유형별 랭킹이 되고, :dir로 최다/최소를 뒤집을 수 있다.",
+   "composition_idiom": "차원 스위치(:dim) + 정렬 방향 스위치(:dir)",
+   "table": "gold_culture_event_schedule",
+   "product_id": "culture_event_schedule",
+   "real_rows_by_combo": [
+    10,
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "free_ratio_by_gu",
+   "question_ko": "가격 정보가 있는 행사만 놓고 볼 때 무료 행사 비율이 높은 자치구는 어디인가?",
+   "axes": "구 랭킹 — 무료 비율 DESC(가격정보 보유 임계값)",
+   "sql": "-- :from=2026-01-01, :to=2026-12-31, :min_known=30, :n=15\nSELECT gu,\n       SUM(CASE WHEN is_free='무료' THEN 1 ELSE 0 END) AS free_events,\n       SUM(CASE WHEN is_free IN ('무료','유료') THEN 1 ELSE 0 END) AS priced_known,\n       ROUND(100.0 * SUM(CASE WHEN is_free='무료' THEN 1 ELSE 0 END)\n             / NULLIF(SUM(CASE WHEN is_free IN ('무료','유료') THEN 1 ELSE 0 END), 0), 1) AS free_pct\nFROM gold_culture_event_schedule\nWHERE event_start_date BETWEEN :from AND :to\nGROUP BY gu\nHAVING priced_known >= :min_known\nORDER BY free_pct DESC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_range",
+    "having",
+    "filter_null",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from": "2026-01-01",
+     "to": "2026-12-31",
+     "min_known": 30,
+     "n": 15
+    },
+    {
+     "from": "2026-01-01",
+     "to": "2026-12-31",
+     "min_known": 40,
+     "n": 15
+    }
+   ],
+   "rows_by_combo": [
+    3,
+    3
+   ],
+   "insight_sample_ko": "2026년 시작 행사 중 유·무료 표기가 있는 건만 보면 무료 비율은 송파구 88.1%(무료 37/판정 42)로 가장 높다. is_free가 비어 있는 행사(대부분 공연)는 분모에서 제외하고, :min_known으로 표본이 얇은 구를 걸러 낸다.",
+   "composition_idiom": "비율(무료 share) + 임계값 HAVING(:min_known) + filter_null(is_free NULL 제외)",
+   "table": "gold_culture_event_schedule",
+   "product_id": "culture_event_schedule",
+   "real_rows_by_combo": [
+    15,
+    15
+   ]
+  },
+  {
+   "pattern_id": "long_running_events",
+   "question_ko": "특정 날짜에 진행 중인 행사 중 가장 오래(장기) 운영하는 전시·공연은 무엇인가?",
+   "axes": "랭킹 — 특정일 진행 중 행사 run_days DESC(장르 센티널)",
+   "sql": "-- :on_date=2026-08-01, :category=ALL, :n=10\nSELECT title, category, event_type, venue_name, gu,\n       event_start_date, event_end_date,\n       CAST(julianday(event_end_date) - julianday(event_start_date) AS INT) AS run_days\nFROM gold_culture_event_schedule\nWHERE event_start_date <= :on_date AND event_end_date >= :on_date\n  AND (:category = 'ALL' OR category = :category)\nORDER BY run_days DESC LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "on_date": "2026-08-01",
+     "category": "ALL",
+     "n": 10
+    },
+    {
+     "on_date": "2026-08-01",
+     "category": "연극",
+     "n": 10
+    }
+   ],
+   "rows_by_combo": [
+    10,
+    10
+   ],
+   "insight_sample_ko": "2026-08-01 기준 진행 중 행사 중 최장기는 성동구 성수 소극장의 연극 '영시기 [서울 성수]'로 393일(2025-08-01~2026-08-29) 운영이다. :category를 '연극'처럼 특정 장르로 바꾸면 그 장르 안에서, 'ALL'이면 전 장르 통합으로 순위가 나온다.",
+   "composition_idiom": "센티널(:category='ALL') + 기간 겹침 + 파생지표(run_days)",
+   "table": "gold_culture_event_schedule",
+   "product_id": "culture_event_schedule",
+   "real_rows_by_combo": [
+    10,
+    10
+   ]
+  },
+  {
+   "pattern_id": "multi_gu_agenda",
+   "question_ko": "내가 자주 다니는 여러 자치구(예: 성동·마포·종로)에서 이 기간에 겹치는 행사를 한 번에 보여줘.",
+   "axes": "다중 구 단면 — 기간 겹침 목록(event_start_date ASC)",
+   "sql": "-- :gus=[\"성동구\",\"마포구\",\"종로구\"], :from=2026-08-01, :to=2026-08-15, :n=20\nSELECT gu, title, category, venue_name, is_free, event_start_date, event_end_date\nFROM gold_culture_event_schedule\nWHERE gu IN (SELECT value FROM json_each(:gus))\n  AND event_start_date <= :to AND event_end_date >= :from\nORDER BY event_start_date, gu LIMIT :n",
+   "requires": [
+    "select_columns",
+    "filter_set",
+    "filter_range",
+    "subquery",
+    "sort"
+   ],
+   "combos": [
+    {
+     "gus": "[\"성동구\",\"마포구\",\"종로구\"]",
+     "from": "2026-08-01",
+     "to": "2026-08-15",
+     "n": 20
+    },
+    {
+     "gus": "[\"강남구\",\"서초구\"]",
+     "from": "2026-08-01",
+     "to": "2026-08-31",
+     "n": 20
+    }
+   ],
+   "rows_by_combo": [
+    20,
+    20
+   ],
+   "insight_sample_ko": "성동·마포·종로 3개 구에서 2026-08-01~08-15에 겹치는 행사를 시작일 순으로 묶으면 첫 행은 성동구 성수 소극장의 연극 '영시기 [서울 성수]'(2025-08-01~2026-08-29)다. 기존 단일 구 창(gu_window)의 다중 선택 상위호환으로, :gus JSON 배열에 원하는 구를 넣는다.",
+   "composition_idiom": "배열 IN(json_each :gus) + 기간 겹침",
+   "table": "gold_culture_event_schedule",
+   "product_id": "culture_event_schedule",
+   "real_rows_by_combo": [
+    20,
+    20
+   ]
+  },
+  {
+   "pattern_id": "monthly_event_histogram",
+   "question_ko": "행사가 몇 월에 몰리나? 시작월별 행사 수(무료·장르 다양성 포함) 추이를 보여줘.",
+   "axes": "시계열/분포 — 월별 시작 행사 수(구 센티널)",
+   "sql": "-- :from=2026-01-01, :to=2026-12-31, :gu=ALL, :n=24\nSELECT substr(event_start_date, 1, 7) AS month,\n       COUNT(*) AS events,\n       SUM(CASE WHEN is_free='무료' THEN 1 ELSE 0 END) AS free_events,\n       COUNT(DISTINCT category) AS categories\nFROM gold_culture_event_schedule\nWHERE event_start_date BETWEEN :from AND :to\n  AND (:gu = 'ALL' OR gu = :gu)\nGROUP BY month ORDER BY month LIMIT :n",
+   "requires": [
+    "select_columns",
+    "aggregate",
+    "group_by",
+    "filter_range",
+    "sort"
+   ],
+   "combos": [
+    {
+     "from": "2026-01-01",
+     "to": "2026-12-31",
+     "gu": "ALL",
+     "n": 24
+    },
+    {
+     "from": "2026-06-01",
+     "to": "2026-12-31",
+     "gu": "종로구",
+     "n": 24
+    }
+   ],
+   "rows_by_combo": [
+    12,
+    7
+   ],
+   "insight_sample_ko": "서울 전역 시작월별 행사 수는 2026-01 296건(무료 24, 장르 14종)으로 출발해 봄·여름으로 갈수록 늘어난다. :gu를 '종로구'처럼 특정 구로 좁히면 그 구만의 월별 추이가 되고, 'ALL'이면 전역 분포가 된다.",
+   "composition_idiom": "센티널(:gu='ALL') + 월 버킷(substr) 시계열",
+   "table": "gold_culture_event_schedule",
+   "product_id": "culture_event_schedule",
+   "real_rows_by_combo": [
+    12,
+    7
+   ]
+  }
+ ],
+ "audit_fail": [],
+ "run_fail": [],
+ "zero_first_combo": [],
+ "n_accepted": 47
+}

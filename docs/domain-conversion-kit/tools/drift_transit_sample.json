@@ -1,0 +1,37 @@
+{
+ "total": 12,
+ "ok": 10,
+ "drift_fail": [
+  {
+   "pattern_id": "busiest_dongs_at_hour",
+   "error": "RuntimeError"
+  },
+  {
+   "pattern_id": "event_route_lookup",
+   "error": "RuntimeError"
+  }
+ ],
+ "row_drift": [
+  {
+   "pattern_id": "dong_day_timeline",
+   "declared": 12,
+   "measured": 0
+  },
+  {
+   "pattern_id": "my_dong_now",
+   "declared": 1,
+   "measured": 0
+  },
+  {
+   "pattern_id": "full_soon_lots",
+   "declared": 10,
+   "measured": 8
+  },
+  {
+   "pattern_id": "avail_lots_in_gu",
+   "declared": 4,
+   "measured": 0
+  }
+ ],
+ "skipped": []
+}

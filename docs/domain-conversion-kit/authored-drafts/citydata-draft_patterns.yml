@@ -1,0 +1,1398 @@
+# citydata — 검증 통과 신규 패턴 draft (미적용, 구성만 하면 삽입)
+# 총 94건 · 실 D1 read-검증 통과 · 정적 감사 통과 · verified_rows 스탬핑 대기
+
+### 삽입 대상 모델: gold_citydata_air_daily  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "air_agg_by_dim_on_date"
+              question_ko: "특정 날 자치구/지역유형/행정동별 평균 대기질 순위는? (좋은 곳/나쁜 곳)"
+              axes: "차원 집계 랭킹 — AVG(avg_pm10) (날짜 고정, 차원·정렬 스위치)"
+              verified_rows: 0                # 실 D1 실측: [10, 5, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-08-01 자치구별 평균 대기질 악화순 1위는 광진구 — 평균 PM10 42.0㎍/㎥·PM2.5 26.4(관측 5개 지점). :dim=category면 지역유형별, :dim=dong이면 행정동별로 같은 집계."
+              sql: |
+                -- :dim=gu, :date=2026-08-01, :dir=desc, :n=10
+                SELECT
+                  CASE :dim WHEN 'category' THEN area_category WHEN 'dong' THEN admin_dong ELSE gu END AS dim_value,
+                  ROUND(AVG(avg_pm10),1) AS mean_pm10,
+                  ROUND(AVG(avg_pm25),1) AS mean_pm25,
+                  ROUND(AVG(avg_air_idx_value),1) AS mean_air_idx,
+                  COUNT(*) AS n_areas
+                FROM gold_citydata_air_daily
+                WHERE event_date = :date
+                GROUP BY CASE :dim WHEN 'category' THEN area_category WHEN 'dong' THEN admin_dong ELSE gu END
+                ORDER BY CASE WHEN :dir='asc' THEN AVG(avg_pm10) END ASC,
+                         CASE WHEN :dir='desc' THEN AVG(avg_pm10) END DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_set, sort]
+            - pattern_id: "air_city_daily_trend"
+              question_ko: "서울 전역의 일별 평균 대기질 추이는? (도시 전체 시계열)"
+              axes: "시계열 집계 — event_date ASC (전 지점 평균, 기간 창)"
+              verified_rows: 0                # 실 D1 실측: [18, 21] (스탬핑 대기)
+              insight_sample_ko: "서울 전역 일평균 PM10 추이 — 2026-07-20은 110개 지점 평균 10.3㎍/㎥(그날 최댓값 24, 평균 통합지수 45.8)로 시작해 2026-08-07까지 18일 시계열."
+              sql: |
+                -- :from=2026-07-20, :to=2026-08-07
+                SELECT event_date,
+                  ROUND(AVG(avg_pm10),1) AS mean_pm10,
+                  ROUND(AVG(avg_pm25),1) AS mean_pm25,
+                  MAX(max_pm10) AS worst_pm10,
+                  ROUND(AVG(avg_air_idx_value),1) AS mean_air_idx,
+                  COUNT(*) AS n_areas
+                FROM gold_citydata_air_daily
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY event_date
+                ORDER BY event_date ASC
+              requires: [select_columns, aggregate, group_by, filter_range, sort]
+            - pattern_id: "air_rank_places_on_date_by_metric"
+              question_ko: "특정 날 어느 지점이 대기질이 가장 나쁘거나 가장 깨끗했나? (지표·방향 선택)"
+              axes: "장소 랭킹 — 지표·정렬 스위치 (날짜 고정, pm10/pm25/air_idx × 악화/청정)"
+              verified_rows: 0                # 실 D1 실측: [10, 10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-08-01 PM2.5 최악 지점은 이촌한강공원(용산구) — PM2.5 31·PM10 37. :metric=pm10&:dir=asc로 바꾸면 가장 깨끗한 지점(고척돔 PM10 28)을 뽑는다. 기존 pm10-DESC 고정 패턴의 지표·방향 일반화(상위호환)."
+              sql: |
+                -- :metric=pm25, :date=2026-08-01, :dir=desc, :n=10
+                SELECT area_nm, gu, area_category, avg_pm10, avg_pm25, avg_air_idx_value,
+                  CASE :metric WHEN 'pm25' THEN avg_pm25 WHEN 'air_idx' THEN avg_air_idx_value ELSE avg_pm10 END AS metric_value
+                FROM gold_citydata_air_daily
+                WHERE event_date = :date
+                ORDER BY CASE WHEN :dir='asc' THEN (CASE :metric WHEN 'pm25' THEN avg_pm25 WHEN 'air_idx' THEN avg_air_idx_value ELSE avg_pm10 END) END ASC,
+                         CASE WHEN :dir='desc' THEN (CASE :metric WHEN 'pm25' THEN avg_pm25 WHEN 'air_idx' THEN avg_air_idx_value ELSE avg_pm10 END) END DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "air_bad_day_frequency_for_places"
+              question_ko: "최근 기간 미세먼지 나쁜 날(임계 초과)이 가장 잦았던 지점은? (빈도, 강도 아님)"
+              axes: "장소 랭킹 — 임계 초과일수 DESC (기간 집계, HAVING)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-08~08-07 중 PM10 35㎍/㎥ 이상인 날이 가장 잦은 지점은 신림역(관악구) — 관측 26일 가운데 7일. 강도(최댓값)가 아니라 빈도(초과일수) 기준 랭킹."
+              sql: |
+                -- :from=2026-07-08, :to=2026-08-07, :min_pm10=35, :n=10
+                SELECT area_nm, gu,
+                  SUM(CASE WHEN avg_pm10 >= :min_pm10 THEN 1 ELSE 0 END) AS bad_days,
+                  COUNT(*) AS observed_days,
+                  ROUND(AVG(avg_pm10),1) AS mean_pm10
+                FROM gold_citydata_air_daily
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY area_nm, gu
+                HAVING SUM(CASE WHEN avg_pm10 >= :min_pm10 THEN 1 ELSE 0 END) > 0
+                ORDER BY bad_days DESC, mean_pm10 DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, having, sort]
+            - pattern_id: "air_intraday_spike_ranking"
+              question_ko: "특정 날 일중 미세먼지 급등(피크-평균 격차)이 가장 심했던 지점은?"
+              axes: "장소 랭킹 — (max_pm10 - avg_pm10) DESC (날짜 고정, 파생 지표)"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "2026-08-01 일중 PM10 급등(피크-평균 격차)이 가장 큰 지점은 고속터미널역(서초구) — 평균 34㎍/㎥에서 피크 56까지, 격차 22. 하루 평균은 무난해도 순간 나빠지는 지점 탐지."
+              sql: |
+                -- :date=2026-08-01, :n=10
+                SELECT area_nm, gu, avg_pm10, max_pm10, (max_pm10 - avg_pm10) AS pm10_spike, avg_air_idx_value
+                FROM gold_citydata_air_daily
+                WHERE event_date = :date
+                ORDER BY (max_pm10 - avg_pm10) DESC, max_pm10 DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "air_compare_selected_areas_on_date"
+              question_ko: "내가 고른 여러 지점의 특정 날 대기질을 나란히 비교하면?"
+              axes: "단면 비교 — 선택 지점 집합 (날짜 고정, 배열 IN)"
+              verified_rows: 0                # 실 D1 실측: [3, 2] (스탬핑 대기)
+              insight_sample_ko: "선택한 3개 지점의 2026-08-01 PM10 비교 — 건대입구역 42(광진구)로 가장 높고 서울역·창덕궁·종묘가 뒤. :areas 배열에 임의 지점 세트를 넣어 다지점 단면 비교."
+              sql: |
+                -- :areas=["서울역","건대입구역","창덕궁·종묘"], :date=2026-08-01
+                SELECT area_nm, gu, area_category, avg_pm10, avg_pm25, avg_air_idx_value
+                FROM gold_citydata_air_daily
+                WHERE event_date = :date AND area_nm IN (SELECT value FROM json_each(:areas))
+                ORDER BY avg_pm10 DESC
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "air_day_over_day_change_on_date"
+              question_ko: "특정 날, 직전 관측일 대비 미세먼지가 가장 많이 나빠진 지점은?"
+              axes: "장소 랭킹 — 전일 대비 delta DESC (window LAG, 날짜 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "직전 관측일 대비 PM10이 가장 크게 악화된 지점(2026-08-01)은 홍대 관광특구(마포구) — 15→37, +22㎍/㎥. LAG로 지점별 이전 관측일과 비교(달력 갭은 이전 관측일 기준)."
+              sql: |
+                -- :date=2026-08-01, :n=10
+                WITH d AS (
+                  SELECT area_cd, area_nm, gu, event_date, avg_pm10,
+                    LAG(avg_pm10) OVER (PARTITION BY area_cd ORDER BY event_date) AS prev_pm10
+                  FROM gold_citydata_air_daily
+                )
+                SELECT area_nm, gu, avg_pm10, prev_pm10, (avg_pm10 - prev_pm10) AS pm10_delta
+                FROM d
+                WHERE event_date = :date AND prev_pm10 IS NOT NULL
+                ORDER BY (avg_pm10 - prev_pm10) DESC
+                LIMIT :n
+              requires: [select_columns, subquery, window, filter_set, filter_null, sort]
+
+### 삽입 대상 모델: gold_citydata_charger_dow_hour  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "charger_best_places_at_dow_hour"
+              question_ko: "이 요일·시간에 (특정 자치구/전체에서) 충전소가 가장 잘 비는(또는 가장 붐비는) 장소는?"
+              axes: "장소 랭킹 — avg_available_pct DESC/ASC (요일·시간 고정, 자치구 선택)"
+              verified_rows: 0                # 실 D1 실측: [10, 8] (스탬핑 대기)
+              insight_sample_ko: "토요일(dow=6) 18시 기준 서울 전역(신뢰 셀)에서 충전소가 가장 잘 비는 곳은 종로구 동대문역으로 평균 가용률 94.4%(충전기 12대, base_n 36)."
+              sql: |
+                -- :gu=ALL, :dow=6, :hr=18, :dir=desc, :n=10
+                SELECT area_nm, gu, area_category, avg_available_pct, n_chargers, base_n
+                FROM gold_citydata_charger_dow_hour
+                WHERE dow = :dow AND hr = :hr AND reliable = 1
+                  AND (:gu = 'ALL' OR gu = :gu)
+                ORDER BY CASE WHEN :dir = 'asc' THEN avg_available_pct END ASC,
+                         CASE WHEN :dir = 'desc' THEN avg_available_pct END DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "charger_availability_by_dimension_at_slot"
+              question_ko: "이 요일·시간에 어느 자치구/지역유형/행정동의 충전소가 평균적으로 더 여유로운가?"
+              axes: "차원 집계 랭킹 — AVG(avg_available_pct) DESC (요일·시간 고정, 차원 스위치)"
+              verified_rows: 0                # 실 D1 실측: [23, 5] (스탬핑 대기)
+              insight_sample_ko: "토요일 18시 자치구별 평균 충전소 가용률은 성동구가 89.1%로 가장 높았다(신뢰 셀 기준 집계 장소 1곳, 충전기 합 80대)."
+              sql: |
+                -- :dim=gu, :dow=6, :hr=18, :n=25
+                SELECT CASE :dim WHEN 'gu' THEN gu WHEN 'category' THEN area_category ELSE admin_dong END AS dim_value,
+                       ROUND(AVG(avg_available_pct), 1) AS avg_avail_pct,
+                       COUNT(*) AS n_places,
+                       SUM(n_chargers) AS total_chargers
+                FROM gold_citydata_charger_dow_hour
+                WHERE dow = :dow AND hr = :hr AND reliable = 1
+                GROUP BY dim_value
+                ORDER BY avg_avail_pct DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "charger_weekday_weekend_hourly_for_place"
+              question_ko: "이 장소는 시간대별로 평일과 주말 중 언제 충전소가 더 잘 비나?"
+              axes: "시간 프로파일 교차 — 평일 vs 주말 조건부 집계 (장소 고정, hr 축)"
+              verified_rows: 0                # 실 D1 실측: [24, 24] (스탬핑 대기)
+              insight_sample_ko: "강남 MICE 관광특구는 0시 기준 평일 82.0% vs 주말 80.3%로 평일 새벽이 근소하게 더 여유롭다(24개 시간대 전부 나란히 비교 가능)."
+              sql: |
+                -- :area=강남 MICE 관광특구
+                SELECT hr,
+                       ROUND(AVG(CASE WHEN dow BETWEEN 1 AND 5 THEN avg_available_pct END), 1) AS weekday_avail_pct,
+                       ROUND(AVG(CASE WHEN dow IN (6, 7) THEN avg_available_pct END), 1) AS weekend_avail_pct
+                FROM gold_citydata_charger_dow_hour
+                WHERE area_nm = :area
+                GROUP BY hr
+                ORDER BY hr
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "charger_capacity_ranking"
+              question_ko: "충전 인프라 규모(관측된 최대 충전기 수)가 가장 큰 장소는? (자치구 선택)"
+              axes: "장소 랭킹 — MAX(n_chargers) DESC (자치구 선택)"
+              verified_rows: 0                # 실 D1 실측: [15, 8] (스탬핑 대기)
+              insight_sample_ko: "관측된 충전기 규모 1위는 금천구 가산디지털단지역으로 최대 630대에 이른다."
+              sql: |
+                -- :gu=ALL, :n=15
+                SELECT area_nm, gu, area_category, MAX(n_chargers) AS n_chargers
+                FROM gold_citydata_charger_dow_hour
+                WHERE (:gu = 'ALL' OR gu = :gu)
+                GROUP BY area_cd, area_nm, gu, area_category
+                ORDER BY n_chargers DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "charger_compare_selected_places_at_slot"
+              question_ko: "선택한 여러 장소들의 이 요일·시간 충전소 가용률을 나란히 비교하면?"
+              axes: "장소 단면 비교 — avg_available_pct DESC (요일·시간 고정, 다중 장소 선택)"
+              verified_rows: 0                # 실 D1 실측: [2, 3] (스탬핑 대기)
+              insight_sample_ko: "토요일 18시 강남 MICE 관광특구(가용률 68.5%, 충전기 100대)가 홍대 관광특구보다 충전소가 더 여유로웠다."
+              sql: |
+                -- :areas=["강남 MICE 관광특구","홍대 관광특구"], :dow=6, :hr=18
+                SELECT area_nm, gu, avg_available_pct, n_chargers, base_n, reliable
+                FROM gold_citydata_charger_dow_hour
+                WHERE dow = :dow AND hr = :hr
+                  AND area_nm IN (SELECT value FROM json_each(:areas))
+                ORDER BY avg_available_pct DESC
+              requires: [select_columns, filter_set, sort]
+
+### 삽입 대상 모델: gold_citydata_cmrcl_daily  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "gu_commerce_totals_on_date"
+              question_ko: "특정 날 자치구별 총 결제 규모와 평균 붐빔은? (자치구 랭킹)"
+              axes: "자치구 집계 랭킹 — SUM(payment_count_total) DESC (날짜 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 자치구별 총 결제 1위는 종로구로, 13개 상권 합계 78,819건·평균 붐빔비율 35.0%."
+              sql: |
+                -- :date=2026-07-30, :n=10
+                SELECT gu, COUNT(*) AS area_count, SUM(payment_count_total) AS total_payments, ROUND(AVG(busy_ratio_percent),1) AS avg_busy
+                FROM gold_citydata_cmrcl_daily
+                WHERE event_date = :date
+                GROUP BY gu
+                ORDER BY total_payments DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "category_commerce_breakdown_on_date"
+              question_ko: "특정 날 상권 유형(발달상권·관광특구·인구밀집지역·고궁문화유산)별 결제 규모와 붐빔은?"
+              axes: "상권유형 단면 집계 — SUM(payment_count_total) DESC (날짜 고정)"
+              verified_rows: 0                # 실 D1 실측: [4, 4] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 상권유형 중 인구밀집지역이 45개 상권·총 결제 264,051건으로 최다, 평균 붐빔 33.9%."
+              sql: |
+                -- :date=2026-07-30
+                SELECT area_category, COUNT(*) AS area_count, SUM(payment_count_total) AS total_payments, ROUND(AVG(payment_count_avg),1) AS avg_pay_per_slot, ROUND(AVG(busy_ratio_percent),1) AS avg_busy
+                FROM gold_citydata_cmrcl_daily
+                WHERE event_date = :date
+                GROUP BY area_category
+                ORDER BY total_payments DESC
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "rank_commerce_places_by_metric"
+              question_ko: "특정 날 선택한 지표(결제건수·붐빔비율·순간결제피크액·평균결제) 기준 상·하위 상권은? (자치구 선택)"
+              axes: "장소 랭킹 — 지표/정렬 스위치 (날짜 고정, 자치구 센티널)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 순간 결제피크액 기준 1위는 여의도(영등포구)로 2,700만원, 결제 27,224건·분주한."
+              sql: |
+                -- :date=2026-07-30, :metric=payment_amt_peak, :dir=desc, :gu=ALL, :n=10
+                SELECT area_nm, gu, area_category, payment_count_total, payment_amt_peak, busy_ratio_percent, peak_cmrcl_lvl
+                FROM gold_citydata_cmrcl_daily
+                WHERE event_date = :date AND (:gu = 'ALL' OR gu = :gu)
+                ORDER BY
+                  CASE WHEN :dir = 'asc' THEN
+                    CASE :metric WHEN 'busy_ratio_percent' THEN busy_ratio_percent
+                                 WHEN 'payment_amt_peak' THEN payment_amt_peak
+                                 WHEN 'payment_count_avg' THEN payment_count_avg
+                                 ELSE payment_count_total END END ASC,
+                  CASE WHEN :dir = 'desc' THEN
+                    CASE :metric WHEN 'busy_ratio_percent' THEN busy_ratio_percent
+                                 WHEN 'payment_amt_peak' THEN payment_amt_peak
+                                 WHEN 'payment_count_avg' THEN payment_count_avg
+                                 ELSE payment_count_total END END DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "compare_selected_areas_on_date"
+              question_ko: "고른 여러 상권을 특정 날 나란히 비교하면?"
+              axes: "다중 단면 — 선택 상권 집합 결제·붐빔 비교 (날짜 고정)"
+              verified_rows: 0                # 실 D1 실측: [3, 2] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 선릉역·익선동·서울대입구역 중 선릉역이 결제 13,485건으로 가장 활발(붐빔 40.2%, 분주한)."
+              sql: |
+                -- :date=2026-07-30, :areas=["익선동","선릉역","서울대입구역"]
+                SELECT area_nm, gu, area_category, payment_count_total, busy_ratio_percent, payment_amt_peak, peak_cmrcl_lvl
+                FROM gold_citydata_cmrcl_daily
+                WHERE event_date = :date AND area_nm IN (SELECT value FROM json_each(:areas))
+                ORDER BY payment_count_total DESC
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "busy_threshold_places_on_date"
+              question_ko: "특정 날 붐빔비율이 임계값 이상인 상권은? (자치구 선택)"
+              axes: "단면 필터 — busy_ratio_percent >= 임계값 (날짜 고정, 자치구 센티널)"
+              verified_rows: 0                # 실 D1 실측: [13, 6] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 붐빔비율 40% 이상 상권은 13곳, 최고는 용산역 44.9%(결제 9,655건, 분주한)."
+              sql: |
+                -- :date=2026-07-30, :min_busy=40, :gu=ALL, :n=20
+                SELECT area_nm, gu, busy_ratio_percent, payment_count_total, peak_cmrcl_lvl
+                FROM gold_citydata_cmrcl_daily
+                WHERE event_date = :date AND (:gu = 'ALL' OR gu = :gu) AND busy_ratio_percent >= :min_busy
+                ORDER BY busy_ratio_percent DESC LIMIT :n
+              requires: [select_columns, filter_set, filter_range, sort]
+            - pattern_id: "payment_peak_hour_distribution"
+              question_ko: "특정 기간 상권들의 결제 피크는 주로 하루 중 몇 시에 발생하나?"
+              axes: "시간대 분포 — peak_at 시(hour)별 상권-일 집계 (기간 고정)"
+              verified_rows: 0                # 실 D1 실측: [21, 6] (스탬핑 대기)
+              insight_sample_ko: "2026-07-08~08-07 결제피크 시각 분포에서 00시대에 56 상권-일이 집계, 평균 피크액 약 123만원."
+              sql: |
+                -- :from=2026-07-08, :to=2026-08-07
+                SELECT substr(peak_at, 12, 2) AS peak_hour, COUNT(*) AS place_days, ROUND(AVG(payment_amt_peak)) AS avg_peak_amt
+                FROM gold_citydata_cmrcl_daily
+                WHERE event_date BETWEEN :from AND :to AND peak_at IS NOT NULL
+                GROUP BY peak_hour
+                ORDER BY peak_hour
+              requires: [select_columns, aggregate, group_by, filter_range, filter_null, sort]
+            - pattern_id: "frequently_busy_places_over_period"
+              question_ko: "최근 기간 붐빔비율이 임계값 이상인 날이 가장 많았던 상권은?"
+              axes: "상권 랭킹 — 붐빈 날 수 DESC (기간·임계값 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "2026-07-08~08-07 붐빔비율 50% 이상인 날이 가장 많았던 상권은 용산역(용산구) 8일, 평균 붐빔 56.9%."
+              sql: |
+                -- :from=2026-07-08, :to=2026-08-07, :min_busy=50, :n=10
+                SELECT area_nm, gu, area_category, COUNT(*) AS busy_days, ROUND(AVG(busy_ratio_percent),1) AS avg_busy, MAX(payment_count_total) AS max_payments
+                FROM gold_citydata_cmrcl_daily
+                WHERE event_date BETWEEN :from AND :to AND busy_ratio_percent >= :min_busy
+                GROUP BY area_nm, gu, area_category
+                ORDER BY busy_days DESC, avg_busy DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, sort]
+
+### 삽입 대상 모델: gold_citydata_dst_daily  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "dst_type_totals"
+              question_ko: "기간 내 어떤 재난 유형이 가장 많이·넓게 발령됐고 전체에서 몇 %를 차지하나?"
+              axes: "유형 집계·랭킹 — dst_type별 SUM(alert_count) DESC + 전체 대비 비중(window)"
+              verified_rows: 0                # 실 D1 실측: [5, 4] (스탬핑 대기)
+              insight_sample_ko: "7/17~8/7 폭염이 총 97건·영향지역 누계 1166곳·활동 16일로 전체 경보의 77.0%를 차지했고 단일일 최대 영향은 120곳이었다."
+              sql: |
+                -- :from=2026-07-17, :to=2026-08-07, :n=10
+                SELECT dst_type,
+                       SUM(alert_count) AS total_alerts,
+                       SUM(affected_areas) AS total_affected_areas,
+                       COUNT(DISTINCT event_date) AS active_days,
+                       MAX(affected_areas) AS peak_affected_areas,
+                       ROUND(100.0 * SUM(alert_count) / SUM(SUM(alert_count)) OVER (), 1) AS pct_of_alerts
+                FROM gold_citydata_dst_daily
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY dst_type
+                ORDER BY total_alerts DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, window, sort]
+            - pattern_id: "dst_longest_episodes"
+              question_ko: "첫 발령부터 마지막 발령까지 가장 오래 지속된 재난 경보는?"
+              axes: "날짜×유형 랭킹 — 파생 지속시간(last-first, 분) DESC"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "가장 길게 지속된 경보는 2026-07-29 폭염으로 10:03~18:29 동안 506분간 13건 발령, 영향지역 120곳이었다."
+              sql: |
+                -- :from=2026-07-17, :to=2026-08-07, :n=10
+                SELECT event_date, dst_type, alert_count, affected_areas, first_alert_at, last_alert_at,
+                       CAST(ROUND((julianday(last_alert_at) - julianday(first_alert_at)) * 1440) AS INTEGER) AS duration_minutes
+                FROM gold_citydata_dst_daily
+                WHERE event_date BETWEEN :from AND :to
+                ORDER BY duration_minutes DESC
+                LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "dst_types_over_time"
+              question_ko: "선택한 재난 유형들(예: 폭염·호우)만 기간별로 함께 보면?"
+              axes: "시계열 — 유형 다중 선택(IN), event_date ASC"
+              verified_rows: 0                # 실 D1 실측: [20, 6] (스탬핑 대기)
+              insight_sample_ko: "폭염·호우만 추리면 20행이 나오며 기간 첫 행은 2026-07-17 호우로 10건·영향지역 44곳이었다."
+              sql: |
+                -- :types=["폭염","호우"], :from=2026-07-17, :to=2026-08-07
+                SELECT event_date, dst_type, alert_count, affected_areas, emrg_step
+                FROM gold_citydata_dst_daily
+                WHERE dst_type IN (SELECT value FROM json_each(:types))
+                  AND event_date BETWEEN :from AND :to
+                ORDER BY event_date ASC, dst_type
+              requires: [select_columns, filter_set, filter_range, sort]
+            - pattern_id: "dst_rank_days_flexible"
+              question_ko: "재난 발령일을 지표(경보 수/영향 지역)와 정렬 방향을 골라 랭킹하면?"
+              axes: "날짜 랭킹 — 지표 스위치(alert_count/affected_areas) + 정렬 방향 스위치"
+              verified_rows: 0                # 실 D1 실측: [10, 5, 5] (스탬핑 대기)
+              insight_sample_ko: "영향 지역 DESC로 보면 최상위는 2026-07-28 폭염으로 영향지역 120곳(경보 3건)이었다."
+              sql: |
+                -- :metric=affected_areas, :dir=desc, :from=2026-07-17, :to=2026-08-07, :n=10
+                SELECT event_date, dst_type, alert_count, affected_areas
+                FROM gold_citydata_dst_daily
+                WHERE event_date BETWEEN :from AND :to
+                ORDER BY
+                  CASE WHEN :dir='asc' THEN (CASE :metric WHEN 'alert_count' THEN alert_count ELSE affected_areas END) END ASC,
+                  CASE WHEN :dir='desc' THEN (CASE :metric WHEN 'alert_count' THEN alert_count ELSE affected_areas END) END DESC
+                LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "dst_latest_by_type"
+              question_ko: "이 재난 유형의 가장 최근 안내 문구는 무엇인가? (전체는 ALL)"
+              axes: "최신 조회 — 센티널 유형 필터, last_alert_at DESC"
+              verified_rows: 0                # 실 D1 실측: [5, 10, 3] (스탬핑 대기)
+              insight_sample_ko: "폭염의 가장 최근 경보는 2026-08-07 16:00 발령으로 문구는 \"동작구 극한 폭염 지속 중 ▲폭염 안전수칙 준수(물, 그늘, 휴식)…\"였다."
+              sql: |
+                -- :type=폭염, :n=5
+                SELECT event_date, dst_type, last_alert_at, affected_areas, latest_message
+                FROM gold_citydata_dst_daily
+                WHERE (:type = 'ALL' OR dst_type = :type)
+                ORDER BY last_alert_at DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "dst_on_date"
+              question_ko: "특정 날 서울에 어떤 재난 경보가 있었고 그 실제 안내 문구는? (규모 임계 이상만)"
+              axes: "단면 — 날짜 고정, affected_areas 임계 필터, affected_areas DESC"
+              verified_rows: 0                # 실 D1 실측: [2, 2] (스탬핑 대기)
+              insight_sample_ko: "2026-08-04에는 폭염(영향 62곳, 09:25~16:20, 13건)과 정전이 발령됐고 최상위 폭염 문구는 \"금천구 가산,시흥,독산 전역에 무더운 날씨가 지속…\"이었다."
+              sql: |
+                -- :date=2026-08-04, :min_areas=1
+                SELECT dst_type, emrg_step, alert_count, affected_areas, first_alert_at, last_alert_at, latest_message
+                FROM gold_citydata_dst_daily
+                WHERE event_date = :date AND affected_areas >= :min_areas
+                ORDER BY affected_areas DESC
+              requires: [select_columns, filter_set, filter_range, sort]
+            - pattern_id: "dst_search_message"
+              question_ko: "안내 문구에 특정 키워드가 들어간 재난 경보를 찾으면? (예: 정전)"
+              axes: "텍스트 검색 — latest_message LIKE, last_alert_at DESC"
+              verified_rows: 0                # 실 D1 실측: [4, 10] (스탬핑 대기)
+              insight_sample_ko: "'정전'이 포함된 문구는 4건이며 가장 최근은 2026-08-07 도봉구 정전 급증 안내였다."
+              sql: |
+                -- :kw=%정전%, :n=10
+                SELECT event_date, dst_type, affected_areas, last_alert_at, latest_message
+                FROM gold_citydata_dst_daily
+                WHERE latest_message LIKE :kw
+                ORDER BY last_alert_at DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+
+### 삽입 대상 모델: gold_citydata_dst_dow_hour  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "dst_alerts_by_dim"
+              question_ko: "재난 경보를 요일·시간·유형 중 원하는 축으로 집계하면? (특정 유형만 볼 수도 있음)"
+              axes: "집계·랭킹 — dow/hr/dst_type 차원 선택, total_alerts DESC (유형 센티널)"
+              verified_rows: 0                # 실 D1 실측: [5, 7, 16] (스탬핑 대기)
+              insight_sample_ko: "유형별로 보면 폭염이 총 97건(41개 요일·시간 슬롯)으로 압도적 최다다. dim=hr로 바꾸면 하루 중 14시(26건)에 경보가 가장 몰린다."
+              sql: |
+                -- :dim=dst_type, :type=ALL
+                SELECT CASE :dim WHEN 'dow' THEN CAST(dow AS TEXT) WHEN 'hr' THEN CAST(hr AS TEXT) ELSE dst_type END AS dim_value,
+                       sum(alert_count) AS total_alerts, sum(active_days) AS total_active_days, count(*) AS slot_count
+                FROM gold_citydata_dst_dow_hour
+                WHERE (:type = 'ALL' OR dst_type = :type)
+                GROUP BY dim_value
+                ORDER BY total_alerts DESC
+              requires: [select_columns, aggregate, group_by, filter_set, sort]
+            - pattern_id: "dst_types_at_slot"
+              question_ko: "특정 요일·시간대엔 어떤 재난 유형의 경보가 떴나?"
+              axes: "단면 — dow·hr 고정, 유형별 alert_count DESC"
+              verified_rows: 0                # 실 D1 실측: [1, 1] (스탬핑 대기)
+              insight_sample_ko: "목요일(dow=4) 11시엔 폭염 경보만 잡히고 6건으로 신뢰 가능(reliable=1)한 셀이다."
+              sql: |
+                -- :dow=4, :hr=11
+                SELECT dst_type, alert_count, active_days, reliable
+                FROM gold_citydata_dst_dow_hour
+                WHERE dow = :dow AND hr = :hr
+                ORDER BY alert_count DESC
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "dst_peak_slots_filtered"
+              question_ko: "경보가 잦은 요일·시간 슬롯은? (유형 지정·최소 경보수 하한을 줄 수 있음)"
+              axes: "슬롯 랭킹 — alert_count DESC (유형 센티널 + 최소 경보수 임계값)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "경보가 가장 잦은 슬롯은 수요일(dow=3) 11시 폭염으로 7건이며 신뢰 가능(reliable=1)하다."
+              sql: |
+                -- :type=ALL, :min_alerts=1, :n=10
+                SELECT dow, hr, dst_type, alert_count, active_days, reliable
+                FROM gold_citydata_dst_dow_hour
+                WHERE (:type = 'ALL' OR dst_type = :type) AND alert_count >= :min_alerts
+                ORDER BY alert_count DESC LIMIT :n
+              requires: [select_columns, filter_set, filter_range, sort]
+            - pattern_id: "dst_multi_type_distribution"
+              question_ko: "관심 있는 여러 재난 유형만 골라 요일·시간 분포를 한눈에 보면?"
+              axes: "다중 유형 단면 — dst_type IN(선택) → dow·hr 정렬"
+              verified_rows: 0                # 실 D1 실측: [53, 11] (스탬핑 대기)
+              insight_sample_ko: "호우·폭염 두 유형만 추리면 53개 요일·시간 슬롯에 분포한다(전체 64개 중 대부분이 이 둘). 나머지 정전·화재·기타는 합쳐 11개 슬롯뿐이다."
+              sql: |
+                -- :types=["호우","폭염"]
+                SELECT dst_type, dow, hr, alert_count, reliable
+                FROM gold_citydata_dst_dow_hour
+                WHERE dst_type IN (SELECT value FROM json_each(:types))
+                ORDER BY dst_type, dow, hr
+              requires: [select_columns, filter_set, subquery, sort]
+            - pattern_id: "dst_reliable_type_summary"
+              question_ko: "재난 유형별로 요일·시간 신호가 얼마나 믿을 만한가(신뢰 셀 비율)?"
+              axes: "비율 — 유형별 reliable 셀 비중, reliable_pct DESC"
+              verified_rows: 0                # 실 D1 실측: [5] (스탬핑 대기)
+              insight_sample_ko: "가장 표본이 두꺼운 폭염조차 41개 슬롯 중 7개(17.1%)만 신뢰 가능해, 이 히트맵은 유형별로 신뢰 셀만 골라 해석해야 한다."
+              sql: |
+                -- (전 유형 신뢰도 비교, 파라미터 없음)
+                SELECT dst_type, count(*) AS slot_count, sum(reliable) AS reliable_slots,
+                       round(100.0 * sum(reliable) / count(*), 1) AS reliable_pct
+                FROM gold_citydata_dst_dow_hour
+                GROUP BY dst_type
+                ORDER BY reliable_pct DESC, slot_count DESC
+              requires: [select_columns, aggregate, group_by, sort]
+
+### 삽입 대상 모델: gold_citydata_ppltn_daily  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "ppltn_place_rank_flex"
+              question_ko: "특정 날, 지표(평균/최대인구·붐빔비율)·자치구·지역유형·정렬을 골라 장소 랭킹을 보고 싶다"
+              axes: "장소 랭킹 — 지표 스위치 DESC/ASC (날짜 고정, gu·area_type 센티널)"
+              verified_rows: 0                # 실 D1 실측: [10, 5, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-14 평균인구 상위 1위는 여의도(영등포구·발달상권)로 평균 99,858명, 최대 190,000명, 붐빔비율 31.6%(붐빔)."
+              sql: |
+                -- :date=2026-07-14, :metric=avg, :dir=desc, :gu=ALL, :atype=ALL, :n=10
+                SELECT area_name, gu, area_type, average_population, max_population, busy_ratio_percent, peak_congestion_level
+                FROM gold_citydata_ppltn_daily
+                WHERE event_date = :date
+                  AND (:gu = 'ALL' OR gu = :gu)
+                  AND (:atype = 'ALL' OR area_type = :atype)
+                ORDER BY
+                  CASE WHEN :dir='asc' THEN (CASE :metric WHEN 'avg' THEN average_population WHEN 'max' THEN max_population ELSE busy_ratio_percent END) END ASC,
+                  CASE WHEN :dir='desc' THEN (CASE :metric WHEN 'avg' THEN average_population WHEN 'max' THEN max_population ELSE busy_ratio_percent END) END DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "ppltn_group_aggregate_on_date"
+              question_ko: "특정 날 자치구별 또는 지역유형별로 붐빔을 묶어 보면?"
+              axes: "단면 집계 — 차원 스위치(gu/area_type)별 평균·최대·장소수 (날짜 고정)"
+              verified_rows: 0                # 실 D1 실측: [25, 5, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-14 자치구별 평균인구 1위는 노원구로 평균 25,903명(관측 장소 1곳), 최대 42,000명. 지역유형으로 보면 관광특구가 평균 31,953명(7곳)으로 가장 붐빔."
+              sql: |
+                -- :date=2026-07-14, :dim=gu, :n=25
+                SELECT
+                  CASE :dim WHEN 'gu' THEN gu WHEN 'area_type' THEN area_type ELSE gu END AS dim_value,
+                  COUNT(*) AS n_places,
+                  ROUND(AVG(average_population)) AS avg_ppltn,
+                  MAX(max_population) AS peak_ppltn,
+                  ROUND(AVG(busy_ratio_percent),1) AS avg_busy_ratio
+                FROM gold_citydata_ppltn_daily
+                WHERE event_date = :date
+                GROUP BY CASE :dim WHEN 'gu' THEN gu WHEN 'area_type' THEN area_type ELSE gu END
+                ORDER BY avg_ppltn DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "ppltn_period_avg_rank"
+              question_ko: "일정 기간 동안 평균적으로 가장 붐빈 장소는? (하루가 아니라 기간 전체 기준)"
+              axes: "기간 집계 랭킹 — 장소별 AVG(average_population) DESC (기간창, gu·area_type 센티널)"
+              verified_rows: 0                # 실 D1 실측: [10, 5, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-01~07-31 기간 평균 붐빔 1위는 여의도(영등포구)로 28일 평균 86,615명, 기간 최대 190,000명, 평균 붐빔비율 22.9%."
+              sql: |
+                -- :from=2026-07-01, :to=2026-07-31, :gu=ALL, :atype=ALL, :n=10
+                SELECT area_name, gu, area_type,
+                  ROUND(AVG(average_population)) AS avg_ppltn,
+                  MAX(max_population) AS peak_ppltn,
+                  ROUND(AVG(busy_ratio_percent),1) AS avg_busy_ratio,
+                  COUNT(*) AS n_days
+                FROM gold_citydata_ppltn_daily
+                WHERE event_date BETWEEN :from AND :to
+                  AND (:gu = 'ALL' OR gu = :gu)
+                  AND (:atype = 'ALL' OR area_type = :atype)
+                GROUP BY area_name, gu, area_type
+                ORDER BY avg_ppltn DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, filter_set, sort]
+            - pattern_id: "ppltn_peak_hour_profile_for_place"
+              question_ko: "이 장소는 하루 중 주로 몇 시에 인구 정점을 찍나? (기간 내 정점 시각 분포)"
+              axes: "시각 분포 — peak_at 시(hour)별 정점 발생 일수 (장소·기간 고정)"
+              verified_rows: 0                # 실 D1 실측: [8, 13] (스탬핑 대기)
+              insight_sample_ko: "고속터미널역은 2026-07-01~07-31 중 14시에 정점을 찍은 날이 8일로 가장 많고, 그때 평균 최대인구는 32,750명."
+              sql: |
+                -- :area=고속터미널역, :from=2026-07-01, :to=2026-07-31
+                SELECT
+                  substr(peak_at, 12, 2) AS peak_hour,
+                  COUNT(*) AS n_days,
+                  ROUND(AVG(max_population)) AS avg_peak_ppltn
+                FROM gold_citydata_ppltn_daily
+                WHERE area_name = :area AND event_date BETWEEN :from AND :to AND peak_at IS NOT NULL
+                GROUP BY substr(peak_at, 12, 2)
+                ORDER BY n_days DESC
+              requires: [select_columns, aggregate, group_by, filter_set, filter_range, filter_null, sort]
+            - pattern_id: "ppltn_volatility_on_date"
+              question_ko: "특정 날 하루 안에서 인구 진폭(최대-최소)이 가장 큰/작은 장소는?"
+              axes: "장소 랭킹 — 파생지표 (max_population - min_population) DESC/ASC (날짜 고정, gu 센티널)"
+              verified_rows: 0                # 실 D1 실측: [10, 10, 5] (스탬핑 대기)
+              insight_sample_ko: "2026-07-14 인구 진폭 1위는 여의도로 최대 190,000명·최소 30,000명, 진폭 160,000명(붐빔비율 31.6%)."
+              sql: |
+                -- :date=2026-07-14, :dir=desc, :gu=ALL, :n=10
+                SELECT area_name, gu, area_type, max_population, min_population,
+                  (max_population - min_population) AS swing_ppltn, busy_ratio_percent
+                FROM gold_citydata_ppltn_daily
+                WHERE event_date = :date AND (:gu = 'ALL' OR gu = :gu)
+                ORDER BY
+                  CASE WHEN :dir='asc' THEN (max_population - min_population) END ASC,
+                  CASE WHEN :dir='desc' THEN (max_population - min_population) END DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "ppltn_congestion_days_for_place"
+              question_ko: "이 장소는 기간 중 각 혼잡 수준(여유·보통·약간 붐빔·붐빔)을 며칠씩 기록했나?"
+              axes: "범주 분포 — peak_congestion_level별 일수 (장소·기간 고정)"
+              verified_rows: 0                # 실 D1 실측: [4, 4] (스탬핑 대기)
+              insight_sample_ko: "고속터미널역은 2026-07-01~08-07 중 '붐빔'을 18일 기록(그 날들 평균 14,549명·평균 붐빔비율 36.2%)으로 가장 잦음."
+              sql: |
+                -- :area=고속터미널역, :from=2026-07-01, :to=2026-08-07
+                SELECT peak_congestion_level,
+                  COUNT(*) AS n_days,
+                  ROUND(AVG(average_population)) AS avg_ppltn,
+                  ROUND(AVG(busy_ratio_percent),1) AS avg_busy_ratio
+                FROM gold_citydata_ppltn_daily
+                WHERE area_name = :area AND event_date BETWEEN :from AND :to
+                GROUP BY peak_congestion_level
+                ORDER BY n_days DESC
+              requires: [select_columns, aggregate, group_by, filter_set, filter_range, sort]
+            - pattern_id: "ppltn_compare_selected_areas_on_date"
+              question_ko: "관심 장소 여러 곳을 골라 특정 날 붐빔을 나란히 비교하고 싶다"
+              axes: "다중 선택 단면 — average_population DESC (날짜 고정, area_name 배열 IN)"
+              verified_rows: 0                # 실 D1 실측: [3, 2] (스탬핑 대기)
+              insight_sample_ko: "2026-07-14 세 곳 중 잠실 관광특구가 평균 40,660명으로 가장 붐볐고(최대 74,000명·약간 붐빔), 고속터미널역·이태원 관광특구가 뒤를 이음."
+              sql: |
+                -- :areas=["고속터미널역","이태원 관광특구","잠실 관광특구"], :date=2026-07-14
+                SELECT area_name, gu, area_type, average_population, max_population, busy_ratio_percent, peak_congestion_level
+                FROM gold_citydata_ppltn_daily
+                WHERE event_date = :date AND area_name IN (SELECT value FROM json_each(:areas))
+                ORDER BY average_population DESC
+              requires: [select_columns, filter_set, subquery, sort]
+            - pattern_id: "ppltn_frequently_crowded_places"
+              question_ko: "기간 내내 자주 붐빈 장소는? ('붐빔'·'약간 붐빔' 일수가 임계값 이상)"
+              axes: "기간 집계 랭킹 + 임계값 — 붐빔 일수 DESC (기간창, HAVING min_days)"
+              verified_rows: 0                # 실 D1 실측: [20, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-01~07-31 중 붐빔/약간 붐빔 일수가 가장 많은 곳은 홍대입구역(2호선)으로 28일 중 26일(평균 14,395명)."
+              sql: |
+                -- :from=2026-07-01, :to=2026-07-31, :min_days=10, :n=20
+                SELECT area_name, gu, area_type,
+                  SUM(CASE WHEN peak_congestion_level IN ('붐빔','약간 붐빔') THEN 1 ELSE 0 END) AS crowded_days,
+                  COUNT(*) AS n_days,
+                  ROUND(AVG(average_population)) AS avg_ppltn
+                FROM gold_citydata_ppltn_daily
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY area_name, gu, area_type
+                HAVING SUM(CASE WHEN peak_congestion_level IN ('붐빔','약간 붐빔') THEN 1 ELSE 0 END) >= :min_days
+                ORDER BY crowded_days DESC, avg_ppltn DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, having, sort]
+
+### 삽입 대상 모델: gold_citydata_ppltn_demographics  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "segment_share_ranking_at_time"
+              question_ko: "이 요일·시간에 특정 세그먼트 비중(구성비)이 가장 높은/낮은 지역은?"
+              axes: "장소 랭킹 — avg_rate_pct 기준(요일·시간·세그먼트 고정). 연령/성별 스위치 + 정렬 방향 스위치. 기존 headcount 랭킹의 '비중' 상위호환"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "월요일 18시 20대 비중이 가장 높은 곳은 건대입구역 29.62%(추정 8,890명). :dir=asc면 비중 최저, :segment_type=gender면 성별 비중 랭킹으로 전환."
+              sql: |
+                -- :dow=1, :hour=18, :segment_type=age, :segment=20, :dir=desc, :n=10
+                SELECT area_nm, area_category, gu_code, avg_rate_pct, avg_est_headcount
+                FROM gold_citydata_ppltn_demographics
+                WHERE dow = :dow AND hour = :hour AND segment_type = :segment_type AND segment = :segment
+                ORDER BY CASE WHEN :dir='asc' THEN avg_rate_pct END ASC,
+                         CASE WHEN :dir='desc' THEN avg_rate_pct END DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "gender_skew_ranking_at_time"
+              question_ko: "이 요일·시간에 남초(또는 여초)가 가장 심한 지역은?"
+              axes: "장소 랭킹 — 성별 구성비 차(male%−female%) 조건부 집계. 정렬 방향으로 남초/여초 전환"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "월요일 18시 남초가 가장 심한 곳은 노량진(남 53.4% vs 여 46.6%, +6.8pp). :dir=asc면 여초 top — 혜화역(남 44.05% vs 여 55.95%, −11.9pp)."
+              sql: |
+                -- :dow=1, :hour=18, :dir=desc, :n=10
+                SELECT area_nm, area_category, gu_code,
+                  MAX(CASE WHEN segment='male' THEN avg_rate_pct END) AS male_pct,
+                  MAX(CASE WHEN segment='female' THEN avg_rate_pct END) AS female_pct,
+                  MAX(CASE WHEN segment='male' THEN avg_rate_pct END) - MAX(CASE WHEN segment='female' THEN avg_rate_pct END) AS male_minus_female
+                FROM gold_citydata_ppltn_demographics
+                WHERE dow = :dow AND hour = :hour AND segment_type = 'gender'
+                GROUP BY area_cd, area_nm, area_category, gu_code
+                HAVING COUNT(DISTINCT segment) = 2
+                ORDER BY CASE WHEN :dir='asc' THEN male_minus_female END ASC,
+                         CASE WHEN :dir='desc' THEN male_minus_female END DESC
+                LIMIT :n
+              requires: [select_columns, aggregate, group_by, having, sort]
+            - pattern_id: "age_group_share_ranking_at_time"
+              question_ko: "이 요일·시간에 특정 연령대 묶음(예: 젊은 층 0·10·20대) 비중이 가장 높은 지역은?"
+              axes: "장소 랭킹 — 선택한 연령 세그먼트 집합의 구성비 합(SUM avg_rate_pct). 묶음은 배열로 자유 선택"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "월요일 18시 젊은 층(0·10·20대) 비중 합이 가장 높은 곳은 건대입구역 31.07%(추정 9,325명). :segments=[\"60\",\"70\"]로 바꾸면 고령층 묶음 랭킹."
+              sql: |
+                -- :dow=1, :hour=18, :segments=["0","10","20"], :n=10
+                SELECT area_nm, area_category, gu_code,
+                  SUM(avg_rate_pct) AS group_share_pct,
+                  SUM(avg_est_headcount) AS group_headcount
+                FROM gold_citydata_ppltn_demographics
+                WHERE dow = :dow AND hour = :hour AND segment_type = 'age'
+                  AND segment IN (SELECT value FROM json_each(:segments))
+                GROUP BY area_cd, area_nm, area_category, gu_code
+                ORDER BY group_share_pct DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, aggregate, group_by, sort]
+            - pattern_id: "peak_time_for_segment_at_place"
+              question_ko: "이 장소에서 특정 세그먼트가 가장 두드러지는(비중 또는 추정 인원 최대) 요일·시간은?"
+              axes: "요일×시간 랭킹 — 장소·세그먼트 고정, 지표 스위치(비중/추정인원)로 정렬. '언제' 특정 인구층이 몰리나"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "신도림역에서 20대 비중이 가장 높은 때는 토요일 21시(20.36%). :metric=headcount면 추정 인원 기준 피크 시간(예: 여성 인원은 일요일 17시 4,602명)으로 전환."
+              sql: |
+                -- :area=신도림역, :segment_type=age, :segment=20, :metric=share, :n=10
+                SELECT dow, hour, avg_rate_pct, avg_est_headcount, avg_ppltn
+                FROM gold_citydata_ppltn_demographics
+                WHERE area_nm = :area AND segment_type = :segment_type AND segment = :segment
+                ORDER BY CASE WHEN :metric='headcount' THEN avg_est_headcount ELSE avg_rate_pct END DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "category_segment_profile_at_time"
+              question_ko: "이 요일·시간에 어떤 지역 유형(공원·관광특구·발달상권 등)이 특정 세그먼트 비중이 높나?"
+              axes: "지역유형 단면 — area_category 집계(AVG 비중, SUM 추정인원). 유형별 인구 성향 프로파일"
+              verified_rows: 0                # 실 D1 실측: [5, 5] (스탬핑 대기)
+              insight_sample_ko: "월요일 18시 20대 평균 비중이 가장 높은 지역 유형은 인구밀집지역(19.9%, 5개 장소 합산 추정 16,640명)."
+              sql: |
+                -- :dow=1, :hour=18, :segment_type=age, :segment=20
+                SELECT area_category,
+                  AVG(avg_rate_pct) AS avg_share_pct,
+                  SUM(avg_est_headcount) AS total_headcount,
+                  COUNT(*) AS n_places
+                FROM gold_citydata_ppltn_demographics
+                WHERE dow = :dow AND hour = :hour AND segment_type = :segment_type AND segment = :segment
+                GROUP BY area_category
+                ORDER BY avg_share_pct DESC
+              requires: [select_columns, filter_set, aggregate, group_by, sort]
+            - pattern_id: "gu_segment_headcount_ranking_at_time"
+              question_ko: "이 요일·시간에 특정 세그먼트 추정 인원이 가장 많은 자치구는?"
+              axes: "자치구 랭킹 — gu_code 집계(SUM 추정인원). 인력/자원 배치용 세그먼트 규모 랭킹"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "월요일 18시 20대 추정 인원이 가장 많은 자치구는 11215(광진구) 8,890명. :segment_type=gender면 성별 규모(예: 여성 최다 자치구 11440, 12,614명)로 전환."
+              sql: |
+                -- :dow=1, :hour=18, :segment_type=age, :segment=20, :n=10
+                SELECT gu_code,
+                  SUM(avg_est_headcount) AS total_headcount,
+                  AVG(avg_rate_pct) AS avg_share_pct,
+                  COUNT(*) AS n_places
+                FROM gold_citydata_ppltn_demographics
+                WHERE dow = :dow AND hour = :hour AND segment_type = :segment_type AND segment = :segment
+                GROUP BY gu_code
+                ORDER BY total_headcount DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, aggregate, group_by, sort]
+            - pattern_id: "compare_places_segment_mix_at_time"
+              question_ko: "선택한 여러 장소의 이 요일·시간 연령/성별 구성을 나란히 비교하면?"
+              axes: "다장소 교차 단면 — 배열로 지정한 장소들의 세그먼트별 비중·추정인원(연령/성별 스위치)"
+              verified_rows: 0                # 실 D1 실측: [16, 16] (스탬핑 대기)
+              insight_sample_ko: "월요일 18시 홍대 관광특구·건대입구역 연령 구성 병렬 비교 — 건대입구역 20대 비중 29.62%가 두 곳 통틀어 최상위 세그먼트."
+              sql: |
+                -- :areas=["홍대 관광특구","건대입구역"], :dow=1, :hour=18, :segment_type=age
+                SELECT area_nm, segment, avg_rate_pct, avg_est_headcount
+                FROM gold_citydata_ppltn_demographics
+                WHERE area_nm IN (SELECT value FROM json_each(:areas))
+                  AND dow = :dow AND hour = :hour AND segment_type = :segment_type
+                ORDER BY area_nm, avg_rate_pct DESC
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "segment_overindex_places_at_time"
+              question_ko: "이 요일·시간에 도시 평균 대비 특정 세그먼트가 과대표집된(비중이 평균보다 높은) 지역은?"
+              axes: "장소 랭킹 — 윈도우 AVG() OVER()로 도시 평균 비중을 기준선 삼아 초과분(pp) 정렬. 임계값(:min_ratio)으로 평균 배수 필터"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "월요일 18시 20대 비중이 도시 평균(17.07%) 이상인 지역 중 건대입구역이 +12.55pp로 가장 과대표집(비중 29.62%). :min_ratio=1.3이면 평균의 1.3배 넘는 곳만 남김."
+              sql: |
+                -- :dow=1, :hour=18, :segment_type=age, :segment=20, :min_ratio=1.0, :n=10
+                WITH base AS (
+                  SELECT area_nm, area_category, gu_code, avg_rate_pct,
+                    AVG(avg_rate_pct) OVER () AS city_avg_pct
+                  FROM gold_citydata_ppltn_demographics
+                  WHERE dow = :dow AND hour = :hour AND segment_type = :segment_type AND segment = :segment
+                )
+                SELECT area_nm, area_category, gu_code, avg_rate_pct, city_avg_pct,
+                  avg_rate_pct - city_avg_pct AS over_index_pp
+                FROM base
+                WHERE avg_rate_pct >= city_avg_pct * :min_ratio
+                ORDER BY over_index_pp DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, subquery, window, sort]
+
+### 삽입 대상 모델: gold_citydata_ppltn_dow_hour  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "busiest_places_at_dow_hour"
+              question_ko: "특정 요일·시간에 도시 전체에서 가장 붐비는 장소 top N은?"
+              axes: "장소 랭킹 — avg_ppltn DESC (요일·시간 고정, 도시 전역)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "일요일(dow=7) 15시 기준 여의도(영등포구·발달상권)가 평균 108,778명으로 도시 최상위, 혼잡도 '보통'."
+              sql: |
+                -- :dow=7, :hr=15, :n=10
+                SELECT area_nm, gu, area_category, avg_ppltn, typical_congest_lvl
+                FROM gold_citydata_ppltn_dow_hour
+                WHERE dow = :dow AND hr = :hr
+                ORDER BY avg_ppltn DESC LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "ppltn_by_dimension_at_dow_hour"
+              question_ko: "특정 요일·시간에 자치구/지역유형/행정동 중 어느 단위가 가장 붐비나?"
+              axes: "차원 집계 랭킹 — AVG(avg_ppltn) DESC (요일·시간 고정, 차원 스위치)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "dim=gu, 일요일 15시 자치구별 평균 붐빔 1위는 영등포구(평균 70,473명·최대 122,500명·지점 2개)."
+              sql: |
+                -- :dim=gu, :dow=7, :hr=15, :n=10
+                SELECT
+                  CASE :dim WHEN 'gu' THEN gu WHEN 'category' THEN area_category ELSE admin_dong END AS dim_value,
+                  ROUND(AVG(avg_ppltn)) AS avg_ppltn,
+                  MAX(max_ppltn) AS max_ppltn,
+                  COUNT(*) AS n_areas
+                FROM gold_citydata_ppltn_dow_hour
+                WHERE dow = :dow AND hr = :hr
+                GROUP BY CASE :dim WHEN 'gu' THEN gu WHEN 'category' THEN area_category ELSE admin_dong END
+                ORDER BY avg_ppltn DESC LIMIT :n
+              requires: [select_columns, filter_set, aggregate, group_by, sort]
+            - pattern_id: "peak_slot_per_place"
+              question_ko: "장소마다 가장 붐비는 요일·시간 한 셀만 뽑아 도시 전역에서 비교하면?"
+              axes: "장소별 argmax — 장소당 최붐빔 셀 1개 후 avg_ppltn DESC (window)"
+              verified_rows: 0                # 실 D1 실측: [15, 5] (스탬핑 대기)
+              insight_sample_ko: "신뢰 셀 기준 각 장소의 피크 셀 중 도시 최고는 여의도 화요일(dow=2) 13시로 평균 171,840명('붐빔')."
+              sql: |
+                -- :n=15
+                WITH ranked AS (
+                  SELECT area_nm, gu, dow, hr, avg_ppltn, typical_congest_lvl,
+                         ROW_NUMBER() OVER (PARTITION BY area_nm ORDER BY avg_ppltn DESC) AS rn
+                  FROM gold_citydata_ppltn_dow_hour
+                  WHERE reliable = 1
+                )
+                SELECT area_nm, gu, dow, hr, avg_ppltn, typical_congest_lvl
+                FROM ranked
+                WHERE rn = 1
+                ORDER BY avg_ppltn DESC
+                LIMIT :n
+              requires: [select_columns, subquery, window, sort]
+            - pattern_id: "volatile_cells_for_place"
+              question_ko: "이 장소에서 붐빔 편차(최대-최소)가 가장 큰 요일·시간 셀은?"
+              axes: "요일×시간 랭킹 — (max_ppltn-min_ppltn) DESC (장소 고정, reliable만)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "영등포 타임스퀘어에서 편차가 가장 큰 셀은 수요일(dow=3) 19시로 최대 30,778명 vs 최소 16,333명, 스프레드 14,445명."
+              sql: |
+                -- :area=영등포 타임스퀘어, :n=10
+                SELECT dow, hr, avg_ppltn, max_ppltn, min_ppltn, (max_ppltn - min_ppltn) AS ppltn_spread
+                FROM gold_citydata_ppltn_dow_hour
+                WHERE area_nm = :area AND reliable = 1
+                ORDER BY ppltn_spread DESC LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "weekend_vs_weekday_for_place"
+              question_ko: "이 장소의 시간대별 붐빔이 평일과 주말에 어떻게 다른가?"
+              axes: "시간 프로파일 × 평일/주말 단면 — hr, 요일유형 집계 (장소 고정)"
+              verified_rows: 0                # 실 D1 실측: [48, 48] (스탬핑 대기)
+              insight_sample_ko: "영등포 타임스퀘어 0시 평일 평균 4,637명(최대 5,306명) — 시간대별로 평일/주말 두 곡선을 나란히 비교."
+              sql: |
+                -- :area=영등포 타임스퀘어
+                SELECT hr,
+                  CASE WHEN dow IN (6,7) THEN '주말' ELSE '평일' END AS day_type,
+                  ROUND(AVG(avg_ppltn)) AS avg_ppltn,
+                  MAX(max_ppltn) AS max_ppltn
+                FROM gold_citydata_ppltn_dow_hour
+                WHERE area_nm = :area
+                GROUP BY hr, CASE WHEN dow IN (6,7) THEN '주말' ELSE '평일' END
+                ORDER BY hr, day_type
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "congestion_distribution_for_place"
+              question_ko: "이 장소는 관측 요일·시간 셀 중 혼잡 레벨별로 몇 셀씩인가(얼마나 자주 붐비나)?"
+              axes: "혼잡레벨 분포 — typical_congest_lvl별 셀 수 집계 (장소 고정)"
+              verified_rows: 0                # 실 D1 실측: [4, 4] (스탬핑 대기)
+              insight_sample_ko: "영등포 타임스퀘어는 관측 셀 중 '여유'가 30셀로 최다(그 구간 평균 6,517명), 나머지 3개 레벨에 분산."
+              sql: |
+                -- :area=영등포 타임스퀘어
+                SELECT typical_congest_lvl, COUNT(*) AS n_cells, ROUND(AVG(avg_ppltn)) AS avg_ppltn
+                FROM gold_citydata_ppltn_dow_hour
+                WHERE area_nm = :area
+                GROUP BY typical_congest_lvl
+                ORDER BY n_cells DESC
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "place_ppltn_at_selected_hours"
+              question_ko: "이 장소의 선택한 시간대들(예: 출퇴근·심야)에서 요일별 붐빔을 비교하면?"
+              axes: "요일×선택시간 단면 — 장소 고정, hr 다중 선택(json_each)"
+              verified_rows: 0                # 실 D1 실측: [28, 14] (스탬핑 대기)
+              insight_sample_ko: "영등포 타임스퀘어의 선택 시간(8/12/18/22시) 중 화요일 8시 평균 10,922명('여유')부터 요일·시간별로 나열."
+              sql: |
+                -- :area=영등포 타임스퀘어, :hrs=[8,12,18,22]
+                SELECT dow, hr, avg_ppltn, typical_congest_lvl
+                FROM gold_citydata_ppltn_dow_hour
+                WHERE area_nm = :area AND hr IN (SELECT value FROM json_each(:hrs))
+                ORDER BY dow, hr
+              requires: [select_columns, filter_set, sort]
+
+### 삽입 대상 모델: gold_citydata_ppltn_hourly  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "crowd_ranking_by_dimension_at_time"
+              question_ko: "특정 시각에 자치구/지역유형/행정동별 평균 붐빔 랭킹은?"
+              axes: "차원별 집계 랭킹 — AVG(average_population) DESC (시각 고정, 차원 스위치)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "2026-07-17 17시 자치구별 평균 붐빔 1위는 송파구로 평균 23,819.7명(집계 장소 3곳, 최대 64,000명)."
+              sql: |
+                -- :dim=gu, :ts=2026-07-17 17:00:00, :n=10
+                SELECT CASE :dim WHEN 'category' THEN area_category WHEN 'dong' THEN admin_dong ELSE gu END AS dim_value,
+                       COUNT(*) AS place_n,
+                       ROUND(AVG(average_population), 1) AS avg_ppltn,
+                       MAX(max_population) AS peak_ppltn
+                FROM gold_citydata_ppltn_hourly
+                WHERE time_bucket = :ts
+                GROUP BY CASE :dim WHEN 'category' THEN area_category WHEN 'dong' THEN admin_dong ELSE gu END
+                ORDER BY avg_ppltn DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "consistently_busy_places_over_period"
+              question_ko: "최근 기간에 평균적으로 가장 꾸준히 붐빈 장소는?"
+              axes: "장소 랭킹 — 기간 평균 AVG(average_population) DESC (기간창 + 표본 임계값)"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "2026-07-01~08-09 기간 평균 붐빔 1위는 여의도(영등포구·발달상권)로 평균 83,977.3명, 최대 190,000명(집계 버킷 41개)."
+              sql: |
+                -- :from=2026-07-01 00:00:00, :to=2026-08-09 00:00:00, :min_buckets=5, :n=10
+                SELECT area_nm, gu, area_category,
+                       ROUND(AVG(average_population), 1) AS avg_ppltn,
+                       MAX(max_population) AS peak_ppltn,
+                       COUNT(*) AS bucket_n
+                FROM gold_citydata_ppltn_hourly
+                WHERE time_bucket BETWEEN :from AND :to
+                GROUP BY area_cd, area_nm, gu, area_category
+                HAVING COUNT(*) >= :min_buckets
+                ORDER BY avg_ppltn DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, having, sort]
+            - pattern_id: "congestion_level_periods_for_place"
+              question_ko: "이 장소가 특정 혼잡 등급이었던 시간대는 언제인가?"
+              axes: "시간 필터 — peak_congestion_level 고정 (장소 고정), time_bucket ASC"
+              verified_rows: 0                # 실 D1 실측: [118, 556] (스탬핑 대기)
+              insight_sample_ko: "광나루한강공원이 '약간 붐빔'이었던 시간대는 7개이며, 가장 이른 2026-07-04 10시 평균 5,417명(붐빔 비율 100%)."
+              sql: |
+                -- :area=광나루한강공원, :level=약간 붐빔
+                SELECT time_bucket, average_population, max_population, busy_ratio_percent, peak_congestion_level
+                FROM gold_citydata_ppltn_hourly
+                WHERE area_nm = :area AND peak_congestion_level = :level
+                ORDER BY time_bucket
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "most_volatile_places_at_time"
+              question_ko: "특정 시각에 인구 변동폭(최대-최소)이 가장 큰 장소는?"
+              axes: "장소 랭킹 — (max_population - min_population) DESC (시각 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-17 17시 변동폭 1위는 잠실역(송파구)으로 56,000~64,000명(변동폭 8,000, 등급 '붐빔')."
+              sql: |
+                -- :ts=2026-07-17 17:00:00, :n=10
+                SELECT area_nm, gu, average_population, max_population, min_population,
+                       (max_population - min_population) AS swing, peak_congestion_level
+                FROM gold_citydata_ppltn_hourly
+                WHERE time_bucket = :ts
+                ORDER BY swing DESC LIMIT :n
+              requires: [select_columns, sort]
+            - pattern_id: "compare_places_at_time"
+              question_ko: "지정한 여러 장소의 특정 시각 붐빔을 나란히 비교하면?"
+              axes: "단면 비교 — 지정 장소 집합 (시각 고정), 배열 IN"
+              verified_rows: 0                # 실 D1 실측: [3, 2] (스탬핑 대기)
+              insight_sample_ko: "2026-07-17 17시 세 장소 중 장한평역이 평균 8,250명으로 가장 붐볐고 등급은 '여유'."
+              sql: |
+                -- :ts=2026-07-17 17:00:00, :areas=["광나루한강공원","장한평역","충정로역"]
+                SELECT area_nm, gu, average_population, max_population, busy_ratio_percent, peak_congestion_level
+                FROM gold_citydata_ppltn_hourly
+                WHERE time_bucket = :ts AND area_nm IN (SELECT value FROM json_each(:areas))
+                ORDER BY average_population DESC
+              requires: [select_columns, filter_set, subquery, sort]
+            - pattern_id: "city_congestion_distribution_at_time"
+              question_ko: "특정 시각에 서울 전역의 혼잡 등급 분포는?"
+              axes: "분포 — peak_congestion_level별 장소 수·비율 (시각 고정)"
+              verified_rows: 0                # 실 D1 실측: [4, 4] (스탬핑 대기)
+              insight_sample_ko: "2026-07-17 17시 서울 전역에서 '여유' 등급이 11곳(57.9%)으로 가장 많았고 해당 등급 평균 8,044.4명."
+              sql: |
+                -- :ts=2026-07-17 17:00:00
+                SELECT peak_congestion_level,
+                       COUNT(*) AS place_n,
+                       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS share_pct,
+                       ROUND(AVG(average_population), 1) AS avg_ppltn
+                FROM gold_citydata_ppltn_hourly
+                WHERE time_bucket = :ts
+                GROUP BY peak_congestion_level
+                ORDER BY place_n DESC
+              requires: [select_columns, aggregate, group_by, window, sort]
+            - pattern_id: "gu_crowd_trend_over_period"
+              question_ko: "이 자치구 전체의 시간별 평균 붐빔 추이는?"
+              axes: "집계 시계열 — time_bucket 축, 자치구 내 평균 (기간창)"
+              verified_rows: 0                # 실 D1 실측: [25, 112] (스탬핑 대기)
+              insight_sample_ko: "동대문구 2026-07-17 시간대별 평균 붐빔은 00시 평균 7,000명(집계 장소 1곳)에서 시작."
+              sql: |
+                -- :gu=동대문구, :from=2026-07-17 00:00:00, :to=2026-07-18 00:00:00
+                SELECT time_bucket,
+                       COUNT(*) AS place_n,
+                       ROUND(AVG(average_population), 1) AS avg_ppltn,
+                       MAX(max_population) AS peak_ppltn
+                FROM gold_citydata_ppltn_hourly
+                WHERE gu = :gu AND time_bucket BETWEEN :from AND :to
+                GROUP BY time_bucket
+                ORDER BY time_bucket
+              requires: [select_columns, aggregate, group_by, filter_set, filter_range, sort]
+
+### 삽입 대상 모델: gold_citydata_ppltn_x_culture_daily  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "gu_culture_activity_on_date"
+              question_ko: "특정 날 자치구별 문화행사 총량은 어디가 가장 많나?"
+              axes: "자치구 롤업 랭킹 — SUM(event_count) DESC (날짜 고정, 동→구 집계)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 문화행사 총량 1위는 종로구로 6개 동에서 총 248건(공연 136건·축제 9건), 평균 생활인구 약 9,907명."
+              sql: |
+                -- :date=2026-07-30, :n=10
+                SELECT gu, SUM(event_count) AS total_events, SUM(performance_count) AS performances, SUM(festival_count) AS festivals, SUM(has_event) AS active_dongs, ROUND(AVG(ppltn_avg),1) AS avg_ppltn
+                FROM gold_citydata_ppltn_x_culture_daily
+                WHERE event_date = :date
+                GROUP BY gu
+                ORDER BY total_events DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "rank_dongs_by_metric_on_date"
+              question_ko: "특정 날, 고른 지표(행사수/공연/전시/축제/평균인구/최대인구)로 동네를 정렬하면?"
+              axes: "동 랭킹 — 지표 스위치 + 정렬방향 스위치 (날짜 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 5, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 공연 수 1위는 혜화동(종로구)으로 공연 126건·전체 행사 157건, 평균 생활인구 13,034.6명. metric/dir 스위치로 동일 패턴이 기존 event_count 랭킹의 상위호환."
+              sql: |
+                -- :date=2026-07-30, :metric=performance, :dir=desc, :n=10
+                SELECT admin_dong, gu, event_count, performance_count, exhibition_count, festival_count, ppltn_avg, ppltn_peak
+                FROM gold_citydata_ppltn_x_culture_daily
+                WHERE event_date = :date
+                ORDER BY
+                 CASE WHEN :dir='asc' THEN CASE :metric WHEN 'performance' THEN performance_count WHEN 'exhibition' THEN exhibition_count WHEN 'festival' THEN festival_count WHEN 'ppltn_avg' THEN ppltn_avg WHEN 'ppltn_peak' THEN ppltn_peak ELSE event_count END END ASC,
+                 CASE WHEN :dir='desc' THEN CASE :metric WHEN 'performance' THEN performance_count WHEN 'exhibition' THEN exhibition_count WHEN 'festival' THEN festival_count WHEN 'ppltn_avg' THEN ppltn_avg WHEN 'ppltn_peak' THEN ppltn_peak ELSE event_count END END DESC
+                LIMIT :n
+              requires: [select_columns, sort]
+            - pattern_id: "crowded_dongs_without_events_on_date"
+              question_ko: "특정 날 붐비는데 문화행사가 하나도 없는 동네는? (행사 유치 공백)"
+              axes: "동 랭킹 — ppltn_avg DESC (날짜 고정, has_event=0 교차)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 문화행사 없이 가장 붐빈 동네는 목5동(양천구)으로 평균 생활인구 64,163.1명·최대 71,000명인데 행사 0건."
+              sql: |
+                -- :date=2026-07-30, :n=10
+                SELECT admin_dong, gu, ppltn_avg, ppltn_peak, hotspot_count
+                FROM gold_citydata_ppltn_x_culture_daily
+                WHERE event_date = :date AND has_event = 0
+                ORDER BY ppltn_avg DESC LIMIT :n
+              requires: [select_columns, sort]
+            - pattern_id: "dongs_with_event_type_on_date"
+              question_ko: "특정 날 특정 유형(KCISA행사/세종문화회관/전시/공연/축제/행사)이 열린 동네는?"
+              axes: "동 단면 — event_types 부분일치 필터 (날짜 고정), event_count DESC"
+              verified_rows: 0                # 실 D1 실측: [10, 1] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 세종문화회관 공연이 잡힌 동네는 사직동(종로구) 단 1곳(event_types='행사, 공연, 세종문화회관, KCISA행사', 40건). KCISA행사는 혜화동 등 다수. 카운트 컬럼에 없는 유형(세종문화회관·KCISA행사·행사)을 문자열로 조회."
+              sql: |
+                -- :date=2026-07-30, :type=KCISA행사, :n=10
+                SELECT admin_dong, gu, event_types, event_count, ppltn_avg
+                FROM gold_citydata_ppltn_x_culture_daily
+                WHERE event_date = :date AND event_types LIKE '%' || :type || '%'
+                ORDER BY event_count DESC LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "city_culture_trend"
+              question_ko: "최근 기간 서울 전체의 일별 문화행사 활발도와 붐빔 추이는?"
+              axes: "시계열 — event_date 축, 전 동 집계(도시 전체)"
+              verified_rows: 0                # 실 D1 실측: [28, 7] (스탬핑 대기)
+              insight_sample_ko: "2026-07-01 서울 전체 문화행사 369건·행사 있는 동 54곳·축제 5건, 도시 평균 생활인구 약 13,485명. 기간 첫날 스냅샷."
+              sql: |
+                -- :from=2026-07-01, :to=2026-07-31
+                SELECT event_date, SUM(event_count) AS total_events, SUM(has_event) AS active_dongs, SUM(festival_count) AS festivals, ROUND(AVG(ppltn_avg),1) AS avg_ppltn
+                FROM gold_citydata_ppltn_x_culture_daily
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY event_date
+                ORDER BY event_date ASC
+              requires: [select_columns, aggregate, group_by, filter_range, sort]
+            - pattern_id: "sustained_culture_hubs"
+              question_ko: "최근 기간 문화행사가 꾸준히 많았던 상위 동네(문화 허브)는?"
+              axes: "동 랭킹 — 기간 누적 SUM(event_count) DESC + 임계값 HAVING (기간 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07 한 달 문화행사 누적 1위는 혜화동(종로구)으로 총 3,864건·28일 내내 행사, 평균 생활인구 13,022.3명."
+              sql: |
+                -- :from=2026-07-01, :to=2026-07-31, :min_events=100, :n=10
+                SELECT admin_dong, gu, SUM(event_count) AS total_events, SUM(has_event) AS active_days, ROUND(AVG(ppltn_avg),1) AS avg_ppltn
+                FROM gold_citydata_ppltn_x_culture_daily
+                WHERE event_date BETWEEN :from AND :to
+                GROUP BY admin_dong, gu
+                HAVING SUM(event_count) >= :min_events
+                ORDER BY total_events DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, having, filter_range, sort]
+            - pattern_id: "compare_selected_dongs_on_date"
+              question_ko: "선택한 동네들의 특정 날 문화행사와 붐빔을 나란히 비교하면?"
+              axes: "동 단면 비교 — 다중 선택 IN (날짜 고정), ppltn_avg DESC"
+              verified_rows: 0                # 실 D1 실측: [3, 2] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 선택 3개 동 중 잠실4동(송파구)이 가장 붐벼 평균 생활인구 51,361.7명(최대 95,000)인데 행사는 2건(행사·KCISA행사)뿐."
+              sql: |
+                -- :dongs=["잠실4동","사직동","역삼1동"], :date=2026-07-30
+                SELECT admin_dong, gu, event_count, performance_count, festival_count, ppltn_avg, ppltn_peak, event_types
+                FROM gold_citydata_ppltn_x_culture_daily
+                WHERE event_date = :date AND admin_dong IN (SELECT value FROM json_each(:dongs))
+                ORDER BY ppltn_avg DESC
+              requires: [select_columns, filter_set, sort]
+
+### 삽입 대상 모델: gold_citydata_ppltn_x_weather_hourly  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "gu_crowd_weather_at_time"
+              question_ko: "특정 시각, 자치구별 평균 붐빔과 그때 기온 랭킹은?"
+              axes: "자치구 집계·랭킹 — AVG(ppltn_avg) DESC (시각 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 6] (스탬핑 대기)
+              insight_sample_ko: "2026-08-01 13시 기준 자치구 평균 붐빔 1위는 강남구(동 2곳 평균 50,571.4명, 피크 77,000명, 평균기온 33.0도)."
+              sql: |
+                -- :ts=2026-08-01 13:00:00, :n=10
+                SELECT gu, COUNT(*) AS dong_n, ROUND(AVG(ppltn_avg),1) AS avg_ppltn, MAX(ppltn_peak) AS peak_ppltn, ROUND(AVG(temp_c),1) AS avg_temp
+                FROM gold_citydata_ppltn_x_weather_hourly
+                WHERE time_bucket = :ts
+                GROUP BY gu
+                ORDER BY avg_ppltn DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, sort]
+            - pattern_id: "hot_crowded_dongs_at_time"
+              question_ko: "특정 시각, 기온이 임계값 이상이면서 가장 붐빈 동네는? (폭염 노출 인구)"
+              axes: "동 랭킹 — ppltn_avg DESC (시각 고정, temp_c 임계값)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-08-01 13시 기온 30도 이상 동네 중 가장 붐빈 곳은 송파구 잠실4동(34.0도, 습도 60, 평균 84,714.3명, 피크 87,000명)."
+              sql: |
+                -- :ts=2026-08-01 13:00:00, :min_temp=30, :n=10
+                SELECT admin_dong, gu, temp_c, humidity, ppltn_avg, ppltn_peak
+                FROM gold_citydata_ppltn_x_weather_hourly
+                WHERE time_bucket = :ts AND temp_c >= :min_temp
+                ORDER BY ppltn_avg DESC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "dong_weather_crowd_summary"
+              question_ko: "이 동네의 기간 요약 — 평균·피크 붐빔, 기온 범위, 폭염·강수 시간은?"
+              axes: "단면 집계 — 동·기간 고정 1행 요약"
+              verified_rows: 0                # 실 D1 실측: [1, 1] (스탬핑 대기)
+              insight_sample_ko: "회기동(1123071000) 기간 요약: 관측 56시간, 평균 8,279.5명, 피크 13,000명, 기온 26~36도, 평균습도 76.5, 폭염(33도+) 8시간, 강수 0시간."
+              sql: |
+                -- :dong_code=1123071000, :from=2026-07-01 00:00:00, :to=2026-08-08 23:00:00, :heat=33
+                SELECT COUNT(*) AS hours, ROUND(AVG(ppltn_avg),1) AS avg_ppltn, MAX(ppltn_peak) AS peak_ppltn, MIN(temp_c) AS min_temp, MAX(temp_c) AS max_temp, ROUND(AVG(humidity),1) AS avg_humidity, SUM(is_raining) AS rainy_hours, SUM(CASE WHEN temp_c >= :heat THEN 1 ELSE 0 END) AS heat_hours
+                FROM gold_citydata_ppltn_x_weather_hourly
+                WHERE admin_dong_code = :dong_code AND time_bucket BETWEEN :from AND :to
+              requires: [select_columns, filter_set, filter_range, aggregate]
+            - pattern_id: "weather_metric_ranking_at_time"
+              question_ko: "특정 시각, 고른 지표(붐빔·기온·습도·바람·강수확률) 기준 상·하위 동네는?"
+              axes: "동 랭킹 — 지표·방향 스위치 (시각 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-08-01 13시 가장 더운 동네는 송파구 잠실2동(34.0도), 그때 평균 5,904.8명·습도 60·바람 4.0m/s."
+              sql: |
+                -- :ts=2026-08-01 13:00:00, :metric=temp_c, :dir=desc, :n=10
+                SELECT admin_dong, gu, ppltn_avg, temp_c, humidity, wind_ms, precip_prob
+                FROM gold_citydata_ppltn_x_weather_hourly
+                WHERE time_bucket = :ts
+                ORDER BY
+                  CASE WHEN :dir='asc' THEN (CASE :metric WHEN 'ppltn_avg' THEN ppltn_avg WHEN 'temp_c' THEN temp_c WHEN 'humidity' THEN humidity WHEN 'wind_ms' THEN wind_ms ELSE precip_prob END) END ASC,
+                  CASE WHEN :dir='desc' THEN (CASE :metric WHEN 'ppltn_avg' THEN ppltn_avg WHEN 'temp_c' THEN temp_c WHEN 'humidity' THEN humidity WHEN 'wind_ms' THEN wind_ms ELSE precip_prob END) END DESC
+                LIMIT :n
+              requires: [select_columns, sort]
+            - pattern_id: "gu_hourly_weather_crowd_trend"
+              question_ko: "이 자치구의 시간별 평균 붐빔·기온·습도 추이는?"
+              axes: "시계열 — 자치구 고정, time_bucket 집계 축"
+              verified_rows: 0                # 실 D1 실측: [16, 16] (스탬핑 대기)
+              insight_sample_ko: "강남구 2026-08-01 01시엔 동 4곳 평균 6,968.8명, 평균기온 28.0도, 평균습도 92.5, 강수 없음."
+              sql: |
+                -- :gu=강남구, :from=2026-08-01 00:00:00, :to=2026-08-01 23:00:00
+                SELECT time_bucket, COUNT(*) AS dong_n, ROUND(AVG(ppltn_avg),1) AS avg_ppltn, ROUND(AVG(temp_c),1) AS avg_temp, ROUND(AVG(humidity),1) AS avg_humidity, MAX(is_raining) AS any_rain
+                FROM gold_citydata_ppltn_x_weather_hourly
+                WHERE gu = :gu AND time_bucket BETWEEN :from AND :to
+                GROUP BY time_bucket
+                ORDER BY time_bucket
+              requires: [select_columns, filter_set, filter_range, aggregate, group_by, sort]
+            - pattern_id: "crowd_by_temp_band"
+              question_ko: "기온대(구간)별 평균 붐빔은? — 더울수록 사람이 줄까?"
+              axes: "분포 — 기온대 구간별 평균 붐빔 (기간 고정)"
+              verified_rows: 0                # 실 D1 실측: [4, 4] (스탬핑 대기)
+              insight_sample_ko: "전체 기간 28도 미만 구간은 657시간·평균 7,292.7명·평균 핫스팟 1.32·평균습도 93.3 (야간·저온대에 집중)."
+              sql: |
+                -- :from=2026-07-01 00:00:00, :to=2026-08-08 23:00:00
+                SELECT CASE WHEN temp_c < 28 THEN 'a_lt28' WHEN temp_c < 31 THEN 'b_28to31' WHEN temp_c < 34 THEN 'c_31to34' ELSE 'd_ge34' END AS temp_band, COUNT(*) AS hours, ROUND(AVG(ppltn_avg),1) AS avg_ppltn, ROUND(AVG(hotspot_count),2) AS avg_hotspots, ROUND(AVG(humidity),1) AS avg_humidity
+                FROM gold_citydata_ppltn_x_weather_hourly
+                WHERE time_bucket BETWEEN :from AND :to
+                GROUP BY temp_band
+                ORDER BY temp_band
+              requires: [select_columns, filter_range, aggregate, group_by, sort]
+            - pattern_id: "compare_dongs_weather_at_time"
+              question_ko: "선택한 여러 동네를 특정 시각에 붐빔·날씨로 나란히 비교하면?"
+              axes: "다중 단면 — 선택 동 집합 비교 (시각 고정)"
+              verified_rows: 0                # 실 D1 실측: [3, 2] (스탬핑 대기)
+              insight_sample_ko: "2026-08-01 01시 선택 3개 동 중 송파구 잠실4동이 21,000명으로 최다(기온 28.0도, 습도 90, 강수확률 0)."
+              sql: |
+                -- :dongs=["잠실4동","신사동","명동"], :ts=2026-08-01 01:00:00
+                SELECT admin_dong, gu, ppltn_avg, ppltn_peak, temp_c, humidity, precip_prob, is_raining
+                FROM gold_citydata_ppltn_x_weather_hourly
+                WHERE admin_dong IN (SELECT value FROM json_each(:dongs)) AND time_bucket = :ts
+                ORDER BY ppltn_avg DESC
+              requires: [select_columns, filter_set, sort]
+
+### 삽입 대상 모델: gold_citydata_purchasing_power_daily  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "rank_places_by_metric_on_date"
+              question_ko: "특정 날, 선택한 소비 지표(소비강도/구매빈도/총결제액) 기준 상·하위 장소는? (자치구 한정 가능)"
+              axes: "장소 랭킹 — 지표 스위치(spend/buy/amount) × 정렬 방향 × gu 센티널 (날짜 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 8, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 붐빔 대비 소비강도(spend_per_crowd_idx) 1위는 발산역(강서구·인구밀집지역)으로 42644.5, 총결제 3.18억원. metric/dir 스위치로 소비강도·구매빈도·총결제액을 오름/내림 어느 쪽으로도 뽑을 수 있어 기존 고정 랭킹(상위·하위)을 포괄한다."
+              sql: |
+                -- :date=2026-07-30, :metric=spend, :dir=desc, :gu=ALL, :n=10
+                SELECT area_nm, gu, area_category, spend_per_crowd_idx, buy_per_crowd_idx, payment_amt_total
+                FROM gold_citydata_purchasing_power_daily
+                WHERE event_date = :date
+                  AND (:gu = 'ALL' OR gu = :gu)
+                  AND (CASE :metric WHEN 'spend' THEN spend_per_crowd_idx WHEN 'buy' THEN buy_per_crowd_idx WHEN 'amount' THEN payment_amt_total END) IS NOT NULL
+                ORDER BY
+                  CASE WHEN :dir = 'asc' THEN (CASE :metric WHEN 'spend' THEN spend_per_crowd_idx WHEN 'buy' THEN buy_per_crowd_idx WHEN 'amount' THEN payment_amt_total END) END ASC,
+                  CASE WHEN :dir = 'desc' THEN (CASE :metric WHEN 'spend' THEN spend_per_crowd_idx WHEN 'buy' THEN buy_per_crowd_idx WHEN 'amount' THEN payment_amt_total END) END DESC
+                LIMIT :n
+              requires: [select_columns, sort, filter_null]
+            - pattern_id: "spend_distribution_by_dim_on_date"
+              question_ko: "특정 날, 상권유형/자치구/혼잡수준별 평균 소비강도와 총결제 분포는?"
+              axes: "차원 집계·랭킹 — 차원 스위치(category/gu/congest) × avg(spend_per_crowd_idx) DESC (날짜 고정)"
+              verified_rows: 0                # 실 D1 실측: [4, 24, 4] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 상권유형별 평균 소비강도는 고궁·문화유산이 19160.1로 가장 높고(해당 2개 지역, 총결제 6.27억원), 차원 스위치로 자치구별·혼잡수준별 분포도 같은 틀에서 조회된다."
+              sql: |
+                -- :date=2026-07-30, :dim=category
+                SELECT CASE :dim WHEN 'gu' THEN gu WHEN 'congest' THEN congest_peak_lvl ELSE area_category END AS dim_value,
+                       COUNT(*) AS n_areas,
+                       ROUND(AVG(spend_per_crowd_idx), 1) AS avg_spend_idx,
+                       ROUND(AVG(buy_per_crowd_idx), 4) AS avg_buy_idx,
+                       SUM(payment_amt_total) AS total_amt
+                FROM gold_citydata_purchasing_power_daily
+                WHERE event_date = :date AND spend_per_crowd_idx IS NOT NULL
+                GROUP BY CASE :dim WHEN 'gu' THEN gu WHEN 'congest' THEN congest_peak_lvl ELSE area_category END
+                ORDER BY avg_spend_idx DESC
+              requires: [select_columns, aggregate, group_by, filter_null, sort]
+            - pattern_id: "citywide_spend_trend"
+              question_ko: "서울 전체(또는 특정 자치구)의 일별 총결제금액·건수 추이는?"
+              axes: "집계 시계열 — event_date ASC, SUM(payment_amt_total) (gu 센티널·기간 창)"
+              verified_rows: 0                # 실 D1 실측: [21, 28] (스탬핑 대기)
+              insight_sample_ko: "서울 전체 일별 총결제는 예컨대 2026-07-08 기준 82개 지역 합계 약 54.97억원(18.4만 건). 단일 장소 추이(기존 패턴)와 달리 도시·자치구 단위 소비 규모의 흐름을 본다."
+              sql: |
+                -- :gu=ALL, :from=2026-07-01, :to=2026-07-31
+                SELECT event_date,
+                       COUNT(*) AS n_areas,
+                       SUM(payment_amt_total) AS total_amt,
+                       SUM(payment_cnt_total) AS total_cnt
+                FROM gold_citydata_purchasing_power_daily
+                WHERE event_date BETWEEN :from AND :to
+                  AND payment_amt_total IS NOT NULL
+                  AND (:gu = 'ALL' OR gu = :gu)
+                GROUP BY event_date
+                ORDER BY event_date ASC
+              requires: [select_columns, aggregate, group_by, filter_range, filter_null, sort]
+            - pattern_id: "spend_concentration_on_date"
+              question_ko: "특정 날, 하루 결제가 특정 시점에 몰린(피크 집중) 장소는? (최소 결제액 이상)"
+              axes: "장소 랭킹 — payment_amt_peak/payment_amt_total 비율 DESC (날짜 고정, 임계값)"
+              verified_rows: 0                # 실 D1 실측: [10, 15] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 결제 피크 집중도 1위는 신도림역(구로구)으로, 하루 결제 577만원 중 45.1%(260만원)가 피크 시점에 몰렸다. min_amt 임계로 소액 노이즈를 걸러 집중도만 본다."
+              sql: |
+                -- :date=2026-07-30, :min_amt=1000000, :n=10
+                SELECT area_nm, gu, payment_amt_total, payment_amt_peak,
+                       ROUND(payment_amt_peak * 1.0 / payment_amt_total, 3) AS peak_share
+                FROM gold_citydata_purchasing_power_daily
+                WHERE event_date = :date AND payment_amt_total >= :min_amt
+                ORDER BY peak_share DESC
+                LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "avg_ticket_size_on_date"
+              question_ko: "특정 날, 결제 1건당 평균 금액(객단가)이 가장 큰 장소는? (최소 결제건수 이상)"
+              axes: "장소 랭킹 — payment_amt_total/payment_cnt_total 비율 DESC (날짜 고정, 임계값)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "2026-07-30 객단가(결제 1건당 금액) 1위는 압구정로데오거리(강남구)로 약 82,044원(총 4.88억원/5,951건). 붐빔 대비 지수가 아닌 '거래 1건의 크기'를 보는 새 축이다."
+              sql: |
+                -- :date=2026-07-30, :min_cnt=100, :n=10
+                SELECT area_nm, gu, payment_amt_total, payment_cnt_total,
+                       ROUND(payment_amt_total * 1.0 / payment_cnt_total, 0) AS avg_ticket
+                FROM gold_citydata_purchasing_power_daily
+                WHERE event_date = :date AND payment_cnt_total >= :min_cnt
+                ORDER BY avg_ticket DESC
+                LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "compare_places_purchasing_power"
+              question_ko: "지정한 여러 장소의 특정 날 구매력(인구·총결제·소비/구매 강도)을 나란히 비교하면?"
+              axes: "단면 비교 — 장소 다중선택(IN json_each) × spend_per_crowd_idx DESC (날짜 고정)"
+              verified_rows: 0                # 실 D1 실측: [3, 2] (스탬핑 대기)
+              insight_sample_ko: "지정 3개 장소 중 2026-07-30 소비강도 최고는 강남역으로 spend_per_crowd_idx 18086.9, 총결제 9.91억원, 평균인구 54,794명. 임의 장소 묶음을 한 번에 비교한다."
+              sql: |
+                -- :areas=["강남역","서촌","혜화역"], :date=2026-07-30
+                SELECT area_nm, gu, area_category, ppltn_avg, payment_amt_total, spend_per_crowd_idx, buy_per_crowd_idx
+                FROM gold_citydata_purchasing_power_daily
+                WHERE event_date = :date AND area_nm IN (SELECT value FROM json_each(:areas))
+                ORDER BY spend_per_crowd_idx DESC
+              requires: [select_columns, filter_set, sort]
+
+### 삽입 대상 모델: gold_citydata_sbike_dow_hour  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "bike_slots_for_place_switch"
+              question_ko: "이 장소는 무슨 요일·시간에 따릉이가 가장 많나/적나? (지표·정렬 선택)"
+              axes: "요일×시간 랭킹 — 지표(대수/가용률)·정렬 방향 스위치, 장소 고정, 신뢰 셀 선택"
+              verified_rows: 0                # 실 D1 실측: [10, 10, 10] (스탬핑 대기)
+              insight_sample_ko: "여의도에서 신뢰 가능한 셀 중 가용률이 가장 낮은 시간은 목요일(dow=4) 03시로 가용률 9.4%(78/828대). metric·dir 스위치로 '가장 많은/여유로운' 방향(대수 desc)이면 월요일 13시 805대·97.2%가 최상위 — 기존 고정 랭킹(대수 DESC)의 상위호환."
+              sql: |
+                -- :area=여의도, :metric=pct, :dir=asc, :only_reliable=1, :n=10
+                SELECT dow, hr, avg_bikes_available, avg_racks, avg_availability_pct, base_n
+                FROM gold_citydata_sbike_dow_hour
+                WHERE area_nm = :area AND (:only_reliable = 0 OR reliable = 1)
+                ORDER BY
+                 CASE WHEN :dir='desc' THEN (CASE :metric WHEN 'pct' THEN avg_availability_pct ELSE avg_bikes_available END) END DESC,
+                 CASE WHEN :dir='asc' THEN (CASE :metric WHEN 'pct' THEN avg_availability_pct ELSE avg_bikes_available END) END ASC
+                LIMIT :n
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "bike_rollup_ranking_at_slot"
+              question_ko: "이 요일·시간에 자치구(또는 지역유형)별로 따릉이가 어디가 여유로운가?"
+              axes: "집계 랭킹 — 차원 스위치(자치구/지역유형), 요일·시간 고정, avg_availability_pct 평균 DESC"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "수요일(dow=3) 20시 기준 자치구별 평균 가용률은 동대문구가 165.7%로 가장 높음(대상 2곳, 합계 119대) — 100% 초과는 거치대보다 세워진 따릉이가 많은 포화 상태. dim=cat로 바꾸면 금요일 15시 '공원'이 109.6%로 최상위."
+              sql: |
+                -- :dim=gu, :dow=3, :hr=20, :n=10
+                SELECT CASE :dim WHEN 'cat' THEN area_category ELSE gu END AS dim_value,
+                 COUNT(*) AS n_places,
+                 ROUND(AVG(avg_availability_pct),1) AS avg_avail_pct,
+                 SUM(avg_bikes_available) AS total_bikes
+                FROM gold_citydata_sbike_dow_hour
+                WHERE dow = :dow AND hr = :hr
+                GROUP BY dim_value
+                ORDER BY avg_avail_pct DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, aggregate, group_by, sort]
+            - pattern_id: "bike_commute_window_best_places"
+              question_ko: "특정 요일 출퇴근 등 시간대(시간 범위) 평균으로 따릉이가 가장 잘 잡히는 장소는?"
+              axes: "장소 랭킹 — 시간 창(hr BETWEEN) 집계, 요일 고정, avg_availability_pct 평균 DESC"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "수요일(dow=3) 오전 06~09시 평균 가용률이 가장 높은 곳은 성신여대입구역(성북구)로 182.7%, 평균 66대(관측 46건). 토요일(dow=6) 저녁 18~21시엔 신림역(관악구)이 229.9%로 최상위."
+              sql: |
+                -- :dow=3, :from_hr=6, :to_hr=9, :n=10
+                SELECT area_nm, gu, area_category,
+                 ROUND(AVG(avg_availability_pct),1) AS avg_avail_pct,
+                 ROUND(AVG(avg_bikes_available),0) AS avg_bikes,
+                 SUM(base_n) AS obs
+                FROM gold_citydata_sbike_dow_hour
+                WHERE dow = :dow AND hr BETWEEN :from_hr AND :to_hr
+                GROUP BY area_nm, gu, area_category
+                ORDER BY avg_avail_pct DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, filter_range, aggregate, group_by, sort]
+            - pattern_id: "bike_compare_places_at_slot"
+              question_ko: "고른 여러 장소 중 이 요일·시간에 따릉이가 잘 잡히는 곳은?"
+              axes: "장소 비교 — 다중 선택 IN(json_each), 요일·시간 고정, avg_availability_pct DESC"
+              verified_rows: 0                # 실 D1 실측: [3, 2] (스탬핑 대기)
+              insight_sample_ko: "수요일(dow=3) 20시, 고른 세 곳 중 발산역이 가용률 70.8%(185대, 신뢰 셀)로 가장 여유로움. 여러 후보 대여소를 한 번에 비교해 어디로 갈지 고르는 용도."
+              sql: |
+                -- :areas=["여의도","광화문·덕수궁","발산역"], :dow=3, :hr=20
+                SELECT area_nm, gu, avg_bikes_available, avg_availability_pct, base_n, reliable
+                FROM gold_citydata_sbike_dow_hour
+                WHERE dow = :dow AND hr = :hr AND area_nm IN (SELECT value FROM json_each(:areas))
+                ORDER BY avg_availability_pct DESC
+              requires: [select_columns, filter_set, sort]
+            - pattern_id: "bike_full_dock_slots_for_place"
+              question_ko: "이 장소에서 거치대가 포화되어 반납이 어려운(가용률 높은) 요일·시간은?"
+              axes: "요일×시간 랭킹 — avg_availability_pct 임계값 초과, 장소 고정, 신뢰 셀만"
+              verified_rows: 0                # 실 D1 실측: [10, 9] (스탬핑 대기)
+              insight_sample_ko: "노량진은 화요일(dow=2) 06시에 가용률 184.6%(137대/거치대 74)로 도크가 크게 포화 — 반납이 가장 어려운 시간대. 여의도는 min_pct=80 기준 수요일 10시(86.6%) 등 4개 셀만 포화에 근접."
+              sql: |
+                -- :area=노량진, :min_pct=80, :n=10
+                SELECT dow, hr, avg_bikes_available, avg_racks, avg_availability_pct, base_n
+                FROM gold_citydata_sbike_dow_hour
+                WHERE area_nm = :area AND reliable = 1 AND avg_availability_pct >= :min_pct
+                ORDER BY avg_availability_pct DESC
+                LIMIT :n
+              requires: [select_columns, filter_set, filter_range, sort]
+            - pattern_id: "bike_dow_profile_for_place"
+              question_ko: "이 장소는 어느 요일에 따릉이가 가장 여유로운가? (요일별 종일 평균)"
+              axes: "요일 집계 랭킹 — 장소 고정, 전 시간 평균, avg_availability_pct DESC (신뢰 셀만)"
+              verified_rows: 0                # 실 D1 실측: [5, 5] (스탬핑 대기)
+              insight_sample_ko: "여의도는 신뢰 셀 종일 평균 가용률이 수요일(dow=3) 39.9%로 가장 높음(평균 330대, 관측 502건). 노량진은 월요일(dow=1)이 158.6%로 가장 포화 — 요일 단위로 평일/주말 여유 패턴을 한눈에 비교."
+              sql: |
+                -- :area=여의도
+                SELECT dow,
+                 ROUND(AVG(avg_availability_pct),1) AS avg_avail_pct,
+                 ROUND(AVG(avg_bikes_available),0) AS avg_bikes,
+                 SUM(base_n) AS obs
+                FROM gold_citydata_sbike_dow_hour
+                WHERE area_nm = :area AND reliable = 1
+                GROUP BY dow
+                ORDER BY avg_avail_pct DESC
+              requires: [select_columns, filter_set, aggregate, group_by, sort]
+
+### 삽입 대상 모델: gold_citydata_transit_x_incident_hourly  (usage_patterns 리스트 끝에 추가)
+            - pattern_id: "gu_incident_totals_over_period"
+              question_ko: "최근 기간 동안 교통 돌발이 가장 잦았던 자치구는?"
+              axes: "자치구 랭킹 — SUM(incident_count) DESC (기간 집계)"
+              verified_rows: 0                # 실 D1 실측: [10, 5] (스탬핑 대기)
+              insight_sample_ko: "7/25~8/8 교통 돌발이 가장 잦은 자치구는 중구로 총 132건(돌발 발생 114시간), 5분 평균 승차 375.2명."
+              sql: |
+                -- :from=2026-07-25 00:00:00, :to=2026-08-08 23:59:59, :n=10
+                SELECT gu, SUM(incident_count) AS total_incidents, SUM(has_incident) AS incident_hours, ROUND(AVG(board_5min_avg),1) AS avg_board
+                FROM gold_citydata_transit_x_incident_hourly
+                WHERE time_bucket BETWEEN :from AND :to
+                GROUP BY gu
+                ORDER BY total_incidents DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, sort]
+            - pattern_id: "hourly_incident_profile"
+              question_ko: "하루 중 몇 시에 교통 돌발이 가장 몰리나? (시간대별 분포)"
+              axes: "시간대(0-23) 분포 — hour_of_day 축, SUM(incident_count)"
+              verified_rows: 0                # 실 D1 실측: [24, 24] (스탬핑 대기)
+              insight_sample_ko: "7/25~8/8 시간대별 돌발 분포에서 00시는 총 7건(활동 78개 동·시각 셀 중 7시간에 돌발) — 24개 시간대 프로파일을 반환."
+              sql: |
+                -- :from=2026-07-25 00:00:00, :to=2026-08-08 23:59:59
+                SELECT substr(time_bucket,12,2) AS hour_of_day, SUM(incident_count) AS total_incidents, SUM(has_incident) AS incident_hours, COUNT(*) AS n_cells
+                FROM gold_citydata_transit_x_incident_hourly
+                WHERE time_bucket BETWEEN :from AND :to
+                GROUP BY hour_of_day
+                ORDER BY hour_of_day
+              requires: [select_columns, aggregate, group_by, filter_range, sort]
+            - pattern_id: "incident_hotspots_by_acc_type"
+              question_ko: "특정 사고유형 코드(A04 등)가 발생한 시각·동네는?"
+              axes: "단면 — 사고유형 코드 필터, time_bucket ASC"
+              verified_rows: 0                # 실 D1 실측: [15, 15] (스탬핑 대기)
+              insight_sample_ko: "사고유형 A04가 포함된 최초 돌발은 7/25 00:00 강남구 삼성1동(1건, acc_types=A04)."
+              sql: |
+                -- :code=A04, :from=2026-07-25 00:00:00, :to=2026-08-08 23:59:59, :n=15
+                SELECT time_bucket, admin_dong, gu, incident_count, acc_types
+                FROM gold_citydata_transit_x_incident_hourly
+                WHERE acc_types LIKE '%' || :code || '%' AND time_bucket BETWEEN :from AND :to
+                ORDER BY time_bucket LIMIT :n
+              requires: [select_columns, filter_set, filter_range, sort]
+            - pattern_id: "board_alight_net_flow_at_time"
+              question_ko: "특정 시각, 순승차(승차-하차)로 본 출발지·도착지 성격 동네는?"
+              axes: "동 랭킹 — 순승차(board-alight) 방향 스위치 (시각 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "7/31 08시 순유출(승차>하차)이 가장 큰 동네는 광진구 중곡1동으로 5분 평균 승차 193.8·하차 84.6, 순승차 +109.2명 — 출근 출발지 성격. dir=asc로 뒤집으면 중구 명동(승차 181.3·하차 2135.4, 순 -1954.1)이 최대 도착지."
+              sql: |
+                -- :ts=2026-07-31 08:00:00, :dir=desc, :n=10
+                SELECT admin_dong, gu, board_5min_avg, alight_5min_avg, (board_5min_avg - alight_5min_avg) AS net_board
+                FROM gold_citydata_transit_x_incident_hourly
+                WHERE time_bucket = :ts AND board_5min_avg IS NOT NULL AND alight_5min_avg IS NOT NULL
+                ORDER BY CASE WHEN :dir='asc' THEN (board_5min_avg - alight_5min_avg) END ASC, CASE WHEN :dir='desc' THEN (board_5min_avg - alight_5min_avg) END DESC
+                LIMIT :n
+              requires: [select_columns, filter_null, sort]
+            - pattern_id: "incident_prone_dongs_by_rate"
+              question_ko: "교통활동 시간 대비 돌발이 상습적으로 겹치는 동네는? (건수 아닌 비율)"
+              axes: "동 랭킹 — 돌발 발생 시간 비율 DESC (기간 집계, 표본 임계값)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "7/25~8/8 중 활동 97시간 전부(100%)에서 돌발이 겹친 상습 1위는 중구 명동(97/97시간)."
+              sql: |
+                -- :from=2026-07-25 00:00:00, :to=2026-08-08 23:59:59, :min_hours=24, :n=10
+                SELECT admin_dong, gu, SUM(has_incident) AS incident_hours, COUNT(*) AS total_hours, ROUND(100.0*SUM(has_incident)/COUNT(*),1) AS incident_hour_pct
+                FROM gold_citydata_transit_x_incident_hourly
+                WHERE time_bucket BETWEEN :from AND :to
+                GROUP BY admin_dong_code, admin_dong, gu
+                HAVING COUNT(*) >= :min_hours
+                ORDER BY incident_hour_pct DESC LIMIT :n
+              requires: [select_columns, aggregate, group_by, filter_range, having, sort]
+            - pattern_id: "peak_boarding_surges"
+              question_ko: "최근 기간 5분 최대 승차(폭증)가 가장 컸던 동네·시각은?"
+              axes: "시각·동 랭킹 — board_5min_peak DESC (기간 고정)"
+              verified_rows: 0                # 실 D1 실측: [10, 10] (스탬핑 대기)
+              insight_sample_ko: "7/25~8/8 최대 승차 폭증은 7/30 18시 중구 명동으로 5분 최대 승차 10,250명(그 시간 평균 2,412.5, 돌발 1건 동반)."
+              sql: |
+                -- :from=2026-07-25 00:00:00, :to=2026-08-08 23:59:59, :n=10
+                SELECT time_bucket, admin_dong, gu, board_5min_peak, board_5min_avg, incident_count
+                FROM gold_citydata_transit_x_incident_hourly
+                WHERE time_bucket BETWEEN :from AND :to
+                ORDER BY board_5min_peak DESC LIMIT :n
+              requires: [select_columns, filter_range, sort]
+            - pattern_id: "compare_gus_transit_incident_over_period"
+              question_ko: "고른 몇 개 자치구를 기간 집계로 나란히 비교하면?"
+              axes: "자치구 교차 비교 — 선택 집합 집계 (기간 고정)"
+              verified_rows: 0                # 실 D1 실측: [3, 2] (스탬핑 대기)
+              insight_sample_ko: "강남·마포·중구 중 돌발이 가장 잦은 곳은 중구(132건), 5분 평균 승차 375.2·하차 419.2명."
+              sql: |
+                -- :gus=["강남구","마포구","중구"], :from=2026-07-25 00:00:00, :to=2026-08-08 23:59:59
+                SELECT gu, SUM(incident_count) AS total_incidents, SUM(has_incident) AS incident_hours, ROUND(AVG(board_5min_avg),1) AS avg_board, ROUND(AVG(alight_5min_avg),1) AS avg_alight
+                FROM gold_citydata_transit_x_incident_hourly
+                WHERE gu IN (SELECT value FROM json_each(:gus)) AND time_bucket BETWEEN :from AND :to
+                GROUP BY gu
+                ORDER BY total_incidents DESC
+              requires: [select_columns, aggregate, group_by, filter_set, filter_range, sort]
+
