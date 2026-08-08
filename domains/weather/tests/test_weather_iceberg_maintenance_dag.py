@@ -208,7 +208,7 @@ def test_maintenance_dag_is_paused_dev_only_and_serial():
     assert module.dag.kwargs["max_active_runs"] == 1
     assert module.dag.kwargs["is_paused_upon_creation"] is True
     assert module.DEFAULT_PARAM_VALUES == {
-        "target": "dev",
+        "target": "prod",
         "retention": "7d",
         "tables": module.CANONICAL_TABLES,
     }
