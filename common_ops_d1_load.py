@@ -24,7 +24,24 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_DAGS_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(_DAGS_ROOT))
+
+# expectations.load_all() 는 도메인별 <pkg>_ingest 모듈(예: weather_ingest.ops_expectations)을
+# top-level 로 임포트한다. 그 패키지들은 dags 루트가 아니라 domains/<domain>/(commerce 는
+# domains/commerce/include/) 아래 있어서, 여기서 그 경로들을 미리 깔아 두지 않으면 매 도메인이
+# ImportError 로 조용히 건너뛰어진다 — load_all() 이 예외를 삼키는 구조라 등록 자체는 맞아도
+# 조회 DB 에는 하나도 안 올라가는 상태가 눈에 안 띄게 지속될 수 있다(ASAC-DAG#733 후속 실측:
+# commerce 포함 전 도메인이 이 문제로 며칠간 갱신이 안 되고 있었다).
+_DOMAINS_ROOT = _DAGS_ROOT / "domains"
+if _DOMAINS_ROOT.is_dir():
+    for _domain_dir in sorted(_DOMAINS_ROOT.iterdir()):
+        if not _domain_dir.is_dir():
+            continue
+        sys.path.insert(0, str(_domain_dir))
+        _include_dir = _domain_dir / "include"
+        if _include_dir.is_dir():
+            sys.path.insert(0, str(_include_dir))
 
 import pendulum  # noqa: E402
 from airflow.decorators import dag, task  # noqa: E402
