@@ -575,6 +575,20 @@ def _handoff_rows(spec, m: dict, col_defs: list,
                 # 자연키 (product_id, pattern_id) 필수 + 한 모델→다제품(geo_grid)용 d1_table 라우팅.
                 if p.get("sql") and p.get("pattern_id")
                 and p.get("d1_table", spec.d1_table) == spec.d1_table]
+    # 게시 전 정적 보안 감사(pattern_audit) — 게이트웨이는 패턴 SQL 의 테이블 스코프를 검사하지
+    # 않으므로(값 bind 만), "commerce 소유 d1_* 만 읽는 읽기 전용 단일문" 보증은 여기서 강제한다.
+    # 위반 패턴은 게시에서 제외(직전 게시본 행은 다음 잔여 정리에서 함께 사라져 runnable 이 꺼진다)
+    # 하고 §19.1 규격으로 경보한다 — 통과분 게시는 막지 않는다.
+    from gold.pattern_audit import audit_patterns
+    violations = audit_patterns(pat_rows)
+    if violations:
+        log_event("serve.pattern_audit_reject", level="error", where="_handoff_rows",
+                  product_id=pid, table=spec.d1_table,
+                  settled_rows=len(pat_rows), affected_rows=len(violations),
+                  affected_ratio_pct=round(100.0 * len(violations) / max(len(pat_rows), 1), 1),
+                  patterns={k: v[:2] for k, v in sorted(violations.items())[:10]},
+                  hint="scripts/audit_pattern_sql.py 로 사전 검사 후 SQL 을 수정하세요")
+        pat_rows = [r for r in pat_rows if str(r["pattern_id"]) not in violations]
     return col_rows, ext_row, pat_rows, _display_row(spec, sv, pid, publication_id)
 
 

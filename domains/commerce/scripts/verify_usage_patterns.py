@@ -208,7 +208,8 @@ _PARAM_OVERRIDES: dict[str, dict[str, str]] = {
 
 
 # ── 실행·기록 ────────────────────────────────────────────────────────────────
-def run(yml_path: Path, *, execute: bool, apply: bool, only: str | None = None) -> dict:
+def run(yml_path: Path, *, execute: bool, apply: bool, only: str | None = None,
+        only_unstamped: bool = False) -> dict:
     import os
 
     from gold import serving_export as se
@@ -218,6 +219,8 @@ def run(yml_path: Path, *, execute: bool, apply: bool, only: str | None = None) 
     patterns = parse_patterns(lines)
     if only:   # 부분 재검증(#179) — key(d1_table/pattern_id) 부분 일치만 실행, 나머지는 무접촉
         patterns = [p for p in patterns if only in p.key]
+    if only_unstamped:   # 신규 패턴만(#471) — verified_at 이 아직 없는 것만, 기존 스탬프 무접촉
+        patterns = [p for p in patterns if not p.has_verified_at]
     bad = [p.key for p in patterns if p.verified_rows_line < 0 or not p.d1_table or not p.sql_lines]
     if bad:
         raise SystemExit(f"파싱 실패(수동 확인 필요): {bad[:5]} … {len(bad)}건")
@@ -301,6 +304,8 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="D1 실행 + yml 에 verified_* 기록")
     parser.add_argument("--only", default=None,
                         help="key(d1_table/pattern_id) 부분 일치 필터 — 바뀐 패턴만 재검증할 때")
+    parser.add_argument("--only-unstamped", action="store_true",
+                        help="verified_at 없는 신규 패턴만 — 기존 스탬프 무접촉(#471)")
     args = parser.parse_args()
 
     _bootstrap(args.env_file)
@@ -309,7 +314,8 @@ def main() -> int:
     yml_path = Path(args.yml) if args.yml else (
         Path(os.getenv("COMMERCE_DBT_PROJECT_DIR", "/opt/airflow/dbt/domains/commerce"))
         / "models" / "gold" / "_commerce_gold__models.yml")
-    report = run(yml_path, execute=args.execute or args.apply, apply=args.apply, only=args.only)
+    report = run(yml_path, execute=args.execute or args.apply, apply=args.apply,
+                 only=args.only, only_unstamped=args.only_unstamped)
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     ok = not report["failed"] and not report["skipped"]
     return 0 if ok else 1

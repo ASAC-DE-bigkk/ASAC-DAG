@@ -11,6 +11,55 @@
 
 ## 2026-08-08
 
+### 102. usage_patterns 표현력 확장(신규 209) + SQL 정적 보안 감사 도입 (ASAC-DBT#471)
+
+request:
+- #471(표기 규약 정본화)의 확장 지시: commerce D1 22종으로 **실질적으로 가능한 모든 질의
+  패턴**을 찾아 테스트 후 적용하고, 마켓플레이스 API 한계로 표현 불가한 영역은 버리지 말고
+  **역제안 문서**로 정리(특히 조합·조립 패턴 연구). 단 제안 패턴은 **보안 감사 방법과 전체
+  차단 방법**이 동반돼야 한다(쿼리 인젝션 방지). 당위성: AI 접근 폭을 좁히는 방향은 프로젝트
+  취지와 안 맞음.
+
+response:
+- **신규 209패턴**을 22 테이블 + 교차 2종에 설계, 로컬 SQLite 레플리카(실 D1 표본)로 반복
+  검증 후 **실 D1 440조합 전건 통과**(0행·실패 0). 기존 275 + 신규 209 = **484패턴**.
+  `verify_usage_patterns.py --apply --only-unstamped`(신규 플래그)로 신규만 실측 스탬프 —
+  기존 275 무접촉(순수 추가 diff). 조합 관용구: 차원/정렬/지표 스위치·센티널·임계값·기간창·
+  교차 JOIN·**배열 IN(`json_each`, 실 D1 검증)**. 하나의 관용구 패턴이 다수 고정 패턴을 대체.
+- **정적 보안 감사기 신설** `include/gold/pattern_audit.py`: 게이트웨이는 저장 SQL 을 공유 D1
+  전체(`_keys`·`_usage`·타 도메인 `d1_*` 포함)에 verbatim 실행하며 **테이블 스코프를 검사하지
+  않는다**(값 bind 만). 이 감사가 "commerce 패턴은 commerce 소유 d1_* 만 읽는 읽기전용 단일문"을
+  게시 시점에 강제한다 — allowlist 정본은 SERVING_SPEC 파생. export `_handoff_rows` 가 게시
+  직전 위반분을 **게시 제외 + 경보**(§19.1). CLI `scripts/audit_pattern_sql.py`(self-test 23),
+  dbt CI 린트 `lint_usage_patterns.py`(E1~E7) + 워크플로 `commerce-usage-patterns-gate`.
+- **레드팀(3인 독립)이 진짜 우회 확증**: 콤마 조인(`FROM d1_ok, _keys`)의 2번째 이후 테이블을
+  초기 정규식이 놓쳐 `_keys`(API 키 해시+이메일) 유출이 감사 통과했다. **정규식을 토크나이저
+  기반 테이블 추출기로 교체** — 콤마 조인·파생 테이블 뒤 콤마·스칼라 서브쿼리·스키마 한정·
+  pragma TVF 를 전부 열거. 레드팀 페이로드 8종을 회귀 테스트로 고정. 484 코퍼스 오탐 0.
+- **전체 차단(kill switch) 3단계** 문서화: verified_at NULL(즉시 409) / yml 제거 후 export /
+  external=false. 전부 gold·원천 무손실.
+- 문서: 표기·보안 규약 정본 `docs/DB/gold/usage-patterns-convention.md`, 제공정보 카탈로그
+  (생성물) `usage-patterns-catalog.md`(생성기 `scripts/generate_pattern_catalog.py`),
+  마켓플레이스 역제안 `usage-patterns-proposal.md`. 전체 511 테스트·security PASS.
+
+decision:
+- **역제안(C)은 소수**로 수렴 — not_expressible 94건 중 배열 IN(~21)은 `json_each` 로 이미
+  해결(A), 시간축·분위수·지역축 등 ~43건은 게이트웨이가 아니라 commerce gold/서빙 스키마 숙제
+  (B)라 역제안에 섞지 않고 별도 백로그로 분리. 순수 게이트웨이 계약 변경은 8개(P1~P8).
+- **당위성 = 확장과 안전은 트레이드오프가 아니다**: 8제안 중 7개는 값 슬롯/결과 변형이라
+  인젝션 표면 0(소비자는 여전히 질의를 못 짓는다). 유일한 위험 확장(식별자 슬롯 P6)도
+  화이트리스트가 표현력과 안전을 동시에 정의. 표현력을 좁혀도 새 안전이 안 생기고 효용만 깎임.
+- **P4 함수 가용성 실측으로 (B)/(C) 확정**(2026-08-08 실 D1): `sqrt/pow/cos/radians/abs/round/
+  instr` 가용 → 하버사인 반경·분산 지표는 오늘 관용구로 가능(A로 이동, 역제안 철회).
+  `REGEXP`·`stddev`/`corr` 집계는 불가 확정 → (B) FTS/사전계산.
+- **핵심 역제안은 게이트웨이가 테이블 allowlist 를 직접 강제하는 것**(P0) — 지금 그 방어는
+  commerce 측 감사에만 있어 타 도메인이 우회 게시하면 `_keys` 유출을 게이트웨이가 못 막는다.
+  이건 공유 인프라(ASK-Seoul-Serving) 변경이라 commerce 소관 밖 — 취합 이슈로 조율 제안만 한다.
+- **전 275 재검증은 하지 않았다** — id 개명 아닌 순수 추가라 기존 증거 무효화 없음. `--apply`
+  전수 스탬프안은 기각(기존 271개 타임스탬프-only 변경이 리뷰를 흐림) → `--only-unstamped` 신설.
+- **sqlglot 등 파서 의존 도입은 기각** — 보안 플러그인 stdlib-only 원칙 유지. 토크나이저는
+  과다 캡처(=게시 거부) 쪽 fail-closed 로 충분히 견고(코퍼스 오탐 0·레드팀 8종 차단 실증).
+
 ### 101. 게시 패턴 표기 수리 — id 하이픈 77건 개명·churn_yearly 바인딩 전환 (Serving#178·#179)
 
 request:
