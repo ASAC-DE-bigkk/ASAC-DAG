@@ -1,0 +1,372 @@
+{
+ "citydata": {
+  "yml_files": [
+   "dbt/domains/citydata/models/gold/_citydata_gold__models.yml"
+  ],
+  "products": [
+   {
+    "model": "gold_citydata_ppltn_daily",
+    "product_id": "citydata_ppltn_daily",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_ppltn_hourly",
+    "product_id": "citydata_ppltn_hourly",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_cmrcl_daily",
+    "product_id": "citydata_cmrcl_daily",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_purchasing_power_daily",
+    "product_id": "citydata_purchasing_power_daily",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_ppltn_x_culture_daily",
+    "product_id": "citydata_ppltn_x_culture_daily",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_transit_x_incident_hourly",
+    "product_id": "citydata_transit_x_incident_hourly",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_ppltn_x_weather_hourly",
+    "product_id": "citydata_ppltn_x_weather_hourly",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_ppltn_demographics",
+    "product_id": "citydata_ppltn_demographics",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_ppltn_dow_hour",
+    "product_id": "citydata_ppltn_dow_hour",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_sbike_dow_hour",
+    "product_id": "citydata_sbike_dow_hour",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_air_daily",
+    "product_id": "citydata_air_daily",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_charger_dow_hour",
+    "product_id": "citydata_charger_dow_hour",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_dst_daily",
+    "product_id": "citydata_dst_daily",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_citydata_dst_dow_hour",
+    "product_id": "citydata_dst_dow_hour",
+    "external": true,
+    "n_patterns": 3
+   }
+  ],
+  "tables": [
+   "gold_citydata_air_daily",
+   "gold_citydata_charger_dow_hour",
+   "gold_citydata_cmrcl_daily",
+   "gold_citydata_dst_daily",
+   "gold_citydata_dst_dow_hour",
+   "gold_citydata_ppltn_daily",
+   "gold_citydata_ppltn_demographics",
+   "gold_citydata_ppltn_dow_hour",
+   "gold_citydata_ppltn_hourly",
+   "gold_citydata_ppltn_x_culture_daily",
+   "gold_citydata_ppltn_x_weather_hourly",
+   "gold_citydata_purchasing_power_daily",
+   "gold_citydata_sbike_dow_hour",
+   "gold_citydata_transit_x_incident_hourly"
+  ],
+  "n_products": 14,
+  "n_patterns": 42,
+  "verified": 0,
+  "requires_hist": {
+   "select_columns": 42,
+   "sort": 42,
+   "filter_set": 24,
+   "filter_range": 12,
+   "aggregate": 1,
+   "group_by": 1
+  }
+ },
+ "culture": {
+  "yml_files": [
+   "dbt/domains/culture/models/gold/_culture_gold__models.yml"
+  ],
+  "products": [
+   {
+    "model": "gold_culture_activity_by_dong",
+    "product_id": "culture_activity_by_dong",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_culture_booking_curve",
+    "product_id": "culture_booking_curve",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_culture_boxoffice_daily",
+    "product_id": "culture_boxoffice_daily",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_culture_calendar_density",
+    "product_id": "culture_calendar_density",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_culture_event_crowd",
+    "product_id": "culture_event_crowd",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_culture_event_schedule",
+    "product_id": "culture_event_schedule",
+    "external": true,
+    "n_patterns": 4
+   },
+   {
+    "model": "gold_culture_dine_around",
+    "product_id": "culture_dine_around",
+    "external": true,
+    "n_patterns": 3
+   }
+  ],
+  "tables": [
+   "gold_culture_activity_by_dong",
+   "gold_culture_booking_curve",
+   "gold_culture_boxoffice_daily",
+   "gold_culture_calendar_density",
+   "gold_culture_dine_around",
+   "gold_culture_event_crowd",
+   "gold_culture_event_schedule"
+  ],
+  "n_products": 7,
+  "n_patterns": 22,
+  "verified": 22,
+  "requires_hist": {
+   "select_columns": 22,
+   "sort": 22,
+   "filter_range": 8,
+   "subquery": 4,
+   "aggregate": 3,
+   "group_by": 3,
+   "filter_set": 2
+  }
+ },
+ "transit": {
+  "yml_files": [
+   "dbt/domains/transit/models/schema.yml"
+  ],
+  "products": [
+   {
+    "model": "gold_transit_dong_hourly",
+    "product_id": "transit_dong_hourly",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_transit_dong_now",
+    "product_id": "transit_dong_now",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_transit_parking_profile",
+    "product_id": "transit_parking_profile",
+    "external": false,
+    "n_patterns": 0
+   },
+   {
+    "model": "gold_transit_parking_full_risk",
+    "product_id": "transit_parking_full_risk",
+    "external": true,
+    "n_patterns": 3
+   },
+   {
+    "model": "gold_transit_event_access",
+    "product_id": "transit_event_access",
+    "external": true,
+    "n_patterns": 3
+   }
+  ],
+  "tables": [
+   "gold_transit_dong_hourly",
+   "gold_transit_dong_now",
+   "gold_transit_event_access",
+   "gold_transit_parking_full_risk",
+   "gold_transit_parking_profile"
+  ],
+  "n_products": 5,
+  "n_patterns": 12,
+  "verified": 12,
+  "requires_hist": {
+   "select_columns": 12,
+   "sort": 11,
+   "filter_set": 8,
+   "filter_null": 6,
+   "filter_range": 3,
+   "aggregate": 1,
+   "group_by": 1
+  }
+ },
+ "traffic_weather": {
+  "yml_files": [
+   "dbt/domains/traffic_weather/models\\groups.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\collection_state_sources.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\sources.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\recovery\\gold\\_recovery_gold.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\recovery\\metadata\\_recovery_metadata.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\recovery\\silver\\_recovery_silver.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\gold\\gold_traffic_collection_slot_state.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\gold\\gold_traffic_flow_anomaly_current.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\gold\\gold_traffic_flow_change_latest.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\gold\\gold_traffic_flow_congestion_hotspots_hourly.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\gold\\gold_traffic_flow_link_latest.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\gold\\gold_traffic_flow_link_time_profile.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\gold\\gold_traffic_incident_current_by_admin_dong_hourly.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\gold\\gold_traffic_incident_x_weather_current_hourly.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\gold\\_gold.yml",
+   "dbt/domains/traffic_weather/models\\traffic\\transform\\silver\\_silver.yml",
+   "dbt/domains/traffic_weather/models\\weather\\sources.yml",
+   "dbt/domains/traffic_weather/models\\weather\\special\\gold\\gold_weather_forecast_by_admin_dong.yml",
+   "dbt/domains/traffic_weather/models\\weather\\special\\recovery\\_recovery.yml",
+   "dbt/domains/traffic_weather/models\\weather\\special\\silver\\_special_silver.yml",
+   "dbt/domains/traffic_weather/models\\weather\\special\\w1\\_w1.yml",
+   "dbt/domains/traffic_weather/models\\weather\\transform\\gold\\gold_weather_collection_slot_state.yml",
+   "dbt/domains/traffic_weather/models\\weather\\transform\\gold\\gold_weather_place_current_outlook.yml",
+   "dbt/domains/traffic_weather/models\\weather\\transform\\gold\\gold_weather_place_forecast_change_daily.yml",
+   "dbt/domains/traffic_weather/models\\weather\\transform\\gold\\gold_weather_place_precipitation_window.yml",
+   "dbt/domains/traffic_weather/models\\weather\\transform\\gold\\gold_weather_place_risk_window.yml",
+   "dbt/domains/traffic_weather/models\\weather\\transform\\gold\\_gold.yml",
+   "dbt/domains/traffic_weather/models\\weather\\transform\\gold\\_serving_gold.yml",
+   "dbt/domains/traffic_weather/models\\weather\\transform\\place_mart\\_place_mart.yml",
+   "dbt/domains/traffic_weather/models\\weather\\transform\\silver\\_silver.yml"
+  ],
+  "products": [
+   {
+    "model": "gold_traffic_flow_anomaly_current",
+    "product_id": "traffic_flow_anomaly_current",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_traffic_flow_change_latest",
+    "product_id": "traffic_flow_change_latest",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_traffic_flow_congestion_hotspots_hourly",
+    "product_id": "traffic_flow_congestion_hotspots_hourly",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_traffic_flow_link_latest",
+    "product_id": "traffic_flow_link_latest",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_traffic_flow_link_time_profile",
+    "product_id": "traffic_flow_link_time_profile",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_traffic_incident_x_weather_current_hourly",
+    "product_id": "traffic_incident_x_weather_current_hourly",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_weather_place_current_outlook",
+    "product_id": "weather_place_current_outlook",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_weather_place_forecast_change_daily",
+    "product_id": "weather_place_forecast_change_daily",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_weather_place_precipitation_window",
+    "product_id": "weather_place_precipitation_window",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_weather_place_risk_window",
+    "product_id": "weather_place_risk_window",
+    "external": true,
+    "n_patterns": 8
+   },
+   {
+    "model": "gold_weather_current_wide_by_admin_dong",
+    "product_id": "weather_current_by_admin_dong",
+    "external": false,
+    "n_patterns": 0
+   }
+  ],
+  "tables": [
+   "gold_traffic_flow_anomaly_current",
+   "gold_traffic_flow_change_latest",
+   "gold_traffic_flow_congestion_hotspots_hourly",
+   "gold_traffic_flow_link_latest",
+   "gold_traffic_flow_link_time_profile",
+   "gold_traffic_incident_x_weather_current_hourly",
+   "gold_weather_current_wide_by_admin_dong",
+   "gold_weather_place_current_outlook",
+   "gold_weather_place_forecast_change_daily",
+   "gold_weather_place_precipitation_window",
+   "gold_weather_place_risk_window"
+  ],
+  "n_products": 11,
+  "n_patterns": 80,
+  "verified": 80,
+  "requires_hist": {
+   "select_columns": 80,
+   "sort": 73,
+   "filter_set": 47,
+   "filter_range": 30,
+   "aggregate": 11,
+   "group_by": 11
+  }
+ }
+}

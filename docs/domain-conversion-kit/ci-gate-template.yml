@@ -1,0 +1,28 @@
+# 도메인별 usage-patterns 게이트 (템플릿) — <DOMAIN> 를 도메인명으로 치환.
+# 커머스의 commerce-usage-patterns-gate.yml 을 도메인 무관하게 일반화한 것.
+# 공유 린트(common/serving/lint_usage_patterns.py)를 그 도메인 yml 글롭에 돌린다.
+name: <DOMAIN> usage-patterns gate
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - "domains/<DOMAIN>/models/**/*.yml"
+      - "common/serving/lint_usage_patterns.py"
+      - ".github/workflows/<DOMAIN>-usage-patterns-gate.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: python -m pip install --upgrade pip "pyyaml>=6"
+      - name: Lint usage_patterns (표기 + 테이블 스코프 보안)
+        run: >
+          python common/serving/lint_usage_patterns.py
+          --source "domains/<DOMAIN>/models/**/*.yml"

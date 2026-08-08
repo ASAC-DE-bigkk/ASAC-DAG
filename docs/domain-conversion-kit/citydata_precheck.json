@@ -1,0 +1,260 @@
+{
+ "total": 42,
+ "ok": 42,
+ "skip": 0,
+ "fail": 0,
+ "results": [
+  {
+   "pattern_id": "busiest_days_for_place",
+   "status": "ok",
+   "rows": 0,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "busiest_places_on_date",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "place_daily_trend",
+   "status": "ok",
+   "rows": 0,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "peak_hours_for_place",
+   "status": "ok",
+   "rows": 5,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "busiest_places_at_time",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "place_hourly_trend",
+   "status": "ok",
+   "rows": 24,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "top_commerce_places_on_date",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "place_commerce_trend",
+   "status": "ok",
+   "rows": 21,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "busy_places_in_gu",
+   "status": "ok",
+   "rows": 8,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "top_purchasing_power_on_date",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "place_purchasing_power_trend",
+   "status": "ok",
+   "rows": 28,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "high_crowd_low_spend_on_date",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "culture_active_dongs_on_date",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "festival_dongs_on_date",
+   "status": "ok",
+   "rows": 3,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "dong_culture_crowd_trend",
+   "status": "ok",
+   "rows": 0,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "incident_prone_dongs_at_time",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "busiest_transit_dongs_at_time",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "dong_transit_incident_trend",
+   "status": "ok",
+   "rows": 0,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "crowded_dongs_when_raining",
+   "status": "ok",
+   "rows": 0,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "dong_weather_crowd_trend",
+   "status": "ok",
+   "rows": 0,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "crowded_dongs_at_time",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "top_places_for_segment_at_time",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "segment_mix_for_place_at_time",
+   "status": "ok",
+   "rows": 8,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "gender_mix_for_place_at_time",
+   "status": "ok",
+   "rows": 2,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "peak_dow_hour_for_place",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "quietest_dow_hour_for_place",
+   "status": "ok",
+   "rows": 0,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "place_profile_on_dow",
+   "status": "ok",
+   "rows": 24,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "bike_rich_dow_hour_for_place",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "bike_hourly_profile_for_place_dow",
+   "status": "ok",
+   "rows": 24,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "bike_best_places_at_dow_hour",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "air_trend_for_place",
+   "status": "ok",
+   "rows": 0,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "air_worst_days_for_place",
+   "status": "ok",
+   "rows": 0,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "air_compare_places_on_date",
+   "status": "ok",
+   "rows": 25,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "charger_free_dow_hour_for_place",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "charger_hourly_profile_for_place_dow",
+   "status": "ok",
+   "rows": 24,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "charger_reliable_free_slots",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "dst_alerts_over_time",
+   "status": "ok",
+   "rows": 23,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "dst_by_type",
+   "status": "ok",
+   "rows": 1,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "dst_worst_days",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "dst_when_by_type",
+   "status": "ok",
+   "rows": 41,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "dst_peak_slots",
+   "status": "ok",
+   "rows": 10,
+   "declared_rows": null
+  },
+  {
+   "pattern_id": "dst_busy_dow",
+   "status": "ok",
+   "rows": 7,
+   "declared_rows": null
+  }
+ ]
+}
