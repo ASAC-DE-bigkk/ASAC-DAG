@@ -218,6 +218,17 @@ HANDOFF_COLUMN_TYPES: dict[str, tuple[tuple[str, str], ...]] = {
         ("allow_empty", "INTEGER NOT NULL DEFAULT 0"),
         ("insight_sample_ko", "TEXT"), ("publication_id", "TEXT NOT NULL"),
     ),
+    # v1.11 (Serving#217 P1/P3): 패턴 파라미터 메타 — 기본값·허용값·타입 선언(JSON 문자열).
+    # d1_usage_patterns 에 컬럼을 더하지 않고 **새 표**로 낸다(#706 display 와 같은 이유 —
+    # handoff_schema_is_current 완전일치 검사 때문에 공유 표 컬럼 추가는 구 실행기가 되돌린다).
+    # 게이트웨이는 이 표가 없으면 강등한다(전 파라미터 필수) — 게시가 늦어도 안전하다.
+    "d1_pattern_params": (
+        ("product_id", "TEXT NOT NULL"), ("pattern_id", "TEXT NOT NULL"),
+        ("param_defaults", "TEXT"),      # JSON 객체 문자열 — {"gu": "ALL"} · 미선언 NULL
+        ("param_enum", "TEXT"),          # JSON 객체 문자열 — {"dir": ["asc","desc"]}
+        ("params", "TEXT"),              # JSON 객체 문자열 — {"gus": {"type":"array",...}}
+        ("publication_id", "TEXT NOT NULL"),
+    ),
     # v1.10 (#706): 사람이 읽는 표시 메타. **기존 표에 컬럼을 더하지 않고 새 표로 낸다** —
     # handoff_schema_is_current 가 컬럼 집합을 완전 일치로 보므로, 공유 표에 컬럼을 더하면
     # 구 코드를 가진 실행기가 자기가 아는 모양으로 되돌리며 그 컬럼을 삭제한다. 실행기가
@@ -238,6 +249,7 @@ HANDOFF_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "d1_catalog_columns": ("product_id", "column_name"),
     "d1_catalog_ext": ("product_id",),
     "d1_usage_patterns": ("product_id", "pattern_id"),
+    "d1_pattern_params": ("product_id", "pattern_id"),
     "d1_catalog_display": ("product_id",),
     "d1_catalog_glossary": ("vocabulary_id", "code"),
 }
@@ -251,12 +263,14 @@ HANDOFF_SCOPE_COLUMNS: dict[str, str] = {
     "d1_catalog_columns": "product_id",
     "d1_catalog_ext": "product_id",
     "d1_usage_patterns": "product_id",
+    "d1_pattern_params": "product_id",
     "d1_catalog_display": "product_id",
     "d1_catalog_glossary": "vocabulary_id",
 }
 HANDOFF_PRUNE_KEYS: dict[str, str] = {
     "d1_catalog_columns": "column_name",
     "d1_usage_patterns": "pattern_id",
+    "d1_pattern_params": "pattern_id",
 }
 HANDOFF_STALE_MARKERS: dict[str, str] = {
     "d1_catalog_ext": "publication_id",
@@ -265,6 +279,7 @@ HANDOFF_STALE_MARKERS: dict[str, str] = {
 }
 HANDOFF_PRODUCT_TABLES = (
     "d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns", "d1_catalog_display",
+    "d1_pattern_params",
 )
 HANDOFF_COLUMNS = {table: tuple(name for name, _ in cols) for table, cols in HANDOFF_COLUMN_TYPES.items()}
 

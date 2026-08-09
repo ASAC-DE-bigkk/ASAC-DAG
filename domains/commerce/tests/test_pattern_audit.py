@@ -85,7 +85,7 @@ def test_handoff_rows_excludes_violating_patterns(caplog):
         {"pattern_id": "good", "sql": "SELECT y FROM d1_churn_yearly", "requires": []},
         {"pattern_id": "evil", "sql": "SELECT key_hash FROM _keys", "requires": []},
     ]}}
-    _, _, pat_rows, _ = se._handoff_rows(spec, m, [("y", "varchar")], "pub-1")
+    _, _, pat_rows, _, _ = se._handoff_rows(spec, m, [("y", "varchar")], "pub-1")
     assert [r["pattern_id"] for r in pat_rows] == ["good"]
 
 

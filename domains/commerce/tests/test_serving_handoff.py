@@ -245,3 +245,57 @@ def test_one_model_two_products_get_distinct_titles():
 
     assert detail["title"] == "상권 밀집 격자(업종별)"
     assert overview["title"] == "상권 밀집 격자"      # 덮어쓰기 없는 제품은 계약 필드 그대로
+
+
+# ── v1.11 (Serving#217 P1/P3): d1_pattern_params 게시·정리 ─────────────────────────
+
+def _param_row(pid="commerce_area_profile", pattern="gu_rank_any", pub="pub-1"):
+    return {"product_id": pid, "pattern_id": pattern,
+            "param_defaults": '{"dir": "desc", "n": 10}',
+            "param_enum": '{"dir": ["asc", "desc"]}',
+            "params": None, "publication_id": pub}
+
+
+def test_param_rows_upserted_and_pruned_by_declared_keyset(monkeypatch):
+    """파라미터 메타는 별도 표(d1_pattern_params)에 자연키 upsert + 선언 키셋(NOT IN) 정리.
+
+    선언을 지운 패턴의 옛 행이 남으면 게이트웨이가 죽은 기본값을 계속 적용하므로,
+    patterns 와 같은 판별(NOT IN 키셋)이어야 한다 — publication_id 재사용(#601) run 에도 유효.
+    """
+    spy = _D1Spy()
+    monkeypatch.setattr(se, "_d1", spy.d1)
+    se._publish_handoff("token", [], [], [], [], [], {"commerce_area_profile": "pub-1"}, "t1",
+                        param_rows=[_param_row()])
+    upserts = [s for s in spy.sqls if s.startswith('INSERT OR REPLACE INTO "d1_pattern_params"')]
+    assert upserts and "gu_rank_any" in upserts[0] and '{"dir": "desc", "n": 10}' in upserts[0].replace("''", "'")
+    prunes = [s for s in spy.sqls if 'DELETE FROM "d1_pattern_params"' in s]
+    assert prunes and "NOT IN" in prunes[0] and "gu_rank_any" in prunes[0]
+
+
+def test_param_rows_absent_still_prunes_stale_metadata(monkeypatch):
+    """이번 run 에 파라미터 메타 선언이 0건이어도 게시 제품 스코프의 옛 행은 정리된다 —
+    선언 철회가 곧 행 제거(빈 키셋 NOT IN = 전부 삭제)."""
+    spy = _D1Spy()
+    monkeypatch.setattr(se, "_d1", spy.d1)
+    se._publish_handoff("token", [], [], [], [], [], {"commerce_area_profile": "pub-1"}, "t1")
+    prunes = [s for s in spy.sqls if 'DELETE FROM "d1_pattern_params"' in s]
+    assert prunes, "메타 미선언 run 에도 스코프 정리는 돌아야 한다"
+    upserts = [s for s in spy.sqls if s.startswith('INSERT OR REPLACE INTO "d1_pattern_params"')]
+    assert not upserts
+
+
+def test_handoff_rows_emits_param_rows_only_for_declaring_patterns():
+    """_handoff_rows: 세 필드 중 하나라도 선언한 패턴만 param_rows 를 만들고, JSON 직렬화한다.
+    감사 탈락 패턴의 메타는 싣지 않는다(실행 안 될 패턴의 메타는 소음)."""
+    spec = next(s for s in se.SERVING_SPEC if s.d1_table == "d1_area_profile")
+    m = {"serving": {"usage_patterns": [
+        {"pattern_id": "with_meta", "sql": "SELECT category FROM d1_area_profile WHERE d = :dir",
+         "param_defaults": {"dir": "desc"}},
+        {"pattern_id": "no_meta", "sql": "SELECT category FROM d1_area_profile"},
+    ]}}
+    _, _, pat_rows, _, param_rows = se._handoff_rows(spec, m, [("category", "varchar")], "pub-9")
+    assert {r["pattern_id"] for r in pat_rows} == {"with_meta", "no_meta"}
+    assert [r["pattern_id"] for r in param_rows] == ["with_meta"]
+    assert param_rows[0]["param_defaults"] == '{"dir": "desc"}'
+    assert param_rows[0]["param_enum"] is None
+    assert param_rows[0]["publication_id"] == "pub-9"
