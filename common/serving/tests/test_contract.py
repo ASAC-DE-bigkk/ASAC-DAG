@@ -233,6 +233,7 @@ def test_load_contracts_reads_freshness_field_separately_from_event_time(tmp_pat
     serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
     serving["event_time"] = "observed_at"
     serving["freshness_field"] = "collected_at"
+    serving["freshness_timezone"] = "UTC"
     serving["freshness_slo_minutes"] = 90
     path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -240,6 +241,7 @@ def test_load_contracts_reads_freshness_field_separately_from_event_time(tmp_pat
 
     assert contract.event_time == "observed_at"
     assert contract.freshness_field == "collected_at"
+    assert contract.freshness_timezone == "UTC"
 
 
 def test_load_contracts_retains_publication_trigger_for_runtime_watchdog(tmp_path):
