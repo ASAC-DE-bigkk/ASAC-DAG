@@ -10,6 +10,13 @@
    만료 pending 마커 발견 시 Discord WARN 으로 가시화한다.
 ⚠️ 월요일 00시 직후에는 직전 주 원본이 사라지므로 R2 재적재식 복구 윈도우도 함께 리셋된다.
 
+silver·gold 유지보수 체인 (#748, purge 체인과 **독립** — archive 게이트에 안 걸림):
+  pause_transform → maintain_silver_gold → storage_cleanup → resume_transform(all_done)
+  15분 merge 가 쌓는 소파일을 매일 optimize 로 병합하고 스냅샷·metadata 잔재를 회수한다.
+  optimize ↔ merge 커밋 충돌 방지는 citydata 관례(Variable 플래그 + transform 쪽
+  check_transform_gate skip + drain 대기). 압축은 언제 돌아도 안전하므로 아카이브
+  게이트(#443) 뒤에 두지 않는다 — 게이트는 '삭제' 보호 장치다.
+
 순수 로직(판정·SQL)은 seoul_transit.maintenance — 이 파일은 오케스트레이션만.
 """
 
@@ -132,8 +139,8 @@ def purge_r2_raw() -> dict:
     return summary
 
 
-def purge_bronze() -> dict:
-    """bronze 실시간 테이블 보존 집행 — 주 경계 DELETE + optimize + 스냅샷 회수(7d)."""
+def _trino_cursor():
+    """maintenance 태스크 공용 Trino 커서 (#748 에서 purge_bronze 와 공유하도록 추출)."""
     import trino.dbapi
 
     conn = trino.dbapi.connect(
@@ -143,7 +150,12 @@ def purge_bronze() -> dict:
         catalog=CATALOG, schema=SCHEMA,
         http_scheme=os.environ.get("TRINO_HTTP_SCHEME", "http"),
     )
-    cur = conn.cursor()
+    return conn.cursor()
+
+
+def purge_bronze() -> dict:
+    """bronze 실시간 테이블 보존 집행 — 주 경계 DELETE + optimize + 스냅샷 회수(7d)."""
+    cur = _trino_cursor()
     cat, sch = maintenance.sql_identifier(CATALOG), maintenance.sql_identifier(SCHEMA)
     cur.execute(f"SELECT table_name FROM {cat}.information_schema.tables "
                 f"WHERE table_schema = '{SCHEMA}'")
@@ -164,6 +176,151 @@ def purge_bronze() -> dict:
     return summary
 
 
+# ── silver·gold 유지보수 체인 (#748) ─────────────────────────────────────────────
+
+
+def pause_transform(**context) -> None:
+    """maintenance 플래그 ON + 진행 중 transform run 배수 대기 (citydata 관례).
+
+    플래그가 서면 transit_transform·transform_heavy 의 check_transform_gate 가 새 run 을
+    skip 한다. 이미 running 인 run 은 이어지므로 drain_seconds 로 in-flight 를 배수한다
+    — 기본 420s 는 dbt build 실측 상한(#443 344초) + 여유.
+    """
+    import time
+
+    from airflow.models import Variable
+
+    drain = int(context["params"].get("drain_seconds", 420))
+    Variable.set(maintenance.MAINT_FLAG, "1")
+    print(f"[maintenance] {maintenance.MAINT_FLAG}=1 — transform 차단, 배수 대기 {drain}s")
+    time.sleep(drain)
+    print("[maintenance] 배수 완료 — silver·gold 유지보수 진행")
+
+
+def resume_transform(**_) -> None:
+    from airflow.models import Variable
+
+    Variable.set(maintenance.MAINT_FLAG, "0")
+    print(f"[maintenance] {maintenance.MAINT_FLAG}=0 — transform 재개")
+
+
+def maintain_silver_gold(**context) -> dict:
+    """silver·gold 전 테이블 optimize + expire_snapshots/remove_orphan (DELETE 없음).
+
+    대상은 information_schema 런타임 발견 — bronze_*(보존 체인 담당)·dbt 임시 테이블만
+    제외하고 자동 편입(culture 관례). 테이블별 격리: 하나가 실패해도 나머지는 계속,
+    끝에 실패 목록으로 태스크를 실패시켜 재시도·경보를 남긴다(citydata 관례).
+    """
+    retention = str(context["params"].get("retention", maintenance.SNAPSHOT_RETENTION))
+    cur = _trino_cursor()
+    cat, sch = maintenance.sql_identifier(CATALOG), maintenance.sql_identifier(SCHEMA)
+    cur.execute(
+        f"SELECT table_name FROM {cat}.information_schema.tables "
+        f"WHERE table_schema = '{SCHEMA}' AND table_type = 'BASE TABLE'"
+    )
+    targets = sorted(t for (t,) in cur.fetchall() if maintenance.is_maintain_target(t))
+
+    results: dict[str, str] = {}
+    for table in targets:
+        qualified = f"{cat}.{sch}.{maintenance.sql_identifier(table)}"
+        try:
+            for stmt in maintenance.maintain_sql(qualified, retention):
+                cur.execute(stmt)
+                cur.fetchall()  # 일부 procedure 는 통계 행 반환 — 소비해야 다음 execute 가능
+            results[table] = "ok"
+        except Exception as exc:  # noqa: BLE001 — 테이블별 격리, 배치는 계속
+            results[table] = f"error: {type(exc).__name__}: {exc}"
+    for table, status in sorted(results.items()):
+        print(f"[maintain] {table}: {status}")
+    failed = [t for t, s in results.items() if s != "ok"]
+    if failed:
+        raise RuntimeError(f"maintain 실패 테이블: {', '.join(failed)}")
+    return results
+
+
+def storage_cleanup(**context) -> dict:
+    """R2 Data Catalog 가 못 잡는 잔재를 boto3 로 정리 (citydata run_storage_cleanup 이식).
+
+    (1) 살아있는 테이블의 옛 metadata.json — write.metadata.delete-after-commit 이
+        R2 관리형 카탈로그에선 무효라 커밋마다 무한 증식(citydata 실측 71%),
+    (2) drop/full-refresh 로 버려진 테이블 디렉터리 — 카탈로그에서 사라져
+        remove_orphan_files(테이블 내부만 봄)가 못 보는 영역.
+
+    안전 규칙: $metadata_log_entries 의 현재 참조 metadata·살아있는 디렉터리의
+    비-metadata 파일·cleanup_hours 이내 최근 파일은 보존. 정리 범위는 transit 스키마의
+    __r2_data_catalog/<uuid> 프리픽스로만 제한(타 도메인 불가침).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from seoul_transit.r2_landing import _client_and_bucket
+
+    hours = int(context["params"].get("cleanup_hours", 6))
+    cur = _trino_cursor()
+    cat, sch = maintenance.sql_identifier(CATALOG), maintenance.sql_identifier(SCHEMA)
+
+    # 살아있는 상태 수집 — bronze 포함 스키마 전체(살아있는 디렉터리를 orphan 으로
+    # 오판하지 않도록 대상 필터 없이 전수).
+    keep_meta: set[str] = set()
+    live_dirs: set[str] = set()
+    prefixes: set[str] = set()
+    cur.execute(f"SHOW TABLES FROM {cat}.{sch}")
+    for (tbl,) in cur.fetchall():
+        ident = f'{cat}.{sch}."{maintenance.sql_identifier(tbl)}$metadata_log_entries"'
+        try:
+            cur.execute(f"SELECT file FROM {ident}")
+            rows = cur.fetchall()
+        except Exception:  # noqa: BLE001 — metadata 테이블 없는 객체(뷰 등)는 무시
+            continue
+        for (path,) in rows:
+            m = maintenance.WAREHOUSE_META_RE.match(path or "")
+            if not m:
+                continue
+            prefixes.add(m.group("prefix"))
+            live_dirs.add(m.group("dir"))
+            keep_meta.add(m.group("name"))
+    if not prefixes:
+        print("[storage_cleanup] 살아있는 테이블 없음 — 아무것도 지우지 않음")
+        return {"orphan_dir_objects": 0, "old_metadata_objects": 0}
+
+    client, bucket = _client_and_bucket()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    tally = {"orphan_dir_objects": 0, "orphan_dir_bytes": 0,
+             "old_metadata_objects": 0, "old_metadata_bytes": 0}
+    batch: list[str] = []
+
+    def flush() -> None:
+        if batch:
+            client.delete_objects(
+                Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch]})
+            batch.clear()
+
+    paginator = client.get_paginator("list_objects_v2")
+    for prefix in sorted(prefixes):
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix + "/"):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                parts = key.split("/")  # __r2_data_catalog / <uuid> / <table-dir> / …
+                if len(parts) < 3 or obj["LastModified"] > cutoff:
+                    continue
+                table_dir = parts[2]
+                if table_dir not in live_dirs:
+                    batch.append(key)
+                    tally["orphan_dir_objects"] += 1
+                    tally["orphan_dir_bytes"] += obj["Size"]
+                elif key.endswith(".metadata.json") and parts[-1] not in keep_meta:
+                    batch.append(key)
+                    tally["old_metadata_objects"] += 1
+                    tally["old_metadata_bytes"] += obj["Size"]
+                if len(batch) >= 1000:
+                    flush()
+    flush()
+    print(f"[storage_cleanup] 버려진 디렉터리 {tally['orphan_dir_objects']}개"
+          f"/{tally['orphan_dir_bytes'] / 1e6:.0f}MB, "
+          f"옛 metadata {tally['old_metadata_objects']}개"
+          f"/{tally['old_metadata_bytes'] / 1e6:.0f}MB 정리")
+    return tally
+
+
 with DAG(
     dag_id="transit_maintenance",
     description="transit 실시간 데이터 주 단위(월~일 KST) 보존 집행 — 다음 주 시작 시 "
@@ -172,6 +329,8 @@ with DAG(
     schedule=config.schedule_for("transit_maintenance", "@daily"),
     catchup=False,
     max_active_runs=1,
+    # silver·gold 체인(#748) 파라미터 — 트리거 시 덮어쓰기 가능.
+    params={"retention": maintenance.SNAPSHOT_RETENTION, "drain_seconds": 420, "cleanup_hours": 6},
     tags=["seoul", "transit", "maintenance", "retention", "trino", "iceberg"],
 ) as dag:
     # purge 선행 게이트: 아카이브가 삭제 구간을 소비했는지 확인(미도달이면 skip).
@@ -191,3 +350,29 @@ with DAG(
         on_failure_callback=record_transit_problem,
     )
     archive_gate >> purge_r2 >> purge_tables
+
+    # silver·gold 유지보수 체인(#748) — purge 체인과 독립(아카이브 게이트 비적용:
+    # 게이트는 '삭제' 보호 장치고 압축·회수는 언제 돌아도 안전하다).
+    pause_task = PythonOperator(
+        task_id="pause_transform",
+        python_callable=pause_transform,
+        on_failure_callback=record_transit_problem,
+    )
+    maintain_task = PythonOperator(
+        task_id="maintain_silver_gold",
+        python_callable=track(layer="silver", domain="transit")(maintain_silver_gold),
+        on_failure_callback=record_transit_problem,
+    )
+    cleanup_task = PythonOperator(
+        task_id="storage_cleanup",
+        python_callable=track(layer="silver", domain="transit")(storage_cleanup),
+        on_failure_callback=record_transit_problem,
+    )
+    # maintain/cleanup 이 실패해도 transform 은 반드시 재개(pause 채 방치 방지).
+    resume_task = PythonOperator(
+        task_id="resume_transform",
+        python_callable=resume_transform,
+        trigger_rule="all_done",
+        on_failure_callback=record_transit_problem,
+    )
+    pause_task >> maintain_task >> cleanup_task >> resume_task

@@ -133,3 +133,57 @@ def purge_sql(qualified_table: str, cutoff_ts: str) -> list[str]:
         f"ALTER TABLE {qualified_table} EXECUTE remove_orphan_files"
         f"(retention_threshold => '{SNAPSHOT_RETENTION}')",
     ]
+
+
+# ── silver·gold 유지보수 (ASAC-DAG#748) ────────────────────────────────────────
+# 15분 merge 사이클이 만드는 소파일(silver_subway 1,090개·gold_x_weather 4,483개,
+# 2026-08-09 실측)이 R2 반복 재읽기·요청 폭증의 주범 — bronze 만 다루던 보존 체인과
+# **별도로**, DELETE 없는 병합·회수만 수행한다. 타 도메인은 이미 각자 수행 중
+# (citydata_maintenance 등)이라 transit 갭만 채우는 작업.
+
+# transit_transform·transform_heavy 의 merge 와 optimize 의 파일 재작성이 겹치면
+# Iceberg 커밋 충돌이 난다. maintenance 가 이 Variable 을 1 로 세우면 transform 의
+# check_transform_gate 가 새 run 을 skip 한다(citydata MAINT_FLAG 관례 — Airflow 3
+# Task SDK 는 태스크에서 DAG pause CLI 를 못 쓰므로 Variable 로 위임).
+MAINT_FLAG = "transit_maintenance_active"
+
+
+def is_maintain_target(table: str) -> bool:
+    """silver·gold 유지보수 대상인가.
+
+    bronze_* 제외 — 보존 체인(purge_sql)이 이미 optimize·expire 를 수행한다.
+    dbt 임시 테이블(__dbt_tmp 등) 제외 — 빌드 중 존재하는 과도기 객체라 건드리면
+    진행 중 커밋과 경쟁한다. 그 외 전부(silver·gold·dim·seed) 자동 편입 —
+    culture 관례(신규 테이블 생기면 자동 포함)를 따라 명시 열거를 두지 않는다.
+    """
+    return not (table.startswith("bronze_") or "__dbt_" in table)
+
+
+def maintain_sql(qualified_table: str, retention: str = SNAPSHOT_RETENTION) -> list[str]:
+    """테이블 1개의 소파일 병합·스냅샷/고아 회수 SQL — **DELETE 없음**(보존 체인과 분리).
+
+    행은 절대 건드리지 않는다: optimize 는 같은 데이터를 큰 파일로 재작성, expire/
+    remove_orphan 은 죽은 버전·찌꺼기만 회수. retention 은 Trino min-retention
+    하한(7d) 이상이어야 한다(SNAPSHOT_RETENTION 주석 참조).
+    """
+    sql_identifier(qualified_table.rsplit(".", 1)[-1])  # 마지막 세그먼트 위생 확인
+    if not re.fullmatch(r"\d+d", retention):
+        raise ValueError(f"retention 형식 오류: {retention!r}")
+    return [
+        f"ALTER TABLE {qualified_table} EXECUTE optimize",
+        f"ALTER TABLE {qualified_table} EXECUTE expire_snapshots"
+        f"(retention_threshold => '{retention}')",
+        f"ALTER TABLE {qualified_table} EXECUTE remove_orphan_files"
+        f"(retention_threshold => '{retention}')",
+    ]
+
+
+# 웨어하우스 metadata 경로 파싱(storage_cleanup) — citydata _META_PATH_RE 이식.
+# 예: s3://seoul/__r2_data_catalog/<uuid>/<table-dir>/metadata/00001-….metadata.json
+#   prefix = __r2_data_catalog/<uuid> (정리 범위를 이 스키마 UUID 로 제한 — 타 도메인 불가침)
+#   dir    = <table-dir>              (살아있는 테이블 디렉터리 판정)
+#   name   = metadata 파일명           (현재 참조 metadata 보존 판정)
+WAREHOUSE_META_RE = re.compile(
+    r"^s3://[^/]+/(?P<prefix>__r2_data_catalog/[^/]+)/(?P<dir>[^/]+)/metadata/"
+    r"(?P<name>[^/]+\.metadata\.json)$"
+)
