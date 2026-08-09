@@ -150,6 +150,8 @@ class D1Client(Protocol):
         ext_rows: Sequence[dict[str, Any]],
         pattern_rows: Sequence[dict[str, Any]],
         display_rows: Sequence[dict[str, Any]] = (),
+        *,
+        param_rows: Sequence[dict[str, Any]] = (),
     ) -> None: ...
     def publish_product_evidence(
         self,
@@ -798,8 +800,11 @@ class HttpD1Client:
         pattern_rows: Sequence[dict[str, Any]],
         # v1.10 (#706): 미선언 도메인은 빈 시퀀스 그대로 — 기본값이라 기존 호출부가 안 깨진다.
         display_rows: Sequence[dict[str, Any]] = (),
+        *,
+        # v1.11 (Serving#217): 파라미터 메타(d1_pattern_params) — 미선언 도메인은 빈 시퀀스.
+        param_rows: Sequence[dict[str, Any]] = (),
     ) -> None:
-        """제품 스코프 보조 4종을 자연키 upsert 후 이번 선언에 없는 잔여 행만 정리(#638 §3).
+        """제품 스코프 보조 5종을 자연키 upsert 후 이번 선언에 없는 잔여 행만 정리(#638 §3).
 
         원자성 경계는 제품 단위(#638 §3) — 중간 실패 시 이 제품의 메타만 신·구 혼재하고
         다른 제품·도메인 행은 건드리지 않는다. columns/patterns 정리는 선언 키셋 기준
@@ -813,6 +818,7 @@ class HttpD1Client:
         statements.extend(handoff_upsert_statements("d1_catalog_ext", ext_rows))
         statements.extend(handoff_upsert_statements("d1_usage_patterns", pattern_rows))
         statements.extend(handoff_upsert_statements("d1_catalog_display", display_rows))
+        statements.extend(handoff_upsert_statements("d1_pattern_params", param_rows))
         statements.append(handoff_prune_statement(
             "d1_catalog_columns", product_id, [str(row["column_name"]) for row in columns_rows]))
         statements.append(handoff_stale_delete_statement("d1_catalog_ext", product_id, publication_id))
@@ -821,6 +827,10 @@ class HttpD1Client:
             handoff_stale_delete_statement("d1_catalog_display", product_id, publication_id))
         statements.append(handoff_prune_statement(
             "d1_usage_patterns", product_id, [str(row["pattern_id"]) for row in pattern_rows]))
+        # 파라미터 메타(Serving#217) — 선언을 지운 패턴의 옛 행이 남으면 게이트웨이가 죽은
+        # 기본값을 계속 적용한다. patterns 와 같은 선언 키셋(NOT IN) 판별로 정리한다.
+        statements.append(handoff_prune_statement(
+            "d1_pattern_params", product_id, [str(row["pattern_id"]) for row in param_rows]))
         for batch in group_api_batches(statements):
             self._query_batch(batch)
 

@@ -426,7 +426,7 @@ def test_publisher_meta_rows_round_trip_through_real_sqlite_schema():
         product_id=contract.product_id, model_name=contract.model_name,
         publication_id="pub-9", source_run_id="r", published_at="t",
         serving_status="published", reason="")
-    columns_rows, ext_rows, pattern_rows, _display_rows = _product_meta_rows(
+    columns_rows, ext_rows, pattern_rows, _display_rows, _param_rows = _product_meta_rows(
         contract, [("product_row_id", "varchar")], record)
 
     d1 = SqliteCatalogClient()

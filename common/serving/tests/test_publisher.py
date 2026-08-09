@@ -117,13 +117,15 @@ class FakeD1:
         ]
 
     def publish_product_meta(
-        self, product_id, publication_id, columns_rows, ext_rows, pattern_rows, display_rows=()
+        self, product_id, publication_id, columns_rows, ext_rows, pattern_rows, display_rows=(),
+        *, param_rows=()
     ) -> None:
         self.product_meta[product_id] = {
             "publication_id": publication_id,
             "columns": [dict(row) for row in columns_rows],
             "ext": [dict(row) for row in ext_rows],
             "patterns": [dict(row) for row in pattern_rows],
+            "params": [dict(row) for row in param_rows],
         }
 
     def publish_product_evidence(self, product_id, publication_id, sources, quality) -> None:
@@ -1090,3 +1092,70 @@ def test_plain_upsert_still_enforces_full_parity():
 
     with pytest.raises(PublicationError):
         publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="plain-upsert")
+
+
+# ── v1.11 (Serving#217 P1/P3): 파라미터 메타 게시 + 공유 감사 배선 ─────────────────────
+
+def test_param_meta_published_only_for_declaring_patterns():
+    """param_defaults/param_enum/params 를 선언한 패턴만 d1_pattern_params 행이 되고
+    JSON 직렬화된다 — 공유 게시기 도메인(비커머스)도 추가 배선 없이 게시된다는 것의 증명."""
+    contract = _contract(
+        grain="g", usage_patterns=(
+            {"pattern_id": "with_meta", "sql": "SELECT 1", "question_ko": "q",
+             "param_defaults": {"n": 10, "dir": "desc"},
+             "param_enum": {"dir": ["asc", "desc"]}},
+            {"pattern_id": "no_meta", "sql": "SELECT 2"},
+        ))
+    d1 = FakeD1()
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(1))})
+
+    report = publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="run-p")
+
+    assert report.ok
+    meta = d1.product_meta[contract.product_id]
+    assert {r["pattern_id"] for r in meta["patterns"]} == {"with_meta", "no_meta"}
+    assert [r["pattern_id"] for r in meta["params"]] == ["with_meta"]
+    row = meta["params"][0]
+    assert json.loads(row["param_defaults"]) == {"n": 10, "dir": "desc"}
+    assert json.loads(row["param_enum"]) == {"dir": ["asc", "desc"]}
+    assert row["params"] is None
+    assert row["publication_id"] == meta["publication_id"]
+
+
+def test_pattern_audit_excludes_internal_table_patterns_but_publishes_product():
+    """공유 감사 배선(Serving#217·킷 §F): 내부표를 읽는 패턴은 게시 제외(+메타도 제외)되고
+    나머지 패턴·제품 게시는 계속된다 — 커머스 자체 게시기와 같은 정책."""
+    contract = _contract(
+        grain="g", usage_patterns=(
+            {"pattern_id": "evil", "sql": "SELECT k.email FROM gold_weather_place_current_outlook a, _keys k",
+             "param_defaults": {"n": 1}},
+            {"pattern_id": "evil_paren", "sql": "SELECT * FROM (_keys)"},          # 킷 초판이 놓치던 우회
+            {"pattern_id": "evil_cte_write", "sql": "WITH x AS (SELECT 1) DELETE FROM _usage"},
+            {"pattern_id": "clean", "sql": "SELECT 1"},
+        ))
+    d1 = FakeD1()
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(1))})
+
+    report = publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="run-a")
+
+    assert report.ok                          # 제품 게시는 막지 않는다
+    meta = d1.product_meta[contract.product_id]
+    assert {r["pattern_id"] for r in meta["patterns"]} == {"clean"}
+    assert meta["params"] == []               # 탈락 패턴의 메타는 싣지 않는다
+
+
+def test_sibling_table_pattern_survives_with_warning_only():
+    """allowlist 밖(형제·타 제품 표) 참조는 **경보만** — P0-b 강제는 2차(#217 결정 단계).
+    서브셋 게시 배치에서 잘 돌던 패턴이 카탈로그에서 사라지는 회귀를 막는 경계다."""
+    contract = _contract(
+        grain="g", usage_patterns=(
+            {"pattern_id": "sibling_join",
+             "sql": "SELECT 1 FROM gold_weather_place_current_outlook JOIN gold_other_product ON 1=1"},
+        ))
+    d1 = FakeD1()
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(1))})
+
+    report = publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="run-s")
+
+    assert report.ok
+    assert {r["pattern_id"] for r in d1.product_meta[contract.product_id]["patterns"]} == {"sibling_join"}
