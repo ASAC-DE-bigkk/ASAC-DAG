@@ -7,6 +7,7 @@ against in-memory fakes: no Trino, no Cloudflare, no Airflow, no prod D1.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -523,6 +524,37 @@ def test_snapshot_publish_uses_declared_freshness_field_not_event_time():
     assert d1.catalog[contract.model_name]["time_axis"] == "forecast_at"
     assert d1.catalog[contract.model_name]["freshness"] == "2026-08-04T09:30:00"
     assert d1.product_evidence[contract.product_id]["quality"]["freshness_as_of"] == "2026-08-04T09:30:00"
+
+
+@pytest.mark.parametrize(
+    "freshness_value",
+    [
+        datetime(2026, 8, 9, 14, 26, 20, 372369),
+        "2026-08-09 14:26:20.372369",
+    ],
+)
+def test_snapshot_publish_emits_explicit_utc_for_declared_naive_freshness(freshness_value: object):
+    contract = _contract(
+        freshness_field="collected_at",
+        freshness_timezone="UTC",
+    )
+    columns = [*COLUMNS, ("collected_at", "timestamp")]
+    rows = [{
+        "product_row_id": "r1",
+        "place_id": "p1",
+        "forecast_at": "2026-08-05T12:00:00",
+        "collected_at": freshness_value,
+    }]
+
+    report = publish(
+        [contract],
+        FakeSource({contract.model_name: ReadPlan(columns=columns, rows=rows)}),
+        FakeD1(),
+        FakeSmoke(status="passed"),
+        source_run_id="run-utc-freshness",
+    )
+
+    assert report.records[0].freshness == "2026-08-09T14:26:20.372369+00:00"
 
 
 def test_snapshot_publish_records_passing_distinct_coverage_gate():

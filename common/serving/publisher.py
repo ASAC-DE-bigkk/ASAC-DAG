@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol, Sequence
+from zoneinfo import ZoneInfo
 
 from common.serving import gate as gatelib
 from common.serving.content_identity import d1_content_hash
@@ -103,7 +104,23 @@ def _freshness(contract: ServingContract, rows: Sequence[dict[str, Any]]) -> str
     if not freshness_field or not rows:
         return None
     values = [row.get(freshness_field) for row in rows if row.get(freshness_field) is not None]
-    return str(max(values)) if values else None
+    if not values:
+        return None
+    freshest = max(values)
+    if contract.freshness_timezone is None:
+        return str(freshest)
+    if isinstance(freshest, str):
+        try:
+            freshest = datetime.fromisoformat(freshest.replace("Z", "+00:00"))
+        except ValueError:
+            return freshest
+    if not isinstance(freshest, datetime) or freshest.tzinfo is not None:
+        return str(freshest)
+    if contract.freshness_timezone == "UTC":
+        return freshest.replace(tzinfo=timezone.utc).isoformat()
+    if contract.freshness_timezone == "Asia/Seoul":
+        return freshest.replace(tzinfo=ZoneInfo("Asia/Seoul")).isoformat()
+    return str(freshest)
 
 
 def _catalog_row(contract: ServingContract, columns: Sequence[Column], record: ProductRecord) -> dict[str, Any]:
