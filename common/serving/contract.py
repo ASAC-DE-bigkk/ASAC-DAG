@@ -33,7 +33,6 @@ QUALITY_COVERAGE_REQUIRED_FIELDS = ("field", "expected_distinct_count", "minimum
 QUALITY_COVERAGE_OPTIONAL_FIELDS = ("measurement_scope",)
 QUALITY_COVERAGE_MEASUREMENT_SCOPES = frozenset({"published_rows", "source_relation"})
 QUALITY_COVERAGE_NOT_APPLICABLE_FIELDS = ("not_applicable_reason",)
-FRESHNESS_TIMEZONES = frozenset({"UTC", "Asia/Seoul"})
 
 
 @dataclass(frozen=True)
@@ -54,9 +53,6 @@ class ServingContract:
     # Optional quality-time axis. When absent, Publisher preserves the v1 behavior
     # and measures freshness from event_time.
     freshness_field: str | None = None
-    # Explicit timezone for a naive freshness timestamp. Absent preserves the
-    # legacy textual representation for existing products.
-    freshness_timezone: str | None = None
     description: str = ""
     product_question: str = ""
     tests: tuple[str, ...] = ()
@@ -104,13 +100,6 @@ class ServingContract:
                 )
         if self.freshness_field is not None and not IDENTIFIER_RE.fullmatch(self.freshness_field):
             raise ValueError(f"{self.product_id}: freshness_field must be a physical identifier")
-        if self.freshness_timezone is not None and (
-            not isinstance(self.freshness_timezone, str)
-            or self.freshness_timezone not in FRESHNESS_TIMEZONES
-        ):
-            raise ValueError(
-                f"{self.product_id}: freshness_timezone must be one of {sorted(FRESHNESS_TIMEZONES)}"
-            )
 
 
 def _merged_meta(node: dict[str, Any]) -> dict[str, Any]:
@@ -430,7 +419,6 @@ def load_contracts(
                 reliability=serving.get("reliability") if isinstance(serving.get("reliability"), dict) else None,
                   event_time=serving.get("event_time"),
                   freshness_field=freshness_field,
-                  freshness_timezone=serving.get("freshness_timezone"),
                   description=str(node.get("description", "")),
                   product_question=str(serving.get("product_question", "")),
                   tests=tuple(gates.get(uid, [])),

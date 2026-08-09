@@ -51,7 +51,6 @@
 | `contract_version` | string | `v1` | `v1` | 계약 버전 |
 | `event_time` | string | 모델의 실제 컬럼 | 없음(시간축 없음) | Worker `from`/`to` 필터축 및 append/incremental 워터마크 |
 | `freshness_field` | string | 모델의 실제 컬럼 | `event_time` | 실제 데이터 신선도를 나타내는 품질 시간축. 예보 발표축과 수집축처럼 `event_time`과 의미가 다를 때 명시 |
-| `freshness_timezone` | enum | `UTC` \| `Asia/Seoul` | 없음 | timezone 없는 `freshness_field` 값을 해석할 때만 명시한다. 미선언 제품의 기존 텍스트 표현은 변경하지 않는다. |
 | `retention_or_horizon` | string | 자유 서술 (예: `최근 2일`, `+3일 예보`) | 무제한 | 보존·예보 범위 |
 | `partial_policy` | object | `min_publish_ratio`: 0~1 | 검사 안 함 | [§5.2](#52-partial_policy) |
 | `freshness_slo_minutes` | int | > 0 | — | `freshness_field`(미선언 시 `event_time`) 최신값의 wall-clock 지연 임계 (§3.1 참조) |
@@ -72,7 +71,7 @@
 
 ### 3.4 런타임 실측값 — Export가 기록 (YAML 아님)
 
-Publisher가 `_catalog`/publication 테이블 및 `d1_product_quality`에 매 게시마다 기록한다. `freshness`/`freshness_as_of`는 `freshness_field`의 최댓값이며, 필드가 없으면 기존처럼 `event_time` 최댓값이다. `freshness_timezone`을 선언한 제품의 naive timestamp는 해당 offset을 붙인 ISO 8601 값으로 게시해 공개 Worker가 모호성 없이 wall-clock SLO를 계산한다.
+Publisher가 `_catalog`/publication 테이블 및 `d1_product_quality`에 매 게시마다 기록한다. `freshness`/`freshness_as_of`는 `freshness_field`의 최댓값이며, 필드가 없으면 기존처럼 `event_time` 최댓값이다.
 
 `publication_id` · `source_run_id` · `source_row_count` · `published_row_count` · `d1_row_count` · `duplicate_primary_key_count` · `null_primary_key_count` · `published_bytes` · `freshness` · `published_at` · `serving_status` · `projection_schema_version` · `projection_schema_hash`
 
@@ -274,7 +273,6 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 
 **개정 이력**
 
-- **v1.11** (2026-08-10): 선택 필드 `freshness_timezone`을 추가했다. UTC-naive Weather Gold freshness가 공개 Worker에서 KST로 오해되어 SLO를 9시간 과대 계산한 실측을 해결한다. 선언 제품만 ISO 8601 offset을 붙여 게시하며, 미선언 기존 제품의 표현·해석은 불변이다. ASAC-DBT validator schema `v1.11`과 lockstep.
 - **v1.9** (2026-08-04): 조회·워터마크용 `event_time`과 실제 품질 신선도 축이 다른 제품을 위한 선택 필드 `freshness_field`를 추가했다. 미선언 계약은 기존처럼 `event_time`을 사용한다. 공개 projection 포함·실제 모델 컬럼 검증과 Worker wall-clock SLO fail-closed 책임을 명시했다. ASAC-DBT validator schema `v1.9`와 lockstep.
 - **v1.8** (2026-08-04): Gold보다 거친 공개 rollup을 위한 `public_primary_key`, projection 밖 Gold 축을 재현 가능하게 실측하는 `quality_coverage.measurement_scope: source_relation`, 동적 모집단용 명시적 `not_applicable_reason`을 추가했다. 미선언 계약의 기존 PK·published-row 측정 동작은 유지한다. ASAC-DBT validator schema `v1.8`와 lockstep.
 - **v1.7** (2026-08-04): `upsert_strategy` 허용값에 `incremental` 추가(허용값 추가라 하위 호환 v1 유지). 워터마크(`event_time`) 이후 바뀐 그레인만 부분 upsert해 D1 쓰기를 줄인다(§4). 전체-테이블 parity 면제·`verify_content_parity` 비호환. 미선언·`merge`·`exact_set` 동작은 불변. ASAC-DBT validator schema `v1.7`와 lockstep.
