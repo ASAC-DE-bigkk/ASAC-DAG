@@ -206,7 +206,7 @@ def test_load_contracts_reads_source_evidence_and_freshness_slo(tmp_path):
     )
 
 
-def test_load_contracts_reads_freshness_field_separately_from_event_time(tmp_path):
+def test_load_contracts_keeps_kst_worker_interpretation_without_timezone_override(tmp_path):
     timestamp_meta = {
         "description": "quality timestamp",
         "data_type": "TIMESTAMP",
@@ -241,7 +241,7 @@ def test_load_contracts_reads_freshness_field_separately_from_event_time(tmp_pat
 
     assert contract.event_time == "observed_at"
     assert contract.freshness_field == "collected_at"
-    assert contract.freshness_timezone == "UTC"
+    assert "freshness_timezone" not in contract.__dataclass_fields__
 
 
 def test_load_contracts_retains_publication_trigger_for_runtime_watchdog(tmp_path):
