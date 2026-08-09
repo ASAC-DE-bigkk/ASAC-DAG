@@ -169,13 +169,27 @@ def transform_gate_open(now=None) -> bool:
 
 
 def check_transform_gate(**_context) -> None:
-    """게이트가 닫혀 있으면 downstream(dbt) 을 건너뛴다."""
+    """게이트가 닫혀 있으면 downstream(dbt) 을 건너뛴다.
+
+    fresh·heavy 두 DAG 의 공통 첫 태스크라, maintenance 창(#748) 차단도 여기서 함께
+    본다 — optimize 가 silver·gold 파일을 재작성하는 동안 merge 커밋이 겹치면 Iceberg
+    충돌이 나므로 그 창의 run 만 skip 한다(citydata gate_not_maintenance 관례).
+    플래그는 transit_maintenance 가 set(pause)/clear(resume, all_done 로 항상 clear)한다.
+    """
     from airflow.exceptions import AirflowSkipException
+    from airflow.models import Variable
+
+    from seoul_transit.maintenance import MAINT_FLAG
 
     if not transform_gate_open():
         raise AirflowSkipException(
             "변환 재개 게이트 이전 — gold 아카이브 개시일 전까지 대기 "
             f"(TRANSIT_TRANSFORM_NOT_BEFORE={os.environ.get('TRANSIT_TRANSFORM_NOT_BEFORE', '2026-07-21T09:30')})"
+        )
+    if Variable.get(MAINT_FLAG, default_var="0") == "1":
+        raise AirflowSkipException(
+            f"transit_maintenance 진행 중({MAINT_FLAG}=1) — "
+            "silver·gold optimize 와 merge 커밋 충돌 방지를 위해 이 run 은 skip"
         )
 
 

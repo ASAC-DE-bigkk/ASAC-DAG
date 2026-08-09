@@ -109,3 +109,46 @@ def test_archive_caught_up_tolerates_fractional_seconds():
     # Trino 의 timestamp(6) 문자열은 소수 초를 달고 나온다 — 앞 19자만 비교한다.
     assert maintenance.is_archive_caught_up("2026-07-13 00:00:00.000000", _THU) is True
     assert maintenance.is_archive_caught_up("2026-07-12 23:59:59.999999", _THU) is False
+
+
+# ── silver·gold 유지보수 (#748) ────────────────────────────────────────────────
+def test_maintain_target_excludes_bronze_and_dbt_temp():
+    # bronze 는 보존 체인(purge_sql)이 이미 optimize 하므로 이중 처리 금지.
+    assert not maintenance.is_maintain_target("bronze_subway_arrival")
+    assert not maintenance.is_maintain_target("bronze_bus_position")
+    # dbt 빌드 중 존재하는 과도기 객체 — 진행 중 커밋과 경쟁 금지.
+    assert not maintenance.is_maintain_target("silver_transit_parking__dbt_tmp")
+    assert not maintenance.is_maintain_target("gold_transit_dong_15min__dbt_backup")
+    # 그 외 silver·gold·dim·seed 는 자동 편입.
+    assert maintenance.is_maintain_target("silver_transit_subway_arrival")
+    assert maintenance.is_maintain_target("gold_transit_x_weather_dong_hourly")
+    assert maintenance.is_maintain_target("dim_transit_station")
+    assert maintenance.is_maintain_target("seoul_subway_line_code")
+
+
+def test_maintain_sql_has_no_delete_and_orders_ops():
+    stmts = maintenance.maintain_sql("cat.transit.silver_transit_parking")
+    # 보존 체인과의 결정적 차이 — 행 삭제가 절대 없다.
+    assert not any("DELETE" in s for s in stmts)
+    assert stmts[0] == "ALTER TABLE cat.transit.silver_transit_parking EXECUTE optimize"
+    assert "expire_snapshots(retention_threshold => '7d')" in stmts[1]
+    assert "remove_orphan_files(retention_threshold => '7d')" in stmts[2]
+
+
+def test_maintain_sql_rejects_malformed_retention():
+    with pytest.raises(ValueError):
+        maintenance.maintain_sql("cat.transit.silver_transit_parking", "7d'); DROP TABLE x --")
+
+
+def test_warehouse_meta_path_parses_scope_dir_and_name():
+    m = maintenance.WAREHOUSE_META_RE.match(
+        "s3://seoul/__r2_data_catalog/019fac1b-4fe0-7461-83c6-213c84144314/"
+        "silver_transit_parking-abc123/metadata/00042-deadbeef.metadata.json"
+    )
+    assert m is not None
+    assert m.group("prefix") == "__r2_data_catalog/019fac1b-4fe0-7461-83c6-213c84144314"
+    assert m.group("dir") == "silver_transit_parking-abc123"
+    assert m.group("name") == "00042-deadbeef.metadata.json"
+    # 데이터 파일·형식이 다른 경로는 매치하지 않는다(잘못 지우기 방지).
+    assert maintenance.WAREHOUSE_META_RE.match(
+        "s3://seoul/__r2_data_catalog/uuid/table-dir/data/part-0001.parquet") is None
