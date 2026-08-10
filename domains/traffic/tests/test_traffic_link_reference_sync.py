@@ -18,7 +18,7 @@ def _runtime():
     return link_reference_sync
 
 
-def test_incremental_sql_prioritizes_missing_then_oldest_complete_pair():
+def test_incremental_sql_scopes_active_links_then_prioritizes_missing_and_stale():
     runtime = _runtime()
 
     sql = runtime.build_incremental_sync_link_sql(
@@ -30,6 +30,14 @@ def test_incremental_sql_prioritizes_missing_then_oldest_complete_pair():
 
     assert "iceberg_dev.traffic.bronze_seoul_traffic_incident" in sql
     assert "iceberg_dev.traffic.bronze_seoul_traffic_flow" in sql
+    assert "iceberg_dev.traffic.bronze_collection_run_manifest" in sql
+    assert "latest_active_runs" in sql
+    assert "source_id IN ('seoul_traffic_incident', 'seoul_traffic_flow')" in sql
+    assert "status = 'SUCCESS'" in sql
+    assert "is_publishable" in sql
+    assert "status = 'COALESCED'" in sql
+    assert "incident.dag_run_id = active_run.dag_run_id" in sql
+    assert "flow.dag_run_id = active_run.dag_run_id" in sql
     assert "iceberg_dev.traffic.bronze_seoul_traffic_link_request_audit" in sql
     assert "iceberg_dev.traffic.bronze_seoul_traffic_link_info" in sql
     assert "iceberg_dev.traffic.bronze_seoul_traffic_link_vertex" in sql

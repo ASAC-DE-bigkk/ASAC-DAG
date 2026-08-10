@@ -12,6 +12,7 @@ from traffic_ingest.common.runtime import (
     trino_cursor,
 )
 from traffic_ingest.errors import TrafficBronzeConfigurationError
+from traffic_ingest.flow_info import SOURCE_ID as FLOW_SOURCE_ID
 from traffic_ingest.flow_info import normalize_link_ids
 from traffic_ingest.link_reference_backfill import (
     MAX_BATCH_SIZE,
@@ -27,6 +28,12 @@ from traffic_ingest.link_reference_info import (
     LINK_INFO_SERVICE,
     LINK_VERTEX_SERVICE,
     SOURCE_ID,
+)
+from traffic_ingest.run_manifest import (
+    MANIFEST_TABLE,
+    SOURCE_ID as INCIDENT_SOURCE_ID,
+    STATUS_COALESCED,
+    STATUS_SUCCESS,
 )
 
 
@@ -84,25 +91,62 @@ def build_incremental_sync_link_sql(
     qualified = f"{sql_identifier(catalog)}.{sql_identifier(schema)}"
     incident_table = f"{qualified}.bronze_seoul_traffic_incident"
     flow_table = f"{qualified}.bronze_seoul_traffic_flow"
+    manifest_table = f"{qualified}.{MANIFEST_TABLE}"
     audit_table = f"{qualified}.{REQUEST_AUDIT_TABLE}"
     info_table = f"{qualified}.{LINK_INFO_TABLE}"
     vertex_table = f"{qualified}.{LINK_VERTEX_TABLE}"
     source_id = sql_string(SOURCE_ID)
     info_service = sql_string(LINK_INFO_SERVICE)
     vertex_service = sql_string(LINK_VERTEX_SERVICE)
+    incident_source_id = sql_string(INCIDENT_SOURCE_ID)
+    flow_source_id = sql_string(FLOW_SOURCE_ID)
+    success_status = sql_string(STATUS_SUCCESS)
+    coalesced_status = sql_string(STATUS_COALESCED)
     cutoff = sql_timestamp(stale_before)
 
     return f"""
-        WITH link_universe AS (
-            SELECT cast(link_id AS varchar) AS link_id
-            FROM {incident_table}
-            WHERE link_id IS NOT NULL
-              AND trim(cast(link_id AS varchar)) <> ''
+        WITH active_runs_ranked AS (
+            SELECT
+                successful.source_id,
+                successful.dag_run_id,
+                row_number() OVER (
+                    PARTITION BY successful.source_id
+                    ORDER BY successful.event_at DESC,
+                             successful.dag_run_id DESC
+                ) AS active_run_num
+            FROM {manifest_table} AS successful
+            WHERE successful.source_id IN ({incident_source_id}, {flow_source_id})
+              AND successful.status = {success_status}
+              AND successful.is_publishable
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM {manifest_table} AS coalesced
+                  WHERE coalesced.source_id = successful.source_id
+                    AND coalesced.dag_run_id = successful.dag_run_id
+                    AND coalesced.status = {coalesced_status}
+              )
+        ),
+        latest_active_runs AS (
+            SELECT source_id, dag_run_id
+            FROM active_runs_ranked
+            WHERE active_run_num = 1
+        ),
+        link_universe AS (
+            SELECT cast(incident.link_id AS varchar) AS link_id
+            FROM {incident_table} AS incident
+            JOIN latest_active_runs AS active_run
+              ON active_run.source_id = {incident_source_id}
+             AND incident.dag_run_id = active_run.dag_run_id
+            WHERE incident.link_id IS NOT NULL
+              AND trim(cast(incident.link_id AS varchar)) <> ''
             UNION
-            SELECT cast(link_id AS varchar) AS link_id
-            FROM {flow_table}
-            WHERE link_id IS NOT NULL
-              AND trim(cast(link_id AS varchar)) <> ''
+            SELECT cast(flow.link_id AS varchar) AS link_id
+            FROM {flow_table} AS flow
+            JOIN latest_active_runs AS active_run
+              ON active_run.source_id = {flow_source_id}
+             AND flow.dag_run_id = active_run.dag_run_id
+            WHERE flow.link_id IS NOT NULL
+              AND trim(cast(flow.link_id AS varchar)) <> ''
         ),
         audit_runs AS (
             SELECT
