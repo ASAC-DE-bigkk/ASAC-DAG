@@ -55,6 +55,18 @@ def test_traffic_assets_are_owned_by_the_traffic_domain():
     )
 
 
+def test_cross_domain_scope_contains_weather_and_road_context_products():
+    from traffic_ingest import assets
+
+    assert assets.TRAFFIC_CROSS_DOMAIN_PUBLICATION_PRODUCT_IDS == (
+        "traffic_incident_x_weather_current_hourly",
+        "traffic_road_congestion_context_current",
+    )
+    assert "traffic_road_congestion_context_current" not in (
+        assets.TRAFFIC_CORE_PUBLICATION_PRODUCT_IDS
+    )
+
+
 def test_flow_silver_events_require_the_materialized_contract():
     from traffic_ingest import assets
 

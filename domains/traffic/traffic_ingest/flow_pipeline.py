@@ -10,6 +10,8 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from traffic_ingest.incident_pipeline import landing_asset_metadata
+from traffic_ingest.errors import TrafficCompletenessError
+from traffic_ingest.flow_info import normalize_link_ids
 from traffic_ingest.run_manifest import TrafficRun
 
 
@@ -97,11 +99,17 @@ class TrafficFlowPipeline:
         )
         if str(verified_parent) != parent_incident_run_id:
             raise ValueError("Traffic Flow Incident parent identity mismatch")
-        link_ids = self._resolve_links(conf, parent_incident_run_id)
+        normalized_link_ids = normalize_link_ids(
+            self._resolve_links(conf, parent_incident_run_id)
+        )
+        if not normalized_link_ids:
+            raise TrafficCompletenessError(
+                "Traffic Flow requires at least one incident link"
+            )
         landing_load_date = conf.get("load_date")
         raw_result = dict(
             self._landing.collect(
-                link_ids=link_ids,
+                link_ids=normalized_link_ids,
                 dag_run_id=flow_run_id,
                 landing_load_date=(
                     str(landing_load_date) if landing_load_date is not None else None

@@ -58,6 +58,7 @@ def create_seoul_traffic_flow_bronze_table(cursor, catalog: str, schema: str) ->
             row_count integer,
             collected_at timestamp(6),
             load_date varchar,
+            parent_incident_run_id varchar,
             dag_run_id varchar
         )
         WITH (format = 'PARQUET')
@@ -80,10 +81,19 @@ def create_seoul_traffic_flow_bronze_table(cursor, catalog: str, schema: str) ->
             row_count integer,
             collected_at timestamp(6),
             load_date varchar,
+            parent_incident_run_id varchar,
             dag_run_id varchar
         )
         WITH (format = 'PARQUET')
         """
+    )
+    cursor.execute(
+        f"ALTER TABLE {qualified_table} "
+        "ADD COLUMN IF NOT EXISTS parent_incident_run_id varchar"
+    )
+    cursor.execute(
+        f"ALTER TABLE {audit_table} "
+        "ADD COLUMN IF NOT EXISTS parent_incident_run_id varchar"
     )
     return qualified_table
 
@@ -109,6 +119,7 @@ def _audit_values(
     descriptor: dict[str, Any],
     metadata: dict[str, Any],
     dag_run_id: str,
+    parent_incident_run_id: str,
 ) -> str:
     link_id = descriptor["link_id"]
     collected_at = datetime.fromisoformat(str(descriptor["collected_at"]))
@@ -128,6 +139,7 @@ def _audit_values(
             sql_int(metadata.get("row_count")),
             sql_timestamp(collected_at),
             sql_string(load_date),
+            sql_string(parent_incident_run_id),
             sql_string(dag_run_id),
         )
     ) + ")"
@@ -139,6 +151,7 @@ def _flow_row_values(
     metadata: dict[str, Any],
     rows: list[dict[str, Any]],
     dag_run_id: str,
+    parent_incident_run_id: str,
 ) -> list[str]:
     link_id = descriptor["link_id"]
     collected_at = datetime.fromisoformat(str(descriptor["collected_at"]))
@@ -163,6 +176,7 @@ def _flow_row_values(
                     sql_int(metadata.get("row_count")),
                     sql_timestamp(collected_at),
                     sql_string(load_date),
+                    sql_string(parent_incident_run_id),
                     sql_string(dag_run_id),
                 )
             ) + ")"
@@ -178,6 +192,13 @@ def load_traffic_flow_batch(
     create_table=create_seoul_traffic_flow_bronze_table,
     download_raw_object: Callable[[str, str], bytes],
 ) -> dict[str, Any]:
+    parent_incident_run_id = str(
+        raw_result.get("parent_incident_run_id") or ""
+    ).strip()
+    if not parent_incident_run_id:
+        raise TrafficCompletenessError(
+            "Traffic flow raw result is missing parent_incident_run_id"
+        )
     raw_objects = raw_result.get("raw_objects") or []
     if not isinstance(raw_objects, list) or not raw_objects:
         raise TrafficCompletenessError(
@@ -228,6 +249,7 @@ def load_traffic_flow_batch(
                 descriptor=descriptor,
                 metadata=metadata,
                 dag_run_id=dag_run_id,
+                parent_incident_run_id=parent_incident_run_id,
             )
             for descriptor, metadata, _rows in prepared
         ]
@@ -236,7 +258,7 @@ def load_traffic_flow_batch(
             INSERT INTO {audit_table} (
                 request_id, source_id, request_params_json, link_id, raw_object_key,
                 payload_hash, http_status, result_code, result_msg, list_total_count,
-                row_count, collected_at, load_date, dag_run_id
+                row_count, collected_at, load_date, parent_incident_run_id, dag_run_id
             ) VALUES {', '.join(audit_values)}
             """
         )
@@ -249,6 +271,7 @@ def load_traffic_flow_batch(
                 metadata=metadata,
                 rows=rows,
                 dag_run_id=dag_run_id,
+                parent_incident_run_id=parent_incident_run_id,
             )
         ]
         if flow_values:
@@ -257,7 +280,8 @@ def load_traffic_flow_batch(
                 INSERT INTO {qualified_table} (
                     request_id, source_id, request_params_json, link_id, prcs_spd,
                     prcs_trv_time, raw_object_key, payload_hash, http_status, result_code,
-                    result_msg, list_total_count, row_count, collected_at, load_date, dag_run_id
+                    result_msg, list_total_count, row_count, collected_at, load_date,
+                    parent_incident_run_id, dag_run_id
                 ) VALUES {', '.join(flow_values)}
                 """
             )
@@ -270,6 +294,7 @@ def load_traffic_flow_batch(
         "expected_rows": int(raw_result.get("expected_rows", inserted)),
         "page_count": len(raw_objects),
         "is_publishable": bool(raw_result.get("is_publishable", True)),
+        "parent_incident_run_id": parent_incident_run_id,
     }
 
 

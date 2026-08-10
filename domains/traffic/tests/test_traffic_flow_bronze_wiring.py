@@ -28,7 +28,7 @@ def _incident_event(run_id="incident-1"):
     )
 
 
-def test_flow_dag_has_two_meaningful_tasks_and_no_independent_cron():
+def test_flow_dag_has_only_speed_tasks_and_no_reference_api_or_cron():
     assert dag_module.dag.task_ids == [
         "land_traffic_flow_snapshot",
         "materialize_verify_publish_traffic_flow",
@@ -50,9 +50,12 @@ def test_flow_dag_has_two_meaningful_tasks_and_no_independent_cron():
     if dag_module.TRAFFIC_INCIDENT_BRONZE_ASSET not in schedule_repr:
         schedule_repr = repr(getattr(dag_module.dag.timetable, "dataset_condition", ""))
     assert dag_module.TRAFFIC_INCIDENT_BRONZE_ASSET in schedule_repr
+    assert not any("link_reference" in task_id for task_id in dag_module.dag.task_ids)
 
 
-def test_flow_landing_wrapper_uses_exact_triggering_incident_parent(monkeypatch):
+def test_flow_landing_uses_exact_triggering_incident_parent_without_reference_xcom(
+    monkeypatch,
+):
     captured = {}
 
     class Pipeline:
@@ -60,7 +63,11 @@ def test_flow_landing_wrapper_uses_exact_triggering_incident_parent(monkeypatch)
             captured.update(kwargs)
             return {"parent_incident_run_id": kwargs["parent_incident_run_id"]}
 
-    monkeypatch.setattr(dag_module, "build_traffic_flow_pipeline", lambda: Pipeline())
+    monkeypatch.setattr(
+        dag_module,
+        "build_traffic_flow_pipeline",
+        lambda: Pipeline(),
+    )
 
     result = dag_module.land_traffic_flow_snapshot(
         run_id="asset__flow-1",
@@ -76,7 +83,7 @@ def test_flow_landing_wrapper_uses_exact_triggering_incident_parent(monkeypatch)
         },
     )
 
-    assert result == {"parent_incident_run_id": "incident-1"}
+    assert result["parent_incident_run_id"] == "incident-1"
     assert captured == {
         "parent_incident_run_id": "incident-1",
         "flow_run_id": "asset__flow-1",

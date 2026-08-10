@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.raw_manifest import build_raw_manifest
 
 from traffic_ingest.flow_bronze import (
+    create_seoul_traffic_flow_bronze_table,
     load_traffic_flow_batch,
     verify_seoul_traffic_flow_bronze_runtime,
 )
@@ -47,6 +48,7 @@ def _raw_result(*descriptors):
         "raw_objects": list(descriptors),
         "expected_rows": sum(int(item["row_count"]) for item in descriptors),
         "manifest_key": manifest_key,
+        "parent_incident_run_id": "incident-42",
     }, manifest_key
 
 
@@ -96,8 +98,17 @@ def test_flow_bronze_load_deletes_same_run_link_before_insert():
 
     assert result["inserted"] == 1
     assert result["page_count"] == 1
+    assert result["parent_incident_run_id"] == "incident-42"
     assert any("DELETE FROM iceberg_dev.ask_seoul.bronze_seoul_traffic_flow" in stmt for stmt in cursor.statements)
     assert any("INSERT INTO iceberg_dev.ask_seoul.bronze_seoul_traffic_flow" in stmt for stmt in cursor.statements)
+    assert any("incident-42" in stmt for stmt in cursor.statements if "INSERT INTO" in stmt)
+    normalized_inserts = [
+        " ".join(stmt.split()) for stmt in cursor.statements if "INSERT INTO" in stmt
+    ]
+    assert all(
+        "load_date, parent_incident_run_id, dag_run_id" in stmt
+        for stmt in normalized_inserts
+    )
 
 
 def test_flow_bronze_load_batches_dml_for_multiple_links_and_zero_rows():
@@ -164,7 +175,8 @@ def test_flow_bronze_missing_manifest_blocks_database_mutation():
     with pytest.raises(TrafficCompletenessError, match="manifest is missing"):
         load_traffic_flow_batch(
             raw_result={
-                "raw_objects": [{"raw_object_key": "raw/traffic_flow/one.json"}]
+                "raw_objects": [{"raw_object_key": "raw/traffic_flow/one.json"}],
+                "parent_incident_run_id": "incident-42",
             },
             dag_run_id="manual__missing-manifest",
             cursor_factory=lambda: pytest.fail("must fail before Trino"),
@@ -173,6 +185,50 @@ def test_flow_bronze_missing_manifest_blocks_database_mutation():
         )
 
     assert cursor.statements == []
+
+
+def test_flow_bronze_rejects_missing_parent_lineage_before_r2_or_trino():
+    payload = _payload()
+    descriptor = {
+        "request_id": "request-1",
+        "link_id": "1220003800",
+        "raw_object_key": "raw/traffic_flow/one.json",
+        "raw_hash": "unused",
+        "http_status": 200,
+        "collected_at": "2026-07-15T01:02:03+00:00",
+        "row_count": 1,
+    }
+    raw_result, _manifest_key = _raw_result(descriptor)
+    raw_result.pop("parent_incident_run_id")
+
+    with pytest.raises(TrafficCompletenessError, match="parent_incident_run_id"):
+        load_traffic_flow_batch(
+            raw_result=raw_result,
+            dag_run_id="manual__flow",
+            cursor_factory=lambda: pytest.fail("must fail before Trino"),
+            download_raw_object=lambda *_args: pytest.fail("must fail before R2"),
+        )
+
+
+def test_flow_bronze_schema_adds_parent_lineage_to_existing_data_and_audit_tables():
+    cursor = Cursor()
+
+    create_seoul_traffic_flow_bronze_table(
+        cursor,
+        "iceberg_dev",
+        "ask_seoul",
+    )
+
+    sql = "\n".join(cursor.statements)
+    assert sql.count("parent_incident_run_id varchar") >= 2
+    assert (
+        "ALTER TABLE iceberg_dev.ask_seoul.bronze_seoul_traffic_flow "
+        "ADD COLUMN IF NOT EXISTS parent_incident_run_id varchar"
+    ) in " ".join(sql.split())
+    assert (
+        "ALTER TABLE iceberg_dev.ask_seoul.bronze_seoul_traffic_flow_request_audit "
+        "ADD COLUMN IF NOT EXISTS parent_incident_run_id varchar"
+    ) in " ".join(sql.split())
 
 
 class VerifyCursor:

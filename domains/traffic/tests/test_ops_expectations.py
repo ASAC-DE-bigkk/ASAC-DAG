@@ -63,6 +63,7 @@ def test_manual_only_dags_are_excluded_from_monitoring():
     expected_manual = {
         "traffic_incident_recollect",
         "traffic_incident_bronze_backfill",
+        "traffic_link_reference_backfill",
         "traffic_snapshot_recovery",
     }
     registered = _registered()
@@ -95,6 +96,15 @@ def test_every_monitored_dag_has_a_max_delay():
     for dag_id, row in _registered().items():
         if row["monitored"]:
             assert row["max_delay_minutes"], f"{dag_id}: 최대 허용 지연이 없습니다(S-2)"
+
+
+def test_daily_link_reference_sync_is_monitored_at_its_actual_cadence():
+    row = _registered()["traffic_link_reference_sync"]
+
+    assert row["trigger_type"] == "schedule"
+    assert row["expected_interval"] == "일 1회 03:37"
+    assert row["max_delay_minutes"] == 26 * 60
+    assert row["monitored"] == 1
 
 
 def test_rows_match_the_shared_table_schema():

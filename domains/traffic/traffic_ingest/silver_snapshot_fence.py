@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from traffic_ingest.common.runtime import trino_catalog
+from traffic_ingest.common.runtime import sql_identifier, trino_catalog
 
-_RELATION_SCHEMA = "traffic"
+_DEFAULT_RELATION_SCHEMA = "traffic"
 _RELATION_NAME = "silver_seoul_traffic_incident"
 _ALLOWED_OPERATIONS = frozenset({"append", "overwrite", "replace", "delete"})
 
@@ -17,6 +17,10 @@ class SnapshotFenceTelemetryError(RuntimeError):
 
 class ExternalCompactionRace(RuntimeError):
     """An external rewrite changed Traffic Silver during a guarded phase."""
+
+
+def _relation_schema() -> str:
+    return sql_identifier(os.environ.get("TRAFFIC_SCHEMA", _DEFAULT_RELATION_SCHEMA))
 
 
 def _is_timezone_aware_iso_timestamp(value: object) -> bool:
@@ -91,7 +95,7 @@ def _trino_connection() -> Any:
         port=int(os.environ.get("TRINO_PORT", "8080")),
         user=os.environ.get("TRINO_USER", "airflow"),
         catalog=trino_catalog(),
-        schema=_RELATION_SCHEMA,
+        schema=_relation_schema(),
         http_scheme=os.environ.get("TRINO_HTTP_SCHEME", "http"),
     )
 
@@ -117,7 +121,7 @@ def _collect_silver_snapshot_evidence(
     allow_missing_snapshot_relation: bool,
 ) -> SilverSnapshotEvidence | None:
     """Read target-selected Traffic Silver metadata and close DB resources."""
-    relation_namespace = f"{trino_catalog()}.{_RELATION_SCHEMA}"
+    relation_namespace = f"{trino_catalog()}.{_relation_schema()}"
     snapshots_relation = f'{relation_namespace}."{_RELATION_NAME}$snapshots"'
     files_relation = f'{relation_namespace}."{_RELATION_NAME}$files"'
     connection = connection_factory()
