@@ -84,7 +84,7 @@ def test_weather_transform_trino_tasks_do_not_inflate_pool_priority_from_chain()
         assert task.kwargs["weight_rule"] == "absolute"
 
 
-def test_weather_transform_runs_place_mapping_seed_and_mart():
+def test_weather_transform_runs_spatial_seed_and_mart_phases():
     module = load_transform_module()
     dag = module.dag
 
@@ -107,6 +107,10 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
     for task_id in (
         "dbt_run_common_admin_dong_dimension",
         "dbt_test_common_admin_dong_dimension",
+        "dbt_seed_coverage_grid",
+        "dbt_test_coverage_grid_seed",
+        "dbt_run_coverage_grid_mart",
+        "dbt_test_coverage_grid_mart",
     ):
         assert dag.task_dict[task_id].kwargs["on_failure_callback"] is module.record_weather_problem
 
@@ -118,7 +122,7 @@ def test_weather_transform_runs_place_mapping_seed_and_mart():
     assert "assert_gold_" not in source
 
 
-def test_weather_transform_runs_place_mart_before_full_gold_and_metrics():
+def test_weather_transform_runs_spatial_marts_before_full_gold_and_metrics():
     module = load_transform_module()
     dag = module.dag
 
@@ -127,6 +131,8 @@ def test_weather_transform_runs_place_mart_before_full_gold_and_metrics():
         "dbt_test_silver",
         "dbt_run_place_mart",
         "dbt_test_place_mart",
+        "dbt_run_coverage_grid_mart",
+        "dbt_test_coverage_grid_mart",
         "dbt_run_gold",
         "dbt_test_gold",
         "mark_weather_gold_publication_ready",
@@ -211,12 +217,16 @@ def test_weather_transform_passes_w2_canonical_revision_to_model_commands():
         "dbt_test_common_admin_dong_dimension",
         "dbt_seed_place_mapping",
         "dbt_test_place_mapping_seed",
+        "dbt_seed_coverage_grid",
+        "dbt_test_coverage_grid_seed",
         "dbt_run_silver",
         "dbt_test_silver",
         "dbt_run_gold",
         "dbt_test_gold",
         "dbt_run_place_mart",
         "dbt_test_place_mart",
+        "dbt_run_coverage_grid_mart",
+        "dbt_test_coverage_grid_mart",
     )
 
     for task_id in model_parsing_task_ids:

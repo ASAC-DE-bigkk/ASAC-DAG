@@ -205,6 +205,18 @@ EXPECTED_DBT_PHASES = (
         True,
     ),
     (
+        "dbt_seed_coverage_grid",
+        "seed",
+        "ask_seoul_weather_transform_coverage_grid",
+        True,
+    ),
+    (
+        "dbt_test_coverage_grid_seed",
+        "test",
+        "ask_seoul_weather_transform_coverage_grid",
+        True,
+    ),
+    (
         "dbt_run_silver",
         "run",
         "ask_seoul_weather_transform_silver",
@@ -226,6 +238,18 @@ EXPECTED_DBT_PHASES = (
         "dbt_test_place_mart",
         "test",
         "ask_seoul_weather_transform_serving_place_mart",
+        True,
+    ),
+    (
+        "dbt_run_coverage_grid_mart",
+        "run",
+        "ask_seoul_weather_transform_serving_grid_mart",
+        True,
+    ),
+    (
+        "dbt_test_coverage_grid_mart",
+        "test",
+        "ask_seoul_weather_transform_serving_grid_mart",
         True,
     ),
     (

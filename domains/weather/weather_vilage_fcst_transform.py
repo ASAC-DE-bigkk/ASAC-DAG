@@ -64,7 +64,7 @@ WEATHER_SNAPSHOT_VAR = "weather_snapshot_dag_run_id"
 WEATHER_GOLD_PUBLICATION_READY_ASSET_REF = Asset(
     WEATHER_GOLD_PUBLICATION_READY_ASSET
 )
-# Dedicated lane (#512): this DAG's own 12-step chain used to share
+# Dedicated lane (#512): this DAG's own transform chain used to share
 # trino_weather_heavy with weather_w2_canonical_transform and
 # weather_vilage_fcst_bronze, so a single run (observed ~50min) starved both
 # of the shared pool. #480's atomic swap + snapshot pin already makes the
@@ -123,6 +123,16 @@ DBT_PHASE_SPECS = (
         "ask_seoul_weather_transform_place_mapping",
     ),
     DbtPhaseSpec(
+        "dbt_seed_coverage_grid",
+        "seed",
+        "ask_seoul_weather_transform_coverage_grid",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_coverage_grid_seed",
+        "test",
+        "ask_seoul_weather_transform_coverage_grid",
+    ),
+    DbtPhaseSpec(
         "dbt_run_silver",
         "run",
         "ask_seoul_weather_transform_silver",
@@ -141,6 +151,16 @@ DBT_PHASE_SPECS = (
         "dbt_test_place_mart",
         "test",
         "ask_seoul_weather_transform_serving_place_mart",
+    ),
+    DbtPhaseSpec(
+        "dbt_run_coverage_grid_mart",
+        "run",
+        "ask_seoul_weather_transform_serving_grid_mart",
+    ),
+    DbtPhaseSpec(
+        "dbt_test_coverage_grid_mart",
+        "test",
+        "ask_seoul_weather_transform_serving_grid_mart",
     ),
     DbtPhaseSpec(
         "dbt_run_gold",

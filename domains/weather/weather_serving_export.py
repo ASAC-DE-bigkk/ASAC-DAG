@@ -18,6 +18,8 @@ dag = build_serving_export_dag(
         "weather_place_precipitation_window",
         "weather_place_risk_window",
         "weather_place_forecast_change_daily",
+        "weather_grid_current_outlook",
+        "weather_grid_precipitation_window",
     ],
     exact_domain_contracts=True,
     require_public_projection=True,
