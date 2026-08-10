@@ -1,4 +1,4 @@
-"""Airflow DAG: build and publish Traffic×Weather Gold independently of Core."""
+"""Airflow DAG: build and publish Traffic cross-domain Gold after source updates."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ import traffic_gold_transform as core  # noqa: E402
 from common.assets import WEATHER_GOLD_PUBLICATION_READY_ASSET  # noqa: E402
 from common.runtime_guard import default_target, validate_dev_runtime  # noqa: E402
 from traffic_ingest.assets import (  # noqa: E402
+    TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET,
     TRAFFIC_CROSS_DOMAIN_GOLD_PUBLICATION_READY_ASSET_REF,
     TRAFFIC_CROSS_DOMAIN_PUBLICATION_PRODUCT_IDS,
     TRAFFIC_GOLD_PUBLICATION_SCOPE_KEY,
@@ -101,10 +102,11 @@ def mark_cross_domain_gold_success(**context) -> dict[str, object]:
 
 with DAG(
     dag_id="traffic_cross_domain_gold_transform",
-    description="Build Traffic×Weather Gold after Traffic or Weather updates.",
+    description="Build Traffic cross-domain Gold after Traffic Core or Weather updates.",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule=(
         schedule_asset(TRAFFIC_INCIDENT_SILVER_ASSET)
+        | schedule_asset(TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET)
         | schedule_asset(WEATHER_GOLD_PUBLICATION_READY_ASSET)
     ),
     catchup=False,

@@ -48,9 +48,10 @@ EXPECTATIONS = (
                 upstream="traffic_incident_transform (silver 완료 Asset)", max_delay_minutes=90),
     Expectation("traffic_serving_export", "asset",
                 upstream="traffic_gold_transform (core gold 발행 완료 Asset)", max_delay_minutes=120),
-    # Traffic×Weather cross-domain gold — 두 상류 Asset 중 먼저 도착하는 쪽으로 트리거된다.
+    # Cross-domain gold — 세 상류 Asset 중 먼저 도착하는 쪽으로 트리거된다.
     Expectation("traffic_cross_domain_gold_transform", "asset",
                 upstream=("traffic_incident_transform (silver 완료 Asset) 또는 "
+                          "traffic_gold_transform (core gold 발행 완료 Asset) 또는 "
                           "weather_vilage_fcst_transform (weather gold 발행 완료 Asset)"),
                 max_delay_minutes=180),
     Expectation("traffic_cross_domain_serving_export", "asset",
