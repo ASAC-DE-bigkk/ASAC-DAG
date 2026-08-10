@@ -35,6 +35,15 @@ class FakeD1:
         self.read_table_rows_calls: list[tuple[str, list[Column], tuple[str, ...]]] = []
         self.product_meta: dict[str, dict[str, Any]] = {}  # 핸드오프 메타(#638) 게시 기록
         self.product_evidence: dict[str, dict[str, Any]] = {}  # V1 source/quality evidence (#678)
+        self.execute_calls: list[str] = []                 # export 시점 패턴 검증(Serving#217)
+        self.execute_result: list[dict[str, Any]] = [{"n": 1}]  # 기본: 1행 반환(검증 통과)
+        self.execute_error: Exception | None = None        # 설정 시 execute 가 예외
+
+    def execute(self, sql: str) -> list[dict[str, Any]]:
+        self.execute_calls.append(sql)
+        if self.execute_error is not None:
+            raise self.execute_error
+        return list(self.execute_result)
 
     def table_row_count(self, name: str) -> int:
         return len(self.tables.get(name, []))
@@ -1159,3 +1168,49 @@ def test_sibling_table_pattern_survives_with_warning_only():
 
     assert report.ok
     assert {r["pattern_id"] for r in d1.product_meta[contract.product_id]["patterns"]} == {"sibling_join"}
+
+
+# ── export 시점 패턴 검증 스탬프 (Serving#217) ──────────────────────────────────
+
+def test_export_verifies_unverified_draft_and_stamps():
+    """공용 게시기가 미검증 초안을 방금 게시한 D1 에 돌려 verified_at 를 스탬프한다 —
+    yml 에 verified_at 없는 초안이 게시 후 runnable 로 열리는 경로."""
+    contract = _contract(grain="g", usage_patterns=(
+        {"pattern_id": "draft", "sql": "-- :n=5\nSELECT a FROM gold_weather_place_current_outlook LIMIT :n",
+         "question_ko": "q", "axes": "x", "requires": ["select_columns"]},   # verified_at 없음
+        {"pattern_id": "verified", "sql": "SELECT 1 FROM gold_weather_place_current_outlook",
+         "question_ko": "q", "axes": "x", "requires": ["select_columns"],
+         "verified_at": "2026-01-01T00:00:00Z", "verified_rows": 3},
+    ))
+    d1 = FakeD1()
+    d1.execute_result = [{"a": 1}, {"a": 2}]   # 초안 SQL 이 2행 반환 → 검증 통과
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(1))})
+
+    report = publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="run-v")
+
+    assert report.ok
+    pats = {p["pattern_id"]: p for p in d1.product_meta[contract.product_id]["patterns"]}
+    # 초안이 스탬프돼 게시됨
+    assert pats["draft"]["verified_at"] and pats["draft"]["verified_rows"] == 2
+    assert pats["draft"]["verified_publication_id"] == d1.product_meta[contract.product_id]["publication_id"]
+    # 이미 검증된 건 원래 스탬프 유지(재실행/덮어쓰기 없음)
+    assert pats["verified"]["verified_at"] == "2026-01-01T00:00:00Z"
+    # 초안 SQL 이 실제로 실행됐다(예시값 치환)
+    assert any("LIMIT 5" in c for c in d1.execute_calls)
+
+
+def test_export_verification_failure_does_not_block_publish():
+    """초안 SQL 이 실행 중 깨져도(드리프트) 게시는 계속되고, 그 패턴만 미검증으로 남는다."""
+    contract = _contract(grain="g", usage_patterns=(
+        {"pattern_id": "broken", "sql": "-- :n=5\nSELECT bad FROM gold_weather_place_current_outlook LIMIT :n",
+         "question_ko": "q", "axes": "x", "requires": ["select_columns"]},
+    ))
+    d1 = FakeD1()
+    d1.execute_error = RuntimeError("no such column: bad")
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(1))})
+
+    report = publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="run-b")
+
+    assert report.ok    # 게시는 안 막힌다
+    pats = {p["pattern_id"]: p for p in d1.product_meta[contract.product_id]["patterns"]}
+    assert pats["broken"].get("verified_at") is None   # 미검증으로 남음(안전망)

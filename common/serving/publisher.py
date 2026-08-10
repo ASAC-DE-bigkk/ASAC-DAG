@@ -25,6 +25,7 @@ from common.serving.content_identity import d1_content_hash
 from common.serving.contract import ServingContract
 from common.serving.d1_client import Column, D1Client, sqlite_type
 from common.serving.pattern_audit import audit_pattern_sql, build_allowlist, deny_findings
+from common.serving.pattern_verify import verify_and_stamp
 
 log = logging.getLogger(__name__)
 from common.serving.gate import (
@@ -712,6 +713,18 @@ def publish(
             record.stage = "product_meta"
             columns_rows, ext_rows, pattern_rows, display_rows, param_rows = _product_meta_rows(
                 contract, plan.columns, record, audit_allowlist)
+            # export 시점 패턴 검증(Serving#217): 방금 게시한 D1 데이터에 미검증 패턴 SQL 을 실제로
+            # 돌려 통과분에 verified_at 스탬프 → 게이트웨이가 runnable 로 연다. 이미 검증(yml 스탬프)된
+            # 패턴은 무접촉. 이 제품만 다루므로 도메인 간 충돌 없음. 검증 실패는 게시를 막지 않는다.
+            try:
+                vr = verify_and_stamp(
+                    pattern_rows, run_sql=d1.execute, publication_id=record.publication_id)
+                if vr["verified"] or vr["failed"] or vr["skipped"]:
+                    log.info("[serving publish] 패턴 검증 스탬프 product=%s 검증=%d 실패=%d 스킵=%d",
+                             contract.product_id, len(vr["verified"]), len(vr["failed"]), len(vr["skipped"]))
+            except Exception as exc:  # noqa: BLE001 — 검증은 부가물, 게시를 깨지 않는다
+                log.warning("[serving publish] 패턴 검증 스탬프 실패(무시) product=%s: %s",
+                            contract.product_id, type(exc).__name__)
             d1.publish_product_meta(
                 contract.product_id, record.publication_id, columns_rows, ext_rows, pattern_rows,
                 display_rows, param_rows=param_rows,
