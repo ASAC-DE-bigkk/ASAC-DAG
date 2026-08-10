@@ -16,6 +16,34 @@ def test_resolve_params_from_comment():
     assert ":gu" not in sub and ":n" not in sub and "'강남구'" in sub
 
 
+# 🔴 아래 넷은 **운영에서 실제로 새어 나간** 모양이다(2026-08-10 카탈로그 실측).
+#    culture 미검증 19건 중 16건, 그리고 그날 스탬프된 173건 중 87건이 이 경로였다.
+def test_resolve_params_does_not_steal_next_params_number():
+    # 예전 규칙은 `=종로구, :from=` 를 건너뛰고 **다음 파라미터의 2026** 을 :gu 에 물렸다.
+    sql = "-- :gu=종로구, :from=2026-07-01, :to=2026-08-31\nSELECT a FROM t WHERE gu = :gu AND d BETWEEN :from AND :to"
+    _, resolved, unresolved = resolve_params(sql)
+    assert unresolved == []
+    assert resolved["gu"] == "'종로구'"
+    assert resolved["from"] == "'2026-07-01'" and resolved["to"] == "'2026-08-31'"
+
+
+def test_resolve_params_keeps_date_whole():
+    # 날짜의 앞 네 자리만 삼키면 `BETWEEN 2026 AND 2026` 이 되어 SQLite 가 조용히 0행을 준다.
+    sub, _, _ = resolve_params("-- :from=2026-08-01\nSELECT a FROM t WHERE d >= :from")
+    assert "'2026-08-01'" in sub and "2026 " not in sub
+
+
+def test_resolve_params_unquoted_sentinel():
+    _, resolved, _ = resolve_params("-- :gu=ALL, :n=7\nSELECT a FROM t WHERE (:gu = 'ALL' OR gu = :gu) LIMIT :n")
+    assert resolved["gu"] == "'ALL'" and resolved["n"] == "7"
+
+
+def test_resolve_params_requires_equals_sign():
+    # 값이 없는 파라미터는 **미해결로 남는 게 맞다** — 같은 줄 다른 숫자를 주워 오면 안 된다.
+    _, _, unresolved = resolve_params("SELECT a FROM t WHERE gu = :gu ORDER BY x LIMIT 10")
+    assert "gu" in unresolved
+
+
 def test_resolve_params_unresolved_when_no_example():
     _, _, unresolved = resolve_params("SELECT * FROM t WHERE g = :gu")
     assert "gu" in unresolved

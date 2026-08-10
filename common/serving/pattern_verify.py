@@ -49,21 +49,38 @@ def resolve_params(sql_text: str, hint_text: str = "") -> tuple[str, dict[str, s
                 rest = source[m.end():]
                 nl = rest.find("\n")
                 tail = (rest if nl < 0 else rest[:nl])[:600]
-                # ① 따옴표 문자열 / 숫자 (기존 규약 — `:gu='성동구'` / `:n=10`)
-                vm = re.match(r"[^'0-9\[]{0,16}('(?:[^']|'')*'|[0-9]+(?:\.[0-9]+)?)", tail)
-                if vm:
-                    value = vm.group(1)
+                # 🔴 예시값은 **`:이름=값` 꼴이다 — `=` 에 앵커를 건다.** 예전에는 `=` 앞으로
+                #   16자까지 아무 문자나 건너뛰며 첫 숫자를 찾았는데, 그 관대함이
+                #   `-- :gu=종로구, :from=2026-07-01` 에서 `:gu` 에 **다음 파라미터의 숫자
+                #   2026** 을 물려 줬다. 값이 없는 파라미터는 미해결로 남아 스킵되는 게 맞지,
+                #   옆칸 숫자를 주워 오면 안 된다.
+                eq = re.match(r"\s*=\s*", tail)
+                if not eq:
+                    continue
+                val = tail[eq.end():]
+                # ① 따옴표 문자열 (`:gu='성동구'`)
+                qm = re.match(r"'(?:[^']|'')*'", val)
+                if qm:
+                    value = qm.group(0)
                     break
                 # ② 한 줄 배열 (`:gus=['a','b']` — json_each(:gus) 검증용, JSON 문자열로 bind)
-                am = re.match(r"\s*=\s*(\[[^\]\n]*\])", tail)
+                am = re.match(r"\[[^\]\n]*\]", val)
                 if am:
-                    value = "'" + am.group(1).replace("'", "''") + "'"
+                    value = "'" + am.group(0).replace("'", "''") + "'"
                     break
-                # ③ 따옴표 없는 문자열 값 (`:area=광나루한강공원, :level=약간 붐빔`) → SQL 문자열로 감싼다
-                tm = re.match(r"\s*=\s*([^,\n\]]+)", tail)
+                # ③ 숫자 (`:n=10`) — **값 전체가 숫자일 때만.** `2026-07-01` 의 앞 네 자리를
+                #   숫자로 삼키면 `event_date BETWEEN 2026 AND 2026` 이 되는데, SQLite 는
+                #   TEXT↔INTEGER 를 타입 순서로 비교해 **조용히 0행**(또는 `>= 2026` 이면
+                #   반대로 **필터 무력화**)이 된다. 둘 다 검증을 통과하거나 못 하게 만든다.
+                num = re.match(r"[0-9]+(?:\.[0-9]+)?(?![0-9A-Za-z_\-./:])", val)
+                if num:
+                    value = num.group(0)
+                    break
+                # ④ 따옴표 없는 값 (`:gu=ALL`·`:from=2026-07-01`·`:level=약간 붐빔`) → SQL 문자열로 감싼다
+                tm = re.match(r"[^,\n\]]+", val)
                 if tm:
-                    v = tm.group(1).strip()
-                    if v and not v.startswith(("'", "[")):
+                    v = tm.group(0).strip()
+                    if v:
                         value = "'" + v.replace("'", "''") + "'"
                         break
             if value is not None:
