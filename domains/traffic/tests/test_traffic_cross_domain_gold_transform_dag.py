@@ -1,23 +1,72 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 import sys
+
+import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import traffic_cross_domain_gold_transform as module  # noqa: E402
+from traffic_transform_test_support import (  # noqa: E402
+    FakeAssetExpression,
+    load_gold_transform_module,
+)
+from traffic_transform_test_support import (  # noqa: E402, F401
+    restore_airflow_modules_after_dag_import,
+)
 
 
-def test_cross_domain_dag_reconverges_after_core_gold_and_weather_updates():
-    schedule_text = repr(module.dag.timetable.dataset_condition)
+@pytest.fixture
+def module():
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "traffic_cross_domain_gold_transform.py"
+    )
+    original_core = sys.modules.get("traffic_gold_transform")
+    core = load_gold_transform_module()
+    sys.modules["traffic_gold_transform"] = core
+    spec = importlib.util.spec_from_file_location(
+        "traffic_cross_domain_gold_transform_under_test",
+        module_path,
+    )
+    loaded = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    try:
+        spec.loader.exec_module(loaded)
+        yield loaded
+    finally:
+        if original_core is None:
+            sys.modules.pop("traffic_gold_transform", None)
+        else:
+            sys.modules["traffic_gold_transform"] = original_core
 
-    assert module.TRAFFIC_INCIDENT_SILVER_ASSET in schedule_text
-    assert module.TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET in schedule_text
-    assert module.WEATHER_GOLD_PUBLICATION_READY_ASSET in schedule_text
+
+def _scheduled_asset_uris(value) -> set[str]:
+    if isinstance(value, FakeAssetExpression):
+        return {
+            uri
+            for child in value.assets
+            for uri in _scheduled_asset_uris(child)
+        }
+    uri = getattr(value, "uri", None)
+    return {str(uri)} if uri else set()
 
 
-def test_cross_domain_success_asset_scopes_both_cross_domain_products(monkeypatch):
+def test_cross_domain_dag_reconverges_after_core_gold_and_weather_updates(module):
+    schedule_uris = _scheduled_asset_uris(module.dag.kwargs["schedule"])
+
+    assert schedule_uris == {
+        module.TRAFFIC_INCIDENT_SILVER_ASSET,
+        module.TRAFFIC_CORE_GOLD_PUBLICATION_READY_ASSET,
+        module.WEATHER_GOLD_PUBLICATION_READY_ASSET,
+    }
+
+
+def test_cross_domain_success_asset_scopes_both_cross_domain_products(
+    module, monkeypatch
+):
     captured = {}
 
     class Accessor:
