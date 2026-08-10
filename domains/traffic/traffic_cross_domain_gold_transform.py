@@ -55,6 +55,7 @@ CROSS_DOMAIN_PHASE_SPECS = (
         "dbt_run_cross_domain_gold",
         "build",
         CROSS_DOMAIN_SELECTOR,
+        threads=1,
         silver_persisted=True,
         fresh_parse=True,
         snapshot_required=True,

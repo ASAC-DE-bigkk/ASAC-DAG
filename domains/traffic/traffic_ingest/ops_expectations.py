@@ -8,7 +8,7 @@
 오너 확인: @masondev1024. ``confirmed_on`` 은 [[weather_ingest.ops_expectations]] 와 같은
 근거(ASK-Seoul#78 §9 "기대 주기 등록" 절의 weather·traffic 담당 예시, 2026-08-03)를 쓴다.
 
-등록 대상 = 2026-08-08 기준 ``domains/traffic/`` 실제 DAG 파일 전수(13개). 이 시점 운영 D1
+등록 대상 = 2026-08-10 기준 ``domains/traffic/`` 실제 DAG 파일 전수(15개). 이 시점 운영 D1
 상태표(2026-08-07 실측, #733)는 8개로 더 적은데, 그중 3개는 수동 전용(`S-4` 로 여기 등록은
 하되 감시 제외)이고 ``traffic_cross_domain_gold_transform``·``traffic_cross_domain_serving_export``
 는 이후 머지된 Traffic×Weather Gold 신규 DAG라 그 실측 스냅샷에는 없었다.
@@ -35,6 +35,9 @@ EXPECTATIONS = (
     # 기존 raw object로 bronze만 재적재(API 호출 없음) — 수동 전용, 감시 제외(S-4).
     Expectation("traffic_incident_bronze_backfill", "manual", monitored=False),
     Expectation("traffic_link_reference_backfill", "manual", monitored=False),
+    # 도로명·좌표 기준정보 — 매일 03:37, 신규/30일 stale link만 최대 100건 처리.
+    Expectation("traffic_link_reference_sync", "schedule", "일 1회 03:37",
+                max_delay_minutes=26 * 60),
     # incident bronze 완료 Asset 트리거.
     Expectation("traffic_incident_transform", "asset",
                 upstream="traffic_incident_bronze (bronze 완료 Asset)", max_delay_minutes=60),

@@ -98,6 +98,15 @@ def test_every_monitored_dag_has_a_max_delay():
             assert row["max_delay_minutes"], f"{dag_id}: 최대 허용 지연이 없습니다(S-2)"
 
 
+def test_daily_link_reference_sync_is_monitored_at_its_actual_cadence():
+    row = _registered()["traffic_link_reference_sync"]
+
+    assert row["trigger_type"] == "schedule"
+    assert row["expected_interval"] == "일 1회 03:37"
+    assert row["max_delay_minutes"] == 26 * 60
+    assert row["monitored"] == 1
+
+
 def test_rows_match_the_shared_table_schema():
     rows = shared_rows(updated_at="2026-08-08T00:00:00+00:00", domains=[DOMAIN])
     assert set(rows[0]) == set(d1_ops.columns_of(d1_ops.PIPELINE_EXPECTATION_TABLE))

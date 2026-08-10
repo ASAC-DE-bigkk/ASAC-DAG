@@ -64,6 +64,15 @@ def test_cross_domain_dag_reconverges_after_core_gold_and_weather_updates(module
     }
 
 
+def test_cross_domain_build_is_single_threaded(module):
+    specs = {spec.task_id: spec for spec in module.CROSS_DOMAIN_PHASE_SPECS}
+
+    assert specs["dbt_run_cross_domain_gold"].threads == 1
+    assert module.dbt_phase_tasks["dbt_run_cross_domain_gold"].kwargs[
+        "op_kwargs"
+    ]["threads"] == 1
+
+
 def test_cross_domain_success_asset_scopes_both_cross_domain_products(
     module, monkeypatch
 ):
