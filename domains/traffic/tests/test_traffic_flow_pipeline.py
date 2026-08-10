@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from traffic_ingest.errors import TrafficCompletenessError
 
 
-def _pipeline(events):
+def _pipeline(events, *, resolved_link_ids=None):
     from traffic_ingest.flow_pipeline import TrafficFlowPipeline
 
     class IncidentManifest:
@@ -50,6 +50,14 @@ def _pipeline(events):
         runtime_guard=lambda: events.append(("guard",)),
         incident_manifest=IncidentManifest(),
         flow_manifest=FlowManifest(),
+        resolve_links=lambda conf, parent: events.append(
+            ("resolve_links", conf, parent)
+        )
+        or (
+            ["1220003800"]
+            if resolved_link_ids is None
+            else list(resolved_link_ids)
+        ),
         landing=Landing(),
         load=lambda raw_result, run_id: events.append(("load", run_id))
         or {
@@ -70,7 +78,6 @@ def test_flow_pipeline_preserves_exact_incident_parent_from_landing_to_asset():
     raw_result = pipeline.land(
         parent_incident_run_id="incident-1",
         flow_run_id="asset__flow-1",
-        link_ids=["1220003800"],
         conf={},
     )
     outcome = pipeline.materialize(
@@ -79,6 +86,7 @@ def test_flow_pipeline_preserves_exact_incident_parent_from_landing_to_asset():
     )
 
     assert raw_result["parent_incident_run_id"] == "incident-1"
+    assert ("resolve_links", {}, "incident-1") in events
     assert ("land", ("1220003800",), "asset__flow-1", None) in events
     assert outcome.asset_metadata == {
         "source_id": "seoul_traffic_flow",
@@ -101,7 +109,6 @@ def test_flow_pipeline_uses_explicit_load_date_for_backfill_partition():
     pipeline.land(
         parent_incident_run_id="incident-1",
         flow_run_id="manual__flow-backfill",
-        link_ids=["1220003800"],
         conf={"load_date": "2026-07-10"},
     )
 
@@ -114,7 +121,6 @@ def test_flow_pipeline_revalidates_and_publishes_the_exact_pinned_parent():
     raw_result = pipeline.land(
         parent_incident_run_id="incident-1",
         flow_run_id="asset__flow-1",
-        link_ids=["1220003800"],
         conf={},
     )
 
@@ -130,15 +136,14 @@ def test_flow_pipeline_revalidates_and_publishes_the_exact_pinned_parent():
     assert not any(event[0] == "flow_fail" for event in events)
 
 
-def test_flow_pipeline_rejects_an_empty_reference_handoff_before_landing():
+def test_flow_pipeline_rejects_an_empty_incident_link_set_before_landing():
     events = []
-    pipeline = _pipeline(events)
+    pipeline = _pipeline(events, resolved_link_ids=[])
 
-    with pytest.raises(TrafficCompletenessError, match="referenced link"):
+    with pytest.raises(TrafficCompletenessError, match="incident link"):
         pipeline.land(
             parent_incident_run_id="incident-1",
             flow_run_id="asset__flow-1",
-            link_ids=[],
             conf={},
         )
 

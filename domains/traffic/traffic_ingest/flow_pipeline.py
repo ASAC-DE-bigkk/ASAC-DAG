@@ -73,6 +73,7 @@ class TrafficFlowPipeline:
         runtime_guard: Callable[[], None],
         incident_manifest,
         flow_manifest: Manifest,
+        resolve_links: Callable[[dict[str, object], str], list[str]],
         landing,
         load: Callable[[dict[str, object], str], dict[str, object]],
         verify: Callable[[dict[str, object], str], int],
@@ -80,6 +81,7 @@ class TrafficFlowPipeline:
         self._runtime_guard = runtime_guard
         self._incident_manifest = incident_manifest
         self._flow_manifest = flow_manifest
+        self._resolve_links = resolve_links
         self._landing = landing
         self._load = load
         self._verify = verify
@@ -89,7 +91,6 @@ class TrafficFlowPipeline:
         *,
         parent_incident_run_id: str,
         flow_run_id: str,
-        link_ids: list[str],
         conf: dict[str, object],
     ) -> dict[str, object]:
         self._runtime_guard()
@@ -98,10 +99,12 @@ class TrafficFlowPipeline:
         )
         if str(verified_parent) != parent_incident_run_id:
             raise ValueError("Traffic Flow Incident parent identity mismatch")
-        normalized_link_ids = normalize_link_ids(link_ids)
+        normalized_link_ids = normalize_link_ids(
+            self._resolve_links(conf, parent_incident_run_id)
+        )
         if not normalized_link_ids:
             raise TrafficCompletenessError(
-                "Traffic Flow requires at least one referenced link"
+                "Traffic Flow requires at least one incident link"
             )
         landing_load_date = conf.get("load_date")
         raw_result = dict(

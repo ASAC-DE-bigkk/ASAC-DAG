@@ -43,15 +43,10 @@ from traffic_ingest.errors import TrafficSourceEmptyResponseError  # noqa: E402
 from traffic_ingest.flow_info import KST  # noqa: E402
 from traffic_ingest.flow_ingest import build_traffic_flow_pipeline  # noqa: E402
 from traffic_ingest.flow_pipeline import FLOW_MATERIALIZE_TASK_ID  # noqa: E402
-from traffic_ingest.link_reference_ingest import (  # noqa: E402
-    build_traffic_link_reference_pipeline,
-)
 from traffic_lineage import enable_lineage_if_configured  # noqa: E402
 
 
 DAG_ID = "traffic_flow_bronze"
-LINK_REFERENCE_LAND_TASK_ID = "land_traffic_link_reference"
-LINK_REFERENCE_MATERIALIZE_TASK_ID = "materialize_verify_traffic_link_reference"
 LAND_TASK_ID = "land_traffic_flow_snapshot"
 record_traffic_problem = problem_failure_callback(
     domain="traffic", source_system="seoul_topis"
@@ -140,42 +135,10 @@ def _incident_parent_from_context(context: dict) -> str:
 
 
 @fail_fast_traffic_bronze
-def land_traffic_link_reference(**context) -> dict[str, object]:
-    return build_traffic_link_reference_pipeline().land(
-        parent_incident_run_id=_incident_parent_from_context(context),
-        link_reference_run_id=str(context["run_id"]),
-        conf=dag_run_conf(context),
-    )
-
-
-@fail_fast_traffic_bronze
-def materialize_verify_traffic_link_reference(**context) -> dict[str, object]:
-    raw_result = (
-        context["ti"].xcom_pull(task_ids=LINK_REFERENCE_LAND_TASK_ID) or {}
-    )
-    return build_traffic_link_reference_pipeline().materialize(
-        raw_result=raw_result,
-        link_reference_run_id=str(context["run_id"]),
-    )
-
-
-@fail_fast_traffic_bronze
 def land_traffic_flow_snapshot(**context) -> dict[str, object]:
-    reference_result = (
-        context["ti"].xcom_pull(task_ids=LINK_REFERENCE_MATERIALIZE_TASK_ID) or {}
-    )
-    parent_incident_run_id = str(
-        reference_result.get("parent_incident_run_id") or ""
-    )
-    link_ids = reference_result.get("requested_link_ids")
-    if not parent_incident_run_id or not isinstance(link_ids, list):
-        raise AirflowFailException(
-            "Traffic Flow requires a materialized link reference handoff"
-        )
     return build_traffic_flow_pipeline().land(
-        parent_incident_run_id=parent_incident_run_id,
+        parent_incident_run_id=_incident_parent_from_context(context),
         flow_run_id=str(context["run_id"]),
-        link_ids=link_ids,
         conf=dag_run_conf(context),
     )
 
@@ -209,29 +172,6 @@ with DAG(
     max_active_runs=1,
     tags=["ask_seoul", "traffic", "flow", "bronze", "asset", "iceberg"],
 ) as dag:
-    land_reference = PythonOperator(
-        task_id=LINK_REFERENCE_LAND_TASK_ID,
-        python_callable=land_traffic_link_reference,
-        retries=3,
-        retry_delay=timedelta(minutes=1),
-        retry_exponential_backoff=True,
-        on_failure_callback=[
-            record_traffic_flow_land_problem,
-            record_traffic_raw_product_failure,
-        ],
-    )
-    materialize_reference = PythonOperator(
-        task_id=LINK_REFERENCE_MATERIALIZE_TASK_ID,
-        python_callable=materialize_verify_traffic_link_reference,
-        pool=TRINO_INGEST_POOL,
-        retries=3,
-        retry_delay=timedelta(minutes=1),
-        retry_exponential_backoff=True,
-        on_failure_callback=[
-            record_traffic_problem,
-            record_traffic_bronze_product_failure,
-        ],
-    )
     land_flow = PythonOperator(
         task_id=LAND_TASK_ID,
         python_callable=land_traffic_flow_snapshot,
@@ -258,7 +198,7 @@ with DAG(
         ],
         on_success_callback=record_traffic_bronze_product_event,
     )
-    land_reference >> materialize_reference >> land_flow >> materialize_flow
+    land_flow >> materialize_flow
 
 
 enable_lineage_if_configured(dag)
