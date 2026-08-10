@@ -49,6 +49,23 @@ def test_resolve_params_unresolved_when_no_example():
     assert "gu" in unresolved
 
 
+def test_resolve_params_expands_array_for_in_list():
+    # P3 전개형(IN (:gus)) — JSON 배열 예시를 IN 리스트로 전개(게이트웨이 ?,?,? 와 동형).
+    # JSON 문자열 그대로 넣으면 단일 리터럴 비교가 되어 조용히 0행이 난다.
+    sql = '-- :gus=["강남구","서초구"]\nSELECT g FROM t WHERE gu IN (:gus)'
+    sub, _, unresolved = resolve_params(sql)
+    assert unresolved == []
+    assert "IN ('강남구', '서초구')" in sub
+
+
+def test_resolve_params_keeps_json_string_for_json_each():
+    # json_each(:gus) 형은 JSON 문자열 그대로 bind — 전개 대상이 아니다
+    sql = '-- :gus=["a","b"]\nSELECT g FROM t WHERE gu IN (SELECT value FROM json_each(:gus))'
+    sub, _, unresolved = resolve_params(sql)
+    assert unresolved == []
+    assert "json_each('[\"a\",\"b\"]')" in sub
+
+
 def test_verify_stamps_only_unverified_and_on_success():
     now = "2026-08-10T00:00:00Z"
     rows = [
