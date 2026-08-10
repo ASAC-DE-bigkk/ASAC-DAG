@@ -33,6 +33,7 @@ QUALITY_COVERAGE_REQUIRED_FIELDS = ("field", "expected_distinct_count", "minimum
 QUALITY_COVERAGE_OPTIONAL_FIELDS = ("measurement_scope",)
 QUALITY_COVERAGE_MEASUREMENT_SCOPES = frozenset({"published_rows", "source_relation"})
 QUALITY_COVERAGE_NOT_APPLICABLE_FIELDS = ("not_applicable_reason",)
+EMPTY_RESULT_FRESHNESS_FIELDS = ("relation", "field")
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,9 @@ class ServingContract:
     # Optional quality-time axis. When absent, Publisher preserves the v1 behavior
     # and measures freshness from event_time.
     freshness_field: str | None = None
+    # For a valid zero-row sparse product, read the freshness timestamp from this
+    # declared upstream model. A null fallback is a fail-closed publication error.
+    empty_result_freshness: dict[str, str] | None = None
     description: str = ""
     product_question: str = ""
     tests: tuple[str, ...] = ()
@@ -100,6 +104,15 @@ class ServingContract:
                 )
         if self.freshness_field is not None and not IDENTIFIER_RE.fullmatch(self.freshness_field):
             raise ValueError(f"{self.product_id}: freshness_field must be a physical identifier")
+        if self.empty_result_freshness is not None:
+            if set(self.empty_result_freshness) != set(EMPTY_RESULT_FRESHNESS_FIELDS):
+                raise ValueError(f"{self.product_id}: empty_result_freshness must contain relation and field")
+            for field_name in EMPTY_RESULT_FRESHNESS_FIELDS:
+                value = self.empty_result_freshness.get(field_name)
+                if not isinstance(value, str) or not IDENTIFIER_RE.fullmatch(value):
+                    raise ValueError(
+                        f"{self.product_id}: empty_result_freshness.{field_name} must be a physical identifier"
+                    )
 
 
 def _merged_meta(node: dict[str, Any]) -> dict[str, Any]:
@@ -251,6 +264,38 @@ def _load_freshness_field(
     if public_projection is not None and raw not in public_projection:
         raise ValueError(f"{product_id}: freshness_field missing from public_projection: {raw}")
     return raw
+
+
+def _load_empty_result_freshness(
+    product_id: str,
+    serving: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, str] | None:
+    """Load the trusted upstream freshness source for a valid zero-row product."""
+    raw = serving.get("empty_result_freshness")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != set(EMPTY_RESULT_FRESHNESS_FIELDS):
+        raise ValueError(f"{product_id}: empty_result_freshness must contain relation and field")
+    relation = raw.get("relation")
+    field = raw.get("field")
+    if not isinstance(relation, str) or not IDENTIFIER_RE.fullmatch(relation):
+        raise ValueError(f"{product_id}: empty_result_freshness relation must be a model identifier")
+    if not isinstance(field, str) or not IDENTIFIER_RE.fullmatch(field):
+        raise ValueError(f"{product_id}: empty_result_freshness field must be a physical identifier")
+    source_nodes = [
+        node
+        for node in (manifest.get("nodes") or {}).values()
+        if node.get("resource_type") == "model" and node.get("name") == relation
+    ]
+    if len(source_nodes) != 1:
+        raise ValueError(f"{product_id}: empty_result_freshness relation unknown model {relation}")
+    source_columns = source_nodes[0].get("columns")
+    if not isinstance(source_columns, dict) or field not in source_columns:
+        raise ValueError(
+            f"{product_id}: empty_result_freshness field unknown column {field} on {relation}"
+        )
+    return {"relation": relation, "field": field}
 
 
 def _load_source_evidence(product_id: str, serving: dict[str, Any]) -> tuple[dict[str, Any], ...] | None:
@@ -405,6 +450,9 @@ def load_contracts(
         freshness_field = _load_freshness_field(
             str(product_id), serving, node, public_projection
         )
+        empty_result_freshness = _load_empty_result_freshness(
+            str(product_id), serving, manifest
+        )
         contracts.append(
             ServingContract(
                 product_id=str(product_id),
@@ -419,6 +467,7 @@ def load_contracts(
                 reliability=serving.get("reliability") if isinstance(serving.get("reliability"), dict) else None,
                   event_time=serving.get("event_time"),
                   freshness_field=freshness_field,
+                  empty_result_freshness=empty_result_freshness,
                   description=str(node.get("description", "")),
                   product_question=str(serving.get("product_question", "")),
                   tests=tuple(gates.get(uid, [])),

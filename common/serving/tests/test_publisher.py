@@ -536,6 +536,60 @@ def test_snapshot_publish_uses_declared_freshness_field_not_event_time():
     assert d1.product_evidence[contract.product_id]["quality"]["freshness_as_of"] == "2026-08-04T09:30:00"
 
 
+def test_empty_snapshot_uses_declared_hourly_freshness_fallback():
+    contract = _contract(
+        zero_policy="allow",
+        event_time=None,
+        freshness_field=None,
+        empty_result_freshness={
+            "relation": "gold_weather_place_hourly_outlook",
+            "field": "forecast_collected_at_max",
+        },
+    )
+    report = publish(
+        [contract],
+        FakeSource({
+            contract.model_name: ReadPlan(
+                columns=COLUMNS,
+                rows=[],
+                empty_result_freshness="2026-08-10T20:00:00",
+            )
+        }),
+        FakeD1(),
+        FakeSmoke(status="passed"),
+        source_run_id="empty-precipitation-window",
+    )
+
+    assert report.records[0].freshness == "2026-08-10T20:00:00"
+    assert report.records[0].serving_status == STATUS_PUBLISHED
+
+
+def test_empty_snapshot_refuses_null_declared_freshness_fallback():
+    contract = _contract(
+        zero_policy="allow",
+        freshness_field="forecast_collected_at_max",
+        empty_result_freshness={
+            "relation": "gold_weather_place_hourly_outlook",
+            "field": "forecast_collected_at_max",
+        },
+    )
+    d1 = FakeD1()
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract],
+            FakeSource({
+                contract.model_name: ReadPlan(columns=COLUMNS, rows=[])
+            }),
+            d1,
+            FakeSmoke(status="passed"),
+            source_run_id="empty-without-hourly-freshness",
+        )
+
+    assert d1.replace_calls == 0
+    assert excinfo.value.report.records[0].stage == "empty_result_freshness"
+
+
 def test_snapshot_publish_records_passing_distinct_coverage_gate():
     contract = _contract(
         quality_coverage={

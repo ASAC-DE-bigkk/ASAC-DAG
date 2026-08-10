@@ -244,6 +244,34 @@ def test_load_contracts_keeps_kst_worker_interpretation_without_timezone_overrid
     assert "freshness_timezone" not in contract.__dataclass_fields__
 
 
+def test_load_contracts_reads_empty_result_freshness_from_a_declared_model(tmp_path):
+    timestamp_meta = {
+        "description": "quality timestamp",
+        "data_type": "TIMESTAMP",
+        "config": {"meta": {"nullable": False, "semantic_role": "timestamp", "unit": "datetime"}},
+    }
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["empty_result_freshness"] = {
+        "relation": "gold_weather_place_hourly_outlook",
+        "field": "forecast_collected_at_max",
+    }
+    manifest["nodes"]["model.project.gold_weather_place_hourly_outlook"] = {
+        "resource_type": "model",
+        "name": "gold_weather_place_hourly_outlook",
+        "columns": {"forecast_collected_at_max": timestamp_meta},
+    }
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_contracts(path)[0]
+
+    assert contract.empty_result_freshness == {
+        "relation": "gold_weather_place_hourly_outlook",
+        "field": "forecast_collected_at_max",
+    }
+
+
 def test_load_contracts_retains_publication_trigger_for_runtime_watchdog(tmp_path):
     path = _projection_manifest(tmp_path)
     manifest = json.loads(path.read_text(encoding="utf-8"))
