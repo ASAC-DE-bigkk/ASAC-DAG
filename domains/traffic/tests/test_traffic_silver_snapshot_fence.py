@@ -281,6 +281,34 @@ def test_trino_connection_uses_the_exact_silver_relation_namespace(monkeypatch):
     assert captured["schema"] == "traffic"
 
 
+def test_snapshot_fence_uses_the_target_selected_traffic_schema(monkeypatch):
+    captured = {}
+    connection = object()
+    monkeypatch.setenv("ASK_SEOUL_TARGET", "dev")
+    monkeypatch.setenv("TRINO_ICEBERG_CATALOG", "iceberg_dev")
+    monkeypatch.setenv("TRAFFIC_SCHEMA", "ask_seoul_road_755")
+    monkeypatch.setattr(
+        "trino.dbapi.connect",
+        lambda **kwargs: captured.update(kwargs) or connection,
+    )
+
+    assert snapshot_fence._trino_connection() is connection
+    assert captured["schema"] == "ask_seoul_road_755"
+
+    cursor = FakeCursor(
+        snapshot_row=(11, "2026-07-19T00:00:00Z", "overwrite"),
+        file_rows=[],
+    )
+    collect_silver_snapshot_evidence(
+        connection_factory=lambda: FakeConnection(cursor)
+    )
+
+    assert all(
+        "iceberg_dev.ask_seoul_road_755." in statement
+        for statement in cursor.statements
+    )
+
+
 def test_prod_snapshot_fence_uses_only_the_prod_catalog(monkeypatch):
     monkeypatch.setenv("ASK_SEOUL_TARGET", "prod")
     # 단일 키 규약: 카탈로그는 이 키의 '값'이 정한다. prod 선언이면 dev 창고가 새어들 수 없다.

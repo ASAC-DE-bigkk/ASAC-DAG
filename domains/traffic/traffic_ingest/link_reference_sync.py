@@ -23,6 +23,7 @@ from traffic_ingest.link_reference_bronze import (
     LINK_INFO_TABLE,
     LINK_VERTEX_TABLE,
     REQUEST_AUDIT_TABLE,
+    create_seoul_traffic_link_reference_tables,
 )
 from traffic_ingest.link_reference_info import (
     LINK_INFO_SERVICE,
@@ -232,6 +233,7 @@ def resolve_incremental_sync_link_ids(
     stale_after_days: int = DEFAULT_STALE_AFTER_DAYS,
     now: datetime | None = None,
     cursor_factory=trino_cursor,
+    create_tables=create_seoul_traffic_link_reference_tables,
 ) -> list[str]:
     safe_batch_size, safe_stale_days = validate_incremental_sync_request(
         batch_size=batch_size,
@@ -243,6 +245,7 @@ def resolve_incremental_sync_link_ids(
             "now must be a timezone-aware datetime"
         )
     cursor, catalog, schema = cursor_factory()
+    create_tables(cursor, catalog, schema)
     cursor.execute(
         build_incremental_sync_link_sql(
             catalog=catalog,

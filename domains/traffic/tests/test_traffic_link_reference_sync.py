@@ -101,6 +101,34 @@ def test_incremental_resolver_uses_exact_utc_cutoff_and_preserves_query_order():
     assert "LIMIT 2" in cursor.sql
 
 
+def test_incremental_resolver_bootstraps_reference_tables_before_candidate_query():
+    runtime = _runtime()
+    events = []
+
+    class Cursor:
+        def execute(self, sql):
+            events.append(("query", sql))
+
+        def fetchall(self):
+            return []
+
+    cursor = Cursor()
+
+    result = runtime.resolve_incremental_sync_link_ids(
+        batch_size=1,
+        stale_after_days=30,
+        now=datetime(2026, 8, 10, 3, 37, tzinfo=timezone.utc),
+        cursor_factory=lambda: (cursor, "iceberg_dev", "traffic"),
+        create_tables=lambda received_cursor, catalog, schema: events.append(
+            ("bootstrap", received_cursor, catalog, schema)
+        ),
+    )
+
+    assert result == []
+    assert events[0] == ("bootstrap", cursor, "iceberg_dev", "traffic")
+    assert events[1][0] == "query"
+
+
 def test_incremental_landing_force_refreshes_only_selected_candidates():
     runtime = _runtime()
     calls = []
