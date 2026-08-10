@@ -519,8 +519,9 @@ def _display_row(spec, sv: dict, pid: str, publication_id: str) -> dict | None:
 
 
 def _handoff_rows(spec, m: dict, col_defs: list,
-                  publication_id: str) -> tuple[list, dict, list, dict | None]:
-    """(columns_rows, ext_row, pattern_rows, display_row) — d1_catalog_* / d1_usage_patterns 용.
+                  publication_id: str) -> tuple[list, dict, list, dict | None, list]:
+    """(columns_rows, ext_row, pattern_rows, display_row, param_rows) — d1_catalog_* /
+    d1_usage_patterns / d1_pattern_params 용.
 
     공유 `_catalog` 의 columns JSON 은 전 도메인이 name/type 관행이라 건드리지 않고(동형 유지),
     컬럼 역할·그레인/PK 계보·검증 질의 패턴은 공용 보조 테이블로 게시한다(#638 공통 규약) —
@@ -589,7 +590,23 @@ def _handoff_rows(spec, m: dict, col_defs: list,
                   patterns={k: v[:2] for k, v in sorted(violations.items())[:10]},
                   hint="scripts/audit_pattern_sql.py 로 사전 검사 후 SQL 을 수정하세요")
         pat_rows = [r for r in pat_rows if str(r["pattern_id"]) not in violations]
-    return col_rows, ext_row, pat_rows, _display_row(spec, sv, pid, publication_id)
+    # v1.11 (Serving#217 P1/P3): 파라미터 메타는 별도 표 d1_pattern_params 로 낸다(#706 전례 —
+    # 공유 표 컬럼 추가는 구 실행기가 되돌린다). 세 필드 중 하나라도 선언한 패턴만 행을 만들고,
+    # 감사 탈락 패턴(violations)의 메타는 싣지 않는다 — 실행 안 될 패턴의 메타는 소음이다.
+    published_ids = {str(r["pattern_id"]) for r in pat_rows}
+    param_rows = [{"product_id": pid, "pattern_id": p.get("pattern_id"),
+                   "param_defaults": (json.dumps(p["param_defaults"], ensure_ascii=False)
+                                      if isinstance(p.get("param_defaults"), dict) else None),
+                   "param_enum": (json.dumps(p["param_enum"], ensure_ascii=False)
+                                  if isinstance(p.get("param_enum"), dict) else None),
+                   "params": (json.dumps(p["params"], ensure_ascii=False)
+                              if isinstance(p.get("params"), dict) else None),
+                   "publication_id": publication_id}
+                  for p in (sv.get("usage_patterns") or [])
+                  if str(p.get("pattern_id")) in published_ids
+                  and p.get("d1_table", spec.d1_table) == spec.d1_table
+                  and any(isinstance(p.get(k), dict) for k in ("param_defaults", "param_enum", "params"))]
+    return col_rows, ext_row, pat_rows, _display_row(spec, sv, pid, publication_id), param_rows
 
 
 def _glossary_rows(cur, catalog: str, qschema: str, exported_at: str) -> list[dict]:
@@ -651,7 +668,7 @@ _PID_RE = re.compile(r"^[a-z0-9_:]+$")
 
 def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_rows: list,
                      display_rows: list, glossary_rows: list, published: dict[str, str],
-                     glossary_stamp: str) -> None:
+                     glossary_stamp: str, *, param_rows: list = ()) -> None:
     """보조 5종 **자연키 upsert** 게시(#638 §3 — 전량 교체 금지, 공용 스키마 정본 소비).
 
     절차는 전 도메인 동일하며 **제품 단위**로 돈다(#638 §3 원자성 경계): 제품마다 ① 이번
@@ -696,8 +713,10 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
     ext_by_pid: dict[str, list] = {}
     patterns_by_pid: dict[str, list] = {}
     display_by_pid: dict[str, list] = {}
+    params_by_pid: dict[str, list] = {}
     for grouped, rows in ((columns_by_pid, columns_rows), (ext_by_pid, ext_rows),
-                          (patterns_by_pid, pattern_rows), (display_by_pid, display_rows)):
+                          (patterns_by_pid, pattern_rows), (display_by_pid, display_rows),
+                          (params_by_pid, param_rows)):
         for row in rows:
             grouped.setdefault(str(row.get("product_id")), []).append(row)
 
@@ -707,10 +726,12 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
             continue
         product_columns = columns_by_pid.get(pid, [])
         product_patterns = patterns_by_pid.get(pid, [])
+        product_params = params_by_pid.get(pid, [])
         for table, rows in (("d1_catalog_columns", product_columns),
                             ("d1_catalog_ext", ext_by_pid.get(pid, [])),
                             ("d1_usage_patterns", product_patterns),
-                            ("d1_catalog_display", display_by_pid.get(pid, []))):
+                            ("d1_catalog_display", display_by_pid.get(pid, [])),
+                            ("d1_pattern_params", product_params)):
             for statement in handoff_upsert_statements(table, rows):
                 _d1(statement, token)   # security: allow-sql — 공용 빌더(식별자 상수, 값 이스케이프)
         _d1(handoff_prune_statement(
@@ -718,6 +739,10 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
         _d1(handoff_stale_delete_statement("d1_catalog_ext", pid, publication_id), token)  # security: allow-sql — 공용 빌더
         _d1(handoff_prune_statement(
             "d1_usage_patterns", pid, [str(r["pattern_id"]) for r in product_patterns]), token)  # security: allow-sql — 공용 빌더
+        # 파라미터 메타(Serving#217) — 선언을 지운 패턴의 옛 행이 남으면 게이트웨이가 죽은
+        # 기본값을 계속 적용하므로, patterns 와 같은 선언 키셋(NOT IN) 판별로 정리한다.
+        _d1(handoff_prune_statement(
+            "d1_pattern_params", pid, [str(r["pattern_id"]) for r in product_params]), token)  # security: allow-sql — 공용 빌더
         # display 를 내린(또는 아직 안 쓴) 제품의 옛 행이 남지 않게 — ext 와 같은 단일 키 스코프라
         # 판별도 같다. 미선언 제품은 upsert 가 0건이고 이 삭제만 돌아 행이 없는 상태로 수렴한다.
         _d1(handoff_stale_delete_statement("d1_catalog_display", pid, publication_id), token)  # security: allow-sql — 공용 빌더
@@ -741,9 +766,9 @@ def _publish_handoff(token: str, columns_rows: list, ext_rows: list, pattern_row
                 + _lit(vocabulary_id) + ";", token)   # security: allow-sql — 상수 어휘, _lit 이스케이프
 
     log.info("[serving export] 핸드오프 메타 upsert: columns=%d ext=%d patterns=%d display=%d "
-             "glossary=%d (잔여 정리 — 제품 %d종·어휘 %d종)", len(columns_rows), len(ext_rows),
-             len(pattern_rows), len(display_rows), len(glossary_rows), len(published),
-             len(vocabularies))
+             "params=%d glossary=%d (잔여 정리 — 제품 %d종·어휘 %d종)", len(columns_rows),
+             len(ext_rows), len(pattern_rows), len(display_rows), len(param_rows),
+             len(glossary_rows), len(published), len(vocabularies))
 
 
 def _check_contract_drift(meta: dict[str, dict]) -> None:
@@ -967,6 +992,7 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
     handoff_ext: list = []
     handoff_pats: list = []
     handoff_display: list = []       # 표시 메타(#706) — 선언한 제품만 행이 생긴다
+    handoff_params: list = []        # 파라미터 메타(Serving#217 P1/P3) — 선언한 패턴만 행이 생긴다
     public_evidence_rows: list[tuple] = []
     try:
         cur = conn.cursor()
@@ -1089,8 +1115,9 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                 "snapshot_at": now, "source_table": spec.source, "tier": spec.tier,
                 "d1_row_count": n, "payload_hash": fingerprint, "rewritten": not reuse}
             # MCP/API 핸드오프 계보(게시 스냅샷 기준) — publication_id 로 게시본을 식별한다
-            cr, er, pr, dr = _handoff_rows(spec, m, col_defs, publication_id)
+            cr, er, pr, dr, qr = _handoff_rows(spec, m, col_defs, publication_id)
             handoff_cols.extend(cr); handoff_ext.append(er); handoff_pats.extend(pr)
+            handoff_params.extend(qr)
             if dr:
                 handoff_display.append(dr)
             published["commerce_" + spec.d1_table[3:]] = publication_id   # 잔여 정리 스코프
@@ -1122,7 +1149,8 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
         _upsert_meta(meta_rows, token)
         _upsert_publish_state(state_rows, token)
         _publish_handoff(token, handoff_cols, handoff_ext, handoff_pats, handoff_display,
-                         _glossary_rows(cur, catalog, qschema, now), published, now)
+                         _glossary_rows(cur, catalog, qschema, now), published, now,
+                         param_rows=handoff_params)
         _publish_public_evidence(token, public_evidence_rows)
     finally:
         conn.close()

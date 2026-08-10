@@ -18,10 +18,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol, Sequence
 
+import logging
+
 from common.serving import gate as gatelib
 from common.serving.content_identity import d1_content_hash
 from common.serving.contract import ServingContract
 from common.serving.d1_client import Column, D1Client, sqlite_type
+from common.serving.pattern_audit import audit_pattern_sql, build_allowlist, deny_findings
+
+log = logging.getLogger(__name__)
 from common.serving.gate import (
     STATUS_DEGRADED,
     STATUS_FAILED,
@@ -140,13 +145,22 @@ def _product_meta_rows(
     contract: ServingContract,
     columns: Sequence[Column],
     record: ProductRecord,
+    audit_allowlist: frozenset[str] | None = None,
 ) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
-    """핸드오프 메타 4종(#638 §2.2 · display 는 v1.10 #706) 행 — 계약 선언(dbt yml→manifest)에서 그대로 나온다.
+    """핸드오프 메타 5종(#638 §2.2 · display v1.10 #706 · param v1.11 Serving#217) 행 —
+    계약 선언(dbt yml→manifest)에서 그대로 나온다.
 
     타입은 D1 실물과 같은 SQLite 타입으로 싣고(commerce 관행 동형), 컬럼 설명이 없는
     도메인은 description_ko=NULL 로 컬럼 행 자체는 게시한다(이름·타입·게시본 대조는 유효).
+
+    패턴 게시 감사(Serving#217·킷 §F): 지금까지 커머스만 자체 게시기에서 감사를 받았고 공유
+    게시기 도메인은 무감사였다 — 여기 한 번 걸어 전 도메인이 같은 검사를 받는다. 강제 수위는
+    #217 결정의 단계 그대로: **거부 계열(구조 위반·내부표)은 게시 제외**(P0-a 동형),
+    **allowlist 밖은 경보만**(P0-b 는 게시 계약·오너십과 함께 2차 — 서브셋 게시 배치에서
+    형제 표 참조를 오차단하지 않기 위해서이기도 하다).
     """
     descriptions = contract.column_descriptions or {}
     columns_rows = [
@@ -210,7 +224,52 @@ def _product_meta_rows(
         # 한 모델→다제품 선언(commerce geo_grid 관행)과의 동형성: d1_table 명시 시 해당 제품만.
         and pattern.get("d1_table", contract.model_name) == contract.model_name
     ]
-    return columns_rows, ext_rows, pattern_rows, display_rows
+
+    # ── 패턴 게시 감사 (Serving#217 · 킷 §F 배선) ─────────────────────────────────
+    # 거부 계열(구조 위반·내부표 참조)은 게시 제외 + 경보(제품 게시는 막지 않는다 —
+    # commerce _handoff_rows 와 같은 정책). allowlist 밖은 **경보만**(P0-b 예고 신호).
+    kept: list[dict[str, Any]] = []
+    for row in pattern_rows:
+        denied = deny_findings(row["sql"])
+        if denied:
+            log.error(
+                "serve.pattern_audit_reject product=%s pattern=%s findings=%s "
+                "(게시 제외 — lint_usage_patterns.py 로 사전 검사 후 SQL 수정)",
+                contract.product_id, row["pattern_id"], denied[:2])
+            continue
+        if audit_allowlist is not None:
+            extern = [f for f in audit_pattern_sql(row["sql"], audit_allowlist)
+                      if "allowlist 밖" in f]
+            if extern:
+                log.warning(
+                    "serve.pattern_audit_external product=%s pattern=%s findings=%s "
+                    "(경보만 — allowlist 강제는 P0-b/2차, Serving#217)",
+                    contract.product_id, row["pattern_id"], extern[:1])
+        kept.append(row)
+    pattern_rows = kept
+
+    # v1.11 (Serving#217 P1/P3): 파라미터 메타는 별도 표 d1_pattern_params 로 —
+    # 세 필드 중 하나라도 선언한 패턴만 행을 만들고, 감사 탈락 패턴의 메타는 싣지 않는다.
+    published_ids = {str(row["pattern_id"]) for row in pattern_rows}
+    param_rows = [
+        {
+            "product_id": contract.product_id,
+            "pattern_id": pattern.get("pattern_id"),
+            "param_defaults": (json.dumps(pattern["param_defaults"], ensure_ascii=False)
+                               if isinstance(pattern.get("param_defaults"), dict) else None),
+            "param_enum": (json.dumps(pattern["param_enum"], ensure_ascii=False)
+                           if isinstance(pattern.get("param_enum"), dict) else None),
+            "params": (json.dumps(pattern["params"], ensure_ascii=False)
+                       if isinstance(pattern.get("params"), dict) else None),
+            "publication_id": record.publication_id,
+        }
+        for pattern in contract.usage_patterns
+        if str(pattern.get("pattern_id")) in published_ids
+        and pattern.get("d1_table", contract.model_name) == contract.model_name
+        and any(isinstance(pattern.get(k), dict)
+                for k in ("param_defaults", "param_enum", "params"))
+    ]
+    return columns_rows, ext_rows, pattern_rows, display_rows, param_rows
 
 
 def _product_evidence(
@@ -412,6 +471,12 @@ def publish(
 ) -> PublicationReport:
     """Publish each contract as one Publication unit. Raises ``PublicationError`` if any fails."""
     report = PublicationReport()
+    # 패턴 게시 감사 allowlist(Serving#217·킷 §F) — 이번 호출 계약들의 제품 테이블 ∪ 명시
+    # 크로스도메인 소스. 서브셋 배치일 수 있어 allowlist 밖은 경보만 한다(_product_meta_rows).
+    audit_allowlist = build_allowlist(
+        (c.model_name for c in contracts),
+        (s for c in contracts for s in (getattr(c, "cross_domain_sources", None) or ())),
+    )
     for contract in contracts:
         record = ProductRecord(
             product_id=contract.product_id,
@@ -645,11 +710,11 @@ def publish(
             # 핸드오프 메타(#638) — 같은 try 안이라 실패 시 스냅샷·_catalog 가 함께 복원된다.
             # 메타 행 자체는 보상하지 않는다(#638 §3 — 제품 단위 신·구 혼재 허용, 타 제품 무영향).
             record.stage = "product_meta"
-            columns_rows, ext_rows, pattern_rows, display_rows = _product_meta_rows(
-                contract, plan.columns, record)
+            columns_rows, ext_rows, pattern_rows, display_rows, param_rows = _product_meta_rows(
+                contract, plan.columns, record, audit_allowlist)
             d1.publish_product_meta(
                 contract.product_id, record.publication_id, columns_rows, ext_rows, pattern_rows,
-                display_rows,
+                display_rows, param_rows=param_rows,
             )
             # 권리/품질 증거(#678)는 이번 publication_id에 결속한다. 여기서 실패하면
             # catalog와 스냅샷을 복원하고, Worker는 publication 불일치/누락으로 계속 차단한다.

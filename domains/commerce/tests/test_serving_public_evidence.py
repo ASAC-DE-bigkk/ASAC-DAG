@@ -113,7 +113,7 @@ def test_flow_monthly_publishes_public_evidence_with_active_publication(monkeypa
     monkeypatch.setattr(se, "_append_ledger", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(se, "_upsert_catalog", lambda *_args: None)
     monkeypatch.setattr(se, "_upsert_meta", lambda *_args: None)
-    monkeypatch.setattr(se, "_publish_handoff", lambda *_args: None)
+    monkeypatch.setattr(se, "_publish_handoff", lambda *_args, **_kw: None)
     monkeypatch.setattr(se, "_glossary_rows", lambda *_args: [])
     monkeypatch.setattr(se, "_publish_public_evidence", lambda token, rows: evidence_calls.append((token, rows)))
     monkeypatch.setattr(se, "_write_serve_state", lambda *_args: None)

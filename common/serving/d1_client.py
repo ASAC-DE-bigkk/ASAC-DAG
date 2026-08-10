@@ -150,6 +150,8 @@ class D1Client(Protocol):
         ext_rows: Sequence[dict[str, Any]],
         pattern_rows: Sequence[dict[str, Any]],
         display_rows: Sequence[dict[str, Any]] = (),
+        *,
+        param_rows: Sequence[dict[str, Any]] = (),
     ) -> None: ...
     def publish_product_evidence(
         self,
@@ -218,6 +220,17 @@ HANDOFF_COLUMN_TYPES: dict[str, tuple[tuple[str, str], ...]] = {
         ("allow_empty", "INTEGER NOT NULL DEFAULT 0"),
         ("insight_sample_ko", "TEXT"), ("publication_id", "TEXT NOT NULL"),
     ),
+    # v1.11 (Serving#217 P1/P3): 패턴 파라미터 메타 — 기본값·허용값·타입 선언(JSON 문자열).
+    # d1_usage_patterns 에 컬럼을 더하지 않고 **새 표**로 낸다(#706 display 와 같은 이유 —
+    # handoff_schema_is_current 완전일치 검사 때문에 공유 표 컬럼 추가는 구 실행기가 되돌린다).
+    # 게이트웨이는 이 표가 없으면 강등한다(전 파라미터 필수) — 게시가 늦어도 안전하다.
+    "d1_pattern_params": (
+        ("product_id", "TEXT NOT NULL"), ("pattern_id", "TEXT NOT NULL"),
+        ("param_defaults", "TEXT"),      # JSON 객체 문자열 — {"gu": "ALL"} · 미선언 NULL
+        ("param_enum", "TEXT"),          # JSON 객체 문자열 — {"dir": ["asc","desc"]}
+        ("params", "TEXT"),              # JSON 객체 문자열 — {"gus": {"type":"array",...}}
+        ("publication_id", "TEXT NOT NULL"),
+    ),
     # v1.10 (#706): 사람이 읽는 표시 메타. **기존 표에 컬럼을 더하지 않고 새 표로 낸다** —
     # handoff_schema_is_current 가 컬럼 집합을 완전 일치로 보므로, 공유 표에 컬럼을 더하면
     # 구 코드를 가진 실행기가 자기가 아는 모양으로 되돌리며 그 컬럼을 삭제한다. 실행기가
@@ -238,6 +251,7 @@ HANDOFF_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "d1_catalog_columns": ("product_id", "column_name"),
     "d1_catalog_ext": ("product_id",),
     "d1_usage_patterns": ("product_id", "pattern_id"),
+    "d1_pattern_params": ("product_id", "pattern_id"),
     "d1_catalog_display": ("product_id",),
     "d1_catalog_glossary": ("vocabulary_id", "code"),
 }
@@ -251,12 +265,14 @@ HANDOFF_SCOPE_COLUMNS: dict[str, str] = {
     "d1_catalog_columns": "product_id",
     "d1_catalog_ext": "product_id",
     "d1_usage_patterns": "product_id",
+    "d1_pattern_params": "product_id",
     "d1_catalog_display": "product_id",
     "d1_catalog_glossary": "vocabulary_id",
 }
 HANDOFF_PRUNE_KEYS: dict[str, str] = {
     "d1_catalog_columns": "column_name",
     "d1_usage_patterns": "pattern_id",
+    "d1_pattern_params": "pattern_id",
 }
 HANDOFF_STALE_MARKERS: dict[str, str] = {
     "d1_catalog_ext": "publication_id",
@@ -265,6 +281,7 @@ HANDOFF_STALE_MARKERS: dict[str, str] = {
 }
 HANDOFF_PRODUCT_TABLES = (
     "d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns", "d1_catalog_display",
+    "d1_pattern_params",
 )
 HANDOFF_COLUMNS = {table: tuple(name for name, _ in cols) for table, cols in HANDOFF_COLUMN_TYPES.items()}
 
@@ -783,8 +800,11 @@ class HttpD1Client:
         pattern_rows: Sequence[dict[str, Any]],
         # v1.10 (#706): 미선언 도메인은 빈 시퀀스 그대로 — 기본값이라 기존 호출부가 안 깨진다.
         display_rows: Sequence[dict[str, Any]] = (),
+        *,
+        # v1.11 (Serving#217): 파라미터 메타(d1_pattern_params) — 미선언 도메인은 빈 시퀀스.
+        param_rows: Sequence[dict[str, Any]] = (),
     ) -> None:
-        """제품 스코프 보조 4종을 자연키 upsert 후 이번 선언에 없는 잔여 행만 정리(#638 §3).
+        """제품 스코프 보조 5종을 자연키 upsert 후 이번 선언에 없는 잔여 행만 정리(#638 §3).
 
         원자성 경계는 제품 단위(#638 §3) — 중간 실패 시 이 제품의 메타만 신·구 혼재하고
         다른 제품·도메인 행은 건드리지 않는다. columns/patterns 정리는 선언 키셋 기준
@@ -798,6 +818,7 @@ class HttpD1Client:
         statements.extend(handoff_upsert_statements("d1_catalog_ext", ext_rows))
         statements.extend(handoff_upsert_statements("d1_usage_patterns", pattern_rows))
         statements.extend(handoff_upsert_statements("d1_catalog_display", display_rows))
+        statements.extend(handoff_upsert_statements("d1_pattern_params", param_rows))
         statements.append(handoff_prune_statement(
             "d1_catalog_columns", product_id, [str(row["column_name"]) for row in columns_rows]))
         statements.append(handoff_stale_delete_statement("d1_catalog_ext", product_id, publication_id))
@@ -806,6 +827,10 @@ class HttpD1Client:
             handoff_stale_delete_statement("d1_catalog_display", product_id, publication_id))
         statements.append(handoff_prune_statement(
             "d1_usage_patterns", product_id, [str(row["pattern_id"]) for row in pattern_rows]))
+        # 파라미터 메타(Serving#217) — 선언을 지운 패턴의 옛 행이 남으면 게이트웨이가 죽은
+        # 기본값을 계속 적용한다. patterns 와 같은 선언 키셋(NOT IN) 판별로 정리한다.
+        statements.append(handoff_prune_statement(
+            "d1_pattern_params", product_id, [str(row["pattern_id"]) for row in param_rows]))
         for batch in group_api_batches(statements):
             self._query_batch(batch)
 
