@@ -80,6 +80,7 @@ def test_only_target_traffic_weather_dags_reference_domain_lineage_helpers():
         DOMAIN_DIR / "traffic_incident_bronze.py": "traffic_lineage",
         DOMAIN_DIR / "traffic_incident_landing.py": "traffic_lineage",
         DOMAIN_DIR / "traffic_flow_bronze.py": "traffic_lineage",
+        DOMAIN_DIR / "traffic_link_reference_backfill.py": "traffic_lineage",
         DOMAIN_DIR / "traffic_flow_transform.py": "traffic_lineage",
             DOMAIN_DIR / "traffic_incident_transform.py": "traffic_lineage",
             DOMAIN_DIR / "traffic_gold_transform.py": "traffic_lineage",

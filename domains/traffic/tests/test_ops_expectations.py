@@ -63,6 +63,7 @@ def test_manual_only_dags_are_excluded_from_monitoring():
     expected_manual = {
         "traffic_incident_recollect",
         "traffic_incident_bronze_backfill",
+        "traffic_link_reference_backfill",
         "traffic_snapshot_recovery",
     }
     registered = _registered()

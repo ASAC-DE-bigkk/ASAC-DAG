@@ -34,6 +34,7 @@ EXPECTATIONS = (
     Expectation("traffic_incident_recollect", "manual", monitored=False),
     # 기존 raw object로 bronze만 재적재(API 호출 없음) — 수동 전용, 감시 제외(S-4).
     Expectation("traffic_incident_bronze_backfill", "manual", monitored=False),
+    Expectation("traffic_link_reference_backfill", "manual", monitored=False),
     # incident bronze 완료 Asset 트리거.
     Expectation("traffic_incident_transform", "asset",
                 upstream="traffic_incident_bronze (bronze 완료 Asset)", max_delay_minutes=60),
