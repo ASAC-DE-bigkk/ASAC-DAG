@@ -19,10 +19,12 @@ class FakeCursor:
         select_rows: list[tuple[Any, ...]],
         *,
         distinct_count: int | None = None,
+        fallback_freshness: Any | None = None,
     ) -> None:
         self.show_columns_rows = show_columns_rows
         self.select_rows = select_rows
         self.distinct_count = distinct_count
+        self.fallback_freshness = fallback_freshness
         self.statements: list[str] = []
         self.description: list[tuple[str]] = []
         self._pending: str | None = None
@@ -37,6 +39,10 @@ class FakeCursor:
             self._pending = "distinct_count"
             self.description = [("_col0",)]
             return
+        if sql.startswith("SELECT MAX("):
+            self._pending = "fallback_freshness"
+            self.description = [("freshness",)]
+            return
         self._pending = "select"
         selected = sql.removeprefix("SELECT ").split(" FROM ", 1)[0]
         if selected == "*":
@@ -47,12 +53,16 @@ class FakeCursor:
     def fetchall(self) -> list[tuple[Any, ...]]:
         if self._pending == "show":
             return self.show_columns_rows
+        if self._pending == "fallback_freshness":
+            return [(self.fallback_freshness,)]
         return self.select_rows
 
     def fetchone(self) -> tuple[int]:
-        assert self._pending == "distinct_count"
-        assert self.distinct_count is not None
-        return (self.distinct_count,)
+        if self._pending == "distinct_count":
+            assert self.distinct_count is not None
+            return (self.distinct_count,)
+        assert self._pending == "fallback_freshness"
+        return (self.fallback_freshness,)
 
 
 def _contract(**overrides: Any) -> ServingContract:
@@ -125,6 +135,38 @@ def test_source_relation_coverage_is_measured_before_projected_read():
         'SELECT "product_row_id","place_id","forecast_at" FROM iceberg_dev.weather.gold_weather_place_current_outlook',
     ]
     assert plan.coverage_observed_distinct_count == 147
+
+
+def test_empty_result_reads_declared_freshness_from_hourly_source():
+    cursor = FakeCursor(
+        [
+            ("product_row_id", "varchar"),
+            ("place_id", "varchar"),
+            ("forecast_at", "timestamp"),
+        ],
+        [],
+        fallback_freshness="2026-08-10 20:00:00",
+    )
+    contract = _contract(
+        zero_policy="allow",
+        freshness_field="forecast_at",
+        empty_result_freshness={
+            "relation": "gold_weather_place_hourly_outlook",
+            "field": "forecast_collected_at_max",
+        },
+    )
+
+    plan = TrinoSourceReader(cursor, "iceberg_dev", "weather").read(
+        contract, last_good_max=None
+    )
+
+    assert plan.rows == []
+    assert plan.empty_result_freshness == "2026-08-10 20:00:00"
+    assert cursor.statements == [
+        "SHOW COLUMNS FROM iceberg_dev.weather.gold_weather_place_current_outlook",
+        'SELECT "product_row_id","place_id","forecast_at" FROM iceberg_dev.weather.gold_weather_place_current_outlook',
+        'SELECT MAX("forecast_collected_at_max") FROM iceberg_dev.weather.gold_weather_place_hourly_outlook',
+    ]
 
 
 def test_opted_in_append_full_and_incremental_reads_use_projection_and_preserve_delete_window():

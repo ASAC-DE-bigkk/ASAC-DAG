@@ -86,6 +86,37 @@ class TrinoSourceReader:
             return "*"
         return ",".join(_quote_identifier(column) for column, _type in projected_columns)
 
+    def _empty_result_freshness(self, contract: ServingContract) -> Any | None:
+        fallback = contract.empty_result_freshness
+        if fallback is None:
+            return None
+        relation = self._relation(fallback["relation"])
+        field = _quote_identifier(fallback["field"])
+        self._cursor.execute(f"SELECT MAX({field}) FROM {relation}")
+        row = self._cursor.fetchone()
+        return row[0] if row else None
+
+    def _plan(
+        self,
+        contract: ServingContract,
+        *,
+        columns: list[Column],
+        rows: list[dict[str, Any]],
+        coverage_observed_distinct_count: int | None,
+        delete_column: str | None = None,
+        delete_literal: str | None = None,
+    ) -> ReadPlan:
+        return ReadPlan(
+            columns=columns,
+            rows=rows,
+            delete_column=delete_column,
+            delete_literal=delete_literal,
+            coverage_observed_distinct_count=coverage_observed_distinct_count,
+            empty_result_freshness=(
+                self._empty_result_freshness(contract) if not rows else None
+            ),
+        )
+
     def read(self, contract: ServingContract, last_good_max: Any | None) -> ReadPlan:
         columns = self._columns(contract.model_name)
         relation = self._relation(contract.model_name)
@@ -110,7 +141,8 @@ class TrinoSourceReader:
         # 두 경우뿐. 그 외(snapshot·exact_set upsert·event_time 없는 append)는 전량 읽는다.
         if not incremental_upsert and (contract.publication_mode != "append" or not contract.event_time):
             rows = self._select(f"SELECT {select_list} FROM {relation}")
-            return ReadPlan(
+            return self._plan(
+                contract,
                 columns=read_columns,
                 rows=rows,
                 coverage_observed_distinct_count=coverage_observed_distinct_count,
@@ -119,7 +151,8 @@ class TrinoSourceReader:
         column_type = dict(columns).get(contract.event_time, "")
         if last_good_max is None:
             rows = self._select(f"SELECT {select_list} FROM {relation}")  # first run: full backfill
-            return ReadPlan(
+            return self._plan(
+                contract,
                 columns=read_columns,
                 rows=rows,
                 coverage_observed_distinct_count=coverage_observed_distinct_count,
@@ -141,7 +174,8 @@ class TrinoSourceReader:
                 watermark = base.format("YYYY-MM-DD HH:mm:ss")
                 literal = f"timestamp '{watermark}'"
             rows = self._select(f"SELECT {select_list} FROM {relation} WHERE {event_time} >= {literal}")
-            return ReadPlan(
+            return self._plan(
+                contract,
                 columns=read_columns,
                 rows=rows,
                 coverage_observed_distinct_count=coverage_observed_distinct_count,
@@ -155,7 +189,8 @@ class TrinoSourceReader:
             cutoff = base.subtract(hours=APPEND_LOOKBACK_HOURS).format("YYYY-MM-DD HH:00:00")
             literal = f"timestamp '{cutoff}'"
         rows = self._select(f"SELECT {select_list} FROM {relation} WHERE {event_time} >= {literal}")
-        return ReadPlan(
+        return self._plan(
+            contract,
             columns=read_columns,
             rows=rows,
             delete_column=contract.event_time,

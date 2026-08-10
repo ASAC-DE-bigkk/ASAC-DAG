@@ -47,6 +47,9 @@ class ReadPlan:
     delete_literal: str | None = None
     # `quality_coverage.measurement_scope=source_relation`의 projection 전 실측값.
     coverage_observed_distinct_count: int | None = None
+    # Sparse zero-row products may carry the upstream freshness declared by
+    # `empty_result_freshness`; null is intentionally not treated as healthy.
+    empty_result_freshness: Any | None = None
 
 
 class SourceReader(Protocol):
@@ -104,9 +107,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _freshness(contract: ServingContract, rows: Sequence[dict[str, Any]]) -> str | None:
+def _freshness(
+    contract: ServingContract,
+    rows: Sequence[dict[str, Any]],
+    empty_result_freshness: Any | None = None,
+) -> str | None:
     freshness_field = contract.freshness_field or contract.event_time
-    if not freshness_field or not rows:
+    if not rows:
+        return str(empty_result_freshness) if empty_result_freshness is not None else None
+    if not freshness_field:
         return None
     values = [row.get(freshness_field) for row in rows if row.get(freshness_field) is not None]
     return str(max(values)) if values else None
@@ -537,6 +546,19 @@ def publish(
 
         rows, degraded = gatelib.apply_reliability(contract, plan.rows)
         record.source_row_count = len(rows)
+        freshness = _freshness(
+            contract,
+            rows,
+            plan.empty_result_freshness if not plan.rows else None,
+        )
+        if not plan.rows and contract.empty_result_freshness is not None and freshness is None:
+            record.serving_status = STATUS_FAILED
+            record.stage = "empty_result_freshness"
+            record.reason = "empty_result_freshness returned null; preserving last-known-good"
+            report.failures.append(f"{contract.model_name}: {record.reason}")
+            _append_ledger(d1, record, outcome="failed")
+            report.records.append(record)
+            continue
         if verify_content_parity:
             contract_error = _content_contract_error(contract, plan)
             if contract_error:
@@ -672,7 +694,7 @@ def publish(
 
         record.published_row_count = d1_row_count
         record.published_bytes = len(json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8"))
-        record.freshness = _freshness(contract, rows)
+        record.freshness = freshness
         record.serving_status = (
             STATUS_DEGRADED if (degraded or decision.serving_status == STATUS_DEGRADED) else STATUS_PUBLISHED
         )
