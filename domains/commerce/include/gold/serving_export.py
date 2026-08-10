@@ -1116,6 +1116,18 @@ def export_to_d1(*, elapsed_seconds: float | None = None) -> dict:
                 "d1_row_count": n, "payload_hash": fingerprint, "rewritten": not reuse}
             # MCP/API 핸드오프 계보(게시 스냅샷 기준) — publication_id 로 게시본을 식별한다
             cr, er, pr, dr, qr = _handoff_rows(spec, m, col_defs, publication_id)
+            # export 시점 패턴 검증(Serving#217): 방금 게시한 D1 데이터에 미검증 패턴 SQL 을 실제로
+            # 돌려 통과분에 verified_at 스탬프 → 게이트웨이가 runnable 로 연다. yml 에 verified_at 이
+            # 이미 있는 패턴은 무접촉(손 검증 존중). 검증 실패는 게시를 막지 않는다.
+            try:
+                from common.serving.pattern_verify import verify_and_stamp
+                vr = verify_and_stamp(pr, run_sql=lambda s: _d1(s, token),  # security: allow-sql — 검증된 참조 SQL(SELECT 한정), 값은 예시 상수
+                                      publication_id=publication_id)
+                if vr["verified"] or vr["failed"] or vr["skipped"]:
+                    log.info("[serving export] 패턴 검증 스탬프 %s 검증=%d 실패=%d 스킵=%d",
+                             spec.d1_table, len(vr["verified"]), len(vr["failed"]), len(vr["skipped"]))
+            except Exception as exc:  # noqa: BLE001 — 검증은 부가물, 게시를 깨지 않는다
+                log.warning("[serving export] 패턴 검증 스탬프 실패(무시) %s: %s", spec.d1_table, type(exc).__name__)
             handoff_cols.extend(cr); handoff_ext.append(er); handoff_pats.extend(pr)
             handoff_params.extend(qr)
             if dr:
