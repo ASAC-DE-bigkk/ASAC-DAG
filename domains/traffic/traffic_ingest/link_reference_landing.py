@@ -112,6 +112,7 @@ class TrafficLinkReferenceLanding:
                         "raw_hash": hashlib.sha256(payload).hexdigest(),
                         "http_status": int(http_status),
                         "collected_at": collected_at.isoformat(),
+                        "load_date": landing_load_date,
                         "result_code": metadata["result_code"],
                         "result_msg": metadata.get("result_msg"),
                         "list_total_count": int(metadata["list_total_count"]),

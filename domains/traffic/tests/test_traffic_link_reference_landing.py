@@ -81,6 +81,9 @@ def test_landing_writes_two_raw_objects_then_one_complete_manifest_per_link():
         "LinkInfo",
         "LinkVerInfo",
     ]
+    assert {item["load_date"] for item in result["raw_objects"]} == {
+        "2026-08-10"
+    }
     assert result["requested_link_ids"] == ["1220003800"]
     assert result["expected_raw_objects"] == 2
     assert result["parsed_rows"] == 3
