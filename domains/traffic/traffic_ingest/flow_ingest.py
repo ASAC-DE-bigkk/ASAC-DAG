@@ -8,7 +8,6 @@ from common.http import HttpCore, PathKey
 from traffic_ingest.flow_info import (
     SOURCE_ID,
     build_api_url,
-    resolve_flow_link_ids,
     traffic_api_key,
 )
 from traffic_ingest.flow_bronze import (
@@ -85,10 +84,6 @@ def build_traffic_flow_pipeline() -> TrafficFlowPipeline:
         runtime_guard=lambda: validate_dev_runtime("traffic"),
         incident_manifest=build_traffic_manifest(),
         flow_manifest=build_traffic_flow_manifest(),
-        resolve_links=lambda conf, parent: resolve_flow_link_ids(
-            conf=conf,
-            incident_run_id=parent,
-        ),
         landing=build_traffic_flow_landing(),
         load=load,
         verify=verify,

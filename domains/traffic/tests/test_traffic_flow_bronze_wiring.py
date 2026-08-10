@@ -28,15 +28,24 @@ def _incident_event(run_id="incident-1"):
     )
 
 
-def test_flow_dag_has_two_meaningful_tasks_and_no_independent_cron():
+def test_flow_dag_resolves_reference_once_before_traffic_info_and_has_no_cron():
     assert dag_module.dag.task_ids == [
+        "land_traffic_link_reference",
+        "materialize_verify_traffic_link_reference",
         "land_traffic_flow_snapshot",
         "materialize_verify_publish_traffic_flow",
     ]
+    land_reference = dag_module.dag.get_task("land_traffic_link_reference")
+    materialize_reference = dag_module.dag.get_task(
+        "materialize_verify_traffic_link_reference"
+    )
     land = dag_module.dag.get_task("land_traffic_flow_snapshot")
     materialize = dag_module.dag.get_task("materialize_verify_publish_traffic_flow")
 
+    assert land_reference.downstream_task_ids == {materialize_reference.task_id}
+    assert materialize_reference.downstream_task_ids == {land.task_id}
     assert land.downstream_task_ids == {materialize.task_id}
+    assert materialize_reference.pool == dag_module.TRINO_INGEST_POOL
     assert materialize.pool == dag_module.TRINO_INGEST_POOL
     assert materialize.outlets == [dag_module.TRAFFIC_FLOW_MATERIALIZED_ALIAS]
     assert dag_module.dag.max_active_runs == 1
@@ -52,17 +61,25 @@ def test_flow_dag_has_two_meaningful_tasks_and_no_independent_cron():
     assert dag_module.TRAFFIC_INCIDENT_BRONZE_ASSET in schedule_repr
 
 
-def test_flow_landing_wrapper_uses_exact_triggering_incident_parent(monkeypatch):
+def test_reference_wrapper_uses_exact_triggering_incident_parent(monkeypatch):
     captured = {}
 
     class Pipeline:
         def land(self, **kwargs):
             captured.update(kwargs)
-            return {"parent_incident_run_id": kwargs["parent_incident_run_id"]}
+            return {
+                "parent_incident_run_id": kwargs["parent_incident_run_id"],
+                "requested_link_ids": ["1220003800"],
+                "unresolved_link_ids": ["1220003800"],
+            }
 
-    monkeypatch.setattr(dag_module, "build_traffic_flow_pipeline", lambda: Pipeline())
+    monkeypatch.setattr(
+        dag_module,
+        "build_traffic_link_reference_pipeline",
+        lambda: Pipeline(),
+    )
 
-    result = dag_module.land_traffic_flow_snapshot(
+    result = dag_module.land_traffic_link_reference(
         run_id="asset__flow-1",
         dag_run=types.SimpleNamespace(conf={}),
         triggering_asset_events={
@@ -76,11 +93,93 @@ def test_flow_landing_wrapper_uses_exact_triggering_incident_parent(monkeypatch)
         },
     )
 
+    assert result["parent_incident_run_id"] == "incident-1"
+    assert captured == {
+        "parent_incident_run_id": "incident-1",
+        "link_reference_run_id": "asset__flow-1",
+        "conf": {},
+    }
+
+
+def test_flow_landing_uses_materialized_reference_handoff_without_parent_requery(
+    monkeypatch,
+):
+    captured = {}
+    materialized_reference = {
+        "parent_incident_run_id": "incident-1",
+        "requested_link_ids": ["1220003800"],
+    }
+
+    class Pipeline:
+        def land(self, **kwargs):
+            captured.update(kwargs)
+            return {"parent_incident_run_id": kwargs["parent_incident_run_id"]}
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            assert task_ids == dag_module.LINK_REFERENCE_MATERIALIZE_TASK_ID
+            return materialized_reference
+
+    monkeypatch.setattr(dag_module, "build_traffic_flow_pipeline", lambda: Pipeline())
+    monkeypatch.setattr(
+        dag_module,
+        "_incident_parent_from_context",
+        lambda _context: pytest.fail("Flow landing must not resolve the parent again"),
+    )
+
+    result = dag_module.land_traffic_flow_snapshot(
+        run_id="asset__flow-1",
+        dag_run=types.SimpleNamespace(conf={}),
+        ti=TI(),
+    )
+
     assert result == {"parent_incident_run_id": "incident-1"}
     assert captured == {
         "parent_incident_run_id": "incident-1",
         "flow_run_id": "asset__flow-1",
+        "link_ids": ["1220003800"],
         "conf": {},
+    }
+
+
+def test_reference_materializer_uses_only_the_reference_landing_xcom(monkeypatch):
+    captured = {}
+    raw_result = {
+        "parent_incident_run_id": "incident-1",
+        "requested_link_ids": ["1220003800"],
+        "unresolved_link_ids": ["1220003800"],
+    }
+
+    class Pipeline:
+        def materialize(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "parent_incident_run_id": "incident-1",
+                "requested_link_ids": ["1220003800"],
+                "inserted_info": 1,
+                "inserted_vertices": 2,
+            }
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            assert task_ids == dag_module.LINK_REFERENCE_LAND_TASK_ID
+            return raw_result
+
+    monkeypatch.setattr(
+        dag_module,
+        "build_traffic_link_reference_pipeline",
+        lambda: Pipeline(),
+    )
+
+    result = dag_module.materialize_verify_traffic_link_reference(
+        run_id="asset__flow-1",
+        ti=TI(),
+    )
+
+    assert result["inserted_vertices"] == 2
+    assert captured == {
+        "raw_result": raw_result,
+        "link_reference_run_id": "asset__flow-1",
     }
 
 
