@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
@@ -92,7 +93,21 @@ def resolve_params(sql_text: str, hint_text: str = "") -> tuple[str, dict[str, s
     substituted = executable
     for name in names:
         if name in resolved:
-            substituted = re.sub(rf":{name}(?![a-z0-9_])", resolved[name].replace("\\", r"\\"), substituted)
+            value = resolved[name]
+            # P3 배열 전개형(`gu IN (:gus)` — json_each 아님): 게이트웨이는 array 파라미터를
+            # ?,?,? 로 전개해 실행하므로, 검증도 JSON 배열 예시를 IN 리스트로 전개해 같은
+            # 형으로 돌린다. JSON 문자열 그대로 넣으면 단일 리터럴 비교가 되어 조용히 0행.
+            if (value.startswith("'[") and value.endswith("]'")
+                    and re.search(rf"\bIN\s*\(\s*:{name}\s*\)", substituted, re.I)
+                    and not re.search(rf"json_each\(\s*:{name}\s*\)", substituted, re.I)):
+                try:
+                    items = json.loads(value[1:-1].replace("''", "'"))
+                    value = ", ".join(
+                        str(x) if isinstance(x, (int, float)) and not isinstance(x, bool)
+                        else "'" + str(x).replace("'", "''") + "'" for x in items)
+                except ValueError:
+                    pass                                   # 배열 파싱 실패 — 원문 유지(미해결과 동급)
+            substituted = re.sub(rf":{name}(?![a-z0-9_])", value.replace("\\", r"\\"), substituted)
     return substituted.strip(), resolved, unresolved
 
 
