@@ -119,6 +119,28 @@ def test_footer_has_target_and_run_id():
     assert "target=prod" in footer and "dbt 42초" in footer and "asset_triggered__" in footer
 
 
+def test_label_switches_the_title():
+    payload = tn.build_transform_payload(
+        tn.summarize_models(_results(_model("gold_culture_slo_daily"))),
+        tn.summarize_tests(_results()), label="SLO 마트")
+    assert payload["embeds"][0]["title"] == "culture SLO 마트 완료 — silver 0 · gold 1"
+
+
+def test_explicit_elapsed_prevents_double_counting_on_dbt_build():
+    """🔴 `dbt build` 는 run·test 를 한 번에 돈다 — 같은 payload 를 둘로 요약해 넘기므로
+    합을 쓰면 소요가 정확히 두 배가 된다. culture_slo 가 이 경로다.
+    """
+    build = _results(_model("gold_culture_slo_daily"), _test("t"), elapsed=90.0)
+    models, tests = tn.summarize_models(build), tn.summarize_tests(build)
+
+    doubled = tn.build_transform_payload(models, tests)["embeds"][0]["footer"]["text"]
+    assert "dbt 180초" in doubled, "합산 기본값이 두 배가 되는 상황 자체를 고정한다"
+
+    correct = tn.build_transform_payload(
+        models, tests, elapsed=models["elapsed"])["embeds"][0]["footer"]["text"]
+    assert "dbt 90초" in correct
+
+
 def test_named_list_folds_beyond_five():
     payload = tn.build_transform_payload(
         tn.summarize_models(_results()),

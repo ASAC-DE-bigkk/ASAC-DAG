@@ -3,6 +3,25 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-08-11 — culture_slo 도 같은 알림 규칙으로 (#777 후속)
+
+- **왜 지금** — `culture_transform` 을 고치고 보니 `culture_slo` 에 **같은 구멍 둘**이 그대로
+  있었다. 실패 콜백에 `dbt_project_dir` 이 없어 원인을 안 말하고, 성공 쪽은 아예 침묵.
+  SLO 마트는 관측용이라 조용히 멈추면 **관측이 멈춘 걸 관측할 방법이 없다**.
+- **같은 배선** — `problem_failure_callback(domain="culture", dbt_project_dir=DBT_PROJECT)` +
+  체인 끝 `notify_slo_success`. → `culture_slo.py`
+- **다른 점: `dbt build` 는 한 번이다** — transform 은 `run`·`test` 가 별개 명령이라 스냅샷이
+  둘이지만, slo 는 `build --select tag:slo` 한 번이라 결과가 한 파일에 같이 남는다. 요약
+  함수는 노드 종류(model/test)로 갈라 보므로 같은 payload 를 둘 다에 넘기면 되는데,
+  **소요만은 합이 정확히 두 배**가 된다. `build_transform_payload(elapsed=...)` 를 추가해
+  명시로 넘긴다(테스트로 두 배가 되는 상황 자체를 고정). → `transform_notify.py`
+- **스냅샷 이름 충돌 방지** — 두 DAG 이 같은 dbt 프로젝트 디렉터리를 쓴다. 겹치면 05:00 SLO
+  알림이 03:00 변환 결과를 말한다. 태스크 id 로 갈라(`run_results.dbt_slo.json` vs
+  `run_results.dbt_run/dbt_test.json`) 두 DAG 소스를 실제로 대조하는 테스트를 뒀다.
+  → `tests/test_slo_notify_wiring.py`
+- **제목 라벨** — "culture 변환 완료" 와 "culture **SLO 마트** 완료" 를 가른다. 같은 채널에
+  두 알림이 섞이면 어느 DAG 말인지 못 읽는다.
+
 ## 2026-08-11 — culture_transform 알림 양쪽 채우기 (실패 원인 · 성공 요약)
 
 - **왜 지금** — 변환은 지금까지 **실패할 때만** 말이 있었고, 그 실패 알림조차 원인을
