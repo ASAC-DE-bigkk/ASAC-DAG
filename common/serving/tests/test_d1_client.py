@@ -390,6 +390,114 @@ def _product_meta_payload(publication_id: str) -> tuple[list, list, list]:
     return columns_rows, ext_rows, pattern_rows
 
 
+def _vocabulary_rows(publication_id: str, column_name: str = "sky_code") -> list[dict[str, str]]:
+    return [{
+        "product_id": "weather_place_current_outlook",
+        "table_name": "gold_weather_place_current_outlook",
+        "column_name": column_name,
+        "vocabulary_id": "weather:sky_code",
+        "publication_id": publication_id,
+    }]
+
+
+def test_column_vocabulary_sidecar_upserts_and_prunes_per_product():
+    d1 = SqliteCatalogClient()
+    columns_rows, ext_rows, pattern_rows = _product_meta_payload("pub-1")
+
+    d1.publish_product_meta(
+        "weather_place_current_outlook",
+        "pub-1",
+        columns_rows,
+        ext_rows,
+        pattern_rows,
+        vocabulary_rows=_vocabulary_rows("pub-1"),
+    )
+
+    pragma = d1._query('PRAGMA table_info("d1_catalog_column_vocabularies");')
+    assert handoff_schema_is_current("d1_catalog_column_vocabularies", pragma)
+    assert [row["name"] for row in pragma if row["pk"]] == ["product_id", "column_name"]
+    assert d1._query(
+        "SELECT product_id, column_name, vocabulary_id, publication_id "
+        "FROM d1_catalog_column_vocabularies;"
+    ) == [{
+        "product_id": "weather_place_current_outlook",
+        "column_name": "sky_code",
+        "vocabulary_id": "weather:sky_code",
+        "publication_id": "pub-1",
+    }]
+
+    d1.publish_product_meta(
+        "weather_place_current_outlook",
+        "pub-2",
+        columns_rows,
+        ext_rows,
+        pattern_rows,
+        vocabulary_rows=_vocabulary_rows("pub-2", "pty_code"),
+    )
+    d1.publish_product_meta(
+        "weather_place_current_outlook",
+        "pub-2",
+        columns_rows,
+        ext_rows,
+        pattern_rows,
+        vocabulary_rows=_vocabulary_rows("pub-2", "pty_code"),
+    )
+
+    assert d1._query(
+        "SELECT column_name, publication_id FROM d1_catalog_column_vocabularies "
+        "WHERE product_id = 'weather_place_current_outlook';"
+    ) == [{"column_name": "pty_code", "publication_id": "pub-2"}]
+
+
+def test_publish_glossary_rejects_unknown_vocabulary_without_writing():
+    d1 = SqliteCatalogClient()
+    row = {
+        "vocabulary_id": "unknown:code",
+        "code": "x",
+        "label_ko": "알 수 없음",
+        "origin": "traffic_weather",
+        "source_type": "dbt_contract",
+        "exported_at": "t1",
+    }
+
+    with pytest.raises(ValueError, match="unknown:code"):
+        d1.publish_glossary([row])
+
+    assert d1._query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'd1_catalog_glossary';"
+    ) == []
+
+
+def test_publish_glossary_replaces_only_the_declared_vocabulary_terms():
+    d1 = SqliteCatalogClient()
+    initial = [
+        {
+            "vocabulary_id": "weather:sky_code",
+            "code": "1",
+            "label_ko": "맑음",
+            "origin": "traffic_weather",
+            "source_type": "dbt_contract",
+            "exported_at": "t1",
+        },
+        {
+            "vocabulary_id": "weather:sky_code",
+            "code": "3",
+            "label_ko": "구름 많음",
+            "origin": "traffic_weather",
+            "source_type": "dbt_contract",
+            "exported_at": "t1",
+        },
+    ]
+
+    d1.publish_glossary(initial)
+    d1.publish_glossary([dict(initial[0], label_ko="맑음(갱신)", exported_at="t2")])
+
+    assert d1._query(
+        "SELECT code, label_ko FROM d1_catalog_glossary "
+        "WHERE vocabulary_id = 'weather:sky_code' ORDER BY code;"
+    ) == [{"code": "1", "label_ko": "맑음(갱신)"}]
+
+
 def test_product_meta_migrates_legacy_table_preserving_skipped_product_rows():
     """레거시(자연키 없음) → v1 은 **행 보존 이행** 1회(#638 §4) — 이행 run 에 게시되지 않는
     제품(밴드 스킵)의 직전 메타가 살아남아야 한다(#593 보존 시맨틱 승계)."""
@@ -482,7 +590,7 @@ def test_publisher_meta_rows_round_trip_through_real_sqlite_schema():
         product_id=contract.product_id, model_name=contract.model_name,
         publication_id="pub-9", source_run_id="r", published_at="t",
         serving_status="published", reason="")
-    columns_rows, ext_rows, pattern_rows, _display_rows, _param_rows = _product_meta_rows(
+    columns_rows, ext_rows, pattern_rows, _display_rows, _param_rows, vocabulary_rows = _product_meta_rows(
         contract, [("product_row_id", "varchar")], record)
 
     d1 = SqliteCatalogClient()
@@ -494,6 +602,7 @@ def test_publisher_meta_rows_round_trip_through_real_sqlite_schema():
         {"grain": "place_id마다 한 행.", "primary_key": '["product_row_id"]'}]
     assert d1._query("SELECT pattern_id, requires, allow_empty FROM d1_usage_patterns;") == [
         {"pattern_id": "p1", "requires": '["sort"]', "allow_empty": 0}]
+    assert vocabulary_rows == []
 
 
 def test_product_evidence_upserts_sources_and_current_quality_by_publication():

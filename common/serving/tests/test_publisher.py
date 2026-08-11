@@ -34,6 +34,7 @@ class FakeD1:
         self.replace_calls = 0
         self.read_table_rows_calls: list[tuple[str, list[Column], tuple[str, ...]]] = []
         self.product_meta: dict[str, dict[str, Any]] = {}  # 핸드오프 메타(#638) 게시 기록
+        self.glossary_rows: list[dict[str, Any]] = []
         self.product_evidence: dict[str, dict[str, Any]] = {}  # V1 source/quality evidence (#678)
         self.execute_calls: list[str] = []                 # export 시점 패턴 검증(Serving#217)
         self.execute_result: list[dict[str, Any]] = [{"n": 1}]  # 기본: 1행 반환(검증 통과)
@@ -127,7 +128,7 @@ class FakeD1:
 
     def publish_product_meta(
         self, product_id, publication_id, columns_rows, ext_rows, pattern_rows, display_rows=(),
-        *, param_rows=()
+        *, param_rows=(), vocabulary_rows=()
     ) -> None:
         self.product_meta[product_id] = {
             "publication_id": publication_id,
@@ -135,7 +136,11 @@ class FakeD1:
             "ext": [dict(row) for row in ext_rows],
             "patterns": [dict(row) for row in pattern_rows],
             "params": [dict(row) for row in param_rows],
+            "vocabularies": [dict(row) for row in vocabulary_rows],
         }
+
+    def publish_glossary(self, rows) -> None:
+        self.glossary_rows = [dict(row) for row in rows]
 
     def publish_product_evidence(self, product_id, publication_id, sources, quality) -> None:
         self.product_evidence[product_id] = {
@@ -463,6 +468,114 @@ def test_snapshot_publish_writes_product_meta_rows():
     assert patterns[0]["verified_publication_id"] == "prev-pub"
     assert patterns[0]["allow_empty"] == 0
     assert patterns[0]["publication_id"] == report.records[0].publication_id
+
+
+def test_snapshot_publish_writes_declared_column_vocabulary_and_glossary_term():
+    contract = _contract(
+        column_vocabularies={"sky_code": "weather:sky_code"},
+        vocabulary_terms=(
+            {
+                "vocabulary_id": "weather:sky_code",
+                "code": "1",
+                "label_ko": "맑음",
+                "origin": "traffic_weather",
+                "source_type": "dbt_contract",
+            },
+        ),
+    )
+    d1 = FakeD1()
+    columns = [*COLUMNS, ("sky_code", "varchar")]
+    source = FakeSource({contract.model_name: ReadPlan(columns=columns, rows=_rows(1))})
+
+    report = publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="run-vocabulary")
+
+    assert report.ok
+    assert d1.product_meta[contract.product_id]["vocabularies"] == [{
+        "product_id": contract.product_id,
+        "table_name": contract.model_name,
+        "column_name": "sky_code",
+        "vocabulary_id": "weather:sky_code",
+        "publication_id": report.records[0].publication_id,
+    }]
+    assert [{key: row[key] for key in ("vocabulary_id", "code", "label_ko", "origin", "source_type")}
+            for row in d1.glossary_rows] == [{
+                "vocabulary_id": "weather:sky_code",
+                "code": "1",
+                "label_ko": "맑음",
+                "origin": "traffic_weather",
+                "source_type": "dbt_contract",
+            }]
+
+
+def test_unknown_column_vocabulary_fails_before_snapshot_write():
+    contract = _contract(column_vocabularies={"sky_code": "unknown:sky_code"})
+    d1 = FakeD1()
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(1))})
+
+    with pytest.raises(PublicationError, match="unknown:sky_code"):
+        publish([contract], source, d1, FakeSmoke(status="passed"), source_run_id="run-vocabulary-invalid")
+
+    assert d1.replace_calls == 0
+
+
+def test_weather_traffic_column_vocabulary_mappings_are_the_approved_exact_set():
+    weather = _contract(
+        column_vocabularies={
+            "gu_code": "common:gu_code",
+            "sky_code": "weather:sky_code",
+            "pty_code": "weather:pty_code",
+        },
+        vocabulary_terms=(
+            {"vocabulary_id": "weather:sky_code", "code": "1", "label_ko": "맑음", "origin": "traffic_weather", "source_type": "dbt_contract"},
+            {"vocabulary_id": "weather:pty_code", "code": "0", "label_ko": "없음", "origin": "traffic_weather", "source_type": "dbt_contract"},
+        ),
+    )
+    hotspots = _contract(
+        product_id="traffic_flow_congestion_hotspots_hourly",
+        model_name="gold_traffic_flow_congestion_hotspots_hourly",
+        column_vocabularies={
+            "flow_value_quality": "traffic:flow_value_quality",
+            "hotspot_state": "traffic:hotspot_state",
+        },
+        vocabulary_terms=(
+            {"vocabulary_id": "traffic:flow_value_quality", "code": "available", "label_ko": "원천 값 있음", "origin": "traffic_weather", "source_type": "dbt_contract"},
+            {"vocabulary_id": "traffic:hotspot_state", "code": "observed", "label_ko": "관측됨", "origin": "traffic_weather", "source_type": "dbt_contract"},
+        ),
+    )
+    flow_latest = _contract(
+        product_id="traffic_flow_link_latest",
+        model_name="gold_traffic_flow_link_latest",
+        column_vocabularies={"flow_value_quality": "traffic:flow_value_quality"},
+    )
+    incident = _contract(
+        product_id="traffic_incident_x_weather_current_hourly",
+        model_name="gold_traffic_incident_x_weather_current_hourly",
+        column_vocabularies={"gu_code": "common:gu_code"},
+    )
+    contracts = [weather, hotspots, flow_latest, incident]
+    columns = [*COLUMNS, ("gu_code", "varchar"), ("sky_code", "varchar"), ("pty_code", "varchar"),
+               ("flow_value_quality", "varchar"), ("hotspot_state", "varchar")]
+    source = FakeSource({contract.model_name: ReadPlan(columns=columns, rows=_rows(1)) for contract in contracts})
+    d1 = FakeD1()
+
+    report = publish(contracts, source, d1, FakeSmoke(status="passed"), source_run_id="run-vocabulary-exact-set")
+
+    assert report.ok
+    actual = {
+        (row["product_id"], row["column_name"], row["vocabulary_id"])
+        for meta in d1.product_meta.values()
+        for row in meta["vocabularies"]
+    }
+    assert actual == {
+        ("weather_place_current_outlook", "gu_code", "common:gu_code"),
+        ("weather_place_current_outlook", "sky_code", "weather:sky_code"),
+        ("weather_place_current_outlook", "pty_code", "weather:pty_code"),
+        ("traffic_flow_congestion_hotspots_hourly", "flow_value_quality", "traffic:flow_value_quality"),
+        ("traffic_flow_congestion_hotspots_hourly", "hotspot_state", "traffic:hotspot_state"),
+        ("traffic_flow_link_latest", "flow_value_quality", "traffic:flow_value_quality"),
+        ("traffic_incident_x_weather_current_hourly", "gu_code", "common:gu_code"),
+    }
+    assert "common:gu_code" not in {row["vocabulary_id"] for row in d1.glossary_rows}
 
 
 def test_snapshot_publish_writes_source_and_quality_evidence():
