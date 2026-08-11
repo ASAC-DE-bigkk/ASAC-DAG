@@ -3,6 +3,35 @@
 설계·구조에 영향을 준 변경만 **최신순**으로 기록한다(사소한 수정 제외).
 형식: 날짜 · 무엇 · 왜 · 영향 파일. 참조는 PR/이슈 번호.
 
+## 2026-08-11 — culture_transform 알림 양쪽 채우기 (실패 원인 · 성공 요약)
+
+- **왜 지금** — 변환은 지금까지 **실패할 때만** 말이 있었고, 그 실패 알림조차 원인을
+  말하지 못했다. 실측: `culture_transform` 은 4번 실패했고(07-17 `dbt_source_freshness`,
+  07-21·07-29 `dbt_test`, 08-08 `dbt_run`) Discord 알림은 4번 다 나갔다
+  (`logs/_discord_notify_guard` 의 run id 4건이 dag_run 실패 4건과 일치). 즉 배선은
+  살아 있었고, 문제는 **알림 내용**과 **성공 쪽 침묵**이었다.
+- **실패 알림에 원인 붙이기** — `problem_failure_callback(domain="culture")` 에
+  `dbt_project_dir` 이 빠져 있어 공통 콜백이 `run_results.json` 을 읽지 않았다. 그래서
+  7/21·7/29 의 `dbt_test` 실패는 "dbt_test 가 실패했다"까지만 알렸고 어떤 테스트가 왜
+  깨졌는지는 Airflow 로그를 따로 열어야 했다. 인자 하나로 실패 노드·사유가 embed 에
+  붙는다(#161 이 이미 제공하던 기능 — 우리가 안 켠 것). weather 의 XCom 키 형은 실행기가
+  attempt-local 경로를 넘길 때 쓰는 것이고, BashOperator 로 dbt CLI 를 직접 도는 culture 는
+  citydata 와 같은 project_dir 형이 맞다. → `culture_transform.py`
+- **성공 요약 알림 추가** — 새벽 런이 조용할 때 "잘 돌았다"와 "안 돌았다"를 알림만으로
+  가를 수 없었다. 체인 끝에 `notify_transform_success` 를 붙여 silver·gold 를 몇 개 어떻게
+  만들었는지(단계별 개수·성공 수·소요·느린 모델 3개)와 계약 테스트 결과(통과/경고/실패)를
+  보낸다. 통과했어도 경고·스킵·비성공 모델이 있으면 **노랑** — 초록으로 덮지 않는다.
+  → `culture_ingest/common/transform_notify.py` · `tests/test_transform_notify.py`
+- **스냅샷을 읽는 이유** — dbt 는 하위명령마다 `target/run_results.json` 을 덮어써서,
+  test 가 끝나면 run 결과는 이미 없다. 성공 요약은 둘 다 필요하므로 `dbt_run`·`dbt_test` 가
+  성공 직후 자기 결과를 `run_results.<task_id>.json` 으로 복사한다(`set -e` 라 실패 시엔
+  복사에 닿지 않고, 실패 콜백은 덮어쓰기 전 원본을 읽는다 — 두 경로가 서로를 안 건드린다).
+- **행 수는 잰 것만** — Trino 는 모델 적재 행 수를 `rows_affected=-1` 로 돌려주는 일이 잦다.
+  0 으로 바꾸면 알림이 "0행 적재"라는 **측정한 적 없는 사실**을 말하게 되므로(7/7 사고와
+  같은 부류), 못 잰 행 수는 아예 쓰지 않는다.
+- **문서 정정** — 모듈 docstring 의 "silver 9종 + gold 3종" 은 실제(12종·13종, tag:slo 4종 제외)와
+  달랐다. → `culture_transform.py`
+
 ## 2026-07-31 — run 리포트를 #619 확정안 규격에 맞춤 (event_id · 행 수 출처 · NULL≠0)
 
 - **왜 지금** — #619 확정안(2026-07-31)이 도메인 기록에 요구한 것 중 culture 코드에
