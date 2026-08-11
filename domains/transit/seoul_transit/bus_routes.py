@@ -19,10 +19,20 @@ from .config import KST
 _HEADER_CD = re.compile(r"<headerCd>(\d+)</headerCd>")
 _HEADER_MSG = re.compile(r"<headerMsg>([^<]*)</headerMsg>")
 _ITEM = re.compile(r"<itemList>(.*?)</itemList>", re.S)
+# 시간표 필드(#765): 응답에 노선 단위 첫차/막차/배차간격/기점·종점이 이미 온다
+# (2026-08-11 실호출 실측 — firstBusTm=20260811043000, term=13 등). 값은 원본
+# 보존(silver 가 파싱) — firstBusTm/lastBusTm 은 API 가 당일 날짜를 붙인 형식.
 _FIELDS = {
     "busRouteId": re.compile(r"<busRouteId>([^<]*)</busRouteId>"),
     "busRouteNm": re.compile(r"<busRouteNm>([^<]*)</busRouteNm>"),
     "routeType": re.compile(r"<routeType>([^<]*)</routeType>"),
+    "firstBusTm": re.compile(r"<firstBusTm>([^<]*)</firstBusTm>"),
+    "lastBusTm": re.compile(r"<lastBusTm>([^<]*)</lastBusTm>"),
+    "term": re.compile(r"<term>([^<]*)</term>"),
+    "stStationNm": re.compile(r"<stStationNm>([^<]*)</stStationNm>"),
+    "edStationNm": re.compile(r"<edStationNm>([^<]*)</edStationNm>"),
+    "corpNm": re.compile(r"<corpNm>([^<]*)</corpNm>"),
+    "length": re.compile(r"<length>([^<]*)</length>"),
 }
 
 # 위생 가드 — 전체 노선이 이보다 적으면 부분/빈 응답 의심(실측 1,364). 빈 스냅샷으로
@@ -78,7 +88,20 @@ def build_reference(routes: list[dict], *, run_id: str, ingest_ts: str) -> dict:
 BUS_ROUTE_MASTER_TABLE = "bronze_bus_route_master"
 BUS_ROUTE_MASTER_COLUMNS = (
     "bus_route_id", "bus_route_nm", "route_type", "tier",
+    "first_bus_tm", "last_bus_tm", "term", "start_station_nm", "end_station_nm",
+    "corp_nm", "route_length",
     "load_date", "collected_at", "dag_run_id",
+)
+
+# 시간표 필드(#765) — API 키 → bronze 컬럼. 값은 원본 문자열 그대로(varchar).
+_TIMETABLE_FIELDS = (
+    ("firstBusTm", "first_bus_tm"),
+    ("lastBusTm", "last_bus_tm"),
+    ("term", "term"),
+    ("stStationNm", "start_station_nm"),
+    ("edStationNm", "end_station_nm"),
+    ("corpNm", "corp_nm"),
+    ("length", "route_length"),
 )
 
 
@@ -111,13 +134,17 @@ def tier_for(route_type: str | None, tier1_types: set[str]) -> int:
 
 
 def build_master_rows(routes: list[dict], tier1_types: set[str]) -> list[dict]:
-    """parse_routes 결과 → bronze 행(계보 제외). busRouteId 없는 행은 제외(파서가 이미 필터)."""
+    """parse_routes 결과 → bronze 행(계보 제외). busRouteId 없는 행은 제외(파서가 이미 필터).
+
+    시간표 필드(#765)는 구 reference(3필드 시절)에도 안전 — 없으면 None(NULL).
+    """
     return [
         {
             "bus_route_id": r["busRouteId"],
             "bus_route_nm": r.get("busRouteNm"),
             "route_type": r.get("routeType"),
             "tier": tier_for(r.get("routeType"), tier1_types),
+            **{col: r.get(api) for api, col in _TIMETABLE_FIELDS},
         }
         for r in routes
         if r.get("busRouteId")
@@ -136,9 +163,25 @@ def master_ddl(qualified_table: str) -> str:
     return (
         f"CREATE TABLE IF NOT EXISTS {qualified_table} (\n"
         "  bus_route_id varchar,\n  bus_route_nm varchar,\n  route_type varchar,\n"
-        "  tier integer,\n  load_date varchar,\n  collected_at timestamp(6),\n"
+        "  tier integer,\n"
+        "  first_bus_tm varchar,\n  last_bus_tm varchar,\n  term varchar,\n"
+        "  start_station_nm varchar,\n  end_station_nm varchar,\n"
+        "  corp_nm varchar,\n  route_length varchar,\n"
+        "  load_date varchar,\n  collected_at timestamp(6),\n"
         "  dag_run_id varchar\n) WITH (format = 'PARQUET')"
     )
+
+
+def master_migration_sql(qualified_table: str) -> list[str]:
+    """기존 테이블(3필드 시절)에 시간표 컬럼 추가(#765) — 신규 생성 시엔 no-op.
+
+    Iceberg ADD COLUMN 은 메타데이터 변경이라 기존 행은 NULL 로 남는다(정상 —
+    과거 스냅샷은 backfill DAG 이 raw XML 재파싱으로 채운다).
+    """
+    return [
+        f"ALTER TABLE {qualified_table} ADD COLUMN IF NOT EXISTS {col} varchar"
+        for _, col in _TIMETABLE_FIELDS
+    ]
 
 
 def master_load_sql(
@@ -156,10 +199,12 @@ def master_load_sql(
     """
     if not rows:
         raise ValueError("master_load_sql: rows 비어 있음 — 삭제만 남아 위험")
+    timetable_cols = [col for _, col in _TIMETABLE_FIELDS]
     values = ",\n".join(
-        "({}, {}, {}, {}, {}, timestamp {}, {})".format(
+        "({}, {}, {}, {}, {}, {}, timestamp {}, {})".format(
             _sql_str(r["bus_route_id"]), _sql_str(r["bus_route_nm"]),
             _sql_str(r["route_type"]), int(r["tier"]),
+            ", ".join(_sql_str(r.get(col)) for col in timetable_cols),
             _sql_str(load_date), _sql_str(collected_at), _sql_str(dag_run_id),
         )
         for r in rows
@@ -167,6 +212,8 @@ def master_load_sql(
     return [
         f"DELETE FROM {qualified_table} WHERE load_date = {_sql_str(load_date)}",
         f"INSERT INTO {qualified_table} "
-        "(bus_route_id, bus_route_nm, route_type, tier, load_date, collected_at, dag_run_id)\n"
+        "(bus_route_id, bus_route_nm, route_type, tier, "
+        + ", ".join(timetable_cols)
+        + ", load_date, collected_at, dag_run_id)\n"
         f"VALUES\n{values}",
     ]
