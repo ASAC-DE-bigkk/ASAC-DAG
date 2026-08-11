@@ -52,6 +52,7 @@
 | `event_time` | string | 모델의 실제 컬럼 | 없음(시간축 없음) | Worker `from`/`to` 필터축 및 append/incremental 워터마크 |
 | `freshness_field` | string | 모델의 실제 컬럼 | `event_time` | 실제 데이터 신선도를 나타내는 품질 시간축. 예보 발표축과 수집축처럼 `event_time`과 의미가 다를 때 명시 |
 | `empty_result_freshness` | object | `{relation, field}`; manifest model과 그 실제 컬럼 | 없음 | `zero_policy: allow` 희소 상품이 0행일 때 상위 relation의 `MAX(field)`를 freshness로 기록. null이면 fail-closed |
+| `retire_on_publish` | bool | `true`는 `enabled: false`, `external: false`와 함께만 허용 | `false` | 다음 성공 publication 뒤 해당 `product_id`의 `_catalog` discovery row만 제거. physical D1 table·ledger는 보존 |
 | `retention_or_horizon` | string | 자유 서술 (예: `최근 2일`, `+3일 예보`) | 무제한 | 보존·예보 범위 |
 | `partial_policy` | object | `min_publish_ratio`: 0~1 | 검사 안 함 | [§5.2](#52-partial_policy) |
 | `freshness_slo_minutes` | int | > 0 | — | `freshness_field`(미선언 시 `event_time`) 최신값의 wall-clock 지연 임계 (§3.1 참조) |
@@ -62,6 +63,8 @@
 | `public_primary_key` | list[string] | `public_projection.columns` 안의 실제 컬럼 | `primary_key` | Gold보다 거친 공개 rollup의 D1 자연키 |
 | `source_evidence` | list[object] | [§3.6](#36-source_evidence-v15-선택-필드) 7개 필드 | 없음 | 공개 소스 URL·이용허락·재배포 범위·출처표시의 정적 증거 |
 | `quality_coverage` | object | [§3.7](#37-quality_coverage-v16-선택-필드) 측정 선언 또는 명시적 N/A | 없음 | 공개 축의 기대 distinct 집합과 최소 커버리지 비율 |
+
+`enabled: true`, `external: true`, `zero_policy: allow`인 공개 희소 상품은 `empty_result_freshness`와 `mcp_projection.empty_result`를 함께 선언해야 한다. 후자는 `state: valid_empty`, machine-readable `code`, 사용자용 `message_ko`를 가진다. Worker는 이 선언과 같은 publication의 freshness·품질 증거가 모두 있을 때만 0행을 정상 결과로 반환하며, 실행·과금하지 않는다.
 
 ### 3.3 YAML에서 제외 — 실측·타 소유
 
@@ -233,6 +236,7 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 5. API Smoke Test     — 대표 물리 테이블 조회 확인 (실패 시 snapshot 복구)
 6. _catalog Upsert    — 자기 도메인 행만 INSERT OR REPLACE (DROP 금지)
 7. Product Evidence   — source 권리 증거 + 품질 실측을 publication_id로 결속
+8. Catalog Retirement — `retire_on_publish: true`인 disabled·non-external product의 `_catalog` row만 exact `product_id`로 제거
 ```
 
 ### 7.1 성공 조건 (모두 충족)
@@ -242,6 +246,7 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 - `_catalog` upsert 완료, **쓴 테이블 수 == `_catalog` 내 도메인 행 수** (#477 ③ 자기검증)
 - `source_evidence` 선언 제품은 `d1_catalog_sources`와 `d1_product_quality`가 같은 `publication_id`로 게시됨
 - 대표 API Smoke Test 200
+- catalog retirement 선언이 있으면 normal publish 성공 뒤 exact `_catalog` row만 제거됐고 physical product table·publication ledger는 보존
 
 ### 7.2 실패 조건 → 직전 정상본 보호
 
@@ -274,6 +279,8 @@ D1 적재와 `_catalog` 등록은 **하나의 Publication 완료 조건**으로 
 
 **개정 이력**
 
+- **v1.15** (2026-08-11): `enabled: true`·`external: true`·`zero_policy: allow` 공개 희소 상품은 `empty_result_freshness`와 Worker가 읽는 `mcp_projection.empty_result`를 함께 선언하도록 Validator를 강화했다. 0행이 정상인 강수·위험 후보 상품을 수집 실패와 혼동하지 않고 무과금 `valid_empty`로 반환한다. ASAC-DBT validator schema `v1.15`와 lockstep.
+- **v1.14** (2026-08-11): 선택 필드 `retire_on_publish`를 추가했다. 공개에서 내릴 제품은 반드시 `enabled: false`, `external: false`와 함께 명시하며, Publisher는 정상 publication 완료 뒤 해당 `product_id`의 `_catalog` discovery row만 삭제한다. physical D1 table·publication ledger를 삭제하지 않아 rollback과 감사 증거를 보존한다. ASAC-DBT validator schema `v1.14`와 lockstep.
 - **v1.13** (2026-08-10): 선택 필드 `empty_result_freshness`를 추가했다. 강수 예보처럼 0행이 정상인 희소 상품은 상위 hourly relation의 물리 freshness 컬럼을 명시해 정상 무강수와 수집 실패를 구분한다. relation/field는 manifest에서 검증하며, fallback이 null이면 Publisher가 fail-closed로 last-known-good를 보존한다. ASAC-DBT validator schema `v1.13`과 lockstep.
 - **v1.9** (2026-08-04): 조회·워터마크용 `event_time`과 실제 품질 신선도 축이 다른 제품을 위한 선택 필드 `freshness_field`를 추가했다. 미선언 계약은 기존처럼 `event_time`을 사용한다. 공개 projection 포함·실제 모델 컬럼 검증과 Worker wall-clock SLO fail-closed 책임을 명시했다. ASAC-DBT validator schema `v1.9`와 lockstep.
 - **v1.8** (2026-08-04): Gold보다 거친 공개 rollup을 위한 `public_primary_key`, projection 밖 Gold 축을 재현 가능하게 실측하는 `quality_coverage.measurement_scope: source_relation`, 동적 모집단용 명시적 `not_applicable_reason`을 추가했다. 미선언 계약의 기존 PK·published-row 측정 동작은 유지한다. ASAC-DBT validator schema `v1.8`와 lockstep.

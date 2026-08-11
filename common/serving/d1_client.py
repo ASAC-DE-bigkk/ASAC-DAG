@@ -139,6 +139,7 @@ class D1Client(Protocol):
     def insert_rows(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], *, replace: bool) -> None: ...
     def upsert_catalog(self, catalog_rows: Sequence[dict[str, Any]]) -> None: ...
     def delete_catalog_row(self, name: str) -> None: ...
+    def delete_catalog_product_ids(self, product_ids: Sequence[str]) -> None: ...
     def catalog_domain_count(self, model_names: set[str]) -> int: ...
     def read_table_rows(self, name: str, ordered_columns: Sequence[Column], primary_key: Sequence[str]) -> list[dict[str, Any]]: ...
     def execute(self, sql: str) -> list[dict[str, Any]]: ...
@@ -735,6 +736,22 @@ class HttpD1Client:
     def delete_catalog_row(self, name: str) -> None:
         self._ensure_catalog_schema()
         self._query(f"DELETE FROM _catalog WHERE name = {sql_literal(name)};")
+
+    def delete_catalog_product_ids(self, product_ids: Sequence[str]) -> None:
+        """Remove public discovery rows without touching product tables or ledgers."""
+
+        if any(
+            not isinstance(product_id, str)
+            or not IDENTIFIER_RE.fullmatch(product_id)
+            for product_id in product_ids
+        ):
+            raise ValueError("unsafe D1 product_id for catalog retirement")
+        normalized = sorted(set(product_ids))
+        if not normalized:
+            return
+        self._ensure_catalog_schema()
+        product_id_literals = ", ".join(sql_literal(product_id) for product_id in normalized)
+        self._query(f"DELETE FROM _catalog WHERE product_id IN ({product_id_literals});")
 
     def catalog_domain_count(self, model_names: set[str]) -> int:
         if not model_names:

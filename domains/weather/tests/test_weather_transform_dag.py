@@ -1,4 +1,6 @@
 import types
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import pytest
@@ -47,6 +49,7 @@ def test_weather_dbt_factory_preserves_phase_contracts():
             "selector": selector,
             "include_project_vars": include_project_vars,
             "snapshot_task_id": module.SNAPSHOT_TASK_ID,
+            "serving_as_of_task_id": module.SERVING_AS_OF_HOUR_TASK_ID,
             "threads": None if task_id == "dbt_deps" else 2,
         }
         if task_id == "dbt_deps":
@@ -90,6 +93,7 @@ def test_weather_transform_runs_spatial_seed_and_mart_phases():
 
     expected_task_order = [
         "resolve_weather_snapshot_run",
+        "resolve_weather_serving_as_of_hour",
         *(
             task_id
             for task_id, _dbt_command, _selector, _include_vars in EXPECTED_DBT_PHASES
@@ -120,6 +124,18 @@ def test_weather_transform_runs_spatial_seed_and_mart_phases():
     assert "weather_place_grid_mapping" not in source
     assert "assert_silver_" not in source
     assert "assert_gold_" not in source
+
+
+def test_weather_transform_freezes_one_kst_hour_before_all_dbt_phases():
+    module = load_transform_module()
+    anchor = module.dag.task_dict[module.SERVING_AS_OF_HOUR_TASK_ID]
+
+    assert anchor.python_callable is module.resolve_weather_serving_as_of_hour
+    assert anchor.upstream_task_ids == {module.SNAPSHOT_TASK_ID}
+    assert anchor.downstream_task_ids == {"dbt_deps"}
+    assert module.resolve_weather_serving_as_of_hour(
+        now=datetime(2026, 8, 11, 10, 59, 59, tzinfo=ZoneInfo("Asia/Seoul"))
+    ) == "2026-08-11 10:00:00"
 
 
 def test_weather_transform_runs_spatial_marts_before_full_gold_and_metrics():

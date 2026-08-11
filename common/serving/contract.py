@@ -571,3 +571,44 @@ def load_domain_contracts(
         for contract in enabled_domain_contracts
         if contract.product_id in requested_ids
     ]
+
+
+def load_domain_retirement_product_ids(
+    manifest_path: str | Path,
+    domain: str,
+) -> tuple[str, ...]:
+    """Load disabled contracts whose public catalog entries must be retired.
+
+    Retirement is intentionally a separate pass from ``load_domain_contracts``:
+    active export contracts remain enabled-only, while catalog cleanup is allowed
+    only for an explicit disabled and non-external DBT declaration.
+    """
+
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    prefix = f"gold_{domain}_"
+    product_ids: list[str] = []
+    for node in (manifest.get("nodes") or {}).values():
+        if node.get("resource_type") != "model" or not str(node.get("name", "")).startswith(prefix):
+            continue
+        metadata = _merged_meta(node)
+        serving = metadata.get("serving")
+        if not isinstance(serving, dict):
+            continue
+        retirement = serving.get("retire_on_publish")
+        if retirement is None or retirement is False:
+            continue
+        if retirement is not True:
+            raise ValueError(f"{domain}: retire_on_publish must be boolean true")
+        if serving.get("enabled") is not False or serving.get("external") is not False:
+            raise ValueError(
+                f"{domain}: retire_on_publish requires enabled=false and external=false"
+            )
+        product_id = serving.get("product_id")
+        if not isinstance(product_id, str) or not IDENTIFIER_RE.fullmatch(product_id):
+            raise ValueError(f"{domain}: retire_on_publish requires a valid product_id")
+        product_ids.append(product_id)
+
+    duplicates = sorted({product_id for product_id in product_ids if product_ids.count(product_id) > 1})
+    if duplicates:
+        raise ValueError(f"{domain}: duplicate retired product_ids={','.join(duplicates)}")
+    return tuple(sorted(product_ids))

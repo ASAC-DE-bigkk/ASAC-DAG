@@ -49,7 +49,16 @@ from common.runtime_guard import (  # noqa: E402
 from weather_ingest.common.resources import DbtWorkload  # noqa: E402
 from weather_ingest.runtime import build_weather_manifest  # noqa: E402
 import weather_dbt_execution as weather_dbt  # noqa: E402
-from weather_dbt_failure import classify_weather_dbt_failure  # noqa: E402
+from weather_dbt_runtime import (  # noqa: E402
+    DBT_RETRY_DELAY,
+    DOMAIN,
+    SERVING_AS_OF_HOUR_TASK_ID,
+    WEATHER_DBT_CONTRACT_VARS,
+    WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
+    WEATHER_SNAPSHOT_VAR,
+    resolve_weather_serving_as_of_hour,
+    run_weather_dbt_phase,
+)
 from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
 
@@ -174,8 +183,6 @@ DBT_PHASE_SPECS = (
     ),
 )
 DBT_PHASE_TASK_IDS = tuple(spec.task_id for spec in DBT_PHASE_SPECS)
-DBT_RETRY_DELAY = timedelta(minutes=2)
-DOMAIN = "weather"
 WEATHER_DISCORD_WEBHOOK_ENV = "WEATHER_DISCORD_WEBHOOK_URL"
 DISCORD_RED = 15158332
 DEFAULT_PARAMS = {
@@ -369,87 +376,29 @@ def run_dbt_phase(
     selector: str | None,
     include_project_vars: bool = True,
     snapshot_task_id: str | None = None,
+    serving_as_of_task_id: str | None = None,
     threads: int | None = None,
     **context,
 ) -> dict[str, object]:
-    """Run one dbt phase with an artifact path isolated to this task attempt."""
-    ti = context["ti"]
-    task_id = getattr(ti, "task_id", None)
-    is_deps = dbt_command == "deps"
-    target = (context.get("params") or {}).get("target", "dev")
-    snapshot_run_id = (
-        ti.xcom_pull(task_ids=snapshot_task_id) if snapshot_task_id else None
+    """Run one dbt phase through the shared non-DAG Weather runtime."""
+
+    return run_weather_dbt_phase(
+        dbt_command=dbt_command,
+        selector=selector,
+        include_project_vars=include_project_vars,
+        snapshot_task_id=snapshot_task_id,
+        serving_as_of_task_id=serving_as_of_task_id,
+        threads=threads,
+        context=context,
+        dbt_executor=weather_dbt,
+        dbt_project=DBT_PROJECT,
+        dbt_bin=DBT_BIN,
+        runner=subprocess.run,
+        pipeline="weather-transform",
+        failure_exception=lambda retryable, message: (
+            AirflowException(message) if retryable else AirflowFailException(message)
+        ),
     )
-    run_results_path = None
-    try:
-        execution = weather_dbt.execute_dbt_phase(
-            dbt_command=dbt_command,
-            selector=selector,
-            invocation_id=task_id or dbt_command.replace(" ", "-"),
-            pipeline="weather-transform",
-            run_id=context.get("run_id"),
-            task_id=task_id,
-            try_number=getattr(ti, "try_number", None),
-            target=target,
-            variables=(
-                json.dumps(
-                    {
-                        **WEATHER_DBT_CONTRACT_VARS,
-                        **(
-                            {WEATHER_SNAPSHOT_VAR: snapshot_run_id}
-                            if snapshot_task_id
-                            else {}
-                        ),
-                    },
-                    separators=(",", ":"),
-                )
-                if include_project_vars and not is_deps
-                else None
-            ),
-            threads=threads,
-            project_dir=DBT_PROJECT,
-            executable=DBT_BIN,
-            runner=subprocess.run,
-        )
-        run_results_path = execution.existing_run_results_path
-    finally:
-        ti.xcom_push(
-            key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
-            value=run_results_path,
-        )
-    for completed in execution.attempts:
-        if completed.stdout:
-            print(completed.stdout, end="")
-        if completed.stderr:
-            print(completed.stderr, end="", file=sys.stderr)
-    completed = execution.completed
-    if completed.returncode != 0 or execution.missing_expected_artifacts:
-        command_output = "\n".join(
-            str(value)
-            for attempt in execution.attempts
-            for value in (attempt.stdout, attempt.stderr)
-            if value
-        )
-        failure = classify_weather_dbt_failure(
-            dbt_command=dbt_command,
-            returncode=int(completed.returncode),
-            artifact_path=execution.existing_run_results_path,
-            missing_expected_artifacts=execution.missing_expected_artifacts,
-            command_output=command_output,
-        )
-        exception_type = AirflowException if failure.retryable else AirflowFailException
-        raise exception_type(
-            "weather dbt command failed: "
-            f"classification={failure.classification}; "
-            f"exit_code={completed.returncode}"
-        )
-    return {
-        "status": "success",
-        "run_results_path": execution.existing_run_results_path,
-        "sources_path": execution.existing_sources_path,
-        "manifest_path": execution.existing_manifest_path,
-        "selected_unique_ids": list(execution.selected_unique_ids),
-    }
 
 
 def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
@@ -461,6 +410,7 @@ def dbt_task(spec: DbtPhaseSpec) -> PythonOperator:
             "selector": spec.selector,
             "include_project_vars": spec.include_project_vars,
             "snapshot_task_id": SNAPSHOT_TASK_ID,
+            "serving_as_of_task_id": SERVING_AS_OF_HOUR_TASK_ID,
             "threads": spec.threads,
         },
         "weight_rule": "absolute",
@@ -574,6 +524,12 @@ with DAG(
         on_failure_callback=record_weather_problem,
     )
 
+    resolve_serving_as_of_hour = PythonOperator(
+        task_id=SERVING_AS_OF_HOUR_TASK_ID,
+        python_callable=resolve_weather_serving_as_of_hour,
+        on_failure_callback=record_weather_problem,
+    )
+
     dbt_phase_tasks = {spec.task_id: dbt_task(spec) for spec in DBT_PHASE_SPECS}
     dbt_tasks_in_order = list(dbt_phase_tasks.values())
 
@@ -593,6 +549,7 @@ with DAG(
     pipeline_tasks = [
         validate_runtime,
         resolve_snapshot,
+        resolve_serving_as_of_hour,
         *dbt_tasks_in_order,
         mark_gold_publication_ready,
         publish_dbt_metrics,
