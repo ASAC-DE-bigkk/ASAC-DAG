@@ -4,7 +4,10 @@ SearchSTNTimeTableByIDService(OA-101, 공공누리 1유형)를 역×요일×방�
 호출해 R2 raw(jsonl) + bronze_subway_timetable 에 적재한다. 설계 근거는
 seoul_transit/subway_timetable.py 모듈 docstring(2026-08-11 실측).
 
-- 유니버스: dim_transit_station 의 커버 노선(1~9호선) 역코드 — 약 325역 × 6콜.
+- 유니버스: dim_transit_station 의 커버 노선 역코드 — 약 325역 × 6콜.
+  ⚠️ 커버리지 실측(2026-08): 원천이 **2호선 전체(50역)·7호선 인천 구간(9역)을
+  미제공**(전 조합 INFO-200, 코드 체계 문제 아님)이라 실제 적재는 266역이다 —
+  계약 caveat 도 동일하게 고지한다(ASAC-DBT#512).
 - 분할 순회: cycle(YYYY-MM) 커서를 R2 state 로 보존, 일 예산(기본 700콜)만큼
   진행하고 이어달린다. 전량 완주 후 그 달은 no-op(다음 달 새 cycle).
 - 쿼터 감지(#766): 한도 초과 의심 응답이 오면 Discord 경보 → 남은 콜을 멈추고
@@ -117,14 +120,16 @@ def collect_and_load_chunk() -> dict:
         return {"cycle": cycle, "calls": 0, "rows": 0, "state": "complete"}
 
     key = config.load_key()
-    chunk, remaining = pending[:DAILY_CALL_BUDGET], pending[DAILY_CALL_BUDGET:]
+    chunk = pending[:DAILY_CALL_BUDGET]
     entries: list[tuple[tuple[str, int, int], dict]] = []
     completed: list[tuple[str, int, int]] = []
+    attempted: list[tuple[str, int, int]] = []
     skipped_empty = errors = 0
     consecutive_errors = 0
     aborted = None
 
     for combo in chunk:
+        attempted.append(combo)
         station, week, inout = combo
         url = openapi_url(key, tt.SERVICE, 1, 1000, station, str(week), str(inout))
         try:
@@ -159,9 +164,14 @@ def collect_and_load_chunk() -> dict:
         if CALL_DELAY_SECONDS:
             time_mod.sleep(CALL_DELAY_SECONDS)
 
-    # 미완료(중단 시점 이후 + 실패 격리 콜)는 커서에 남긴다.
+    # 미완료(중단 시점 이후 + 실패 격리 콜)는 커서에 남긴다. 이번 런에서 실패한
+    # 콤보는 후위로 돌린다 — 결정적으로 실패하는 콤보가 선두에 고착되면 매 런이
+    # 연속 실패 가드로 조기 중단·경보 오발화되는 것을 막는다(#116 리뷰).
     completed_set = set(completed)
-    new_pending = [list(c) for c in pending if c not in completed_set]
+    failed_this_run = [c for c in attempted if c not in completed_set]
+    failed_set = set(failed_this_run)
+    rest = [c for c in pending if c not in completed_set and c not in failed_set]
+    new_pending = [list(c) for c in rest + failed_this_run]
 
     landed_meta = None
     if entries:
