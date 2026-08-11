@@ -33,6 +33,23 @@ def test_resolve_params_keeps_date_whole():
     assert "'2026-08-01'" in sub and "2026 " not in sub
 
 
+def test_resolve_params_number_followed_by_sentence():
+    # 🔴 운영 실측(2026-08-11, commerce gold_env_facility_operation 5건): 값 뒤에 설명문이
+    #    붙는 저작 관행이 있다. `5.` 의 마침표를 거부하면 ④가 문장 전체를 값으로 삼켜
+    #    `LIMIT '5. facility_rows는…'` 이 되고, D1 이 datatype mismatch 로 죽는다.
+    sql = "-- :n = 5. facility_rows는 업소당 2관측이라 /2로 환산\nSELECT gu FROM t LIMIT :n"
+    sub, resolved, unresolved = resolve_params(sql)
+    assert unresolved == []
+    assert resolved["n"] == "5", "설명문이 값으로 딸려 들어왔다"
+    assert sub.rstrip().endswith("LIMIT 5")
+
+
+def test_resolve_params_decimal_still_whole():
+    # 마침표 뒤가 숫자면 소수다 — 잘라내면 안 된다.
+    _, resolved, _ = resolve_params("-- :ratio=3.5\nSELECT a FROM t WHERE r > :ratio")
+    assert resolved["ratio"] == "3.5"
+
+
 def test_resolve_params_unquoted_sentinel():
     _, resolved, _ = resolve_params("-- :gu=ALL, :n=7\nSELECT a FROM t WHERE (:gu = 'ALL' OR gu = :gu) LIMIT :n")
     assert resolved["gu"] == "'ALL'" and resolved["n"] == "7"

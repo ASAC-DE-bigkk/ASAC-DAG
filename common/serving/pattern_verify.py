@@ -73,7 +73,11 @@ def resolve_params(sql_text: str, hint_text: str = "") -> tuple[str, dict[str, s
                 #   숫자로 삼키면 `event_date BETWEEN 2026 AND 2026` 이 되는데, SQLite 는
                 #   TEXT↔INTEGER 를 타입 순서로 비교해 **조용히 0행**(또는 `>= 2026` 이면
                 #   반대로 **필터 무력화**)이 된다. 둘 다 검증을 통과하거나 못 하게 만든다.
-                num = re.match(r"[0-9]+(?:\.[0-9]+)?(?![0-9A-Za-z_\-./:])", val)
+                #   반대로 마침표를 무조건 거부해서도 안 된다 — `-- :n = 5. 설명문…` 처럼
+                #   **값 뒤에 문장이 붙는** 저작 관행이 있고(commerce 5건 실측), 그걸 숫자로
+                #   못 읽으면 ④가 설명문 전체를 값으로 삼켜 `LIMIT '5. 설명문…'` 이 된다.
+                #   가르는 기준은 마침표 뒤가 **숫자냐**다 — `3.5` 는 소수, `5. ` 는 문장 끝.
+                num = re.match(r"[0-9]+(?:\.[0-9]+)?(?![0-9A-Za-z_\-/:]|\.[0-9])", val)
                 if num:
                     value = num.group(0)
                     break
