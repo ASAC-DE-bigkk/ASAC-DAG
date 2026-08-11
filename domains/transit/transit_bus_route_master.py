@@ -119,6 +119,9 @@ def load_route_master_bronze() -> dict:
     cur = conn.cursor()
     cur.execute(bus_routes.master_ddl(qualified))
     cur.fetchall()
+    for stmt in bus_routes.master_migration_sql(qualified):  # 구 테이블 시간표 컬럼 보강(#765)
+        cur.execute(stmt)
+        cur.fetchall()
     for stmt in bus_routes.master_load_sql(
         qualified, rows, load_date=load_date, collected_at=collected_at, dag_run_id=run_id,
     ):

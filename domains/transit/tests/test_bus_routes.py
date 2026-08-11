@@ -14,12 +14,18 @@ for p in (str(_DAGS), str(_TRANSIT)):
 from seoul_transit import bus, bus_routes, config  # noqa: E402
 
 
-def _routes_xml(n_ok=3, header_cd="0"):
-    items = "".join(
-        f"<itemList><busRouteId>10010{i:04d}</busRouteId>"
-        f"<busRouteNm>노선{i}</busRouteNm><routeType>{3 if i % 2 else 8}</routeType></itemList>"
-        for i in range(n_ok)
-    )
+def _routes_xml(n_ok=3, header_cd="0", timetable=False):
+    def item(i):
+        extra = (
+            f"<firstBusTm>2026081104{i:02d}00</firstBusTm><lastBusTm>2026081122{i:02d}00</lastBusTm>"
+            f"<term>1{i}</term><stStationNm>기점{i}</stStationNm><edStationNm>종점{i}</edStationNm>"
+            f"<corpNm>회사{i}</corpNm><length>14{i}</length>"
+        ) if timetable else ""
+        return (
+            f"<itemList><busRouteId>10010{i:04d}</busRouteId>"
+            f"<busRouteNm>노선{i}</busRouteNm><routeType>{3 if i % 2 else 8}</routeType>{extra}</itemList>"
+        )
+    items = "".join(item(i) for i in range(n_ok))
     return f"<msgHeader><headerCd>{header_cd}</headerCd><headerMsg>정상</headerMsg></msgHeader>{items}"
 
 
@@ -28,7 +34,24 @@ def test_parse_routes_extracts_fields(monkeypatch):
     monkeypatch.setattr(bus_routes, "MIN_ROUTES", 2)
     routes = bus_routes.parse_routes(_routes_xml(3))
     assert len(routes) == 3
-    assert routes[1] == {"busRouteId": "100100001", "busRouteNm": "노선1", "routeType": "3"}
+    # 시간표 필드가 없는 응답(구 픽스처)에서도 키는 있고 값은 None — 하위 호환.
+    assert routes[1]["busRouteId"] == "100100001"
+    assert routes[1]["busRouteNm"] == "노선1"
+    assert routes[1]["routeType"] == "3"
+    assert routes[1]["firstBusTm"] is None and routes[1]["term"] is None
+
+
+def test_parse_routes_extracts_timetable_fields(monkeypatch):
+    # #765 — 첫차/막차/배차간격/기점·종점/운수사/노선길이는 원본 문자열 그대로 취한다.
+    monkeypatch.setattr(bus_routes, "MIN_ROUTES", 2)
+    routes = bus_routes.parse_routes(_routes_xml(3, timetable=True))
+    assert routes[1]["firstBusTm"] == "20260811040100"
+    assert routes[1]["lastBusTm"] == "20260811220100"
+    assert routes[1]["term"] == "11"
+    assert routes[1]["stStationNm"] == "기점1"
+    assert routes[1]["edStationNm"] == "종점1"
+    assert routes[1]["corpNm"] == "회사1"
+    assert routes[1]["length"] == "141"
 
 
 def test_parse_routes_header_error_raises():
@@ -220,9 +243,28 @@ def test_build_master_rows_sets_tier_and_keeps_source_route_type():
     ]
     rows = bus_routes.build_master_rows(routes, {"3", "6"})
     assert len(rows) == 2
-    assert rows[0] == {"bus_route_id": "100100001", "bus_route_nm": "간선A",
-                       "route_type": "3", "tier": 1}
+    assert rows[0]["bus_route_id"] == "100100001"
+    assert rows[0]["bus_route_nm"] == "간선A"
+    assert rows[0]["route_type"] == "3" and rows[0]["tier"] == 1
+    # 시간표 필드(#765): 구 reference(3필드 시절)에도 None 으로 안전
+    assert rows[0]["first_bus_tm"] is None and rows[0]["term"] is None
     assert rows[1]["tier"] == 2 and rows[1]["route_type"] == "4"
+
+
+def test_build_master_rows_carries_timetable_fields():
+    routes = [{
+        "busRouteId": "100100412", "busRouteNm": "6001", "routeType": "1",
+        "firstBusTm": "20260811043000", "lastBusTm": "20260811225000", "term": "13",
+        "stStationNm": "인천공항", "edStationNm": "동대문", "corpNm": "공항리무진", "length": "146",
+    }]
+    row = bus_routes.build_master_rows(routes, {"3", "6"})[0]
+    assert row["first_bus_tm"] == "20260811043000"
+    assert row["last_bus_tm"] == "20260811225000"
+    assert row["term"] == "13"
+    assert row["start_station_nm"] == "인천공항"
+    assert row["end_station_nm"] == "동대문"
+    assert row["corp_nm"] == "공항리무진"
+    assert row["route_length"] == "146"
 
 
 def test_master_replace_sql_is_delete_then_insert_with_escaping():
@@ -271,3 +313,30 @@ def test_master_ddl_types_route_codes_varchar_tier_integer():
     assert "route_type varchar" in ddl   # 코드류 varchar(선행 0 보존)
     assert "tier integer" in ddl
     assert "bus_route_id varchar" in ddl
+    assert "first_bus_tm varchar" in ddl  # 시간표 필드(#765) — 원본 보존 varchar
+    assert "route_length varchar" in ddl
+
+
+def test_master_migration_sql_adds_timetable_columns_idempotently():
+    # 구 테이블(3필드 시절) 보강 — IF NOT EXISTS 라 신규 생성 후에도 무해(멱등).
+    stmts = bus_routes.master_migration_sql("iceberg_dev.transit.bronze_bus_route_master")
+    assert len(stmts) == 7
+    assert all("ADD COLUMN IF NOT EXISTS" in s for s in stmts)
+    assert any("first_bus_tm varchar" in s for s in stmts)
+    assert any("term varchar" in s for s in stmts)
+
+
+def test_master_replace_sql_includes_timetable_columns():
+    rows = [{"bus_route_id": "100100412", "bus_route_nm": "6001", "route_type": "1",
+             "tier": 2, "first_bus_tm": "20260811043000", "last_bus_tm": None,
+             "term": "13", "start_station_nm": "인천공항", "end_station_nm": "동대문",
+             "corp_nm": None, "route_length": "146"}]
+    stmts = bus_routes.master_load_sql(
+        "t", rows, load_date="2026-08-09", collected_at="2026-08-09 00:00:11.000000",
+        dag_run_id="x",
+    )
+    assert "first_bus_tm, last_bus_tm, term, start_station_nm, end_station_nm" in stmts[1]
+    assert "'20260811043000'" in stmts[1]
+    assert "'인천공항'" in stmts[1]
+    # None/빈값은 NULL 리터럴
+    assert ", NULL, '13'," in stmts[1].replace("\n", " ")
