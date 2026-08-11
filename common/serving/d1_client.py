@@ -154,7 +154,9 @@ class D1Client(Protocol):
         display_rows: Sequence[dict[str, Any]] = (),
         *,
         param_rows: Sequence[dict[str, Any]] = (),
+        vocabulary_rows: Sequence[dict[str, Any]] = (),
     ) -> None: ...
+    def publish_glossary(self, rows: Sequence[dict[str, Any]]) -> None: ...
     def publish_product_evidence(
         self,
         product_id: str,
@@ -206,6 +208,11 @@ HANDOFF_COLUMN_TYPES: dict[str, tuple[tuple[str, str], ...]] = {
         ("type", "TEXT NOT NULL"), ("description_ko", "TEXT"),
         ("publication_id", "TEXT NOT NULL"),
     ),
+    "d1_catalog_column_vocabularies": (
+        ("product_id", "TEXT NOT NULL"), ("table_name", "TEXT NOT NULL"),
+        ("column_name", "TEXT NOT NULL"), ("vocabulary_id", "TEXT NOT NULL"),
+        ("publication_id", "TEXT NOT NULL"),
+    ),
     "d1_catalog_ext": (
         ("product_id", "TEXT NOT NULL"), ("table_name", "TEXT NOT NULL"),
         ("source_model", "TEXT NOT NULL"), ("grain", "TEXT"),
@@ -251,6 +258,7 @@ HANDOFF_COLUMN_TYPES: dict[str, tuple[tuple[str, str], ...]] = {
 }
 HANDOFF_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "d1_catalog_columns": ("product_id", "column_name"),
+    "d1_catalog_column_vocabularies": ("product_id", "column_name"),
     "d1_catalog_ext": ("product_id",),
     "d1_usage_patterns": ("product_id", "pattern_id"),
     "d1_pattern_params": ("product_id", "pattern_id"),
@@ -265,6 +273,7 @@ HANDOFF_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
 #  - glossary: 제품 스코프가 아니고 exported_at 이 run 마다 새 값이라 부등 판별이 유효.
 HANDOFF_SCOPE_COLUMNS: dict[str, str] = {
     "d1_catalog_columns": "product_id",
+    "d1_catalog_column_vocabularies": "product_id",
     "d1_catalog_ext": "product_id",
     "d1_usage_patterns": "product_id",
     "d1_pattern_params": "product_id",
@@ -273,6 +282,7 @@ HANDOFF_SCOPE_COLUMNS: dict[str, str] = {
 }
 HANDOFF_PRUNE_KEYS: dict[str, str] = {
     "d1_catalog_columns": "column_name",
+    "d1_catalog_column_vocabularies": "column_name",
     "d1_usage_patterns": "pattern_id",
     "d1_pattern_params": "pattern_id",
 }
@@ -282,7 +292,7 @@ HANDOFF_STALE_MARKERS: dict[str, str] = {
     "d1_catalog_glossary": "exported_at",
 }
 HANDOFF_PRODUCT_TABLES = (
-    "d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns", "d1_catalog_display",
+    "d1_catalog_columns", "d1_catalog_column_vocabularies", "d1_catalog_ext", "d1_usage_patterns", "d1_catalog_display",
     "d1_pattern_params",
 )
 HANDOFF_COLUMNS = {table: tuple(name for name, _ in cols) for table, cols in HANDOFF_COLUMN_TYPES.items()}
@@ -488,6 +498,10 @@ GLOSSARY_REGISTRY: dict[str, dict[str, str]] = {
     # 공통 축(#638 §2.4 승격): 게시(취합)는 commerce 가 맡되 정본은 공용 축 패키지의
     # 라이브 행안부 마스터(asac_axes.dim_admin_dong) — commerce 자체 스냅샷 파생이 아니다.
     "common:gu_code":      {"owner": "commerce", "origin": "asac_axes", "source_type": "warehouse"},
+    "weather:sky_code":    {"owner": "traffic_weather", "origin": "traffic_weather", "source_type": "dbt_contract"},
+    "weather:pty_code":    {"owner": "traffic_weather", "origin": "traffic_weather", "source_type": "dbt_contract"},
+    "traffic:flow_value_quality": {"owner": "traffic_weather", "origin": "traffic_weather", "source_type": "dbt_contract"},
+    "traffic:hotspot_state": {"owner": "traffic_weather", "origin": "traffic_weather", "source_type": "dbt_contract"},
 }
 
 
@@ -821,8 +835,9 @@ class HttpD1Client:
         *,
         # v1.11 (Serving#217): 파라미터 메타(d1_pattern_params) — 미선언 도메인은 빈 시퀀스.
         param_rows: Sequence[dict[str, Any]] = (),
+        vocabulary_rows: Sequence[dict[str, Any]] = (),
     ) -> None:
-        """제품 스코프 보조 5종을 자연키 upsert 후 이번 선언에 없는 잔여 행만 정리(#638 §3).
+        """제품 스코프 보조 메타를 자연키 upsert 후 이번 선언에 없는 잔여 행만 정리한다.
 
         원자성 경계는 제품 단위(#638 §3) — 중간 실패 시 이 제품의 메타만 신·구 혼재하고
         다른 제품·도메인 행은 건드리지 않는다. columns/patterns 정리는 선언 키셋 기준
@@ -833,12 +848,16 @@ class HttpD1Client:
         for table in HANDOFF_PRODUCT_TABLES:
             self._ensure_handoff_schema(table)
         statements.extend(handoff_upsert_statements("d1_catalog_columns", columns_rows))
+        statements.extend(handoff_upsert_statements("d1_catalog_column_vocabularies", vocabulary_rows))
         statements.extend(handoff_upsert_statements("d1_catalog_ext", ext_rows))
         statements.extend(handoff_upsert_statements("d1_usage_patterns", pattern_rows))
         statements.extend(handoff_upsert_statements("d1_catalog_display", display_rows))
         statements.extend(handoff_upsert_statements("d1_pattern_params", param_rows))
         statements.append(handoff_prune_statement(
             "d1_catalog_columns", product_id, [str(row["column_name"]) for row in columns_rows]))
+        statements.append(handoff_prune_statement(
+            "d1_catalog_column_vocabularies", product_id,
+            [str(row["column_name"]) for row in vocabulary_rows]))
         statements.append(handoff_stale_delete_statement("d1_catalog_ext", product_id, publication_id))
         # display 를 내린 제품의 옛 행이 남지 않게 — ext 와 같은 단일 키 스코프라 판별도 같다
         statements.append(
@@ -849,6 +868,34 @@ class HttpD1Client:
         # 기본값을 계속 적용한다. patterns 와 같은 선언 키셋(NOT IN) 판별로 정리한다.
         statements.append(handoff_prune_statement(
             "d1_pattern_params", product_id, [str(row["pattern_id"]) for row in param_rows]))
+        for batch in group_api_batches(statements):
+            self._query_batch(batch)
+
+    def publish_glossary(self, rows: Sequence[dict[str, Any]]) -> None:
+        """Fail closed, then replace declared terms only within each vocabulary scope."""
+        violations = glossary_registry_violations(rows)
+        if violations:
+            detail = ", ".join(f"{vocabulary_id}: {reason}" for vocabulary_id, reason in sorted(violations.items()))
+            raise ValueError(f"glossary registry rejected: {detail}")
+        if not rows:
+            return
+
+        markers: dict[str, str] = {}
+        for row in rows:
+            vocabulary_id = str(row.get("vocabulary_id") or "")
+            exported_at = row.get("exported_at")
+            if not isinstance(exported_at, str) or not exported_at:
+                raise ValueError(f"{vocabulary_id}: glossary exported_at is required")
+            previous = markers.setdefault(vocabulary_id, exported_at)
+            if previous != exported_at:
+                raise ValueError(f"{vocabulary_id}: glossary rows must share one exported_at")
+
+        self._ensure_handoff_schema("d1_catalog_glossary")
+        statements = handoff_upsert_statements("d1_catalog_glossary", rows)
+        statements.extend(
+            handoff_stale_delete_statement("d1_catalog_glossary", vocabulary_id, exported_at)
+            for vocabulary_id, exported_at in markers.items()
+        )
         for batch in group_api_batches(statements):
             self._query_batch(batch)
 

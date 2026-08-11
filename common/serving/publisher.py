@@ -23,7 +23,7 @@ import logging
 from common.serving import gate as gatelib
 from common.serving.content_identity import d1_content_hash
 from common.serving.contract import ServingContract
-from common.serving.d1_client import Column, D1Client, sqlite_type
+from common.serving.d1_client import Column, D1Client, GLOSSARY_REGISTRY, glossary_registry_violations, sqlite_type
 from common.serving.pattern_audit import audit_pattern_sql, build_allowlist, deny_findings
 from common.serving.pattern_verify import verify_and_stamp
 
@@ -158,7 +158,7 @@ def _product_meta_rows(
     audit_allowlist: frozenset[str] | None = None,
 ) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
-    list[dict[str, Any]],
+    list[dict[str, Any]], list[dict[str, Any]],
 ]:
     """핸드오프 메타 5종(#638 §2.2 · display v1.10 #706 · param v1.11 Serving#217) 행 —
     계약 선언(dbt yml→manifest)에서 그대로 나온다.
@@ -184,6 +184,18 @@ def _product_meta_rows(
             "publication_id": record.publication_id,
         }
         for ordinal, (name, trino_type) in enumerate(columns)
+    ]
+    vocabulary_rows = [
+        {
+            "product_id": contract.product_id,
+            "table_name": contract.model_name,
+            "column_name": name,
+            "vocabulary_id": vocabulary_id,
+            "publication_id": record.publication_id,
+        }
+        for name, _trino_type in columns
+        if isinstance((vocabulary_id := (contract.column_vocabularies or {}).get(name)), str)
+        and vocabulary_id
     ]
     ext_rows = [
         {
@@ -279,7 +291,36 @@ def _product_meta_rows(
         and any(isinstance(pattern.get(k), dict)
                 for k in ("param_defaults", "param_enum", "params"))
     ]
-    return columns_rows, ext_rows, pattern_rows, display_rows, param_rows
+    return columns_rows, ext_rows, pattern_rows, display_rows, param_rows, vocabulary_rows
+
+
+def _vocabulary_glossary_rows(contracts: Sequence[ServingContract]) -> list[dict[str, Any]]:
+    """Preflight every vocabulary reference before source reads or snapshot writes."""
+    references = {
+        vocabulary_id
+        for contract in contracts
+        for vocabulary_id in (contract.column_vocabularies or {}).values()
+        if isinstance(vocabulary_id, str)
+    }
+    terms = [
+        dict(term)
+        for contract in contracts
+        for term in contract.vocabulary_terms
+        if isinstance(term, dict)
+    ]
+    references.update(str(term.get("vocabulary_id") or "") for term in terms)
+    unknown = sorted(vocabulary_id for vocabulary_id in references if vocabulary_id not in GLOSSARY_REGISTRY)
+    if unknown:
+        raise ValueError(f"unregistered vocabulary_id: {', '.join(unknown)}")
+    if any(term.get("vocabulary_id") == "common:gu_code" for term in terms):
+        raise ValueError("common:gu_code terms must be published by its glossary owner")
+    violations = glossary_registry_violations(terms)
+    if violations:
+        detail = ", ".join(f"{vocabulary_id}: {reason}" for vocabulary_id, reason in sorted(violations.items()))
+        raise ValueError(f"glossary registry rejected: {detail}")
+
+    exported_at = _now_iso()
+    return [dict(term, exported_at=exported_at) for term in terms]
 
 
 def _product_evidence(
@@ -487,6 +528,11 @@ def publish(
         (c.model_name for c in contracts),
         (s for c in contracts for s in (getattr(c, "cross_domain_sources", None) or ())),
     )
+    try:
+        d1.publish_glossary(_vocabulary_glossary_rows(contracts))
+    except Exception as exc:  # noqa: BLE001 -- no source read or snapshot write may precede vocabulary rejection
+        report.failures.append(f"column vocabulary preflight failed: {type(exc).__name__}: {exc}")
+        raise PublicationError(report) from exc
     for contract in contracts:
         record = ProductRecord(
             product_id=contract.product_id,
@@ -733,7 +779,7 @@ def publish(
             # 핸드오프 메타(#638) — 같은 try 안이라 실패 시 스냅샷·_catalog 가 함께 복원된다.
             # 메타 행 자체는 보상하지 않는다(#638 §3 — 제품 단위 신·구 혼재 허용, 타 제품 무영향).
             record.stage = "product_meta"
-            columns_rows, ext_rows, pattern_rows, display_rows, param_rows = _product_meta_rows(
+            columns_rows, ext_rows, pattern_rows, display_rows, param_rows, vocabulary_rows = _product_meta_rows(
                 contract, plan.columns, record, audit_allowlist)
             # export 시점 패턴 검증(Serving#217): 방금 게시한 D1 데이터에 미검증 패턴 SQL 을 실제로
             # 돌려 통과분에 verified_at 스탬프 → 게이트웨이가 runnable 로 연다. 이미 검증(yml 스탬프)된
@@ -762,7 +808,7 @@ def publish(
                             contract.product_id, type(exc).__name__)
             d1.publish_product_meta(
                 contract.product_id, record.publication_id, columns_rows, ext_rows, pattern_rows,
-                display_rows, param_rows=param_rows,
+                display_rows, param_rows=param_rows, vocabulary_rows=vocabulary_rows,
             )
             # 권리/품질 증거(#678)는 이번 publication_id에 결속한다. 여기서 실패하면
             # catalog와 스냅샷을 복원하고, Worker는 publication 불일치/누락으로 계속 차단한다.

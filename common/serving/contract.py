@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
@@ -81,6 +81,8 @@ class ServingContract:
     rollup_rule: str | None = None       # 물리 게시 확장(commerce d1_rollup) — 동상
     display: dict[str, Any] | None = None  # v1.10(#706) 사람이 읽는 표시 메타 — 미선언은 None
     column_descriptions: dict[str, str] | None = None  # manifest node.columns description
+    column_vocabularies: dict[str, str] = field(default_factory=dict)
+    vocabulary_terms: tuple[dict[str, str], ...] = ()
     usage_patterns: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
@@ -143,6 +145,71 @@ def _column_identity_meta(column: dict[str, Any]) -> dict[str, Any]:
         "semantic_role": meta.get("semantic_role"),
         "unit": meta.get("unit"),
     }
+
+
+def _load_column_vocabulary_metadata(
+    product_id: str,
+    node: dict[str, Any],
+) -> tuple[dict[str, str], tuple[dict[str, str], ...]]:
+    """Normalize DBT column vocabulary metadata before any publication work starts."""
+    columns = node.get("columns") or {}
+    if not isinstance(columns, dict):
+        raise ValueError(f"{product_id}: manifest columns must be a mapping")
+
+    column_vocabularies: dict[str, str] = {}
+    vocabulary_terms: list[dict[str, str]] = []
+    for column_name, spec in columns.items():
+        if not isinstance(spec, dict):
+            raise ValueError(f"{product_id}.{column_name}: column metadata must be a mapping")
+        top_meta = spec.get("meta")
+        if top_meta is not None and not isinstance(top_meta, dict):
+            raise ValueError(f"{product_id}.{column_name}: meta must be a mapping")
+        config = spec.get("config")
+        if config is not None and not isinstance(config, dict):
+            raise ValueError(f"{product_id}.{column_name}: config must be a mapping")
+        config_meta = config.get("meta") if isinstance(config, dict) else None
+        if config_meta is not None and not isinstance(config_meta, dict):
+            raise ValueError(f"{product_id}.{column_name}: config.meta must be a mapping")
+        meta = {**(top_meta or {}), **(config_meta or {})}
+
+        vocabulary_id = meta.get("vocabulary_id")
+        terms = meta.get("vocabulary_terms")
+        if vocabulary_id is None and terms is None:
+            continue
+        if not isinstance(vocabulary_id, str) or not vocabulary_id.strip():
+            raise ValueError(f"{product_id}.{column_name}: vocabulary_terms requires vocabulary_id")
+        column_vocabularies[str(column_name)] = vocabulary_id
+        if terms is None:
+            continue
+        if not isinstance(terms, list):
+            raise ValueError(f"{product_id}.{column_name}: vocabulary_terms must be a list")
+        seen_codes: set[str] = set()
+        for term in terms:
+            if (
+                not isinstance(term, dict)
+                or set(term) != {"code", "label_ko"}
+                or not isinstance(term.get("code"), str)
+                or not term["code"].strip()
+                or not isinstance(term.get("label_ko"), str)
+                or not term["label_ko"].strip()
+            ):
+                raise ValueError(
+                    f"{product_id}.{column_name}: vocabulary_terms entries require non-empty code and label_ko"
+                )
+            code = term["code"]
+            if code in seen_codes:
+                raise ValueError(f"{product_id}.{column_name}: vocabulary_terms code '{code}' is duplicated")
+            seen_codes.add(code)
+            vocabulary_terms.append(
+                {
+                    "vocabulary_id": vocabulary_id,
+                    "code": code,
+                    "label_ko": term["label_ko"],
+                    "origin": "traffic_weather",
+                    "source_type": "dbt_contract",
+                }
+            )
+    return column_vocabularies, tuple(vocabulary_terms)
 
 
 def _projection_schema_hash(
@@ -453,6 +520,9 @@ def load_contracts(
         empty_result_freshness = _load_empty_result_freshness(
             str(product_id), serving, manifest
         )
+        column_vocabularies, vocabulary_terms = _load_column_vocabulary_metadata(
+            str(product_id), node
+        )
         contracts.append(
             ServingContract(
                 product_id=str(product_id),
@@ -510,6 +580,8 @@ def load_contracts(
                       if isinstance(node.get("columns"), dict) and node["columns"]
                       else None
                   ),
+                  column_vocabularies=column_vocabularies,
+                  vocabulary_terms=vocabulary_terms,
                   usage_patterns=tuple(
                       pattern
                       for pattern in (serving.get("usage_patterns") or ())

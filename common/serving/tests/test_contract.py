@@ -259,6 +259,67 @@ def test_load_contracts_reads_source_evidence_and_freshness_slo(tmp_path):
     )
 
 
+def test_load_contracts_preserves_column_vocabulary_metadata(tmp_path):
+    path = _projection_manifest(
+        tmp_path,
+        column_overrides={
+            "sky_code": {
+                "description": "KMA 하늘 상태 코드",
+                "data_type": "VARCHAR",
+                "config": {
+                    "meta": {
+                        "vocabulary_id": "weather:sky_code",
+                        "vocabulary_terms": [
+                            {"code": "1", "label_ko": "맑음"},
+                            {"code": "3", "label_ko": "구름 많음"},
+                            {"code": "4", "label_ko": "흐림"},
+                        ],
+                    }
+                },
+            }
+        },
+    )
+
+    contract = load_contracts(path)[0]
+
+    assert contract.column_vocabularies == {"sky_code": "weather:sky_code"}
+    assert contract.vocabulary_terms == (
+        {
+            "vocabulary_id": "weather:sky_code",
+            "code": "1",
+            "label_ko": "맑음",
+            "origin": "traffic_weather",
+            "source_type": "dbt_contract",
+        },
+        {
+            "vocabulary_id": "weather:sky_code",
+            "code": "3",
+            "label_ko": "구름 많음",
+            "origin": "traffic_weather",
+            "source_type": "dbt_contract",
+        },
+        {
+            "vocabulary_id": "weather:sky_code",
+            "code": "4",
+            "label_ko": "흐림",
+            "origin": "traffic_weather",
+            "source_type": "dbt_contract",
+        },
+    )
+
+
+def test_load_contracts_rejects_malformed_column_meta_mapping(tmp_path):
+    path = _projection_manifest(
+        tmp_path,
+        column_overrides={
+            "sky_code": {"description": "KMA 하늘 상태 코드", "data_type": "VARCHAR", "config": {"meta": []}}
+        },
+    )
+
+    with pytest.raises(ValueError, match="sky_code.*config.meta"):
+        load_contracts(path)
+
+
 def test_load_contracts_keeps_kst_worker_interpretation_without_timezone_override(tmp_path):
     timestamp_meta = {
         "description": "quality timestamp",
