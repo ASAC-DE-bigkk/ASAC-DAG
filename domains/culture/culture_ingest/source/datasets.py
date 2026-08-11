@@ -135,7 +135,12 @@ KOPIS_DATASETS = [
         base_params={"area": "11"},  # 11 = 서울 (boxoffice는 area 코드 사용)
         row_tag="boxof",
         key_fields=("prfnm",),
-        note="기간 랭킹(top 50) 스냅샷. 페이징 없음(cpage 무시). 파라미터=stdate/eddate/area/catecode/srchseatscale. ⚠️ stdate~eddate 최대 31일(초과 시 returncode 05). 일배치 DAG는 ≤31일 롤링창 사용.",
+        note="기간 랭킹(top 50) 스냅샷. 페이징 없음(cpage 무시). 파라미터=stdate/eddate/area/catecode/srchseatscale. "
+             "⚠️ stdate~eddate 상한은 **포함 32일**이다(33일부터 returncode 05 — 2026-08-11 실측, #757). "
+             "예전 주석의 '최대 31일'은 틀렸고, 그 오기 때문에 `lookback_days=31`(=포함 32일)을 "
+             "한도 초과로 오해해 prfdtcnt 전량 0의 원인으로 지목했었다 — 아니다. "
+             "🔴 prfdtcnt 는 같은 요청에도 시점에 따라 0으로 오는 일이 잦다(상류 사유 미상, #757). "
+             "행 수·순위는 정상이므로 수집은 계속하되, perf_count 는 외부 계약에서 내렸다.",
         min_rows=30,  # 실측 하한(#150) — baseline 없는 날 truncation 그물
         volume_drop_threshold=0.5,
     ),

@@ -18,7 +18,8 @@ raw를 다시 읽어 bronze Iceberg에 멱등 적재하므로, bronze만 깨진 
                   (kopis_facility_detail 은 야간 missing top-up(#466),
                   전수 재크롤은 culture_facility_refresh 일요일 05:30 KST, #206)
   date_from/to    YYYYMMDD; 비면 -> 롤링 [end-lookback_days, end]
-  lookback_days   날짜창 크기 (boxoffice는 <=31)                       기본 31
+  lookback_days   날짜창 크기. `[end-N, end]` 라 **포함 일수는 N+1** 이다 —      기본 31
+                  boxoffice 상한이 포함 32일이므로 N<=31 (#757 실측)
   include_detail  KOPIS 상세 엔드포인트도 크롤(상한 있음)               기본 True
   max_detail      상세 크롤당 id 상한                                  기본 200
   detail_mode     "missing"(야간 top-up, #466) | "full"(전수)          기본 missing
