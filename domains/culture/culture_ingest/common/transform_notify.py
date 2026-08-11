@@ -157,8 +157,10 @@ def build_transform_payload(
     models: Mapping[str, Any],
     tests: Mapping[str, Any],
     *,
+    label: str = "변환",
     target: str | None = None,
     dag_run_id: str | None = None,
+    elapsed: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """요약 두 개 → Discord embed payload(전송은 하지 않는다 — 순수 조립).
@@ -166,10 +168,15 @@ def build_transform_payload(
     색은 판정을 따른다: 경고·스킵·비성공 모델이 하나라도 있으면 노랑, 아니면 초록.
     성공 경로에서만 불리므로 fail/error 는 원칙적으로 0 이지만, 그래도 세서 적는다 —
     "성공했는데 테스트가 깨져 있다"를 알림이 감추면 안 된다.
+
+    ``elapsed`` 를 주면 그 값을 쓰고, 없으면 두 요약의 합으로 본다. 부르는 쪽이 갈리기
+    때문이다 — `culture_transform` 은 run·test 가 **다른 명령**이라 합이 맞지만,
+    `culture_slo` 는 `dbt build` **한 번**이라 같은 payload 를 둘로 요약해 넘긴다.
+    거기서 합을 쓰면 소요가 정확히 두 배로 부풀어 오른다.
     """
     layers = models.get("layers") or {}
     built = {layer: (layers.get(layer) or {}).get("total", 0) for layer in LAYERS}
-    title = "culture 변환 완료 — " + " · ".join(f"{layer} {built[layer]}" for layer in LAYERS)
+    title = f"culture {label} 완료 — " + " · ".join(f"{layer} {built[layer]}" for layer in LAYERS)
 
     lines = [_layer_line(layer, layers[layer]) for layer in LAYERS if layer in layers]
 
@@ -202,7 +209,8 @@ def build_transform_payload(
     footer_bits = [stamped]
     if target:
         footer_bits.append(f"target={target}")
-    total_seconds = sum(v for v in (models.get("elapsed"), tests.get("elapsed")) if v)
+    total_seconds = (elapsed if elapsed is not None
+                     else sum(v for v in (models.get("elapsed"), tests.get("elapsed")) if v))
     if total_seconds:
         footer_bits.append(f"dbt {total_seconds:.0f}초")
     if dag_run_id:
