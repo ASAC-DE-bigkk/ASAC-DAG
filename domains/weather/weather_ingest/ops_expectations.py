@@ -10,7 +10,7 @@ weather·traffic 담당(masondev1024) 예시로 제시된 등록일(2026-08-03)�
 자체에는 commerce 처럼 도메인별 개별 확인일이 박혀 있지 않고, 이 날짜가 이슈에 남은 유일한
 weather 소유 확인 날짜다.
 
-등록 대상 = 2026-08-08 기준 ``domains/weather/`` 실제 DAG 파일 전수(11개). ``ask_seoul_iceberg_maintenance``
+등록 대상 = 2026-08-11 기준 ``domains/weather/`` 실제 DAG 파일 전수(12개). ``ask_seoul_iceberg_maintenance``
 는 ``weather_`` 접두를 따르지 않는 유일한 예외지만(#78 코멘트), weather 번들 안에 물리적으로
 있고 weather·traffic Iceberg 테이블을 함께 정리하므로 여기서 등록한다.
 
@@ -37,6 +37,9 @@ EXPECTATIONS = (
     # bronze 완료 Asset 트리거 — 상류 이벤트형은 고정 주기 대신 트리거+상류+최대 지연으로(S-3).
     Expectation("weather_vilage_fcst_transform", "asset",
                 upstream="weather_vilage_fcst_bronze (bronze 완료 Asset)", max_delay_minutes=90),
+    # source 재수집 없이 public Weather serving snapshot만 매시 갱신한다.
+    Expectation("weather_serving_snapshot_refresh", "schedule",
+                "매시 00분 (KST)", max_delay_minutes=90),
     Expectation("weather_w2_canonical_transform", "asset",
                 upstream="weather_vilage_fcst_bronze (bronze 완료 Asset)", max_delay_minutes=90),
     # W2 canonical 계약 감사(데이터 쓰기 없음) — 매일 09:15.
@@ -45,9 +48,9 @@ EXPECTATIONS = (
     # 신뢰도 리포트 — 매일 09:00(Discord webhook 설정 시).
     Expectation("weather_bronze_reliability_report", "schedule",
                 "일 1회 09:00", max_delay_minutes=24 * 60),
-    # gold 발행 완료 Asset 트리거(weather_vilage_fcst_transform 이 발행).
+    # full transform 또는 hourly serving refresh가 gold publication 완료 Asset을 발행한다.
     Expectation("weather_serving_export", "asset",
-                upstream="weather_vilage_fcst_transform (gold 발행 완료 Asset)", max_delay_minutes=120),
+                upstream="weather_vilage_fcst_transform 또는 weather_serving_snapshot_refresh (gold publication 완료 Asset)", max_delay_minutes=120),
     # W1 bridge 계약 스모크 — 격리 스키마에서 수동 실행, 감시 제외(S-4).
     Expectation("weather_w1_contract_smoke", "manual", monitored=False),
     # W2 과거 관측 복구(<=6h 창 단위) — 수동 전용, 감시 제외(S-4).

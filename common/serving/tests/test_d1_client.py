@@ -139,6 +139,62 @@ def test_catalog_upsert_preserves_legacy_serving_tier_on_existing_row():
     }
 
 
+def test_catalog_retirement_deletes_only_exact_product_ids_and_keeps_physical_tables():
+    d1 = SqliteCatalogClient()
+    current = _catalog_row()
+    grid_current = {
+        **current,
+        "name": "gold_weather_grid_current_outlook",
+        "product_id": "weather_grid_current_outlook",
+    }
+    grid_precipitation = {
+        **current,
+        "name": "gold_weather_grid_precipitation_window",
+        "product_id": "weather_grid_precipitation_window",
+    }
+    d1.upsert_catalog([current, grid_current, grid_precipitation])
+    for name in (grid_current["name"], grid_precipitation["name"]):
+        d1.ensure_table(name, [("product_row_id", "varchar")], ("product_row_id",))
+
+    d1.delete_catalog_product_ids(
+        [
+            "weather_grid_precipitation_window",
+            "weather_grid_current_outlook",
+            "weather_grid_current_outlook",
+        ]
+    )
+
+    assert d1._query("SELECT product_id FROM _catalog ORDER BY product_id;") == [
+        {"product_id": "weather_place_current_outlook"}
+    ]
+    assert d1._query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name LIKE 'gold_weather_grid_%' ORDER BY name;"
+    ) == [
+        {"name": "gold_weather_grid_current_outlook"},
+        {"name": "gold_weather_grid_precipitation_window"},
+    ]
+    assert not any("DROP TABLE" in query for query in d1.queries)
+
+
+@pytest.mark.parametrize(
+    "product_ids",
+    [
+        ("weather_grid_current_outlook", {"not": "a product id"}),
+        ("weather_grid_current_outlook", "unsafe product id"),
+    ],
+)
+def test_catalog_retirement_rejects_invalid_product_ids_before_deduplication(product_ids):
+    """Malformed input must fail as a validation error, not while sorting a set."""
+
+    d1 = SqliteCatalogClient()
+
+    with pytest.raises(ValueError, match="unsafe D1 product_id"):
+        d1.delete_catalog_product_ids(product_ids)
+
+    assert not d1.queries
+
+
 def test_serving_table_enforces_contract_primary_key_and_reports_readback_counts():
     d1 = SqliteCatalogClient()
     table = "gold_weather_place_current_outlook"

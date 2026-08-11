@@ -157,6 +157,49 @@ def test_weather_dbt_model_command_writes_isolated_artifact(tmp_path, monkeypatc
     ]
 
 
+def test_weather_dbt_model_command_uses_the_frozen_serving_as_of_hour(tmp_path, monkeypatch):
+    module = load_transform_module()
+    monkeypatch.setattr(module, "DBT_PROJECT", str(tmp_path / "weather"))
+    captured = []
+
+    def fake_run(command, **kwargs):
+        captured.append((command, kwargs))
+        if command[1] == "ls":
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout='{"unique_id":"model.asac_seoul.weather_silver","resource_type":"model"}\n',
+                stderr="",
+            )
+        target_path = Path(command[command.index("--target-path") + 1])
+        target_path.mkdir(parents=True, exist_ok=True)
+        (target_path / "run_results.json").write_text("{}", encoding="utf-8")
+        (target_path / "manifest.json").write_text("{}", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    ti = FakeTaskInstance(
+        task_id="dbt_run_silver",
+        try_number=1,
+        pulls={(module.SERVING_AS_OF_HOUR_TASK_ID, None): "2026-08-11 10:00:00"},
+    )
+
+    module.run_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_weather_transform_silver",
+        serving_as_of_task_id=module.SERVING_AS_OF_HOUR_TASK_ID,
+        threads=2,
+        ti=ti,
+        run_id="scheduled__1",
+        params={"target": "dev"},
+    )
+
+    command = captured[-1][0]
+    assert json.loads(command[command.index("--vars") + 1]) == {
+        **module.WEATHER_DBT_CONTRACT_VARS,
+        "weather_serving_as_of_hour": "2026-08-11 10:00:00",
+    }
+
+
 def test_weather_dbt_attempt_overwrites_artifact_xcom_when_process_cannot_start(
     tmp_path, monkeypatch
 ):

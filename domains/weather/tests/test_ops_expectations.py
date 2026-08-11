@@ -89,6 +89,14 @@ def test_asset_triggered_dags_declare_upstream_and_max_delay():
         assert row["upstream"] and row["max_delay_minutes"] > 0
 
 
+def test_hourly_serving_snapshot_refresh_is_monitored_as_a_scheduled_dag():
+    row = _registered()["weather_serving_snapshot_refresh"]
+
+    assert row["trigger_type"] == "schedule"
+    assert row["expected_interval"] == "매시 00분 (KST)"
+    assert row["max_delay_minutes"] == 90
+
+
 def test_every_monitored_dag_has_a_max_delay():
     for dag_id, row in _registered().items():
         if row["monitored"]:

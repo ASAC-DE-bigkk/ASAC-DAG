@@ -15,6 +15,10 @@ WEATHER_PRODUCTS = [
     "weather_place_risk_window",
     "weather_place_forecast_change_daily",
 ]
+RETIRED_GRID_PRODUCTS = [
+    "weather_grid_current_outlook",
+    "weather_grid_precipitation_window",
+]
 
 
 def _manifest(tmp_path):
@@ -124,6 +128,34 @@ def _load_domain_contracts():
     return loader
 
 
+def _load_domain_retirement_product_ids():
+    loader = getattr(contract_module, "load_domain_retirement_product_ids", None)
+    assert loader is not None, "domain retirement contract loader is missing"
+    return loader
+
+
+def _manifest_with_retired_grid_products(tmp_path, *, external: bool = False, enabled: bool = False):
+    path = _manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    for product_id in RETIRED_GRID_PRODUCTS:
+        manifest["nodes"][f"model.project.gold_{product_id}"] = {
+            "resource_type": "model",
+            "name": f"gold_{product_id}",
+            "config": {
+                "meta": {
+                    "serving": {
+                        "enabled": enabled,
+                        "external": external,
+                        "retire_on_publish": True,
+                        "product_id": product_id,
+                    }
+                }
+            },
+        }
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
 def test_load_domain_contracts_requires_every_enabled_weather_product(tmp_path):
     loader = _load_domain_contracts()
 
@@ -164,6 +196,27 @@ def test_load_domain_contracts_allows_an_explicit_partitioned_scope(tmp_path):
     )
 
     assert [contract.product_id for contract in contracts] == sorted(WEATHER_PRODUCTS[:2])
+
+
+def test_load_domain_retirement_product_ids_reads_only_disabled_grid_contracts(tmp_path):
+    product_ids = _load_domain_retirement_product_ids()(
+        _manifest_with_retired_grid_products(tmp_path), "weather"
+    )
+
+    assert product_ids == tuple(sorted(RETIRED_GRID_PRODUCTS))
+
+
+@pytest.mark.parametrize("external,enabled", [(True, False), (False, True)])
+def test_load_domain_retirement_product_ids_fails_closed_when_contract_is_live(
+    tmp_path, external, enabled
+):
+    with pytest.raises(ValueError, match="retire_on_publish requires enabled=false and external=false"):
+        _load_domain_retirement_product_ids()(
+            _manifest_with_retired_grid_products(
+                tmp_path, external=external, enabled=enabled
+            ),
+            "weather",
+        )
 
 
 def test_load_contracts_reads_opt_in_upsert_strategy(tmp_path):

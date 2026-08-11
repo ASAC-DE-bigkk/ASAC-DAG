@@ -1,14 +1,15 @@
+import importlib.util
+import json
 import types
 
 import pytest
 
 from common.serving import dag_factory
 from common.serving.dag_factory import publication_record_payload
-from common.serving.publisher import ProductRecord
+from common.serving.publisher import ProductRecord, PublicationError, PublicationReport
 
 
 def _capture_wrapper_build_calls(monkeypatch, path, module_name):
-    import importlib.util
     import sys
     import types
 
@@ -61,6 +62,156 @@ def test_serving_export_factory_keeps_content_parity_opt_in_default_false():
     assert inspect.signature(dag_factory.build_serving_export_dag).parameters[
         "verify_content_parity"
     ].default is False
+
+
+def test_domain_catalog_retirement_uses_only_disabled_contract_product_ids(tmp_path):
+    manifest = {
+        "nodes": {
+            "model.project.gold_weather_grid_current_outlook": {
+                "resource_type": "model",
+                "name": "gold_weather_grid_current_outlook",
+                "config": {
+                    "meta": {
+                        "serving": {
+                            "enabled": False,
+                            "external": False,
+                            "retire_on_publish": True,
+                            "product_id": "weather_grid_current_outlook",
+                        }
+                    }
+                },
+            }
+        }
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    class Catalog:
+        product_ids = None
+
+        def delete_catalog_product_ids(self, product_ids):
+            self.product_ids = tuple(product_ids)
+
+    catalog = Catalog()
+    retire = getattr(dag_factory, "retire_domain_catalog_entries", None)
+    assert retire is not None, "catalog retirement helper is missing"
+
+    assert retire(catalog, manifest_path=manifest_path, domain="weather") == (
+        "weather_grid_current_outlook",
+    )
+    assert catalog.product_ids == ("weather_grid_current_outlook",)
+
+
+def _retirement_manifest(tmp_path):
+    manifest = {
+        "nodes": {
+            f"model.project.{model_name}": {
+                "resource_type": "model",
+                "name": model_name,
+                "config": {
+                    "meta": {
+                        "serving": {
+                            "enabled": False,
+                            "external": False,
+                            "retire_on_publish": True,
+                            "product_id": product_id,
+                        }
+                    }
+                },
+            }
+            for model_name, product_id in (
+                ("gold_weather_grid_current_outlook", "weather_grid_current_outlook"),
+                ("gold_weather_grid_precipitation_window", "weather_grid_precipitation_window"),
+            )
+        }
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest_path
+
+
+def test_publication_task_retires_exact_catalog_products_only_after_success(tmp_path):
+    events = []
+    report = PublicationReport()
+
+    class Catalog:
+        def delete_catalog_product_ids(self, product_ids):
+            events.append(("retire", tuple(product_ids)))
+
+    def publish_fn(*_args, **_kwargs):
+        events.append(("publish",))
+        return report
+
+    published, retired = dag_factory.publish_then_retire_catalog(
+        publish_fn=publish_fn,
+        contracts=(),
+        source=object(),
+        d1=Catalog(),
+        smoke=object(),
+        source_run_id="run-1",
+        verify_content_parity=False,
+        manifest_path=_retirement_manifest(tmp_path),
+        domain="weather",
+    )
+
+    assert published is report
+    assert retired == (
+        "weather_grid_current_outlook",
+        "weather_grid_precipitation_window",
+    )
+    assert events == [
+        ("publish",),
+        ("retire", retired),
+    ]
+
+
+def test_publication_task_does_not_retire_catalog_when_publish_fails(tmp_path):
+    class Catalog:
+        deleted = False
+
+        def delete_catalog_product_ids(self, _product_ids):
+            self.deleted = True
+
+    catalog = Catalog()
+
+    def publish_fn(*_args, **_kwargs):
+        raise PublicationError(PublicationReport(failures=["publisher failed"]))
+
+    with pytest.raises(PublicationError, match="publisher failed"):
+        dag_factory.publish_then_retire_catalog(
+            publish_fn=publish_fn,
+            contracts=(),
+            source=object(),
+            d1=catalog,
+            smoke=object(),
+            source_run_id="run-1",
+            verify_content_parity=False,
+            manifest_path=_retirement_manifest(tmp_path),
+            domain="weather",
+        )
+
+    assert catalog.deleted is False
+
+
+def test_publication_task_propagates_catalog_retirement_failure_for_airflow_retry(tmp_path):
+    report = PublicationReport()
+
+    class Catalog:
+        def delete_catalog_product_ids(self, _product_ids):
+            raise RuntimeError("D1 retirement write failed")
+
+    with pytest.raises(RuntimeError, match="D1 retirement write failed"):
+        dag_factory.publish_then_retire_catalog(
+            publish_fn=lambda *_args, **_kwargs: report,
+            contracts=(),
+            source=object(),
+            d1=Catalog(),
+            smoke=object(),
+            source_run_id="run-1",
+            verify_content_parity=False,
+            manifest_path=_retirement_manifest(tmp_path),
+            domain="weather",
+        )
 
 
 def test_watchdog_target_must_match_execution_environment():

@@ -110,6 +110,57 @@ def _manifest_path(domain: str, dbt_project: str | None) -> str:
     return f"/opt/airflow/dbt/domains/{project}/target/manifest.json"
 
 
+def retire_domain_catalog_entries(
+    d1,
+    *,
+    manifest_path: str,
+    domain: str,
+) -> tuple[str, ...]:
+    """Retire only DBT-declared public catalog entries after a successful publish."""
+
+    from common.serving.contract import load_domain_retirement_product_ids
+
+    product_ids = load_domain_retirement_product_ids(manifest_path, domain)
+    if product_ids:
+        d1.delete_catalog_product_ids(product_ids)
+    return product_ids
+
+
+def publish_then_retire_catalog(
+    *,
+    publish_fn: Callable[..., object],
+    contracts: Sequence[object],
+    source: object,
+    d1: object,
+    smoke: object,
+    source_run_id: str,
+    verify_content_parity: bool,
+    manifest_path: str,
+    domain: str,
+) -> tuple[object, tuple[str, ...]]:
+    """Publish first, then retire only DBT-declared catalog entries.
+
+    A publication failure exits before retirement.  A retirement write failure
+    intentionally propagates so Airflow retries the task rather than claiming a
+    partial catalog transition succeeded.
+    """
+
+    report = publish_fn(
+        contracts,
+        source,
+        d1,
+        smoke,
+        source_run_id=source_run_id,
+        verify_content_parity=verify_content_parity,
+    )
+    retired_catalog_product_ids = retire_domain_catalog_entries(
+        d1,
+        manifest_path=manifest_path,
+        domain=domain,
+    )
+    return report, retired_catalog_product_ids
+
+
 def resolve_publication_product_ids(
     context: Mapping[str, object],
     configured_product_ids: Sequence[str],
@@ -328,8 +379,9 @@ def build_serving_export_dag(
 
     def _run(**context) -> None:
         run_id = str(context.get("run_id") or context.get("ts") or "manual")
+        manifest_path = _manifest_path(domain, dbt_project)
         contracts = _load_export_contracts(
-            _manifest_path(domain, dbt_project),
+            manifest_path,
             domain,
             product_ids,
             exact_domain_contracts=exact_domain_contracts,
@@ -359,13 +411,16 @@ def build_serving_export_dag(
         smoke = build_smoke_tester_from_env()
 
         try:
-            report = publish(
-                contracts,
-                source,
-                d1,
-                smoke,
+            report, retired_catalog_product_ids = publish_then_retire_catalog(
+                publish_fn=publish,
+                contracts=contracts,
+                source=source,
+                d1=d1,
+                smoke=smoke,
                 source_run_id=run_id,
                 verify_content_parity=verify_content_parity,
+                manifest_path=manifest_path,
+                domain=domain,
             )
         except PublicationError as exc:
             record_publication_events(context, domain, exc.report.records)
@@ -373,13 +428,17 @@ def build_serving_export_dag(
         record_publication_events(context, domain, report.records)
         published = sum(1 for r in report.records if r.serving_status in {"published", "degraded"})
         skipped = sum(1 for r in report.records if r.serving_status == "skipped_retained")
-        print(f"[serving:{domain}] published={published} skipped={skipped} of {len(report.records)} products")
+        print(
+            f"[serving:{domain}] published={published} skipped={skipped} "
+            f"retired_catalog={len(retired_catalog_product_ids)} of {len(report.records)} products"
+        )
         context["ti"].xcom_push(
             key="serving_publication",
             value={
                 "domain": domain,
                 "published": published,
                 "skipped": skipped,
+                "retired_catalog_product_ids": list(retired_catalog_product_ids),
                 "records": [
                     publication_record_payload(r)
                     for r in report.records
