@@ -39,6 +39,7 @@ DAILY = [
     "transit_event_access",
     "transit_parking_profile",
     "transit_bus_route_timetable",   # 공표 시간표 명부(#765·ASAC-DBT#510) — 주간 갱신, daily 재발행
+    "transit_subway_timetable",      # 지하철 첫차·막차 요약(#766·ASAC-DBT#512) — 월 순회, daily 재발행
 ]
 
 transit_serving_export_fast = build_serving_export_dag(
