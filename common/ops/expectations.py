@@ -113,24 +113,35 @@ def rows(*, updated_at: str, domains: Iterable[str] | None = None) -> list[dict[
     return out
 
 
+#: 등록 모듈 후보 — **닫힌 집합**이다. 도메인을 늘리면 여기와 통합 census 테스트
+#: (`common/tests/test_ops_expectations_completeness.py`)에 같이 늘린다. 후보에 있는데
+#: 모듈이 없으면 런타임은 조용히 건너뛰지만(아래 load_all — 실행 환경 사정), **테스트는
+#: 실패한다** — transit 이 이 침묵 스킵 뒤에 숨어 40개 DAG 가 판정 근거 없이 돌던 것이
+#: #733 의 사고다. 같은 일이 다시는 조용히 지나가지 않게 한다.
+EXPECTED_MODULES: tuple[str, ...] = (
+    "commerce_core.ops_expectations",
+    "citydata_ingest.ops_expectations",
+    "culture_ingest.ops_expectations",
+    "traffic_ingest.ops_expectations",
+    "seoul_transit.ops_expectations",      # transit 번들 실제 패키지명(#733 — transit_ingest 아님)
+    "weather_ingest.ops_expectations",
+    "common.ops.ops_expectations",         # 공용 축(로더·로그십) — #733 "등록 주체" 확정분
+)
+
+
 def load_all() -> tuple[str, ...]:
     """등록 모듈을 임포트해 레지스트리를 채운다. 없는 도메인은 조용히 건너뛴다.
 
     각 도메인이 자기 번들에 `ops_expectations` 모듈을 두면 여기서 자동으로 잡힌다.
     임포트 실패는 **그 도메인만** 비우고 나머지는 계속 — 한 도메인의 문법 오류가 전체
-    등록을 막지 않는다.
+    등록을 막지 않는다. (완결성은 런타임이 아니라 `common/tests` 통합 census 가 강제한다.)
     """
     import importlib
     import logging
 
     logger = logging.getLogger(__name__)
-    candidates = (
-        "commerce_core.ops_expectations",
-        "citydata_ingest.ops_expectations",
-        "culture_ingest.ops_expectations",
-        "traffic_ingest.ops_expectations",
-        "transit_ingest.ops_expectations",
-        "weather_ingest.ops_expectations",
+    candidates = EXPECTED_MODULES + (
+        "transit_ingest.ops_expectations",   # 과거 후보명 — 혹시 그 이름으로 만든 배포가 있어도 잡히게
     )
     for name in candidates:
         try:
