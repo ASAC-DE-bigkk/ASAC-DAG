@@ -1,4 +1,6 @@
 # common/serving/pattern_verify.py 단위 — export 시점 검증 스탬프 (Serving#217)
+from datetime import datetime, timezone
+
 from common.serving.pattern_verify import resolve_params, verify_and_stamp
 
 
@@ -83,6 +85,76 @@ def test_resolve_params_keeps_json_string_for_json_each():
     assert "json_each('[\"a\",\"b\"]')" in sub
 
 
+def test_resolve_params_relative_defaults_override_stale_comment_at_kst_boundary():
+    sql = "-- :from=2026-08-01, :to=2026-08-31\nSELECT a FROM t WHERE d >= :from AND d < :to"
+    # 2026-08-10 15:00 UTC = 2026-08-11 00:00 KST. 기준 시각은 KST 계약으로 해석한다.
+    now = datetime(2026, 8, 10, 15, 0, tzinfo=timezone.utc)
+    sub, resolved, unresolved = resolve_params(
+        sql,
+        param_defaults={
+            "from": {"rel": "-1d", "as": "date"},
+            "to": {"rel": "0d", "as": "date"},
+        },
+        now=now,
+    )
+
+    assert unresolved == []
+    assert resolved == {"from": "'2026-08-10'", "to": "'2026-08-11'"}
+    assert "2026-08-01" not in sub and "'2026-08-10'" in sub and "'2026-08-11'" in sub
+
+
+def test_resolve_params_relative_defaults_support_calendar_types():
+    sql = "SELECT a FROM t WHERE ym = :month AND y = :year AND at < :at"
+    now = datetime(2026, 8, 10, 15, 0, tzinfo=timezone.utc)
+    _, resolved, unresolved = resolve_params(
+        sql,
+        param_defaults={
+            "month": {"rel": "-1M", "as": "ym"},
+            "year": {"rel": "-1y", "as": "year"},
+            "at": {"rel": "0d", "as": "datetime"},
+        },
+        now=now,
+    )
+
+    assert unresolved == []
+    assert resolved == {
+        "month": "'2026-07'",
+        "year": "'2025'",
+        "at": "'2026-08-11 00:00:00'",
+    }
+
+
+def test_resolve_params_relative_datetime_nonzero_offset_uses_midnight():
+    sql = "SELECT a FROM t WHERE at < :at"
+    now = datetime(2026, 8, 10, 15, 30, tzinfo=timezone.utc)
+    _, resolved, unresolved = resolve_params(
+        sql,
+        param_defaults={"at": {"rel": "-1d", "as": "datetime"}},
+        now=now,
+    )
+
+    assert unresolved == []
+    assert resolved["at"] == "'2026-08-10 00:00:00'"
+
+
+def test_resolve_params_invalid_relative_default_stays_unresolved():
+    sql = "-- :from=2026-08-01\nSELECT a FROM t WHERE d >= :from"
+    _, resolved, unresolved = resolve_params(
+        sql,
+        param_defaults={"from": {"rel": "yesterday", "as": "date"}},
+    )
+
+    assert "from" not in resolved
+    assert unresolved == ["from"]
+
+    _, resolved, unresolved = resolve_params(
+        sql,
+        param_defaults={"from": {"rel": "0d", "as": []}},
+    )
+    assert "from" not in resolved
+    assert unresolved == ["from"]
+
+
 def test_verify_stamps_only_unverified_and_on_success():
     now = "2026-08-10T00:00:00Z"
     rows = [
@@ -98,6 +170,25 @@ def test_verify_stamps_only_unverified_and_on_success():
     # 이미 검증된 건 그대로 · 실행도 안 함
     assert rows[1]["verified_at"] == "2026-01-01T00:00:00Z" and rows[1]["verified_rows"] == 9
     assert all(":n" not in c for c in calls)   # 예시값으로 치환돼 실행됨
+
+
+def test_verify_uses_relative_defaults_for_each_pattern():
+    now = datetime(2026, 8, 10, 15, 0, tzinfo=timezone.utc)
+    rows = [_row("p", "-- :at='2000-01-01'\nSELECT a FROM t WHERE d = :at")]
+    calls = []
+
+    rep = verify_and_stamp(
+        rows,
+        run_sql=lambda sql: (calls.append(sql), [{"a": 1}])[1],
+        publication_id="pub1",
+        now_iso="2026-08-11T00:00:00Z",
+        now=now,
+        param_defaults_by_pattern={"p": {"at": {"rel": "0d", "as": "date"}}},
+    )
+
+    assert rep["verified"] == ["p"]
+    assert len(calls) == 1
+    assert "'2026-08-11'" in calls[0] and "2000-01-01" not in calls[0]
 
 
 def test_verify_skips_unresolved_params():

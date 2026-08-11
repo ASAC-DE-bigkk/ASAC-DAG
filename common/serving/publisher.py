@@ -739,8 +739,21 @@ def publish(
             # 돌려 통과분에 verified_at 스탬프 → 게이트웨이가 runnable 로 연다. 이미 검증(yml 스탬프)된
             # 패턴은 무접촉. 이 제품만 다루므로 도메인 간 충돌 없음. 검증 실패는 게시를 막지 않는다.
             try:
+                relative_now = datetime.now(timezone.utc)
+                published_pattern_ids = {str(row["pattern_id"]) for row in pattern_rows}
+                param_defaults_by_pattern = {
+                    str(pattern["pattern_id"]): pattern["param_defaults"]
+                    for pattern in contract.usage_patterns
+                    if str(pattern.get("pattern_id")) in published_pattern_ids
+                    and isinstance(pattern.get("param_defaults"), dict)
+                }
                 vr = verify_and_stamp(
-                    pattern_rows, run_sql=d1.execute, publication_id=record.publication_id)
+                    pattern_rows,
+                    run_sql=d1.execute,
+                    publication_id=record.publication_id,
+                    param_defaults_by_pattern=param_defaults_by_pattern,
+                    now=relative_now,
+                )
                 if vr["verified"] or vr["failed"] or vr["skipped"]:
                     log.info("[serving publish] 패턴 검증 스탬프 product=%s 검증=%d 실패=%d 스킵=%d",
                              contract.product_id, len(vr["verified"]), len(vr["failed"]), len(vr["skipped"]))

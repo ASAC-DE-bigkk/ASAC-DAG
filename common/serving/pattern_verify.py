@@ -19,10 +19,15 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Sequence
+from zoneinfo import ZoneInfo
 
 _PLACEHOLDER_RE = re.compile(r":([a-z][a-z0-9_]*)")
+_RELATIVE_RE = re.compile(r"^([+-]?\d+)(d|w|M|y)$")
+_RELATIVE_AS = {"date", "datetime", "ym", "year"}
+_KST = ZoneInfo("Asia/Seoul")
 
 
 def executable_sql(sql_text: str) -> str:
@@ -31,17 +36,89 @@ def executable_sql(sql_text: str) -> str:
     return "\n".join(re.sub(r"--.*$", "", line) for line in stripped.splitlines())
 
 
-def resolve_params(sql_text: str, hint_text: str = "") -> tuple[str, dict[str, str], list[str]]:
+def _relative_default_literal(
+    default: Any,
+    *,
+    now: datetime | None,
+) -> tuple[str | None, bool]:
+    """Return (SQL literal, declared) for a relative default.
+
+    ``declared`` distinguishes an invalid relative declaration from an absent
+    declaration: invalid metadata must not fall back to a stale SQL comment.
+    """
+    if not isinstance(default, Mapping):
+        return None, False
+    if set(default) != {"rel", "as"}:
+        return None, True
+    rel = default.get("rel")
+    as_type = default.get("as")
+    match = _RELATIVE_RE.fullmatch(rel) if isinstance(rel, str) else None
+    if not match or not isinstance(as_type, str) or as_type not in _RELATIVE_AS:
+        return None, True
+
+    current = datetime.now(_KST) if now is None else now
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_KST)
+    else:
+        current = current.astimezone(_KST)
+    amount, unit = int(match.group(1)), match.group(2)
+    try:
+        if unit == "d":
+            shifted = current + timedelta(days=amount)
+        elif unit == "w":
+            shifted = current + timedelta(weeks=amount)
+        else:
+            if unit == "M":
+                month_index = current.year * 12 + current.month - 1 + amount
+                year, month_zero_based = divmod(month_index, 12)
+                anchor = current.replace(year=year, month=month_zero_based + 1, day=1)
+            else:
+                anchor = current.replace(year=current.year + amount, day=1)
+            # JavaScript Date.setUTCMonth/setUTCFullYear overflows invalid days
+            # into the following month; adding day-1 to day 1 matches that rule.
+            shifted = anchor + timedelta(days=current.day - 1)
+    except (OverflowError, ValueError):
+        return None, True
+
+    if as_type == "date":
+        text = shifted.strftime("%Y-%m-%d")
+    elif as_type == "datetime":
+        clock = shifted.strftime("%H:%M:%S") if amount == 0 else "00:00:00"
+        text = shifted.strftime("%Y-%m-%d") + " " + clock
+    elif as_type == "ym":
+        text = shifted.strftime("%Y-%m")
+    else:
+        text = shifted.strftime("%Y")
+    return "'" + text + "'", True
+
+
+def resolve_params(
+    sql_text: str,
+    hint_text: str = "",
+    *,
+    param_defaults: Mapping[str, Any] | None = None,
+    now: datetime | None = None,
+) -> tuple[str, dict[str, str], list[str]]:
     """(치환된 실행문, 사용값, 미해결 이름) — 예시값을 sql 본문 주석 → 힌트 순으로 찾아 치환.
 
     verify_usage_patterns.py 의 동명 함수와 같은 규약(주석 `-- :n=10`, `:gu='성동구'` 형)이다.
+    `param_defaults`에 상대 기본값이 선언된 파라미터는 SQL 주석의 정적 예시보다 우선한다.
     못 찾은 파라미터가 하나라도 있으면 실행을 포기한다(추측값 없음).
     """
     executable = executable_sql(sql_text)
     names = sorted(set(_PLACEHOLDER_RE.findall(executable)), key=len, reverse=True)
     resolved: dict[str, str] = {}
     unresolved: list[str] = []
+    defaults = param_defaults if isinstance(param_defaults, Mapping) else {}
     for name in names:
+        if name in defaults:
+            value, declared = _relative_default_literal(defaults[name], now=now)
+            if declared:
+                if value is None:
+                    unresolved.append(name)
+                else:
+                    resolved[name] = value
+                continue
         value = None
         for source in (sql_text or "", hint_text or ""):
             for m in re.finditer(rf":{name}(?![a-z0-9_])", source):
@@ -126,14 +203,17 @@ def verify_and_stamp(
     publication_id: str,
     now_iso: str | None = None,
     param_overrides: dict[str, dict[str, str]] | None = None,
+    param_defaults_by_pattern: Mapping[str, Mapping[str, Any]] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, list]:
     """미검증 패턴을 실 D1 에 돌려 통과분에 스탬프한다(pattern_rows 를 제자리 수정).
 
     run_sql(sql) -> list[rows] (실패 시 예외). publication_id = 이 제품의 현재 게시본 id.
     이미 verified_at 이 있는 행은 건드리지 않는다(손 검증 존중). 반환: 처리 요약(로그용).
     """
-    now = now_iso or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamp_now = now_iso or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     overrides = param_overrides or {}
+    defaults_by_pattern = param_defaults_by_pattern or {}
     report: dict[str, list] = {"verified": [], "failed": [], "skipped": []}
     for row in pattern_rows:
         pid = str(row.get("pattern_id"))
@@ -143,7 +223,12 @@ def verify_and_stamp(
             report["skipped"].append((pid, "no publication_id"))
             continue
         sql = row.get("sql") or ""
-        substituted, resolved, unresolved = resolve_params(sql, _hint_of(row))
+        substituted, resolved, unresolved = resolve_params(
+            sql,
+            _hint_of(row),
+            param_defaults=defaults_by_pattern.get(pid),
+            now=now,
+        )
         ov = overrides.get(pid)
         if ov:
             resolved = {**resolved, **ov}
@@ -170,7 +255,7 @@ def verify_and_stamp(
             report["skipped"].append((pid, "0행(allow_empty 아님)"))
             continue
         row["verified_rows"] = measured
-        row["verified_at"] = now
+        row["verified_at"] = stamp_now
         row["verified_publication_id"] = publication_id
         report["verified"].append(pid)
     return report

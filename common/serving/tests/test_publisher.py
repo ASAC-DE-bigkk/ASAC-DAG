@@ -1230,8 +1230,11 @@ def test_export_verifies_unverified_draft_and_stamps():
     """공용 게시기가 미검증 초안을 방금 게시한 D1 에 돌려 verified_at 를 스탬프한다 —
     yml 에 verified_at 없는 초안이 게시 후 runnable 로 열리는 경로."""
     contract = _contract(grain="g", usage_patterns=(
-        {"pattern_id": "draft", "sql": "-- :n=5\nSELECT a FROM gold_weather_place_current_outlook LIMIT :n",
+        {"pattern_id": "draft", "sql": "-- :as_of='2000-01-01', :n=5\nSELECT a FROM gold_weather_place_current_outlook WHERE event_date = :as_of LIMIT :n",
          "question_ko": "q", "axes": "x", "requires": ["select_columns"]},   # verified_at 없음
+        {"pattern_id": "relative", "sql": "-- :as_of='2000-01-01', :n=5\nSELECT a FROM gold_weather_place_current_outlook WHERE event_date = :as_of LIMIT :n",
+         "question_ko": "q", "axes": "x", "requires": ["select_columns"],
+         "param_defaults": {"as_of": {"rel": "0d", "as": "date"}}},
         {"pattern_id": "verified", "sql": "SELECT 1 FROM gold_weather_place_current_outlook",
          "question_ko": "q", "axes": "x", "requires": ["select_columns"],
          "verified_at": "2026-01-01T00:00:00Z", "verified_rows": 3},
@@ -1251,6 +1254,9 @@ def test_export_verifies_unverified_draft_and_stamps():
     assert pats["verified"]["verified_at"] == "2026-01-01T00:00:00Z"
     # 초안 SQL 이 실제로 실행됐다(예시값 치환)
     assert any("LIMIT 5" in c for c in d1.execute_calls)
+    # publisher가 d1_pattern_params의 상대 기본값을 export 검증기에도 전달한다.
+    assert any("event_date" in c and "2000-01-01" not in c and ":as_of" not in c
+               for c in d1.execute_calls)
 
 
 def test_export_verification_failure_does_not_block_publish():
