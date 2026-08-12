@@ -260,22 +260,36 @@ def build_d1_client_from_env() -> HttpD1Client:
 # ── API smoke test ────────────────────────────────────────────────────────────────
 
 class HttpSmokeTester:
-    """Hit the public serving API for one representative row to prove reachability."""
+    """Hit the authenticated public serving API for one representative row."""
 
-    def __init__(self, base_url: str) -> None:
-        self._base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str, bearer_token: str = "") -> None:
+        base_url = base_url.rstrip("/")
+        self._api_base_url = (
+            base_url if base_url.endswith("/api/v1") else f"{base_url}/api/v1"
+        ) if base_url else ""
+        self._bearer_token = bearer_token.strip()
 
     def check(self, model_name: str) -> str:
-        if not self._base_url:
+        if not self._api_base_url:
             return "not_evaluated"
+        if not self._bearer_token:
+            return "failed"
         import requests
 
         try:
-            resp = requests.get(f"{self._base_url}/data/{model_name}", params={"limit": 1}, timeout=30)
+            resp = requests.get(
+                f"{self._api_base_url}/data/{model_name}",
+                params={"limit": 1},
+                headers={"Authorization": f"Bearer {self._bearer_token}"},
+                timeout=30,
+            )
         except Exception:  # noqa: BLE001 -- unreachable API is a smoke failure
             return "failed"
         return "passed" if resp.status_code == 200 else "failed"
 
 
 def build_smoke_tester_from_env() -> HttpSmokeTester:
-    return HttpSmokeTester(os.environ.get("SERVING_API_BASE_URL", ""))
+    return HttpSmokeTester(
+        os.environ.get("SERVING_API_BASE_URL", ""),
+        os.environ.get("SERVING_API_SMOKE_TOKEN", ""),
+    )
