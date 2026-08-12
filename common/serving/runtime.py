@@ -16,8 +16,8 @@ import re
 from typing import Any
 
 from common.serving.d1_client import Column, HttpD1Client
-from common.serving.contract import ServingContract
-from common.serving.publisher import ReadPlan
+from common.serving.contract import QUERY_AVAILABILITY_COLUMNS, ServingContract
+from common.serving.publisher import QueryAvailabilityPlan, ReadPlan
 
 APPEND_LOOKBACK_HOURS = 2
 APPEND_LOOKBACK_DAYS = 2
@@ -96,6 +96,18 @@ class TrinoSourceReader:
         row = self._cursor.fetchone()
         return row[0] if row else None
 
+    def _query_availability_plan(self, relation: str) -> QueryAvailabilityPlan:
+        physical = self._columns(relation)
+        types = dict(physical)
+        missing = [column for column in QUERY_AVAILABILITY_COLUMNS if column not in types]
+        if missing:
+            raise ValueError(f"{relation}: query_availability missing columns {','.join(missing)}")
+        columns = [(column, types[column]) for column in QUERY_AVAILABILITY_COLUMNS]
+        select_list = ",".join(_quote_identifier(column) for column in QUERY_AVAILABILITY_COLUMNS)
+        return QueryAvailabilityPlan(columns, self._select(
+            f"SELECT {select_list} FROM {self._relation(relation)}"
+        ))
+
     def _plan(
         self,
         contract: ServingContract,
@@ -114,6 +126,11 @@ class TrinoSourceReader:
             coverage_observed_distinct_count=coverage_observed_distinct_count,
             empty_result_freshness=(
                 self._empty_result_freshness(contract) if not rows else None
+            ),
+            query_availability=(
+                self._query_availability_plan(contract.query_availability_relation)
+                if contract.query_availability_relation is not None
+                else None
             ),
         )
 

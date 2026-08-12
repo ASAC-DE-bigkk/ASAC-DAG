@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from common.serving.contract import ServingContract
+from common.serving.contract import QUERY_AVAILABILITY_COLUMNS
 from common.serving.runtime import HttpSmokeTester, TrinoSourceReader
 
 
@@ -20,11 +21,15 @@ class FakeCursor:
         *,
         distinct_count: int | None = None,
         fallback_freshness: Any | None = None,
+        companion_columns: list[tuple[str, str]] | None = None,
+        companion_rows: list[tuple[Any, ...]] | None = None,
     ) -> None:
         self.show_columns_rows = show_columns_rows
         self.select_rows = select_rows
         self.distinct_count = distinct_count
         self.fallback_freshness = fallback_freshness
+        self.companion_columns = companion_columns
+        self.companion_rows = companion_rows
         self.statements: list[str] = []
         self.description: list[tuple[str]] = []
         self._pending: str | None = None
@@ -32,7 +37,7 @@ class FakeCursor:
     def execute(self, sql: str) -> None:
         self.statements.append(sql)
         if sql.startswith("SHOW COLUMNS"):
-            self._pending = "show"
+            self._pending = "companion_show" if sql.endswith("gold_weather_place_risk_query_availability") else "show"
             self.description = []
             return
         if sql.startswith("SELECT COUNT(DISTINCT"):
@@ -43,19 +48,22 @@ class FakeCursor:
             self._pending = "fallback_freshness"
             self.description = [("freshness",)]
             return
-        self._pending = "select"
+        self._pending = "companion_select" if sql.endswith("gold_weather_place_risk_query_availability") else "select"
         selected = sql.removeprefix("SELECT ").split(" FROM ", 1)[0]
         if selected == "*":
-            self.description = [(name,) for name, _type in self.show_columns_rows]
+            source = self.companion_columns if self._pending == "companion_select" else self.show_columns_rows
+            self.description = [(name,) for name, _type in (source or [])]
             return
         self.description = [(part.strip().strip('"'),) for part in selected.split(",")]
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         if self._pending == "show":
             return self.show_columns_rows
+        if self._pending == "companion_show":
+            return self.companion_columns or []
         if self._pending == "fallback_freshness":
             return [(self.fallback_freshness,)]
-        return self.select_rows
+        return self.companion_rows if self._pending == "companion_select" else self.select_rows
 
     def fetchone(self) -> tuple[int]:
         if self._pending == "distinct_count":
@@ -104,6 +112,43 @@ def test_opted_in_snapshot_read_uses_exact_quoted_projection_and_columns():
     assert plan.columns == [("product_row_id", "varchar"), ("place_id", "varchar"), ("forecast_at", "timestamp")]
     assert plan.rows == [
         {"product_row_id": "row-1", "place_id": "place-1", "forecast_at": "2026-07-30 00:00:00"}
+    ]
+
+
+def test_opted_in_risk_read_fetches_companion_columns_in_fixed_order():
+    cursor = FakeCursor(
+        [("product_row_id", "varchar"), ("place_id", "varchar"), ("forecast_at", "timestamp")],
+        [("row-1", "place-1", "2026-07-30 00:00:00")],
+        companion_columns=[(column, "varchar") for column in QUERY_AVAILABILITY_COLUMNS],
+        companion_rows=[tuple(f"v-{index}" for index, _column in enumerate(QUERY_AVAILABILITY_COLUMNS))],
+    )
+    contract = _contract(
+        product_id="weather_place_risk_window",
+        model_name="gold_weather_place_risk_window",
+        query_availability_relation="gold_weather_place_risk_query_availability",
+    )
+
+    plan = TrinoSourceReader(cursor, "iceberg_dev", "weather").read(contract, last_good_max=None)
+
+    assert [name for name, _type in plan.query_availability.columns] == list(QUERY_AVAILABILITY_COLUMNS)
+    assert cursor.statements[-2:] == [
+        "SHOW COLUMNS FROM iceberg_dev.weather.gold_weather_place_risk_query_availability",
+        'SELECT "place_id","snapshot_as_of_hour","available_from_at","available_to_at","forecast_collected_at_min","forecast_collected_at_max","expected_forecast_hour_count","observed_forecast_hour_count","availability_status","source_population_revision" FROM iceberg_dev.weather.gold_weather_place_risk_query_availability',
+    ]
+
+
+def test_no_query_availability_contract_keeps_existing_reader_statement_sequence():
+    cursor = FakeCursor(
+        [("product_row_id", "varchar"), ("place_id", "varchar"), ("forecast_at", "timestamp")],
+        [("row-1", "place-1", "2026-07-30 00:00:00")],
+    )
+
+    plan = TrinoSourceReader(cursor, "iceberg_dev", "weather").read(_contract(), last_good_max=None)
+
+    assert plan.query_availability is None
+    assert cursor.statements == [
+        "SHOW COLUMNS FROM iceberg_dev.weather.gold_weather_place_current_outlook",
+        'SELECT "product_row_id","place_id","forecast_at" FROM iceberg_dev.weather.gold_weather_place_current_outlook',
     ]
 
 

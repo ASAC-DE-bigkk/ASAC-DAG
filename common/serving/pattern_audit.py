@@ -72,6 +72,41 @@ def tokenize(sql: str) -> list[tuple[str, str]]:
             if m.lastgroup not in ("ws", "line_comment", "block_comment")]
 
 
+def rewrite_audited_relation(
+    sql: str, active_model: str, staging_model: str, allowed_tables: frozenset[str]
+) -> str | None:
+    """Rewrite exact lexical FROM/JOIN references for candidate-only verification.
+
+    The existing full audit remains the authority for relation allowlisting.  This
+    deliberately accepts only an identifier immediately after FROM/JOIN; anything
+    more complex stays unverified instead of accidentally querying active data.
+    """
+    if audit_pattern_sql(sql, allowed_tables):
+        return None
+    tokens = [
+        (m.lastgroup, m.group(), m.start(), m.end()) for m in _TOKEN_RE.finditer(sql or "")
+        if m.lastgroup not in ("ws", "line_comment", "block_comment")
+    ]
+    replacements: list[tuple[int, int, str]] = []
+    active = active_model.lower()
+    for index, (kind, value, _start, _end) in enumerate(tokens[:-1]):
+        if kind != "ident" or value.lower() not in {"from", "join"}:
+            continue
+        next_kind, next_value, start, end = tokens[index + 1]
+        if next_kind not in _NAME_KINDS:
+            return None
+        if _strip_ident(next_value).lower() == active:
+            quote = next_value[:1] if next_kind in {"dquote", "bquote", "bracket"} else ""
+            closing = {"dquote": '"', "bquote": "`", "bracket": "]"}.get(next_kind, "")
+            replacements.append((start, end, f"{quote}{staging_model}{closing}"))
+    if not replacements:
+        return None
+    out = sql
+    for start, end, value in reversed(replacements):
+        out = out[:start] + value + out[end:]
+    return out
+
+
 def _skip_parens(toks: list[tuple[str, str]], j: int) -> int:
     depth = 0
     n = len(toks)

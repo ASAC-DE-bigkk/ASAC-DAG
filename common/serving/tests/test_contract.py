@@ -9,6 +9,14 @@ from common.serving import dag_factory
 from common.serving.contract import load_contracts
 
 
+QUERY_AVAILABILITY_COLUMNS = (
+    "place_id", "snapshot_as_of_hour", "available_from_at", "available_to_at",
+    "forecast_collected_at_min", "forecast_collected_at_max",
+    "expected_forecast_hour_count", "observed_forecast_hour_count",
+    "availability_status", "source_population_revision",
+)
+
+
 WEATHER_PRODUCTS = [
     "weather_place_current_outlook",
     "weather_place_precipitation_window",
@@ -120,6 +128,47 @@ def _projection_manifest(tmp_path, *, projection=None, column_overrides=None):
         encoding="utf-8",
     )
     return path
+
+
+def _availability_companion_node(drop: str | None = None):
+    return {
+        "resource_type": "model",
+        "name": "gold_weather_place_risk_query_availability",
+        "columns": {
+            column: {"data_type": "VARCHAR"}
+            for column in QUERY_AVAILABILITY_COLUMNS
+            if column != drop
+        },
+        "config": {"meta": {}},
+    }
+
+
+def test_load_contracts_reads_declared_query_availability_companion(tmp_path):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["query_availability"] = {"relation": "gold_weather_place_risk_query_availability"}
+    manifest["nodes"]["model.project.gold_weather_place_risk_query_availability"] = _availability_companion_node()
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert load_contracts(path)[0].query_availability_relation == "gold_weather_place_risk_query_availability"
+
+
+@pytest.mark.parametrize("relation,companion,match", [
+    ("missing_model", None, "relation unknown model"),
+    ("gold_weather_place_risk_query_availability", _availability_companion_node(drop="availability_status"), "unknown column availability_status"),
+])
+def test_load_contracts_rejects_invalid_query_availability_contract(tmp_path, relation, companion, match):
+    path = _projection_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    serving = manifest["nodes"]["model.project.gold_weather_place_current_outlook"]["config"]["meta"]["serving"]
+    serving["query_availability"] = {"relation": relation}
+    if companion is not None:
+        manifest["nodes"]["model.project.gold_weather_place_risk_query_availability"] = companion
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=match):
+        load_contracts(path)
 
 
 def _load_domain_contracts():
