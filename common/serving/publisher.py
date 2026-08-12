@@ -856,47 +856,51 @@ def publish(
                 _append_ledger(d1, record, outcome="failed")
                 report.records.append(record)
                 continue
-        atomic_opt_in = contract.query_availability_relation is not None
+        atomic_opt_in = (
+            contract.query_availability_relation is not None
+            or (_uses_replace_lifecycle(contract) and contract.zero_policy == "allow")
+        )
         previous_state: ProductPublicationState | None = None
         try:
             record.stage = "write"
             if atomic_opt_in:
-                # Candidate tables and sidecar are completely read back before an
-                # active table or catalog row can change.
-                assert plan.query_availability is not None
+                # Candidate table, catalog, and quality evidence are activated together.
+                # In particular, zero-row snapshots must expose their fresh fallback
+                # evidence before the public API smoke check can recover a stale LKG.
                 d1.prepare_atomic_publication_schema()
                 d1.stage_snapshot(contract.model_name, plan.columns, rows, contract.primary_key)
                 staged_rows = d1.read_staged_snapshot_rows(contract.model_name, plan.columns, contract.primary_key)
                 if verify_content_parity and record.source_content_hash != d1_content_hash(
                     namespace=contract.model_name, columns=plan.columns, rows=staged_rows, primary_key=contract.primary_key,
                 ):
-                    raise RuntimeError("candidate risk read-back content mismatch")
-                d1.stage_query_availability(
-                    contract.product_id, record.publication_id, plan.query_availability.rows,
-                    fingerprint=record.query_availability_fingerprint or "", measured_at=record.published_at,
-                )
-                sidecar_rows = d1.read_query_availability_rows(contract.product_id, record.publication_id)
-                readback_content_rows = [
-                    {column: row.get(column) for column in QUERY_AVAILABILITY_COLUMNS}
-                    for row in sidecar_rows
-                ]
-                try:
-                    readback_fingerprint = query_availability_fingerprint(
-                        contract,
-                        QueryAvailabilityPlan(plan.query_availability.columns, readback_content_rows),
+                    raise RuntimeError("candidate snapshot read-back content mismatch")
+                if plan.query_availability is not None:
+                    d1.stage_query_availability(
+                        contract.product_id, record.publication_id, plan.query_availability.rows,
+                        fingerprint=record.query_availability_fingerprint or "", measured_at=record.published_at,
                     )
-                except Exception as exc:  # noqa: BLE001 -- malformed/corrupt rows are a read-back mismatch
-                    raise RuntimeError(
-                        f"query_availability read-back mismatch: content identity invalid ({type(exc).__name__})"
-                    ) from exc
-                if not (
-                    len(sidecar_rows) == QUERY_AVAILABILITY_EXPECTED_PLACE_COUNT
-                    and len({row.get("place_id") for row in sidecar_rows}) == QUERY_AVAILABILITY_EXPECTED_PLACE_COUNT
-                    and {row.get("availability_fingerprint") for row in sidecar_rows} == {record.query_availability_fingerprint}
-                    and {row.get("publication_id") for row in sidecar_rows} == {record.publication_id}
-                    and readback_fingerprint == record.query_availability_fingerprint
-                ):
-                    raise RuntimeError("query_availability read-back mismatch")
+                    sidecar_rows = d1.read_query_availability_rows(contract.product_id, record.publication_id)
+                    readback_content_rows = [
+                        {column: row.get(column) for column in QUERY_AVAILABILITY_COLUMNS}
+                        for row in sidecar_rows
+                    ]
+                    try:
+                        readback_fingerprint = query_availability_fingerprint(
+                            contract,
+                            QueryAvailabilityPlan(plan.query_availability.columns, readback_content_rows),
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- malformed/corrupt rows are a read-back mismatch
+                        raise RuntimeError(
+                            f"query_availability read-back mismatch: content identity invalid ({type(exc).__name__})"
+                        ) from exc
+                    if not (
+                        len(sidecar_rows) == QUERY_AVAILABILITY_EXPECTED_PLACE_COUNT
+                        and len({row.get("place_id") for row in sidecar_rows}) == QUERY_AVAILABILITY_EXPECTED_PLACE_COUNT
+                        and {row.get("availability_fingerprint") for row in sidecar_rows} == {record.query_availability_fingerprint}
+                        and {row.get("publication_id") for row in sidecar_rows} == {record.publication_id}
+                        and readback_fingerprint == record.query_availability_fingerprint
+                    ):
+                        raise RuntimeError("query_availability read-back mismatch")
                 # Candidate patterns may only read the staging relation. Ambiguous
                 # SQL stays unverified rather than borrowing old active evidence.
                 metadata_parts = _product_meta_rows(contract, plan.columns, record, audit_allowlist)

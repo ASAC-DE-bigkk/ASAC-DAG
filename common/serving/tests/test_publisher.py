@@ -458,6 +458,60 @@ def test_opted_in_snapshot_stages_then_activates_once_with_same_publication_iden
     assert d1.preflight_calls == 1
 
 
+def test_zero_allow_snapshot_activates_fresh_candidate_before_api_smoke():
+    contract = _projected_contract(zero_policy="allow")
+    d1 = FakeD1()
+
+    class CandidateSmoke:
+        def check(self, model_name):
+            assert model_name == contract.model_name
+            assert d1.catalog[model_name]["row_count"] == 0
+            assert d1.catalog[model_name]["freshness"] == "2026-08-12 16:00:00"
+            return "passed"
+
+    report = publish(
+        [contract],
+        FakeSource({contract.model_name: ReadPlan(
+            COLUMNS, [], empty_result_freshness="2026-08-12 16:00:00",
+        )}),
+        d1,
+        CandidateSmoke(),
+        source_run_id="zero-allow-freshness-recovery",
+        verify_content_parity=True,
+    )
+
+    record = report.records[0]
+    assert d1.activation_calls == [(contract.product_id, contract.model_name, record.publication_id)]
+    assert record.api_smoke_status == "passed"
+    assert d1.catalog[contract.model_name]["publication_id"] == record.publication_id
+
+
+def test_zero_allow_snapshot_smoke_failure_restores_lkg():
+    contract = _projected_contract(zero_policy="allow")
+    d1 = FakeD1()
+    old_rows = _rows(1)
+    old_catalog = {"name": contract.model_name, "publication_id": "pub-old", "row_count": 1}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract],
+            FakeSource({contract.model_name: ReadPlan(
+                COLUMNS, [], empty_result_freshness="2026-08-12 16:00:00",
+            )}),
+            d1,
+            FakeSmoke("failed"),
+            source_run_id="zero-allow-smoke-failure",
+            verify_content_parity=True,
+        )
+
+    assert d1.compensation_calls == [(contract.product_id, contract.model_name)]
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert excinfo.value.report.records[0].rollback_status == "restored"
+
+
 def test_opt_in_primary_key_readback_failure_compensates_once_without_legacy_restore():
     contract = _risk_contract_with_query_availability()
     d1 = ExplodingPrimaryKeyStatsD1()
