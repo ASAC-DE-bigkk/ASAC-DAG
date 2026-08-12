@@ -67,7 +67,9 @@ dag = build_serving_export_dag(
 
 `CLOUDFLARE_API_TOKEN` 은 env 에서만 읽고 로그·코드에 남기지 않는다. 계정/DB id 는 비밀이 아닌
 식별자로 `SERVING_CLOUDFLARE_ACCOUNT_ID`·`SERVING_D1_DATABASE_ID` env 로 주입. 공개 API base 는
-`SERVING_API_BASE_URL`(없으면 smoke no-op pass — mock/local).
+`SERVING_API_BASE_URL`(없으면 smoke no-op pass — mock/local). 설정된 공개 API smoke는
+`SERVING_API_SMOKE_TOKEN`을 `Authorization: Bearer`로 보내며, base URL 뒤의 `/api/v1/data/<model>`을
+확인한다. 토큰 값은 env에만 두고 로그·코드·문서에 기록하지 않는다.
 
 ## 테스트
 

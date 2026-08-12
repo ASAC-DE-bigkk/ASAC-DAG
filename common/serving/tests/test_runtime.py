@@ -1,16 +1,59 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from common.serving.contract import ServingContract
 from common.serving.contract import QUERY_AVAILABILITY_COLUMNS
-from common.serving.runtime import HttpSmokeTester, TrinoSourceReader
+from common.serving.runtime import HttpSmokeTester, TrinoSourceReader, build_smoke_tester_from_env
 
 
 def test_missing_api_base_url_is_not_evaluated_smoke():
     assert HttpSmokeTester("").check("gold_weather_place_current_outlook") == "not_evaluated"
+
+
+def test_smoke_uses_api_v1_and_bearer_token(monkeypatch):
+    calls: list[dict[str, Any]] = []
+
+    def get(url: str, **kwargs: Any) -> SimpleNamespace:
+        calls.append({"url": url, **kwargs})
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(get=get))
+
+    status = HttpSmokeTester("https://ask-seoul.kr", "test-token").check(
+        "gold_traffic_road_congestion_context_current"
+    )
+
+    assert status == "passed"
+    assert calls == [{
+        "url": "https://ask-seoul.kr/api/v1/data/gold_traffic_road_congestion_context_current",
+        "params": {"limit": 1},
+        "headers": {"Authorization": "Bearer test-token"},
+        "timeout": 30,
+    }]
+
+
+def test_smoke_fails_closed_when_api_token_is_missing():
+    assert HttpSmokeTester("https://ask-seoul.kr").check("gold_weather_place_current_outlook") == "failed"
+
+
+def test_smoke_factory_uses_configured_api_token(monkeypatch):
+    calls: list[dict[str, Any]] = []
+
+    def get(url: str, **kwargs: Any) -> SimpleNamespace:
+        calls.append({"url": url, **kwargs})
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(get=get))
+    monkeypatch.setenv("SERVING_API_BASE_URL", "https://ask-seoul.kr/api/v1")
+    monkeypatch.setenv("SERVING_API_SMOKE_TOKEN", "test-token")
+
+    assert build_smoke_tester_from_env().check("gold_weather_place_current_outlook") == "passed"
+    assert calls[0]["url"] == "https://ask-seoul.kr/api/v1/data/gold_weather_place_current_outlook"
 
 
 class FakeCursor:
