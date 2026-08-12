@@ -13,6 +13,7 @@ no Trino, no Cloudflare, no prod. The real seams live in ``runtime.py``.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,9 +23,9 @@ import logging
 
 from common.serving import gate as gatelib
 from common.serving.content_identity import d1_content_hash
-from common.serving.contract import ServingContract
-from common.serving.d1_client import Column, D1Client, GLOSSARY_REGISTRY, glossary_registry_violations, sqlite_type
-from common.serving.pattern_audit import audit_pattern_sql, build_allowlist, deny_findings
+from common.serving.contract import QUERY_AVAILABILITY_COLUMNS, ServingContract
+from common.serving.d1_client import Column, D1Client, GLOSSARY_REGISTRY, HANDOFF_PRODUCT_TABLES, ProductPublicationState, glossary_registry_violations, sqlite_type
+from common.serving.pattern_audit import audit_pattern_sql, build_allowlist, deny_findings, rewrite_audited_relation
 from common.serving.pattern_verify import verify_and_stamp
 
 log = logging.getLogger(__name__)
@@ -35,6 +36,12 @@ from common.serving.gate import (
     STATUS_SKIPPED,
     GateDecision,
 )
+
+
+@dataclass
+class QueryAvailabilityPlan:
+    columns: list[Column]
+    rows: list[dict[str, Any]]
 
 
 @dataclass
@@ -50,6 +57,7 @@ class ReadPlan:
     # Sparse zero-row products may carry the upstream freshness declared by
     # `empty_result_freshness`; null is intentionally not treated as healthy.
     empty_result_freshness: Any | None = None
+    query_availability: QueryAvailabilityPlan | None = None
 
 
 class SourceReader(Protocol):
@@ -83,6 +91,8 @@ class ProductRecord:
     source_content_hash: str | None = None
     d1_content_hash: str | None = None
     coverage: dict[str, Any] | None = None
+    query_availability_fingerprint: str | None = None
+    query_availability_row_count: int | None = None
 
 
 @dataclass
@@ -105,6 +115,136 @@ class PublicationError(RuntimeError):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+QUERY_AVAILABILITY_EXPECTED_PLACE_COUNT = 427
+_WEATHER_PLACE_ID_RE = re.compile(r"^seoul_admd_[0-9]{10}$")
+_KST_NAIVE_TIMESTAMP_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?$"
+)
+_POPULATION_REVISION_RE = re.compile(
+    r"^kma_admin_dong_grid_20260325:[0-9a-f]{64}$"
+)
+
+
+def _query_availability_timestamp(
+    value: Any, *, field: str
+) -> tuple[datetime | None, str | None]:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return None, f"query_availability {field} must be a KST-naive timestamp"
+        return value, None
+    if not isinstance(value, str) or not _KST_NAIVE_TIMESTAMP_RE.fullmatch(value):
+        return None, f"query_availability {field} must be a KST-naive timestamp"
+    try:
+        return datetime.fromisoformat(value), None
+    except ValueError:
+        return None, f"query_availability {field} must be a real calendar timestamp"
+
+
+def query_availability_fingerprint(
+    contract: ServingContract, plan: QueryAvailabilityPlan
+) -> str:
+    relation = contract.query_availability_relation
+    if relation is None:
+        raise ValueError(f"{contract.product_id}: query availability relation is required")
+    return d1_content_hash(
+        namespace=f"{contract.product_id}:{relation}",
+        columns=plan.columns,
+        rows=plan.rows,
+        primary_key=("place_id",),
+    )
+
+
+def validate_query_availability(
+    contract: ServingContract, plan: QueryAvailabilityPlan | None
+) -> str | None:
+    """Reject incomplete companion evidence; this gate never repairs source rows."""
+    if plan is None:
+        return "query_availability plan missing"
+    actual_columns = tuple(column for column, _type in plan.columns)
+    if actual_columns != QUERY_AVAILABILITY_COLUMNS:
+        return "query_availability columns do not match fixed contract"
+    if len(plan.rows) != QUERY_AVAILABILITY_EXPECTED_PLACE_COUNT:
+        return (
+            "query_availability place count mismatch "
+            f"expected={QUERY_AVAILABILITY_EXPECTED_PLACE_COUNT} observed={len(plan.rows)}"
+        )
+    places: set[str] = set()
+    common_snapshot: datetime | None = None
+    common_horizon: datetime | None = None
+    common_count: int | None = None
+    common_revision: str | None = None
+    for row in plan.rows:
+        place_id = row.get("place_id")
+        if not isinstance(place_id, str) or not place_id.strip():
+            return "query_availability place_id is missing"
+        if not _WEATHER_PLACE_ID_RE.fullmatch(place_id):
+            return "query_availability canonical place_id is required"
+        if place_id in places:
+            return "query_availability duplicate place_id"
+        places.add(place_id)
+
+        parsed: dict[str, datetime] = {}
+        for field in (
+            "snapshot_as_of_hour", "available_from_at", "available_to_at",
+            "forecast_collected_at_min", "forecast_collected_at_max",
+        ):
+            if row.get(field) is None:
+                return f"query_availability {field} is missing"
+            timestamp, timestamp_error = _query_availability_timestamp(row.get(field), field=field)
+            if timestamp_error is not None:
+                return timestamp_error
+            assert timestamp is not None
+            parsed[field] = timestamp
+
+        for field in ("snapshot_as_of_hour", "available_from_at", "available_to_at"):
+            timestamp = parsed[field]
+            if timestamp.minute or timestamp.second or timestamp.microsecond:
+                return f"query_availability {field} must be an exact hourly timestamp"
+        if parsed["available_from_at"] != parsed["snapshot_as_of_hour"]:
+            return "query_availability available_from_at must equal snapshot_as_of_hour"
+        if parsed["available_from_at"] > parsed["available_to_at"]:
+            return "query_availability availability bounds are reversed"
+        if parsed["forecast_collected_at_min"] > parsed["forecast_collected_at_max"]:
+            return "query_availability collection bounds are reversed"
+
+        if row.get("availability_status") != "complete":
+            return "query_availability availability_status is not complete"
+        expected = row.get("expected_forecast_hour_count")
+        observed = row.get("observed_forecast_hour_count")
+        if (
+            not isinstance(expected, int) or isinstance(expected, bool)
+            or not isinstance(observed, int) or isinstance(observed, bool)
+            or expected <= 0 or observed <= 0
+        ):
+            return "query_availability forecast hour count must be positive"
+        if expected != observed:
+            return "query_availability forecast hour count expected and observed must match"
+        inclusive_slots = int(
+            (parsed["available_to_at"] - parsed["available_from_at"]).total_seconds() // 3600
+        ) + 1
+        if expected != inclusive_slots:
+            return "query_availability forecast hour count must equal inclusive hourly slot count"
+
+        revision = row.get("source_population_revision")
+        if not isinstance(revision, str) or not _POPULATION_REVISION_RE.fullmatch(revision):
+            return "query_availability source_population_revision is invalid"
+        if common_snapshot is None:
+            common_snapshot = parsed["snapshot_as_of_hour"]
+            common_horizon = parsed["available_to_at"]
+            common_count = expected
+            common_revision = revision
+            continue
+        if parsed["snapshot_as_of_hour"] != common_snapshot:
+            return "query_availability common snapshot mismatch"
+        if parsed["available_to_at"] != common_horizon:
+            return "query_availability common horizon mismatch"
+        if expected != common_count:
+            return "query_availability common forecast hour count mismatch"
+        if revision != common_revision:
+            return "query_availability uniform source_population_revision mismatch"
+    return None
 
 
 def _freshness(
@@ -496,10 +636,17 @@ def _fail_after_write(
     message: str,
     previous_catalog: dict[str, Any] | None,
     catalog_committed: bool = False,
+    atomic_previous: ProductPublicationState | None = None,
 ) -> None:
     record.serving_status = STATUS_FAILED
     record.reason = message
-    if _uses_replace_lifecycle(contract):
+    if atomic_previous is not None:
+        try:
+            d1.compensate_staged_snapshot(contract.product_id, contract.model_name, atomic_previous)
+            record.rollback_status = "restored"
+        except Exception as exc:  # noqa: BLE001 -- retain original failure and compensation state
+            record.rollback_status = f"restore_failed:{type(exc).__name__}"
+    elif _uses_replace_lifecycle(contract):
         _restore_snapshot(
             d1,
             record,
@@ -509,6 +656,47 @@ def _fail_after_write(
     report.failures.append(f"{contract.model_name}: {message}")
     _append_ledger(d1, record, outcome="failed")
     report.records.append(record)
+
+
+def _atomic_quality_row(contract: ServingContract, record: ProductRecord) -> dict[str, Any]:
+    _sources, quality = _product_evidence(contract, record)
+    return {
+        "product_id": contract.product_id,
+        "source_row_count": quality["source_row_count"], "d1_row_count": quality["d1_row_count"],
+        "duplicate_primary_key_count": quality["duplicate_primary_key_count"],
+        "null_primary_key_count": quality["null_primary_key_count"],
+        "freshness_as_of": quality["freshness_as_of"], "freshness_slo_minutes": quality["freshness_slo_minutes"],
+        "serving_status": quality["serving_status"], "measured_at": quality["measured_at"],
+        "coverage_json": (json.dumps(quality["coverage"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                          if quality["coverage"] is not None else None),
+        "projection_schema_version": quality["projection_schema_version"],
+        "projection_schema_hash": quality["projection_schema_hash"], "publication_id": record.publication_id,
+    }
+
+
+def _atomic_candidate_state(
+    contract: ServingContract, columns: Sequence[Column], record: ProductRecord,
+    pattern_rows: list[dict[str, Any]], metadata_parts: tuple[list[dict[str, Any]], ...],
+    previous: ProductPublicationState,
+) -> ProductPublicationState:
+    columns_rows, ext_rows, _old_patterns, display_rows, param_rows, vocabulary_rows = metadata_parts
+    metadata = dict(zip(
+        ("d1_catalog_columns", "d1_catalog_ext", "d1_usage_patterns", "d1_catalog_display", "d1_pattern_params", "d1_catalog_column_vocabularies"),
+        (columns_rows, ext_rows, pattern_rows, display_rows, param_rows, vocabulary_rows), strict=True,
+    ))
+    # All current product-scoped tables are present explicitly; the builder deletes
+    # absent lists so a declaration removal cannot leave LKG metadata mixed in.
+    metadata = {table: tuple(metadata.get(table, ())) for table in HANDOFF_PRODUCT_TABLES}
+    sources, _quality = _product_evidence(contract, record)
+    source_rows = tuple(
+        dict(source, product_id=contract.product_id, publication_id=record.publication_id)
+        for source in (sources or ())
+    )
+    return ProductPublicationState(
+        catalog_row=_catalog_row(contract, columns, record), metadata_rows=metadata,
+        source_rows=source_rows, quality_row=_atomic_quality_row(contract, record),
+        active_table_exists=previous.active_table_exists,
+    )
 
 
 def publish(
@@ -571,6 +759,20 @@ def publish(
 
         plan = source.read(contract, last_good_max)
         record.source_row_count = len(plan.rows)
+        if contract.query_availability_relation is not None:
+            availability_error = validate_query_availability(contract, plan.query_availability)
+            if availability_error is not None:
+                record.stage = "query_availability"
+                record.reason = availability_error
+                report.failures.append(f"{contract.model_name}: {availability_error}")
+                _append_ledger(d1, record, outcome="failed")
+                report.records.append(record)
+                continue
+            assert plan.query_availability is not None
+            record.query_availability_row_count = len(plan.query_availability.rows)
+            record.query_availability_fingerprint = query_availability_fingerprint(
+                contract, plan.query_availability
+            )
         decision = gatelib.evaluate_gate(contract, len(plan.rows), last_good_count)
         record.reason = decision.reason
 
@@ -654,9 +856,81 @@ def publish(
                 _append_ledger(d1, record, outcome="failed")
                 report.records.append(record)
                 continue
+        atomic_opt_in = contract.query_availability_relation is not None
+        previous_state: ProductPublicationState | None = None
         try:
             record.stage = "write"
-            _write(d1, contract, plan, rows)
+            if atomic_opt_in:
+                # Candidate tables and sidecar are completely read back before an
+                # active table or catalog row can change.
+                assert plan.query_availability is not None
+                d1.prepare_atomic_publication_schema()
+                d1.stage_snapshot(contract.model_name, plan.columns, rows, contract.primary_key)
+                staged_rows = d1.read_staged_snapshot_rows(contract.model_name, plan.columns, contract.primary_key)
+                if verify_content_parity and record.source_content_hash != d1_content_hash(
+                    namespace=contract.model_name, columns=plan.columns, rows=staged_rows, primary_key=contract.primary_key,
+                ):
+                    raise RuntimeError("candidate risk read-back content mismatch")
+                d1.stage_query_availability(
+                    contract.product_id, record.publication_id, plan.query_availability.rows,
+                    fingerprint=record.query_availability_fingerprint or "", measured_at=record.published_at,
+                )
+                sidecar_rows = d1.read_query_availability_rows(contract.product_id, record.publication_id)
+                readback_content_rows = [
+                    {column: row.get(column) for column in QUERY_AVAILABILITY_COLUMNS}
+                    for row in sidecar_rows
+                ]
+                try:
+                    readback_fingerprint = query_availability_fingerprint(
+                        contract,
+                        QueryAvailabilityPlan(plan.query_availability.columns, readback_content_rows),
+                    )
+                except Exception as exc:  # noqa: BLE001 -- malformed/corrupt rows are a read-back mismatch
+                    raise RuntimeError(
+                        f"query_availability read-back mismatch: content identity invalid ({type(exc).__name__})"
+                    ) from exc
+                if not (
+                    len(sidecar_rows) == QUERY_AVAILABILITY_EXPECTED_PLACE_COUNT
+                    and len({row.get("place_id") for row in sidecar_rows}) == QUERY_AVAILABILITY_EXPECTED_PLACE_COUNT
+                    and {row.get("availability_fingerprint") for row in sidecar_rows} == {record.query_availability_fingerprint}
+                    and {row.get("publication_id") for row in sidecar_rows} == {record.publication_id}
+                    and readback_fingerprint == record.query_availability_fingerprint
+                ):
+                    raise RuntimeError("query_availability read-back mismatch")
+                # Candidate patterns may only read the staging relation. Ambiguous
+                # SQL stays unverified rather than borrowing old active evidence.
+                metadata_parts = _product_meta_rows(contract, plan.columns, record, audit_allowlist)
+                candidate_patterns = metadata_parts[2]
+                for pattern in candidate_patterns:
+                    rewritten = rewrite_audited_relation(
+                        str(pattern["sql"]), contract.model_name, f"{contract.model_name}__staging", audit_allowlist
+                    )
+                    if rewritten is None:
+                        pattern["verified_at"] = None
+                        pattern["verified_publication_id"] = None
+                    else:
+                        candidate_pattern = dict(pattern, sql=rewritten)
+                        verify_and_stamp([candidate_pattern], run_sql=d1.execute,
+                                         publication_id=record.publication_id,
+                                         now=datetime.now(timezone.utc))
+                        pattern.update({key: candidate_pattern.get(key) for key in (
+                            "verified_rows", "verified_at", "verified_publication_id"
+                        )})
+                # Candidate catalog/quality must describe the post-swap table, so
+                # derive their deterministic counts before building the program.
+                record.d1_row_count = source_row_count
+                record.distinct_primary_key_count = source_distinct_count
+                record.null_primary_key_count = source_null_count
+                record.published_row_count = source_row_count
+                record.published_bytes = len(json.dumps(rows, ensure_ascii=False, default=str).encode("utf-8"))
+                record.freshness = freshness
+                record.serving_status = STATUS_DEGRADED if (degraded or decision.serving_status == STATUS_DEGRADED) else STATUS_PUBLISHED
+                previous_state = d1.capture_product_publication_state(contract.product_id, contract.model_name)
+                candidate = _atomic_candidate_state(contract, plan.columns, record, candidate_patterns, metadata_parts, previous_state)
+                d1.preflight_staged_transition(contract.product_id, contract.model_name, candidate, previous_state)
+                d1.activate_staged_snapshot(contract.product_id, contract.model_name, candidate)
+            else:
+                _write(d1, contract, plan, rows)
         except Exception as exc:  # noqa: BLE001 -- record + continue; snapshot last-good is intact
             record.serving_status = STATUS_FAILED
             record.stage = "write"
@@ -679,6 +953,7 @@ def publish(
                 contract,
                 message=f"D1 primary key read-back 실패: {type(exc).__name__}: {exc}",
                 previous_catalog=catalog,
+                atomic_previous=previous_state if atomic_opt_in else None,
             )
             continue
 
@@ -700,7 +975,7 @@ def publish(
                 "D1 primary key read-back validation failed: "
                 f"source={source_row_count} rows={d1_row_count} "
                 f"distinct={distinct_primary_key_count} null={null_primary_key_count}"
-            ), previous_catalog=catalog)
+            ), previous_catalog=catalog, atomic_previous=previous_state if atomic_opt_in else None)
             continue
 
         if verify_content_parity:
@@ -721,6 +996,7 @@ def publish(
                     contract,
                     message=f"content parity read-back 실패: {type(exc).__name__}: {exc}",
                     previous_catalog=catalog,
+                    atomic_previous=previous_state if atomic_opt_in else None,
                 )
                 continue
             if record.source_content_hash != record.d1_content_hash:
@@ -735,6 +1011,7 @@ def publish(
                         f"source={record.source_content_hash} d1={record.d1_content_hash}"
                     ),
                     previous_catalog=catalog,
+                    atomic_previous=previous_state if atomic_opt_in else None,
                 )
                 continue
 
@@ -748,6 +1025,10 @@ def publish(
             record.stage = "api_smoke"
             record.api_smoke_status = smoke.check(contract.model_name)
             if record.api_smoke_status == "failed":
+                if atomic_opt_in and previous_state is not None:
+                    _fail_after_write(d1, report, record, contract, message="API smoke test 실패",
+                                      previous_catalog=catalog, atomic_previous=previous_state)
+                    continue
                 _fail_after_write(
                     d1,
                     report,
@@ -758,6 +1039,11 @@ def publish(
                 )
                 continue
             elif record.api_smoke_status not in {"passed", "not_evaluated"}:
+                if atomic_opt_in and previous_state is not None:
+                    _fail_after_write(d1, report, record, contract,
+                                      message=f"invalid API smoke status={record.api_smoke_status!r}",
+                                      previous_catalog=catalog, atomic_previous=previous_state)
+                    continue
                 _fail_after_write(
                     d1,
                     report,
@@ -767,6 +1053,23 @@ def publish(
                     previous_catalog=catalog,
                 )
                 continue
+
+        if atomic_opt_in:
+            try:
+                d1.finalize_replaced_table(contract.model_name)
+            except Exception as exc:  # noqa: BLE001 -- active candidate is already valid; retain LKG for recovery
+                record.stage = "finalize"
+                record.serving_status = STATUS_FAILED
+                record.reason = f"finalize 실패: {type(exc).__name__}: {exc}; active publication retained"
+                record.rollback_status = "not_attempted_active_valid"
+                report.failures.append(f"{contract.model_name}: {record.reason}")
+                _append_ledger(d1, record, outcome="failed")
+                report.records.append(record)
+                continue
+            record.stage = "completed"
+            _append_ledger(d1, record, outcome=record.serving_status)
+            report.records.append(record)
+            continue
 
         catalog_committed = False
         try:

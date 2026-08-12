@@ -36,6 +36,8 @@ class ProductWatchdogResult:
     freshness_age_minutes: int | None
     publication_age_minutes: int | None
     issues: tuple[str, ...]
+    query_availability_row_count: int | None = None
+    query_availability_freshness_age_minutes: int | None = None
 
     @property
     def healthy(self) -> bool:
@@ -63,6 +65,10 @@ class ServingWatchdogReport:
                     "freshness_age_minutes": product.freshness_age_minutes,
                     "publication_age_minutes": product.publication_age_minutes,
                     "issues": list(product.issues),
+                    **({"query_availability_row_count": product.query_availability_row_count}
+                       if product.query_availability_row_count is not None else {}),
+                    **({"query_availability_freshness_age_minutes": product.query_availability_freshness_age_minutes}
+                       if product.query_availability_freshness_age_minutes is not None else {}),
                 }
                 for product in self.products
             ],
@@ -85,6 +91,25 @@ SELECT
 FROM _catalog AS c
 LEFT JOIN d1_product_quality AS q
     ON q.product_id = c.product_id
+""".strip()
+
+_QUERY_AVAILABILITY_EVIDENCE_SQL = """
+SELECT product_id, publication_id,
+       count(*) AS row_count,
+       count(DISTINCT place_id) AS distinct_place_count,
+       sum(CASE WHEN place_id IS NULL THEN 1 ELSE 0 END) AS null_place_count,
+       sum(CASE WHEN availability_status != 'complete' THEN 1 ELSE 0 END) AS incomplete_count,
+       sum(CASE WHEN available_from_at > available_to_at
+                     OR forecast_collected_at_min > forecast_collected_at_max
+                     OR expected_forecast_hour_count < 0
+                     OR observed_forecast_hour_count < 0
+                     OR expected_forecast_hour_count != observed_forecast_hour_count
+                     OR source_population_revision IS NULL OR source_population_revision = ''
+                THEN 1 ELSE 0 END) AS invalid_count,
+       count(DISTINCT availability_fingerprint) AS fingerprint_count,
+       min(forecast_collected_at_min) AS forecast_collected_at_min
+FROM d1_product_query_availability
+GROUP BY product_id, publication_id
 """.strip()
 
 
@@ -184,6 +209,12 @@ def evaluate_watchdog(
     ):
         raise ValueError("publication_grace_minutes must be a non-negative integer")
     rows_by_product = _results_by_product(client.execute(_EVIDENCE_SQL))
+    opted_in = [contract for contract in contracts if contract.query_availability_relation is not None]
+    availability_by_identity = {
+        (str(row.get("product_id")), str(row.get("publication_id"))): row
+        for row in (client.execute(_QUERY_AVAILABILITY_EVIDENCE_SQL) if opted_in else [])
+        if isinstance(row.get("product_id"), str) and isinstance(row.get("publication_id"), str)
+    }
     timezone_by_product = dict(naive_freshness_timezones or {})
     results: list[ProductWatchdogResult] = []
 
@@ -193,6 +224,8 @@ def evaluate_watchdog(
         freshness_age: int | None = None
         publication_age: int | None = None
         publication_id: str | None = None
+        availability_count: int | None = None
+        availability_freshness_age: int | None = None
 
         if len(rows) != 1:
             issues.append("catalog_missing" if not rows else "catalog_product_id_duplicated")
@@ -277,6 +310,32 @@ def evaluate_watchdog(
             ):
                 issues.append("publication_interval_breached")
 
+        if contract.query_availability_relation is not None:
+            availability = availability_by_identity.get((contract.product_id, publication_id or ""))
+            if availability is None:
+                any_product_sidecar = any(key[0] == contract.product_id for key in availability_by_identity)
+                issues.append("query_availability_publication_mismatch" if any_product_sidecar else "query_availability_missing")
+            else:
+                availability_count = _integer(availability.get("row_count"))
+                if availability_count != 427 or _integer(availability.get("distinct_place_count")) != 427 or _integer(availability.get("null_place_count")) != 0:
+                    issues.append("query_availability_row_count_mismatch")
+                if _integer(availability.get("incomplete_count")) != 0 or _integer(availability.get("invalid_count")) != 0:
+                    issues.append("query_availability_incomplete")
+                if _integer(availability.get("fingerprint_count")) != 1:
+                    issues.append("query_availability_fingerprint_mismatch")
+                collected, parse_issue = _parse_timestamp(
+                    availability.get("forecast_collected_at_min"),
+                    naive_timezone=timezone_by_product.get(contract.product_id),
+                )
+                if parse_issue is not None:
+                    issues.append(f"query_availability_freshness_{parse_issue}")
+                elif collected is not None:
+                    availability_freshness_age, age_issue = _age_minutes(now, collected)
+                    if age_issue is not None:
+                        issues.append(f"query_availability_freshness_{age_issue}")
+                    elif contract.freshness_slo_minutes is not None and availability_freshness_age > contract.freshness_slo_minutes:
+                        issues.append("query_availability_freshness_slo_breached")
+
         results.append(
             ProductWatchdogResult(
                 product_id=contract.product_id,
@@ -285,6 +344,8 @@ def evaluate_watchdog(
                 freshness_age_minutes=freshness_age,
                 publication_age_minutes=publication_age,
                 issues=tuple(dict.fromkeys(issues)),
+                query_availability_row_count=availability_count,
+                query_availability_freshness_age_minutes=availability_freshness_age,
             )
         )
 

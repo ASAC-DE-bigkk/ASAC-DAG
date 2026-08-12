@@ -7,18 +7,32 @@ against in-memory fakes: no Trino, no Cloudflare, no Airflow, no prod D1.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from common.serving.contract import ServingContract, load_contracts
-from common.serving.d1_client import Column
+from common.serving.contract import QUERY_AVAILABILITY_COLUMNS, ServingContract, load_contracts
+from common.serving.d1_client import Column, ProductPublicationState
 from common.serving.gate import STATUS_DEGRADED, STATUS_PUBLISHED, STATUS_SKIPPED
-from common.serving.publisher import PublicationError, ReadPlan, publish
+from common.serving.publisher import PublicationError, QueryAvailabilityPlan, ReadPlan, query_availability_fingerprint, validate_query_availability, publish
 
 FIXTURES = Path(__file__).parent / "fixtures"
 COLUMNS: list[Column] = [("product_row_id", "varchar"), ("place_id", "varchar"), ("forecast_at", "timestamp")]
+AVAILABILITY_COLUMNS: list[Column] = [
+    ("place_id", "varchar"),
+    ("snapshot_as_of_hour", "timestamp(6)"),
+    ("available_from_at", "timestamp(6)"),
+    ("available_to_at", "timestamp(6)"),
+    ("forecast_collected_at_min", "timestamp(6)"),
+    ("forecast_collected_at_max", "timestamp(6)"),
+    ("expected_forecast_hour_count", "bigint"),
+    ("observed_forecast_hour_count", "bigint"),
+    ("availability_status", "varchar"),
+    ("source_population_revision", "varchar"),
+]
+POPULATION_REVISION = "kma_admin_dong_grid_20260325:638f0e8260b47eeb0335126a87a8a38e7b456da872bf0ea7e28eecf427610e32"
 
 
 # ── fakes ───────────────────────────────────────────────────────────────────────────
@@ -39,6 +53,9 @@ class FakeD1:
         self.execute_calls: list[str] = []                 # export 시점 패턴 검증(Serving#217)
         self.execute_result: list[dict[str, Any]] = [{"n": 1}]  # 기본: 1행 반환(검증 통과)
         self.execute_error: Exception | None = None        # 설정 시 execute 가 예외
+        self.query_availability: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self.staged_query_availability: list[dict[str, Any]] = []
+        self.stage_snapshot_calls: list[str] = []
 
     def execute(self, sql: str) -> list[dict[str, Any]]:
         self.execute_calls.append(sql)
@@ -149,6 +166,48 @@ class FakeD1:
             "quality": dict(quality),
         }
 
+    def stage_query_availability(self, product_id, publication_id, rows, *, fingerprint, measured_at) -> None:
+        staged = [dict(row, product_id=product_id, publication_id=publication_id,
+                       availability_fingerprint=fingerprint, measured_at=measured_at) for row in rows]
+        self.staged_query_availability.extend(staged)
+        self.query_availability[product_id, publication_id] = staged
+
+    def read_query_availability_rows(self, product_id, publication_id):
+        return [dict(row) for row in self.query_availability.get((product_id, publication_id), [])]
+
+    def prepare_atomic_publication_schema(self):
+        pass
+
+    def stage_snapshot(self, name, columns, rows, primary_key):
+        self.stage_snapshot_calls.append(name)
+        self.tables[f"{name}__staging"] = [dict(row) for row in rows]
+        self.columns_by_table[f"{name}__staging"] = list(columns)
+        self.primary_keys[f"{name}__staging"] = tuple(primary_key)
+
+    def read_staged_snapshot_rows(self, name, columns, primary_key):
+        return self.read_table_rows(f"{name}__staging", columns, primary_key)
+
+    def capture_product_publication_state(self, product_id, model_name):
+        return ProductPublicationState(self.catalog_row(model_name), {}, (), None, model_name in self.tables)
+
+    def preflight_staged_transition(self, product_id, model_name, candidate, previous):
+        self.preflight_calls = getattr(self, "preflight_calls", 0) + 1
+
+    def activate_staged_snapshot(self, product_id, model_name, candidate):
+        self.activation_calls = getattr(self, "activation_calls", []) + [(product_id, model_name, candidate.catalog_row["publication_id"])]
+        if model_name in self.tables:
+            self.previous_tables[model_name] = self.tables[model_name]
+        self.tables[model_name] = self.tables.pop(f"{model_name}__staging")
+        self.catalog[model_name] = dict(candidate.catalog_row)
+
+    def compensate_staged_snapshot(self, product_id, model_name, previous):
+        self.compensation_calls = getattr(self, "compensation_calls", []) + [(product_id, model_name)]
+        self.restore_replaced_table(model_name)
+        if previous.catalog_row is None:
+            self.catalog.pop(model_name, None)
+        else:
+            self.catalog[model_name] = dict(previous.catalog_row)
+
 
 class ForgetfulCatalogD1(FakeD1):
     """Writes tables but 'forgets' to register _catalog — reproduces the #477 bug."""
@@ -196,6 +255,16 @@ class ExplodingPrimaryKeyStatsD1(FakeD1):
         if name in self.previous_tables:
             raise RuntimeError("simulated activated read-back failure")
         return super().primary_key_stats(name, primary_key)
+
+
+class ExplodingFinalizeD1(FakeD1):
+    def finalize_replaced_table(self, name: str) -> None:
+        raise RuntimeError("simulated finalize failure")
+
+
+class CorruptingSidecarReadbackD1(FakeD1):
+    def read_query_availability_rows(self, product_id, publication_id):
+        return super().read_query_availability_rows(product_id, publication_id)[:-1]
 
 
 class FakeSource:
@@ -247,7 +316,268 @@ def _rows(n: int) -> list[dict[str, Any]]:
     return [{"product_row_id": f"r{i}", "place_id": "p", "forecast_at": f"2026-07-2{i}T00:00:00"} for i in range(n)]
 
 
+def _availability_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "place_id": f"seoul_admd_{1111000000 + index:010d}",
+            "snapshot_as_of_hour": "2026-08-12 00:00:00",
+            "available_from_at": "2026-08-12 00:00:00",
+            "available_to_at": "2026-08-14 23:00:00",
+            "forecast_collected_at_min": "2026-08-11 20:00:00.123456",
+            "forecast_collected_at_max": "2026-08-11 20:05:00.9",
+            "expected_forecast_hour_count": 72, "observed_forecast_hour_count": 72,
+            "availability_status": "complete", "source_population_revision": POPULATION_REVISION,
+        }
+        for index in range(427)
+    ]
+
+
+def _risk_contract_with_query_availability() -> ServingContract:
+    return _projected_contract(
+        product_id="weather_place_risk_window",
+        model_name="gold_weather_place_risk_window",
+        query_availability_relation="gold_weather_place_risk_query_availability",
+    )
+
+
 # ── tests ─────────────────────────────────────────────────────────────────────────
+
+def test_query_availability_fingerprint_is_order_invariant_and_changes_evidence():
+    contract = _risk_contract_with_query_availability()
+    original = QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows())
+    changed_rows = _availability_rows()
+    changed_rows[0]["source_population_revision"] = "changed"
+
+    assert query_availability_fingerprint(contract, original) == query_availability_fingerprint(
+        contract, QueryAvailabilityPlan(AVAILABILITY_COLUMNS, list(reversed(_availability_rows())))
+    )
+    assert query_availability_fingerprint(contract, original) != query_availability_fingerprint(
+        contract, QueryAvailabilityPlan(AVAILABILITY_COLUMNS, changed_rows)
+    )
+
+
+@pytest.mark.parametrize("mutate,reason", [
+    (lambda rows: rows[:-1], "expected=427 observed=426"),
+    (lambda rows: [{**rows[0], "place_id": None}, *rows[1:]], "place_id"),
+    (lambda rows: [{**rows[0], "place_id": rows[1]["place_id"]}, *rows[1:]], "duplicate"),
+    (lambda rows: [{**rows[0], "availability_status": "incomplete"}, *rows[1:]], "availability_status"),
+    (lambda rows: [{**rows[0], "forecast_collected_at_min": None}, *rows[1:]], "forecast_collected_at_min"),
+    (lambda rows: [{**rows[0], "observed_forecast_hour_count": 71}, *rows[1:]], "forecast hour count"),
+])
+def test_validate_query_availability_fails_closed(mutate, reason):
+    error = validate_query_availability(
+        _risk_contract_with_query_availability(),
+        QueryAvailabilityPlan(AVAILABILITY_COLUMNS, mutate(_availability_rows())),
+    )
+    assert error is not None and reason in error
+
+
+@pytest.mark.parametrize("mutate,reason", [
+    (lambda rows: [{**rows[0], "place_id": "place_1111051500"}, *rows[1:]], "canonical place_id"),
+    (lambda rows: [{**rows[0], "snapshot_as_of_hour": "2026-08-12T00:00:00"}, *rows[1:]], "KST-naive timestamp"),
+    (lambda rows: [{**rows[0], "snapshot_as_of_hour": "2026-08-12 00:00:00+09:00"}, *rows[1:]], "KST-naive timestamp"),
+    (lambda rows: [{**rows[0], "snapshot_as_of_hour": "2026-02-30 00:00:00"}, *rows[1:]], "real calendar"),
+    (lambda rows: [{**rows[0], "snapshot_as_of_hour": datetime(2026, 8, 12, tzinfo=timezone.utc)}, *rows[1:]], "KST-naive timestamp"),
+    (lambda rows: [{**rows[0], "available_to_at": "2026-08-14 23:00:00.1"}, *rows[1:]], "exact hourly"),
+    (lambda rows: [{**rows[0], "available_from_at": "2026-08-12 01:00:00"}, *rows[1:]], "available_from_at must equal snapshot"),
+    (lambda rows: [{**rows[0], "available_to_at": "2026-08-11 23:00:00"}, *rows[1:]], "availability bounds"),
+    (lambda rows: [{**rows[0], "forecast_collected_at_min": "2026-08-11 20:00:00+09:00"}, *rows[1:]], "KST-naive timestamp"),
+    (lambda rows: [{**rows[0], "forecast_collected_at_min": "2026-08-11 20:00:00.1234567"}, *rows[1:]], "KST-naive timestamp"),
+    (lambda rows: [{**rows[0], "forecast_collected_at_min": "2026-08-11 20:06:00"}, *rows[1:]], "collection bounds"),
+    (lambda rows: [{**rows[0], "expected_forecast_hour_count": 0, "observed_forecast_hour_count": 0,
+                    "available_to_at": "2026-08-12 00:00:00"}, *rows[1:]], "positive"),
+    (lambda rows: [{**rows[0], "expected_forecast_hour_count": 71, "observed_forecast_hour_count": 71}, *rows[1:]], "inclusive hourly slot count"),
+    (lambda rows: [{**rows[0], "source_population_revision": "kma_admin_dong_grid_20260325:ABC"}, *rows[1:]], "source_population_revision"),
+    (lambda rows: [{**rows[0], "snapshot_as_of_hour": "2026-08-12 01:00:00",
+                    "available_from_at": "2026-08-12 01:00:00", "available_to_at": "2026-08-15 00:00:00"}, *rows[1:]], "common snapshot"),
+    (lambda rows: [{**rows[0], "available_to_at": "2026-08-15 00:00:00",
+                    "expected_forecast_hour_count": 73, "observed_forecast_hour_count": 73}, *rows[1:]], "common horizon"),
+    (lambda rows: [{**rows[0], "source_population_revision": "kma_admin_dong_grid_20260325:" + "a" * 64}, *rows[1:]], "uniform source_population_revision"),
+], ids=[
+    "noncanonical_place", "t_separator", "offset_string", "invalid_calendar", "aware_datetime",
+    "fractional_hour_bound", "from_not_snapshot", "reversed_availability", "collection_offset",
+    "collection_fraction_too_precise", "reversed_collection", "zero_count", "inclusive_count_mismatch", "malformed_revision", "snapshot_mismatch",
+    "horizon_count_mismatch", "revision_mismatch",
+])
+def test_semantically_invalid_availability_never_stages_or_activates(mutate, reason):
+    contract = _risk_contract_with_query_availability()
+    plan = QueryAvailabilityPlan(AVAILABILITY_COLUMNS, mutate(_availability_rows()))
+    assert reason in (validate_query_availability(contract, plan) or "")
+
+    d1 = FakeD1()
+    with pytest.raises(PublicationError):
+        publish(
+            [contract], FakeSource({contract.model_name: ReadPlan(COLUMNS, _rows(1), query_availability=plan)}),
+            d1, FakeSmoke("passed"), source_run_id="semantic-invalid", verify_content_parity=True,
+        )
+    assert d1.stage_snapshot_calls == []
+    assert d1.staged_query_availability == []
+    assert getattr(d1, "activation_calls", []) == []
+
+
+def test_query_availability_accepts_naive_datetimes_and_fractional_collection_times():
+    rows = _availability_rows()
+    for row in rows:
+        row.update(
+            snapshot_as_of_hour=datetime(2026, 8, 12),
+            available_from_at=datetime(2026, 8, 12),
+            available_to_at=datetime(2026, 8, 14, 23),
+            forecast_collected_at_min=datetime(2026, 8, 11, 20, 0, 0, 123456),
+            forecast_collected_at_max="2026-08-11 20:05:00.9",
+        )
+    assert validate_query_availability(
+        _risk_contract_with_query_availability(), QueryAvailabilityPlan(AVAILABILITY_COLUMNS, rows)
+    ) is None
+
+
+def test_invalid_query_availability_fails_before_d1_stage():
+    contract = _risk_contract_with_query_availability()
+    d1 = FakeD1()
+    plan = QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()[:-1])
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract], FakeSource({contract.model_name: ReadPlan(COLUMNS, _rows(1), query_availability=plan)}),
+            d1, FakeSmoke("passed"), source_run_id="invalid-availability", verify_content_parity=True,
+        )
+
+    assert d1.replace_calls == 0
+    assert d1.staged_query_availability == []
+    assert excinfo.value.report.records[0].stage == "query_availability"
+
+
+def test_opted_in_snapshot_stages_then_activates_once_with_same_publication_identity():
+    contract = _risk_contract_with_query_availability()
+    d1 = FakeD1()
+    report = publish(
+        [contract], FakeSource({contract.model_name: ReadPlan(COLUMNS, _rows(1), query_availability=QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()))}),
+        d1, FakeSmoke("passed"), source_run_id="risk-atomic", verify_content_parity=True,
+    )
+    record = report.records[0]
+    assert d1.activation_calls == [(contract.product_id, contract.model_name, record.publication_id)]
+    assert d1.preflight_calls == 1
+
+
+def test_opt_in_primary_key_readback_failure_compensates_once_without_legacy_restore():
+    contract = _risk_contract_with_query_availability()
+    d1 = ExplodingPrimaryKeyStatsD1()
+    old_rows = _rows(1)
+    old_catalog = {"name": contract.model_name, "publication_id": "pub-old", "row_count": 1}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract], FakeSource({contract.model_name: ReadPlan(COLUMNS, _rows(2), query_availability=QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()))}),
+            d1, FakeSmoke("passed"), source_run_id="atomic-readback-failure", verify_content_parity=True,
+        )
+
+    assert d1.compensation_calls == [(contract.product_id, contract.model_name)]
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert excinfo.value.report.records[0].rollback_status == "restored"
+    assert d1.ledger[-1]["outcome"] == "failed"
+
+
+def test_opt_in_finalize_failure_keeps_valid_active_publication_but_reports_failure():
+    contract = _risk_contract_with_query_availability()
+    d1 = ExplodingFinalizeD1()
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract], FakeSource({contract.model_name: ReadPlan(COLUMNS, _rows(1), query_availability=QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()))}),
+            d1, FakeSmoke("passed"), source_run_id="atomic-finalize-failure", verify_content_parity=True,
+        )
+    record = excinfo.value.report.records[0]
+    assert d1.catalog[contract.model_name]["publication_id"] == record.publication_id
+    assert record.rollback_status == "not_attempted_active_valid"
+    assert d1.ledger[-1]["outcome"] == "failed"
+
+
+def test_opt_in_sidecar_readback_mismatch_never_activates():
+    contract = _risk_contract_with_query_availability()
+    d1 = CorruptingSidecarReadbackD1()
+    with pytest.raises(PublicationError):
+        publish(
+            [contract], FakeSource({contract.model_name: ReadPlan(COLUMNS, _rows(1), query_availability=QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()))}),
+            d1, FakeSmoke("passed"), source_run_id="sidecar-mismatch", verify_content_parity=True,
+        )
+    assert not hasattr(d1, "activation_calls")
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda rows: rows[:-1],
+    lambda rows: [{**rows[0], "place_id": rows[1]["place_id"]}, *rows[1:]],
+    lambda rows: [{**row, "availability_fingerprint": "wrong"} for row in rows],
+    lambda rows: [{**row, "publication_id": "wrong-publication"} for row in rows],
+], ids=["426_rows", "duplicate_place", "wrong_fingerprint", "wrong_publication"])
+def test_every_sidecar_readback_identity_mismatch_blocks_activation(mutate):
+    contract = _risk_contract_with_query_availability()
+    d1 = FakeD1()
+    original = d1.read_query_availability_rows
+    d1.read_query_availability_rows = lambda product_id, publication_id: mutate(original(product_id, publication_id))
+    with pytest.raises(PublicationError):
+        publish(
+            [contract], FakeSource({contract.model_name: ReadPlan(COLUMNS, _rows(1), query_availability=QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()))}),
+            d1, FakeSmoke("passed"), source_run_id="sidecar-identity-mismatch", verify_content_parity=True,
+        )
+    assert not hasattr(d1, "activation_calls")
+
+
+def test_sidecar_row_corruption_with_unchanged_stored_fingerprint_blocks_activation():
+    contract = _risk_contract_with_query_availability()
+    d1 = FakeD1()
+    original = d1.read_query_availability_rows
+
+    def corrupted_rows(product_id, publication_id):
+        rows = original(product_id, publication_id)
+        rows[0]["available_to_at"] = "2026-08-14 22:00:00"
+        return rows
+
+    d1.read_query_availability_rows = corrupted_rows
+    with pytest.raises(PublicationError, match="query_availability read-back"):
+        publish(
+            [contract], FakeSource({contract.model_name: ReadPlan(
+                COLUMNS, _rows(1),
+                query_availability=QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()),
+            )}),
+            d1, FakeSmoke("passed"), source_run_id="sidecar-content-corruption",
+            verify_content_parity=True,
+        )
+    assert d1.stage_snapshot_calls == [contract.model_name]
+    assert getattr(d1, "activation_calls", []) == []
+
+
+def test_opt_in_smoke_failure_compensates_exact_lkg_once():
+    contract = _risk_contract_with_query_availability()
+    d1 = FakeD1()
+    old_rows = _rows(1)
+    old_catalog = {"name": contract.model_name, "publication_id": "pub-old", "row_count": 1}
+    d1.tables[contract.model_name] = [dict(row) for row in old_rows]
+    d1.catalog[contract.model_name] = dict(old_catalog)
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract], FakeSource({contract.model_name: ReadPlan(COLUMNS, _rows(2), query_availability=QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()))}),
+            d1, FakeSmoke("failed"), source_run_id="atomic-smoke-failure", verify_content_parity=True,
+        )
+    assert d1.compensation_calls == [(contract.product_id, contract.model_name)]
+    assert d1.tables[contract.model_name] == old_rows
+    assert d1.catalog[contract.model_name] == old_catalog
+    assert excinfo.value.report.records[0].rollback_status == "restored"
+
+
+def test_opt_in_pattern_verification_queries_staging_never_old_active_table():
+    contract = _risk_contract_with_query_availability()
+    contract = ServingContract(**{**contract.__dict__, "usage_patterns": ({
+        "pattern_id": "candidate_count", "sql": 'SELECT count(*) FROM "gold_weather_place_risk_window"',
+    },)})
+    d1 = FakeD1()
+    d1.tables[contract.model_name] = _rows(1)
+    publish(
+        [contract], FakeSource({contract.model_name: ReadPlan(COLUMNS, _rows(1), query_availability=QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()))}),
+        d1, FakeSmoke("passed"), source_run_id="candidate-pattern", verify_content_parity=True,
+    )
+    assert any("gold_weather_place_risk_window__staging" in sql for sql in d1.execute_calls)
+    assert all('FROM "gold_weather_place_risk_window";' not in sql for sql in d1.execute_calls)
 
 def test_snapshot_publish_success_records_metadata():
     contract = _contract()

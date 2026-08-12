@@ -13,6 +13,9 @@ from common.serving.d1_client import (
     MAX_API_BATCH_BYTES,
     MAX_SQL_STATEMENT_BYTES,
     MAX_STATEMENTS_PER_API_BATCH,
+    MAX_ACTIVATION_STATEMENTS,
+    QUERY_AVAILABILITY_TABLE,
+    ProductPublicationState,
     HttpD1Client,
     build_insert_statements,
     group_api_batches,
@@ -22,6 +25,95 @@ from common.serving.d1_client import (
     handoff_stale_delete_statement,
     handoff_upsert_statements,
 )
+
+
+def _availability_rows() -> list[dict[str, Any]]:
+    return [{
+        "place_id": "p000", "snapshot_as_of_hour": "2026-08-12T00:00:00+00:00",
+        "available_from_at": "2026-08-12T00:00:00+00:00", "available_to_at": "2026-08-15T00:00:00+00:00",
+        "forecast_collected_at_min": "2026-08-11T23:00:00+00:00", "forecast_collected_at_max": "2026-08-12T00:00:00+00:00",
+        "expected_forecast_hour_count": 72, "observed_forecast_hour_count": 72,
+        "availability_status": "complete", "source_population_revision": "revision",
+    }]
+
+
+def test_query_availability_sidecar_uses_publication_versioned_composite_key():
+    d1 = SqliteCatalogClient()
+    d1.stage_query_availability("weather_place_risk_window", "pub-old", _availability_rows(), fingerprint="f-old", measured_at="2026-08-12T00:00:00+00:00")
+    d1.stage_query_availability("weather_place_risk_window", "pub-new", _availability_rows(), fingerprint="f-new", measured_at="2026-08-12T00:01:00+00:00")
+
+    assert {row["publication_id"] for row in d1.read_query_availability_rows("weather_place_risk_window", "pub-old")} == {"pub-old"}
+    assert {row["publication_id"] for row in d1.read_query_availability_rows("weather_place_risk_window", "pub-new")} == {"pub-new"}
+    assert [row["name"] for row in d1._query(f'PRAGMA table_info("{QUERY_AVAILABILITY_TABLE}")') if row["pk"]] == ["product_id", "publication_id", "place_id"]
+
+
+@pytest.mark.parametrize("statements,match", [
+    (["SELECT 1;"] * 33, "32"),
+    (["SELECT '" + ("x" * 80_001) + "';"], "80000"),
+])
+def test_atomic_batch_rejects_budgets_before_transport(statements, match):
+    d1 = HttpD1Client(api_url="https://example.invalid", token="test-token")
+    with pytest.raises(ValueError, match=match):
+        d1._query_atomic_batch(statements)
+
+
+def test_dual_preflight_rejects_compensation_budget_before_any_activation_batch(monkeypatch):
+    d1 = HttpD1Client(api_url="https://example.invalid", token="test-token")
+    previous = ProductPublicationState(
+        catalog_row={**_catalog_row(), "description": "x" * 80_001}, metadata_rows={}, source_rows=(), quality_row=None
+    )
+    candidate = ProductPublicationState(catalog_row=_catalog_row(), metadata_rows={}, source_rows=(), quality_row=None)
+    sent = []
+    monkeypatch.setattr(d1, "_query_atomic_batch", lambda statements: sent.append(statements))
+
+    with pytest.raises(ValueError, match="80000"):
+        d1.preflight_staged_transition("weather_place_risk_window", "gold_weather_place_risk_window", candidate, previous)
+    assert sent == []
+
+
+def test_atomic_risk_activation_keeps_publication_identity_out_of_active_risk_table():
+    d1 = SqliteCatalogClient()
+    name = "gold_weather_place_risk_window"
+    columns = [("product_row_id", "varchar"), ("place_id", "varchar")]
+    d1.prepare_atomic_publication_schema()
+    d1.ensure_table(name, columns, ("product_row_id",))
+    d1.insert_rows(name, columns, [{"product_row_id": "old", "place_id": "p-old"}], replace=False)
+    d1.stage_snapshot(name, columns, [{"product_row_id": "new", "place_id": "p-new"}], ("product_row_id",))
+    state = ProductPublicationState(catalog_row=None, metadata_rows={}, source_rows=(), quality_row=None)
+    d1.preflight_staged_transition("weather_place_risk_window", name, state, state)
+    d1.activate_staged_snapshot("weather_place_risk_window", name, state)
+    assert "publication_id" not in {row["name"] for row in d1._query(f'PRAGMA table_info("{name}")')}
+
+
+def test_existing_query_availability_schema_without_composite_primary_key_fails_closed():
+    d1 = SqliteCatalogClient()
+    d1._query('CREATE TABLE d1_product_query_availability (product_id TEXT, publication_id TEXT, place_id TEXT);')
+    with pytest.raises(RuntimeError, match="schema mismatch"):
+        d1.stage_query_availability("weather_place_risk_window", "pub", _availability_rows(), fingerprint="f", measured_at="2026-08-12T00:00:00+00:00")
+
+
+def test_existing_query_availability_schema_with_matching_names_pk_but_wrong_type_fails_closed():
+    d1 = SqliteCatalogClient()
+    columns = [
+        '"product_id" TEXT NOT NULL', '"publication_id" TEXT NOT NULL', '"place_id" TEXT NOT NULL',
+        '"snapshot_as_of_hour" TEXT NOT NULL', '"available_from_at" TEXT NOT NULL', '"available_to_at" TEXT NOT NULL',
+        '"forecast_collected_at_min" TEXT NOT NULL', '"forecast_collected_at_max" TEXT NOT NULL',
+        '"expected_forecast_hour_count" TEXT NOT NULL',  # must be INTEGER
+        '"observed_forecast_hour_count" INTEGER NOT NULL', '"availability_status" TEXT NOT NULL',
+        '"source_population_revision" TEXT NOT NULL', '"availability_fingerprint" TEXT NOT NULL', '"measured_at" TEXT NOT NULL',
+    ]
+    d1._query('CREATE TABLE d1_product_query_availability (' + ', '.join(columns) + ', PRIMARY KEY (product_id, publication_id, place_id));')
+    with pytest.raises(RuntimeError, match="schema mismatch"):
+        d1.stage_query_availability("weather_place_risk_window", "pub", _availability_rows(), fingerprint="f", measured_at="2026-08-12T00:00:00+00:00")
+
+
+def test_lkg_capture_propagates_metadata_read_failure_after_schema_is_prepared(monkeypatch):
+    d1 = SqliteCatalogClient()
+    d1.prepare_atomic_publication_schema()
+    original = d1._query
+    monkeypatch.setattr(d1, "_query", lambda sql: (_ for _ in ()).throw(RuntimeError("read failed")) if 'd1_catalog_columns' in sql else original(sql))
+    with pytest.raises(RuntimeError, match="read failed"):
+        d1.capture_product_publication_state("weather_place_risk_window", "gold_weather_place_risk_window")
 
 
 class LegacyCatalogClient(HttpD1Client):
@@ -68,6 +160,34 @@ class SqliteCatalogClient(HttpD1Client):
 
     def _query_batch(self, statements: list[str]) -> list[list[dict[str, Any]]]:
         return [self._query(statement) for statement in statements]
+
+
+class AtomicSqliteD1Client(SqliteCatalogClient):
+    def _query_atomic_batch(self, statements):
+        statements = self._validate_atomic_batch(statements)
+        self.connection.execute("SAVEPOINT atomic")
+        try:
+            for statement in statements:
+                self.connection.execute(statement)
+        except Exception:
+            self.connection.execute("ROLLBACK TO atomic")
+            self.connection.execute("RELEASE atomic")
+            raise
+        self.connection.execute("RELEASE atomic")
+        self.connection.commit()
+        return []
+
+
+def test_atomic_sqlite_batch_rolls_back_mid_statement_failure():
+    d1 = AtomicSqliteD1Client()
+    d1._query('CREATE TABLE t (id TEXT PRIMARY KEY, value TEXT);')
+    d1._query("INSERT INTO t VALUES ('old', 'old');")
+    with pytest.raises(sqlite3.IntegrityError):
+        d1._query_atomic_batch([
+            "UPDATE t SET value = 'new' WHERE id = 'old';",
+            "INSERT INTO t VALUES ('old', 'duplicate');",
+        ])
+    assert d1._query("SELECT value FROM t WHERE id = 'old';") == [{"value": "old"}]
 
 
 def _catalog_row() -> dict[str, Any]:

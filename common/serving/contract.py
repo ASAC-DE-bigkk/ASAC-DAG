@@ -34,6 +34,13 @@ QUALITY_COVERAGE_OPTIONAL_FIELDS = ("measurement_scope",)
 QUALITY_COVERAGE_MEASUREMENT_SCOPES = frozenset({"published_rows", "source_relation"})
 QUALITY_COVERAGE_NOT_APPLICABLE_FIELDS = ("not_applicable_reason",)
 EMPTY_RESULT_FRESHNESS_FIELDS = ("relation", "field")
+QUERY_AVAILABILITY_FIELDS = ("relation",)
+QUERY_AVAILABILITY_COLUMNS = (
+    "place_id", "snapshot_as_of_hour", "available_from_at", "available_to_at",
+    "forecast_collected_at_min", "forecast_collected_at_max",
+    "expected_forecast_hour_count", "observed_forecast_hour_count",
+    "availability_status", "source_population_revision",
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,7 @@ class ServingContract:
     # For a valid zero-row sparse product, read the freshness timestamp from this
     # declared upstream model. A null fallback is a fail-closed publication error.
     empty_result_freshness: dict[str, str] | None = None
+    query_availability_relation: str | None = None
     description: str = ""
     product_question: str = ""
     tests: tuple[str, ...] = ()
@@ -365,6 +373,33 @@ def _load_empty_result_freshness(
     return {"relation": relation, "field": field}
 
 
+def _load_query_availability(
+    product_id: str, serving: dict[str, Any], manifest: dict[str, Any]
+) -> str | None:
+    """Load the optional, fixed-shape companion used by risk publication gates."""
+    raw = serving.get("query_availability")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != set(QUERY_AVAILABILITY_FIELDS):
+        raise ValueError(f"{product_id}: query_availability must contain relation")
+    relation = raw.get("relation")
+    if not isinstance(relation, str) or not IDENTIFIER_RE.fullmatch(relation):
+        raise ValueError(f"{product_id}: query_availability relation must be a model identifier")
+    nodes = [
+        node for node in (manifest.get("nodes") or {}).values()
+        if node.get("resource_type") == "model" and node.get("name") == relation
+    ]
+    if len(nodes) != 1:
+        raise ValueError(f"{product_id}: query_availability relation unknown model {relation}")
+    columns = nodes[0].get("columns")
+    if not isinstance(columns, dict):
+        raise ValueError(f"{product_id}: query_availability relation unknown columns")
+    for column in QUERY_AVAILABILITY_COLUMNS:
+        if column not in columns:
+            raise ValueError(f"{product_id}: query_availability relation {relation} unknown column {column}")
+    return relation
+
+
 def _load_source_evidence(product_id: str, serving: dict[str, Any]) -> tuple[dict[str, Any], ...] | None:
     """Load source/right records without silently accepting incomplete evidence.
 
@@ -520,6 +555,9 @@ def load_contracts(
         empty_result_freshness = _load_empty_result_freshness(
             str(product_id), serving, manifest
         )
+        query_availability_relation = _load_query_availability(
+            str(product_id), serving, manifest
+        )
         column_vocabularies, vocabulary_terms = _load_column_vocabulary_metadata(
             str(product_id), node
         )
@@ -538,6 +576,7 @@ def load_contracts(
                   event_time=serving.get("event_time"),
                   freshness_field=freshness_field,
                   empty_result_freshness=empty_result_freshness,
+                  query_availability_relation=query_availability_relation,
                   description=str(node.get("description", "")),
                   product_question=str(serving.get("product_question", "")),
                   tests=tuple(gates.get(uid, [])),

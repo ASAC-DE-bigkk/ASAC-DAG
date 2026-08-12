@@ -11,13 +11,14 @@ from common.serving.watchdog import (
 
 
 class _D1Evidence:
-    def __init__(self, rows):
+    def __init__(self, rows, availability_rows=()):
         self._rows = rows
+        self._availability_rows = availability_rows
         self.sql = None
 
     def execute(self, sql):
         self.sql = sql
-        return self._rows
+        return self._availability_rows if "d1_product_query_availability" in sql else self._rows
 
 
 def _contract(*, slo=75, trigger=None):
@@ -33,6 +34,35 @@ def _contract(*, slo=75, trigger=None):
         freshness_slo_minutes=slo,
         publication_trigger=trigger or {"schedule_cron": "*/15 * * * *"},
     )
+
+
+def _risk_contract():
+    return ServingContract(
+        product_id="weather_place_risk_window", model_name="gold_weather_place_risk_window",
+        enabled=True, external=True, publication_mode="snapshot", zero_policy="fail",
+        primary_key=("product_row_id",), event_time="forecast_at", freshness_slo_minutes=75,
+        publication_trigger={"max_interval_minutes": 60},
+        query_availability_relation="gold_weather_place_risk_query_availability",
+    )
+
+
+def _risk_evidence_row():
+    return _evidence_row(
+        model_name="gold_weather_place_risk_window", product_id="weather_place_risk_window",
+        catalog_freshness="2026-08-12T00:00:00+00:00", quality_freshness="2026-08-12T00:00:00+00:00",
+        published_at="2026-08-12T00:30:00+00:00",
+    )
+
+
+def _availability_aggregate(publication_id="publication-1", **overrides):
+    row = {
+        "product_id": "weather_place_risk_window", "publication_id": publication_id,
+        "row_count": 427, "distinct_place_count": 427, "null_place_count": 0,
+        "incomplete_count": 0, "invalid_count": 0, "fingerprint_count": 1,
+        "forecast_collected_at_min": "2026-08-12T00:00:00+00:00",
+    }
+    row.update(overrides)
+    return row
 
 
 def _evidence_row(**overrides):
@@ -68,6 +98,29 @@ def test_kst_wall_clock_freshness_is_measured_and_breaches_source_slo():
     assert result.publication_age_minutes == 6
     assert result.issues == ("freshness_slo_breached",)
     assert "d1_product_quality" in d1.sql
+
+
+def test_opted_in_risk_watchdog_requires_matching_complete_sidecar():
+    report = evaluate_watchdog(
+        _D1Evidence([_risk_evidence_row()], [_availability_aggregate()]), [_risk_contract()],
+        checked_at=datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc),
+    )
+    assert report.products[0].healthy is True
+    assert report.products[0].query_availability_row_count == 427
+
+
+@pytest.mark.parametrize("rows,issue", [
+    ([], "query_availability_missing"),
+    ([_availability_aggregate("previous")], "query_availability_publication_mismatch"),
+    ([_availability_aggregate(row_count=426)], "query_availability_row_count_mismatch"),
+    ([_availability_aggregate(incomplete_count=1)], "query_availability_incomplete"),
+])
+def test_opted_in_risk_watchdog_reports_sidecar_issues(rows, issue):
+    report = evaluate_watchdog(
+        _D1Evidence([_risk_evidence_row()], rows), [_risk_contract()],
+        checked_at=datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc),
+    )
+    assert issue in report.products[0].issues
 
 
 def test_timezone_aware_freshness_passes_when_both_contract_clocks_are_current():

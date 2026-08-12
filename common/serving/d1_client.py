@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
 Column = tuple[str, str]  # (name, trino_type)
@@ -24,7 +25,21 @@ _SQLITE_TYPE = {
 MAX_SQL_STATEMENT_BYTES = 80_000
 MAX_STATEMENTS_PER_API_BATCH = 4
 MAX_API_BATCH_BYTES = 256_000
+MAX_ACTIVATION_STATEMENTS = 32
+MAX_ACTIVATION_API_BATCH_BYTES = 256_000
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+QUERY_AVAILABILITY_TABLE = "d1_product_query_availability"
+QUERY_AVAILABILITY_COLUMNS = (
+    ("product_id", "TEXT NOT NULL"), ("publication_id", "TEXT NOT NULL"),
+    ("place_id", "TEXT NOT NULL"), ("snapshot_as_of_hour", "TEXT NOT NULL"),
+    ("available_from_at", "TEXT NOT NULL"), ("available_to_at", "TEXT NOT NULL"),
+    ("forecast_collected_at_min", "TEXT NOT NULL"), ("forecast_collected_at_max", "TEXT NOT NULL"),
+    ("expected_forecast_hour_count", "INTEGER NOT NULL"), ("observed_forecast_hour_count", "INTEGER NOT NULL"),
+    ("availability_status", "TEXT NOT NULL"), ("source_population_revision", "TEXT NOT NULL"),
+    ("availability_fingerprint", "TEXT NOT NULL"), ("measured_at", "TEXT NOT NULL"),
+)
+QUERY_AVAILABILITY_PRIMARY_KEY = ("product_id", "publication_id", "place_id")
 
 
 def quote_identifier(identifier: str) -> str:
@@ -164,6 +179,26 @@ class D1Client(Protocol):
         sources: Sequence[dict[str, Any]] | None,
         quality: dict[str, Any],
     ) -> None: ...
+    def stage_snapshot(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], primary_key: Sequence[str]) -> None: ...
+    def read_staged_snapshot_rows(self, name: str, columns: Sequence[Column], primary_key: Sequence[str]) -> list[dict[str, Any]]: ...
+    def stage_query_availability(self, product_id: str, publication_id: str, rows: Sequence[dict[str, Any]], *, fingerprint: str, measured_at: str) -> None: ...
+    def read_query_availability_rows(self, product_id: str, publication_id: str) -> list[dict[str, Any]]: ...
+    def capture_product_publication_state(self, product_id: str, model_name: str) -> "ProductPublicationState": ...
+    def build_activation_statements(self, product_id: str, model_name: str, candidate: "ProductPublicationState") -> tuple[str, ...]: ...
+    def build_compensation_statements(self, product_id: str, model_name: str, previous: "ProductPublicationState") -> tuple[str, ...]: ...
+    def preflight_staged_transition(self, product_id: str, model_name: str, candidate: "ProductPublicationState", previous: "ProductPublicationState") -> None: ...
+    def activate_staged_snapshot(self, product_id: str, model_name: str, candidate: "ProductPublicationState") -> None: ...
+    def compensate_staged_snapshot(self, product_id: str, model_name: str, previous: "ProductPublicationState") -> None: ...
+    def prepare_atomic_publication_schema(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class ProductPublicationState:
+    catalog_row: dict[str, Any] | None
+    metadata_rows: dict[str, tuple[dict[str, Any], ...]]
+    source_rows: tuple[dict[str, Any], ...]
+    quality_row: dict[str, Any] | None
+    active_table_exists: bool = True
 
 
 # ---- catalog schema (single source for both real client and Worker) -----------------
@@ -581,6 +616,20 @@ class HttpD1Client:
             raise RuntimeError("D1 API batch 일부 statement 실패")
         return [(item.get("results") or []) for item in result]
 
+    def _validate_atomic_batch(self, statements: Sequence[str]) -> tuple[str, ...]:
+        if not statements:
+            raise ValueError("atomic batch requires at least one statement")
+        if len(statements) > MAX_ACTIVATION_STATEMENTS:
+            raise ValueError(f"atomic batch exceeds statement budget {MAX_ACTIVATION_STATEMENTS}")
+        if any(_utf8_bytes(statement) > MAX_SQL_STATEMENT_BYTES for statement in statements):
+            raise ValueError(f"atomic batch statement exceeds SQL byte budget {MAX_SQL_STATEMENT_BYTES}")
+        if _api_batch_bytes(statements) > MAX_ACTIVATION_API_BATCH_BYTES:
+            raise ValueError(f"atomic batch exceeds API batch byte budget {MAX_ACTIVATION_API_BATCH_BYTES}")
+        return tuple(statements)
+
+    def _query_atomic_batch(self, statements: Sequence[str]) -> list[list[dict[str, Any]]]:
+        return self._query_batch(self._validate_atomic_batch(statements))
+
     def _create_ddl(
         self,
         name: str,
@@ -694,6 +743,146 @@ class HttpD1Client:
             )
         else:
             self._query(f'ALTER TABLE "{staging}" RENAME TO "{name}";')
+
+    def stage_snapshot(
+        self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], primary_key: Sequence[str]
+    ) -> None:
+        staging = f"{name}__staging"
+        self._query(f'DROP TABLE IF EXISTS "{staging}";')
+        self._query(self._create_ddl(staging, columns, primary_key))
+        self._insert_batches(staging, columns, rows, replace=False)
+
+    def read_staged_snapshot_rows(
+        self, name: str, columns: Sequence[Column], primary_key: Sequence[str]
+    ) -> list[dict[str, Any]]:
+        return self.read_table_rows(f"{name}__staging", columns, primary_key)
+
+    def _ensure_query_availability_schema(self) -> None:
+        existing = self._query(f'PRAGMA table_info("{QUERY_AVAILABILITY_TABLE}");')
+        if existing:
+            expected_by_name = {
+                name: (kind.split()[0].upper(), "NOT NULL" in kind.upper())
+                for name, kind in QUERY_AVAILABILITY_COLUMNS
+            }
+            actual_names = {str(row.get("name")) for row in existing}
+            actual_key = tuple(
+                str(row.get("name")) for row in sorted(
+                    (row for row in existing if int(row.get("pk") or 0) > 0),
+                    key=lambda row: int(row.get("pk") or 0),
+                )
+            )
+            shape_valid = actual_names == set(expected_by_name) and all(
+                str(row.get("type") or "").strip().upper() == expected_by_name[str(row.get("name"))][0]
+                and bool(int(row.get("notnull") or 0)) == expected_by_name[str(row.get("name"))][1]
+                for row in existing
+            )
+            if not shape_valid or actual_key != QUERY_AVAILABILITY_PRIMARY_KEY:
+                raise RuntimeError(
+                    f"{QUERY_AVAILABILITY_TABLE}: schema mismatch; explicit migration is required"
+                )
+            return
+        columns = ", ".join(f'"{name}" {kind}' for name, kind in QUERY_AVAILABILITY_COLUMNS)
+        primary_key = '", "'.join(QUERY_AVAILABILITY_PRIMARY_KEY)
+        self._query(f'CREATE TABLE "{QUERY_AVAILABILITY_TABLE}" ({columns}, PRIMARY KEY ("{primary_key}"));')
+
+    def prepare_atomic_publication_schema(self) -> None:
+        self._ensure_catalog_schema()
+        for table in HANDOFF_PRODUCT_TABLES:
+            self._ensure_handoff_schema(table)
+        self._ensure_evidence_schema("d1_catalog_sources")
+        self._ensure_evidence_schema("d1_product_quality")
+
+    def stage_query_availability(
+        self, product_id: str, publication_id: str, rows: Sequence[dict[str, Any]], *, fingerprint: str, measured_at: str
+    ) -> None:
+        self._ensure_query_availability_schema()
+        enriched = [dict(row, product_id=product_id, publication_id=publication_id,
+                         availability_fingerprint=fingerprint, measured_at=measured_at) for row in rows]
+        columns = [(name, kind.split()[0].lower()) for name, kind in QUERY_AVAILABILITY_COLUMNS]
+        self._insert_batches(QUERY_AVAILABILITY_TABLE, columns, enriched, replace=True)
+
+    def read_query_availability_rows(self, product_id: str, publication_id: str) -> list[dict[str, Any]]:
+        self._ensure_query_availability_schema()
+        columns = ", ".join(f'"{name}"' for name, _kind in QUERY_AVAILABILITY_COLUMNS)
+        return self._query(
+            f'SELECT {columns} FROM "{QUERY_AVAILABILITY_TABLE}" '
+            f'WHERE "product_id" = {sql_literal(product_id)} AND "publication_id" = {sql_literal(publication_id)} '
+            'ORDER BY "place_id";'
+        )
+
+    def capture_product_publication_state(self, product_id: str, model_name: str) -> ProductPublicationState:
+        """Read the exact product-scoped LKG evidence before candidate activation."""
+        metadata: dict[str, tuple[dict[str, Any], ...]] = {}
+        for table in HANDOFF_PRODUCT_TABLES:
+            metadata[table] = tuple(self._query(
+                f'SELECT * FROM "{table}" WHERE "product_id" = {sql_literal(product_id)};'
+            ))
+        sources = tuple(self._query(
+            f'SELECT * FROM "d1_catalog_sources" WHERE "product_id" = {sql_literal(product_id)};'
+        ))
+        quality_rows = self._query(
+            f'SELECT * FROM "d1_product_quality" WHERE "product_id" = {sql_literal(product_id)};'
+        )
+        catalog_rows = self._query(f"SELECT * FROM _catalog WHERE name = {sql_literal(model_name)};")
+        return ProductPublicationState(
+            catalog_row=catalog_rows[0] if catalog_rows else None, metadata_rows=metadata,
+            source_rows=sources, quality_row=quality_rows[0] if quality_rows else None,
+            active_table_exists=self._table_exists(model_name),
+        )
+
+    def _catalog_upsert_statement(self, row: dict[str, Any]) -> str:
+        column_names = '", "'.join(CATALOG_COLUMNS)
+        update_columns = ", ".join(
+            f'"{column}" = excluded."{column}"' for column in CATALOG_COLUMNS if column != "name"
+        )
+        values = ", ".join(sql_literal(row.get(column)) for column in CATALOG_COLUMNS)
+        return f'INSERT INTO _catalog ("{column_names}") VALUES ({values}) ON CONFLICT("name") DO UPDATE SET {update_columns};'
+
+    def _replace_state_evidence_statements(self, product_id: str, state: ProductPublicationState) -> list[str]:
+        statements: list[str] = []
+        for table in HANDOFF_PRODUCT_TABLES:
+            statements.append(f'DELETE FROM "{table}" WHERE "product_id" = {sql_literal(product_id)};')
+            statements.extend(handoff_upsert_statements(table, state.metadata_rows.get(table, ())))
+        statements.append(f'DELETE FROM "d1_catalog_sources" WHERE "product_id" = {sql_literal(product_id)};')
+        statements.extend(evidence_upsert_statements("d1_catalog_sources", state.source_rows))
+        statements.append(f'DELETE FROM "d1_product_quality" WHERE "product_id" = {sql_literal(product_id)};')
+        if state.quality_row is not None:
+            statements.extend(evidence_upsert_statements("d1_product_quality", [state.quality_row]))
+        return statements
+
+    def build_activation_statements(self, product_id: str, model_name: str, candidate: ProductPublicationState) -> tuple[str, ...]:
+        previous = f"{model_name}__previous"
+        staging = f"{model_name}__staging"
+        statements = (
+            [f'ALTER TABLE "{model_name}" RENAME TO "{previous}";', f'ALTER TABLE "{staging}" RENAME TO "{model_name}";']
+            if candidate.active_table_exists else [f'ALTER TABLE "{staging}" RENAME TO "{model_name}";']
+        )
+        statements.extend(self._replace_state_evidence_statements(product_id, candidate))
+        if candidate.catalog_row is not None:
+            statements.append(self._catalog_upsert_statement(candidate.catalog_row))
+        return tuple(statements)
+
+    def build_compensation_statements(self, product_id: str, model_name: str, previous: ProductPublicationState) -> tuple[str, ...]:
+        prior = f"{model_name}__previous"
+        statements: list[str] = [f'DROP TABLE IF EXISTS "{model_name}";']
+        if previous.active_table_exists:
+            statements.append(f'ALTER TABLE "{prior}" RENAME TO "{model_name}";')
+        statements.extend(self._replace_state_evidence_statements(product_id, previous))
+        if previous.catalog_row is None:
+            statements.append(f'DELETE FROM _catalog WHERE "name" = {sql_literal(model_name)};')
+        else:
+            statements.append(self._catalog_upsert_statement(previous.catalog_row))
+        return tuple(statements)
+
+    def preflight_staged_transition(self, product_id: str, model_name: str, candidate: ProductPublicationState, previous: ProductPublicationState) -> None:
+        self._validate_atomic_batch(self.build_activation_statements(product_id, model_name, candidate))
+        self._validate_atomic_batch(self.build_compensation_statements(product_id, model_name, previous))
+
+    def activate_staged_snapshot(self, product_id: str, model_name: str, candidate: ProductPublicationState) -> None:
+        self._query_atomic_batch(self.build_activation_statements(product_id, model_name, candidate))
+
+    def compensate_staged_snapshot(self, product_id: str, model_name: str, previous: ProductPublicationState) -> None:
+        self._query_atomic_batch(self.build_compensation_statements(product_id, model_name, previous))
 
     def restore_replaced_table(self, name: str) -> None:
         previous = f"{name}__previous"

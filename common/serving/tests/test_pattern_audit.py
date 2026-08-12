@@ -6,7 +6,7 @@
 import pytest
 
 from common.serving.pattern_audit import (
-    audit_pattern_sql, build_allowlist, deny_findings, table_refs, tokenize,
+    audit_pattern_sql, build_allowlist, deny_findings, rewrite_audited_relation, table_refs, tokenize,
 )
 
 OK = build_allowlist(["gold_ok", "gold_sibling"])
@@ -100,3 +100,15 @@ def test_table_refs_walks_paren_lists():
 def test_build_allowlist_lowercases_and_merges_cross_domain():
     allow = build_allowlist(["Gold_A"], ["commerce_gold.gold_license_dong_summary"])
     assert "gold_a" in allow and "commerce_gold.gold_license_dong_summary" in allow
+
+
+def test_rewrite_audited_relation_rewrites_only_exact_from_or_join_identifier():
+    sql = 'SELECT \'gold_risk\' AS literal FROM "gold_risk" r JOIN gold_other o ON 1=1'
+    assert rewrite_audited_relation(sql, "gold_risk", "gold_risk__staging", build_allowlist(["gold_risk", "gold_other"])) == (
+        'SELECT \'gold_risk\' AS literal FROM "gold_risk__staging" r JOIN gold_other o ON 1=1'
+    )
+
+
+def test_rewrite_audited_relation_fails_closed_for_unknown_or_unreferenced_sql():
+    assert rewrite_audited_relation("SELECT * FROM unknown", "gold_risk", "gold_risk__staging", build_allowlist(["gold_risk"])) is None
+    assert rewrite_audited_relation("SELECT 'gold_risk'", "gold_risk", "gold_risk__staging", build_allowlist(["gold_risk"])) is None
