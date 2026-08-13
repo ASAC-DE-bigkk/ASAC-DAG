@@ -47,6 +47,7 @@ from weather_dbt_runtime import (  # noqa: E402
     WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
     resolve_weather_serving_as_of_hour,
     run_weather_dbt_phase,
+    weather_serving_as_of_hour_state,
 )
 from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
@@ -68,6 +69,7 @@ record_weather_problem = problem_failure_callback(
     dbt_run_results_xcom_key=WEATHER_DBT_RUN_RESULTS_XCOM_KEY,
 )
 SERVING_SNAPSHOT_SELECTOR = "ask_seoul_weather_serving_snapshot_refresh"
+SERVING_SNAPSHOT_PRIORITY_WEIGHT = 100
 REFRESH_DBT_TASK_IDS = (
     "dbt_run_serving_snapshot_refresh",
     "dbt_test_serving_snapshot_refresh",
@@ -124,6 +126,7 @@ def _serving_snapshot_dbt_task(task_id: str, dbt_command: str) -> PythonOperator
         },
         pool=TRINO_WEATHER_LEGACY_HEAVY_POOL,
         weight_rule="absolute",
+        priority_weight=SERVING_SNAPSHOT_PRIORITY_WEIGHT,
         retries=1,
         retry_delay=DBT_RETRY_DELAY,
         on_failure_callback=record_weather_problem,
@@ -171,15 +174,27 @@ def publish_dbt_run_metrics(**context) -> dict[str, object]:
     return {"rows": len(records), "skipped": False}
 
 
-def mark_weather_serving_snapshot_ready(**context) -> dict[str, str]:
+def mark_weather_serving_snapshot_ready(
+    *, now: datetime | None = None, **context
+) -> dict[str, str]:
     """Emit the existing Publisher asset without claiming a new Bronze snapshot."""
 
+    serving_as_of_hour, serving_hour_state = weather_serving_as_of_hour_state(
+        ti=context["ti"],
+        now=now,
+    )
+    if serving_hour_state == "stale":
+        raise AirflowFailException(
+            "weather hourly serving snapshot completed after its frozen hour: "
+            f"serving_as_of_hour={serving_as_of_hour}"
+        )
     outlet_events = context.get("outlet_events")
     if outlet_events is None:
         raise RuntimeError("weather serving snapshot outlet event is unavailable")
     metadata = {
         "gold_dag_run_id": str(context.get("run_id") or ""),
         "refresh_kind": "hourly_serving_snapshot",
+        "serving_as_of_hour": serving_as_of_hour,
     }
     outlet_events[WEATHER_GOLD_PUBLICATION_READY_ASSET_REF].extra = metadata
     return metadata

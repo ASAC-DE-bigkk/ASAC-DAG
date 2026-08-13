@@ -14,6 +14,7 @@ TRINO_WEATHER_HEAVY_POOL: Final = "trino_weather_heavy"
 TRINO_WEATHER_LEGACY_HEAVY_POOL: Final = "trino_weather_legacy_heavy"
 TRINO_WEATHER_RECOVERY_HEAVY_POOL: Final = "trino_weather_recovery_heavy"
 TRINO_HEAVY_POOL: Final = "trino_heavy"
+SERVING_D1_PUBLISH_POOL: Final = "serving_d1_publish"
 
 
 class AirflowPoolSpec(NamedTuple):
@@ -72,6 +73,12 @@ TRINO_POOL_SPECS: Final = (
         "Serialize Trino/dbt memory-heavy tasks",
         False,
     ),
+    AirflowPoolSpec(
+        SERVING_D1_PUBLISH_POOL,
+        1,
+        "Serialize common serving Publisher writes to the shared D1 database",
+        False,
+    ),
 )
 
 
@@ -109,6 +116,7 @@ __all__ = [
     "TRINO_WEATHER_HEAVY_POOL",
     "TRINO_WEATHER_LEGACY_HEAVY_POOL",
     "TRINO_WEATHER_RECOVERY_HEAVY_POOL",
+    "SERVING_D1_PUBLISH_POOL",
     "airflow_pool_import_payload",
 ]
 

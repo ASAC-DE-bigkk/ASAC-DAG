@@ -2,6 +2,8 @@ import types
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from weather_transform_test_support import (
     FakeAsset,
     FakePythonOperator,
@@ -59,6 +61,7 @@ def test_hourly_snapshot_refresh_runs_only_public_weather_serving_selector():
         }
         assert task.kwargs["pool"] == module.TRINO_WEATHER_LEGACY_HEAVY_POOL
         assert task.kwargs["weight_rule"] == "absolute"
+        assert task.kwargs["priority_weight"] == module.SERVING_SNAPSHOT_PRIORITY_WEIGHT
         assert task.kwargs["retries"] == 1
         assert task.kwargs["retry_delay"] == module.DBT_RETRY_DELAY
         assert task.kwargs["on_failure_callback"] is module.record_weather_problem
@@ -74,17 +77,47 @@ def test_hourly_snapshot_refresh_marks_the_existing_publication_asset_without_br
     assert marker.downstream_task_ids == {"publish_dbt_run_metrics"}
 
     outlet_event = types.SimpleNamespace(extra=None)
+    ti = FakeTaskInstance(
+        pulls={
+            (module.SERVING_AS_OF_HOUR_TASK_ID, None): "2026-08-11 10:00:00"
+        }
+    )
     metadata = module.mark_weather_serving_snapshot_ready(
+        ti=ti,
         run_id="scheduled__2026-08-11T00:00:00+00:00",
         outlet_events={module.WEATHER_GOLD_PUBLICATION_READY_ASSET_REF: outlet_event},
+        now=datetime(2026, 8, 11, 10, 59, 59, tzinfo=ZoneInfo("Asia/Seoul")),
     )
 
     assert metadata == {
         "gold_dag_run_id": "scheduled__2026-08-11T00:00:00+00:00",
         "refresh_kind": "hourly_serving_snapshot",
+        "serving_as_of_hour": "2026-08-11 10:00:00",
     }
     assert outlet_event.extra == metadata
     assert "bronze_dag_run_id" not in metadata
+
+
+def test_hourly_snapshot_refresh_fails_closed_when_frozen_hour_is_stale():
+    module = _module()
+    outlet_event = types.SimpleNamespace(extra=None)
+    ti = FakeTaskInstance(
+        pulls={
+            (module.SERVING_AS_OF_HOUR_TASK_ID, None): "2026-08-11 10:00:00"
+        }
+    )
+
+    with pytest.raises(module.AirflowFailException, match="frozen hour"):
+        module.mark_weather_serving_snapshot_ready(
+            ti=ti,
+            run_id="scheduled__2026-08-11T00:00:00+00:00",
+            outlet_events={
+                module.WEATHER_GOLD_PUBLICATION_READY_ASSET_REF: outlet_event
+            },
+            now=datetime(2026, 8, 11, 11, 0, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+        )
+
+    assert outlet_event.extra is None
 
 
 def test_hourly_snapshot_refresh_freezes_one_kst_hour_for_run_and_test():

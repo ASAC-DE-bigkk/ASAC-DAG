@@ -17,7 +17,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 import logging
 
@@ -85,6 +85,7 @@ class ProductRecord:
     published_bytes: int = 0
     freshness: str | None = None
     api_smoke_status: str = "not_evaluated"
+    api_smoke_detail: dict[str, Any] | None = None
     stage: str = "initialized"
     rollback_status: str = "not_needed"
     projection_schema_hash: str | None = None
@@ -111,6 +112,78 @@ class PublicationError(RuntimeError):
     def __init__(self, report: PublicationReport) -> None:
         self.report = report
         super().__init__("; ".join(report.failures))
+
+
+_SMOKE_DIAGNOSTIC_FIELDS = frozenset({
+    "http_status",
+    "error_code",
+    "blockers",
+    "cf_ray",
+    "latency_ms",
+    "exception_type",
+    "reason",
+})
+_SMOKE_DIAGNOSTIC_TEXT_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _safe_smoke_detail(raw: Mapping[str, Any]) -> dict[str, Any]:
+    detail: dict[str, Any] = {}
+    http_status = raw.get("http_status")
+    if isinstance(http_status, int) and 100 <= http_status <= 599:
+        detail["http_status"] = http_status
+    latency_ms = raw.get("latency_ms")
+    if isinstance(latency_ms, int) and latency_ms >= 0:
+        detail["latency_ms"] = latency_ms
+    for key in ("error_code", "cf_ray", "exception_type", "reason"):
+        value = raw.get(key)
+        if isinstance(value, str) and _SMOKE_DIAGNOSTIC_TEXT_RE.fullmatch(value):
+            detail[key] = value
+    blockers = raw.get("blockers")
+    if isinstance(blockers, (list, tuple)):
+        safe_blockers = [
+            blocker
+            for blocker in blockers[:10]
+            if isinstance(blocker, str)
+            and _SMOKE_DIAGNOSTIC_TEXT_RE.fullmatch(blocker)
+        ]
+        if safe_blockers:
+            detail["blockers"] = safe_blockers
+    return detail
+
+
+def _smoke_diagnostic(smoke: SmokeTester, model_name: str) -> dict[str, Any] | None:
+    getter = getattr(smoke, "diagnostic", None)
+    if not callable(getter):
+        return None
+    try:
+        raw = getter(model_name)
+    except Exception:  # noqa: BLE001 - diagnostics must never replace the smoke verdict
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    detail = _safe_smoke_detail({
+        key: value for key, value in raw.items() if key in _SMOKE_DIAGNOSTIC_FIELDS
+    })
+    return detail or None
+
+
+def _smoke_failure_message(detail: Mapping[str, Any] | None) -> str:
+    if not detail:
+        return "API smoke test 실패"
+    parts = []
+    for key in (
+        "http_status",
+        "error_code",
+        "blockers",
+        "cf_ray",
+        "latency_ms",
+        "exception_type",
+        "reason",
+    ):
+        value = detail.get(key)
+        if value is not None:
+            parts.append(f"{key}={value}")
+    return "API smoke test 실패" + (f" ({', '.join(parts)})" if parts else "")
 
 
 def _now_iso() -> str:
@@ -699,6 +772,30 @@ def _atomic_candidate_state(
     )
 
 
+def _activation_committed_after_error(
+    d1: D1Client,
+    contract: ServingContract,
+    publication_id: str,
+) -> bool:
+    """Reconcile a response-lost activation without replaying its ALTER batch.
+
+    D1 executes the activation batch transactionally, and the catalog upsert is
+    its final statement. Matching catalog identity is therefore the commit marker
+    for the preceding table swap and product-scoped evidence changes.
+    """
+
+    active = d1.capture_product_publication_state(
+        contract.product_id,
+        contract.model_name,
+    )
+    catalog = active.catalog_row or {}
+    return (
+        active.active_table_exists
+        and catalog.get("product_id") == contract.product_id
+        and catalog.get("publication_id") == publication_id
+    )
+
+
 def publish(
     contracts: Sequence[ServingContract],
     source: SourceReader,
@@ -932,10 +1029,38 @@ def publish(
                 previous_state = d1.capture_product_publication_state(contract.product_id, contract.model_name)
                 candidate = _atomic_candidate_state(contract, plan.columns, record, candidate_patterns, metadata_parts, previous_state)
                 d1.preflight_staged_transition(contract.product_id, contract.model_name, candidate, previous_state)
-                d1.activate_staged_snapshot(contract.product_id, contract.model_name, candidate)
+                try:
+                    d1.activate_staged_snapshot(
+                        contract.product_id,
+                        contract.model_name,
+                        candidate,
+                    )
+                except Exception as activation_exc:  # noqa: BLE001 - reconcile unknown transport outcome
+                    try:
+                        activation_committed = _activation_committed_after_error(
+                            d1,
+                            contract,
+                            record.publication_id,
+                        )
+                    except Exception as reconciliation_exc:  # noqa: BLE001 - never replay ALTER blindly
+                        raise RuntimeError(
+                            "D1 atomic activation outcome is unknown: "
+                            f"activation={type(activation_exc).__name__} "
+                            f"reconciliation={type(reconciliation_exc).__name__}"
+                        ) from activation_exc
+                    if not activation_committed:
+                        raise
+                    log.warning(
+                        "D1 atomic activation committed after response error; "
+                        "model=%s product_id=%s publication_id=%s exception_type=%s",
+                        contract.model_name,
+                        contract.product_id,
+                        record.publication_id,
+                        type(activation_exc).__name__,
+                    )
             else:
                 _write(d1, contract, plan, rows)
-        except Exception as exc:  # noqa: BLE001 -- record + continue; snapshot last-good is intact
+        except Exception as exc:  # noqa: BLE001 -- record + continue; activation uncertainty is explicit
             record.serving_status = STATUS_FAILED
             record.stage = "write"
             record.reason = f"write 실패: {type(exc).__name__}: {exc}"
@@ -1028,9 +1153,11 @@ def publish(
         if contract.external:
             record.stage = "api_smoke"
             record.api_smoke_status = smoke.check(contract.model_name)
+            record.api_smoke_detail = _smoke_diagnostic(smoke, contract.model_name)
             if record.api_smoke_status == "failed":
+                failure_message = _smoke_failure_message(record.api_smoke_detail)
                 if atomic_opt_in and previous_state is not None:
-                    _fail_after_write(d1, report, record, contract, message="API smoke test 실패",
+                    _fail_after_write(d1, report, record, contract, message=failure_message,
                                       previous_catalog=catalog, atomic_previous=previous_state)
                     continue
                 _fail_after_write(
@@ -1038,7 +1165,7 @@ def publish(
                     report,
                     record,
                     contract,
-                    message="API smoke test 실패",
+                    message=failure_message,
                     previous_catalog=catalog,
                 )
                 continue

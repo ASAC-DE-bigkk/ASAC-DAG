@@ -53,6 +53,37 @@ def _serving_as_of_hour_from_task(ti: Any, task_id: str | None) -> str | None:
     return raw
 
 
+def weather_serving_as_of_hour_state(
+    *,
+    ti: Any,
+    now: datetime | None = None,
+) -> tuple[str, str]:
+    """Return the frozen KST hour and whether it is still the current hour."""
+
+    frozen_value = _serving_as_of_hour_from_task(
+        ti,
+        SERVING_AS_OF_HOUR_TASK_ID,
+    )
+    if frozen_value is None:  # pragma: no cover - task id is fixed above
+        raise RuntimeError("weather publication requires a frozen serving as-of hour")
+    current_value = resolve_weather_serving_as_of_hour(now=now)
+    frozen_hour = datetime.strptime(
+        frozen_value,
+        "%Y-%m-%d %H:%M:%S",
+    ).replace(tzinfo=KST)
+    current_hour = datetime.strptime(
+        current_value,
+        "%Y-%m-%d %H:%M:%S",
+    ).replace(tzinfo=KST)
+    if frozen_hour > current_hour:
+        raise RuntimeError(
+            "weather publication frozen serving hour is in the future: "
+            f"frozen={frozen_value} current={current_value}"
+        )
+    state = "current" if frozen_hour == current_hour else "stale"
+    return frozen_value, state
+
+
 def run_weather_dbt_phase(
     *,
     dbt_command: str,

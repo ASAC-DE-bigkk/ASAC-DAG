@@ -9,7 +9,11 @@ it reads its token/account/db from the environment and never logs the token.
 from __future__ import annotations
 
 import json
+import logging
+import random
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
@@ -27,7 +31,15 @@ MAX_STATEMENTS_PER_API_BATCH = 4
 MAX_API_BATCH_BYTES = 256_000
 MAX_ACTIVATION_STATEMENTS = 32
 MAX_ACTIVATION_API_BATCH_BYTES = 256_000
+D1_MAX_ATTEMPTS = 3
+D1_RETRY_BASE_SECONDS = 0.5
+D1_RETRY_MAX_SECONDS = 4.0
+D1_TRANSIENT_ERROR_CODES = frozenset({"7500"})
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+CF_RAY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+D1_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+log = logging.getLogger(__name__)
 
 QUERY_AVAILABILITY_TABLE = "d1_product_query_availability"
 QUERY_AVAILABILITY_COLUMNS = (
@@ -61,6 +73,94 @@ def sql_literal(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     return "'" + str(value).replace("'", "''") + "'"
+
+
+class D1RequestError(RuntimeError):
+    """Sanitized D1 transport/API failure without SQL, body, headers, or token."""
+
+    def __init__(
+        self,
+        *,
+        http_status: int | None,
+        error_codes: Sequence[str] = (),
+        cf_ray: str | None = None,
+        attempt: int,
+        exception_type: str | None = None,
+        transient: bool = False,
+    ) -> None:
+        self.http_status = http_status
+        self.error_codes = tuple(error_codes)
+        self.cf_ray = cf_ray
+        self.attempt = attempt
+        self.exception_type = exception_type
+        self.transient = transient
+        parts = [
+            f"http_status={http_status if http_status is not None else 'unknown'}",
+            f"codes={','.join(self.error_codes) if self.error_codes else 'none'}",
+            f"cf_ray={cf_ray or 'none'}",
+            f"attempt={attempt}",
+        ]
+        if exception_type:
+            parts.append(f"exception_type={exception_type}")
+        super().__init__("D1 API 실패: " + " ".join(parts))
+
+
+def _iter_error_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for key in ("error", "errors"):
+            nested = value.get(key)
+            if nested is not None:
+                yield from _iter_error_dicts(nested)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_error_dicts(item)
+
+
+def _d1_error_codes(response: dict[str, Any]) -> tuple[str, ...]:
+    sources: list[Any] = [response.get("errors")]
+    for statement in response.get("result") or ():
+        if isinstance(statement, dict) and statement.get("success") is False:
+            sources.append(statement.get("errors"))
+    codes = {
+        code
+        for source in sources
+        for error in _iter_error_dicts(source)
+        if error.get("code") is not None
+        for code in (str(error.get("code")).strip(),)
+        if D1_ERROR_CODE_RE.fullmatch(code)
+    }
+    return tuple(sorted(codes))
+
+
+def _safe_cf_ray(headers: Any) -> str | None:
+    getter = getattr(headers, "get", None)
+    value = getter("CF-Ray") if callable(getter) else None
+    normalized = str(value or "").strip()
+    return normalized if CF_RAY_RE.fullmatch(normalized) else None
+
+
+def _transient_exception(exc: Exception) -> bool:
+    retryable_names = {
+        "ConnectTimeout",
+        "ConnectionError",
+        "ReadTimeout",
+        "Timeout",
+    }
+    return any(base.__name__ in retryable_names for base in type(exc).__mro__)
+
+
+def _transient_failure(http_status: int | None, error_codes: Sequence[str]) -> bool:
+    return (
+        http_status == 429
+        or (http_status is not None and 500 <= http_status <= 599)
+        or bool(D1_TRANSIENT_ERROR_CODES.intersection(error_codes))
+    )
+
+
+def _read_only_sql(sql: str) -> bool:
+    normalized = sql.lstrip().upper()
+    return normalized.startswith("SELECT ") or normalized.startswith("PRAGMA ")
 
 
 def _utf8_bytes(value: str) -> int:
@@ -576,41 +676,161 @@ def handoff_prune_statement(table: str, scope_value: str, keep_keys: Sequence[st
 class HttpD1Client:
     """Cloudflare D1 HTTP API implementation. Constructed from env by the DAG factory."""
 
-    def __init__(self, api_url: str, token: str) -> None:
+    def __init__(
+        self,
+        api_url: str,
+        token: str,
+        *,
+        max_attempts: int = D1_MAX_ATTEMPTS,
+        sleep_fn: Callable[[float], None] | None = None,
+        random_fn: Callable[[], float] | None = None,
+    ) -> None:
+        if max_attempts < 1:
+            raise ValueError("D1 max_attempts must be at least 1")
         self._api_url = api_url
         self._token = token  # never logged
+        self._max_attempts = max_attempts
+        self._sleep = sleep_fn or time.sleep
+        self._random = random_fn or random.random
         self._handoff_ready: set[str] = set()  # per-run schema check cache
         self._evidence_ready: set[str] = set()  # #678 evidence schema cache
 
-    def _request(self, body: dict[str, Any]) -> dict[str, Any]:
+    def _retry_delay(self, attempt: int) -> float:
+        exponential = min(
+            D1_RETRY_MAX_SECONDS,
+            D1_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+        )
+        return exponential + (self._random() * D1_RETRY_BASE_SECONDS)
+
+    def _request(
+        self,
+        body: dict[str, Any],
+        *,
+        retry_safe: bool = False,
+    ) -> dict[str, Any]:
         import requests  # lazy import so tests never need it
 
-        resp = requests.post(
-            self._api_url, json=body,
-            headers={"Authorization": f"Bearer {self._token}"}, timeout=120,
-        )
-        response = resp.json()
-        result = response.get("result") or []
-        failed_statements = [statement for statement in result if statement.get("success") is False]
-        if not response.get("success") or failed_statements:
-            # Surface D1 errors without echoing the request (which never carries the token anyway).
-            errors = response.get("errors") or [statement.get("errors") for statement in failed_statements]
-            raise RuntimeError(f"D1 API 실패: {json.dumps(errors)[:300]}")
-        return response
+        allowed_attempts = self._max_attempts if retry_safe else 1
+        for attempt in range(1, allowed_attempts + 1):
+            try:
+                resp = requests.post(
+                    self._api_url,
+                    json=body,
+                    headers={"Authorization": f"Bearer {self._token}"},
+                    timeout=120,
+                )
+            except Exception as exc:  # noqa: BLE001 - converted to a sanitized boundary error
+                transient = _transient_exception(exc)
+                error = D1RequestError(
+                    http_status=None,
+                    attempt=attempt,
+                    exception_type=type(exc).__name__,
+                    transient=transient,
+                )
+                if retry_safe and transient and attempt < allowed_attempts:
+                    delay = self._retry_delay(attempt)
+                    log.warning(
+                        "D1 transient request retry attempt=%s/%s http_status=unknown "
+                        "codes=none cf_ray=none exception_type=%s delay_seconds=%.3f",
+                        attempt,
+                        allowed_attempts,
+                        type(exc).__name__,
+                        delay,
+                    )
+                    self._sleep(delay)
+                    continue
+                raise error from exc
 
-    def _query(self, sql: str) -> list[dict[str, Any]]:
-        response = self._request({"sql": sql})
+            raw_http_status = getattr(resp, "status_code", None)
+            http_status = raw_http_status if isinstance(raw_http_status, int) else None
+            cf_ray = _safe_cf_ray(getattr(resp, "headers", None))
+            response: dict[str, Any] | None = None
+            exception_type: str | None = None
+            try:
+                candidate = resp.json()
+                if isinstance(candidate, dict):
+                    response = candidate
+                else:
+                    exception_type = "InvalidJSONShape"
+            except Exception as exc:  # noqa: BLE001 - body is deliberately not surfaced
+                exception_type = type(exc).__name__
+
+            result = (response or {}).get("result") or []
+            failed_statements = [
+                statement
+                for statement in result
+                if isinstance(statement, dict) and statement.get("success") is False
+            ]
+            succeeded = (
+                http_status is not None
+                and 200 <= http_status <= 299
+                and response is not None
+                and response.get("success") is True
+                and not failed_statements
+            )
+            if succeeded:
+                return response
+
+            error_codes = _d1_error_codes(response or {})
+            transient = _transient_failure(http_status, error_codes)
+            error = D1RequestError(
+                http_status=http_status,
+                error_codes=error_codes,
+                cf_ray=cf_ray,
+                attempt=attempt,
+                exception_type=exception_type,
+                transient=transient,
+            )
+            if retry_safe and transient and attempt < allowed_attempts:
+                delay = self._retry_delay(attempt)
+                log.warning(
+                    "D1 transient request retry attempt=%s/%s http_status=%s "
+                    "codes=%s cf_ray=%s exception_type=%s delay_seconds=%.3f",
+                    attempt,
+                    allowed_attempts,
+                    http_status if http_status is not None else "unknown",
+                    ",".join(error_codes) if error_codes else "none",
+                    cf_ray or "none",
+                    exception_type or "none",
+                    delay,
+                )
+                self._sleep(delay)
+                continue
+            raise error
+
+        raise AssertionError("D1 request retry loop exhausted without a result")
+
+    def _query(
+        self,
+        sql: str,
+        *,
+        retry_safe: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        if retry_safe is None:
+            retry_safe = _read_only_sql(sql)
+        response = self._request({"sql": sql}, retry_safe=retry_safe)
         result = response.get("result") or []
         failed_statements = [statement for statement in result if statement.get("success") is False]
         if failed_statements:
-            errors = [statement.get("errors") for statement in failed_statements]
-            raise RuntimeError(f"D1 API 실패: {json.dumps(errors)[:300]}")
+            raise D1RequestError(
+                http_status=200,
+                error_codes=_d1_error_codes(response),
+                attempt=1,
+            )
         return (result[-1].get("results") or []) if result else []
 
-    def _query_batch(self, statements: Sequence[str]) -> list[list[dict[str, Any]]]:
+    def _query_batch(
+        self,
+        statements: Sequence[str],
+        *,
+        retry_safe: bool = False,
+    ) -> list[list[dict[str, Any]]]:
         if not statements:
             return []
-        response = self._request({"batch": [{"sql": statement} for statement in statements]})
+        response = self._request(
+            {"batch": [{"sql": statement} for statement in statements]},
+            retry_safe=retry_safe,
+        )
         result = response.get("result") or []
         if len(result) != len(statements) or any(not item.get("success") for item in result):
             raise RuntimeError("D1 API batch 일부 statement 실패")
@@ -641,7 +861,7 @@ class HttpD1Client:
         cols = ", ".join(f'"{c}" {sqlite_type(t)}' for c, t in columns)
         key_columns = '", "'.join(primary_key)
         cols += f', UNIQUE ("{key_columns}")'
-        return f'CREATE TABLE "{name}" ({cols});'
+        return f'CREATE TABLE IF NOT EXISTS "{name}" ({cols});'
 
     def _ensure_unique_primary_key(self, name: str, primary_key: Sequence[str]) -> None:
         if not primary_key:
@@ -649,7 +869,8 @@ class HttpD1Client:
         columns = '", "'.join(primary_key)
         self._query(
             f'CREATE UNIQUE INDEX IF NOT EXISTS "{name}__pk_uq" '
-            f'ON "{name}" ("{columns}");'
+            f'ON "{name}" ("{columns}");',
+            retry_safe=True,
         )
 
     def _table_exists(self, name: str) -> bool:
@@ -662,7 +883,7 @@ class HttpD1Client:
     def _insert_batches(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], *, replace: bool) -> None:
         statements = build_insert_statements(name, columns, rows, replace=replace)
         for batch in group_api_batches(statements):
-            self._query_batch(batch)
+            self._query_batch(batch, retry_safe=replace)
 
     def execute(self, sql: str) -> list[dict[str, Any]]:
         """Run one statement and return the last statement's rows.
@@ -715,7 +936,10 @@ class HttpD1Client:
 
     def ensure_table(self, name: str, columns: Sequence[Column], primary_key: Sequence[str]) -> None:
         cols = ", ".join(f'"{c}" {sqlite_type(t)}' for c, t in columns)
-        self._query(f'CREATE TABLE IF NOT EXISTS "{name}" ({cols});')
+        self._query(
+            f'CREATE TABLE IF NOT EXISTS "{name}" ({cols});',
+            retry_safe=True,
+        )
         self._ensure_unique_primary_key(name, primary_key)
 
     def replace_table(
@@ -728,11 +952,16 @@ class HttpD1Client:
         # Staging populate first; only swap after a full successful load so a mid-load
         # failure leaves the previous published table (last-known-good) untouched.
         staging = f"{name}__staging"
-        self._query(f'DROP TABLE IF EXISTS "{staging}";')
+        self._query(f'DROP TABLE IF EXISTS "{staging}";', retry_safe=True)
         # A table-level UNIQUE constraint survives the staging rename without a
         # global index-name collision on the next snapshot replacement.
-        self._query(self._create_ddl(staging, columns, primary_key))
-        self._insert_batches(staging, columns, rows, replace=False)
+        self._query(
+            self._create_ddl(staging, columns, primary_key),
+            retry_safe=True,
+        )
+        # Source primary keys are validated before this boundary. OR REPLACE makes
+        # a response-lost retry of the current staging batch idempotent.
+        self._insert_batches(staging, columns, rows, replace=True)
         previous = f"{name}__previous"
         if self._table_exists(previous):
             raise RuntimeError(f"{name}: unfinished previous snapshot exists; restore or finalize it before publishing")
@@ -748,9 +977,12 @@ class HttpD1Client:
         self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], primary_key: Sequence[str]
     ) -> None:
         staging = f"{name}__staging"
-        self._query(f'DROP TABLE IF EXISTS "{staging}";')
-        self._query(self._create_ddl(staging, columns, primary_key))
-        self._insert_batches(staging, columns, rows, replace=False)
+        self._query(f'DROP TABLE IF EXISTS "{staging}";', retry_safe=True)
+        self._query(
+            self._create_ddl(staging, columns, primary_key),
+            retry_safe=True,
+        )
+        self._insert_batches(staging, columns, rows, replace=True)
 
     def read_staged_snapshot_rows(
         self, name: str, columns: Sequence[Column], primary_key: Sequence[str]
@@ -783,7 +1015,11 @@ class HttpD1Client:
             return
         columns = ", ".join(f'"{name}" {kind}' for name, kind in QUERY_AVAILABILITY_COLUMNS)
         primary_key = '", "'.join(QUERY_AVAILABILITY_PRIMARY_KEY)
-        self._query(f'CREATE TABLE "{QUERY_AVAILABILITY_TABLE}" ({columns}, PRIMARY KEY ("{primary_key}"));')
+        self._query(
+            f'CREATE TABLE IF NOT EXISTS "{QUERY_AVAILABILITY_TABLE}" '
+            f'({columns}, PRIMARY KEY ("{primary_key}"));',
+            retry_safe=True,
+        )
 
     def prepare_atomic_publication_schema(self) -> None:
         self._ensure_catalog_schema()
@@ -895,10 +1131,16 @@ class HttpD1Client:
             self._query(f'DROP TABLE IF EXISTS "{name}";')
 
     def finalize_replaced_table(self, name: str) -> None:
-        self._query(f'DROP TABLE IF EXISTS "{name}__previous";')
+        self._query(
+            f'DROP TABLE IF EXISTS "{name}__previous";',
+            retry_safe=True,
+        )
 
     def delete_where_gte(self, name: str, column: str, trino_literal: str) -> None:
-        self._query(f'DELETE FROM "{name}" WHERE "{column}" >= {trino_literal};')
+        self._query(
+            f'DELETE FROM "{name}" WHERE "{column}" >= {trino_literal};',
+            retry_safe=True,
+        )
 
     def insert_rows(self, name: str, columns: Sequence[Column], rows: Sequence[dict[str, Any]], *, replace: bool) -> None:
         self._insert_batches(name, columns, rows, replace=replace)
@@ -907,7 +1149,7 @@ class HttpD1Client:
         return {str(row["name"]) for row in self._query("PRAGMA table_info(_catalog);")}
 
     def _ensure_catalog_schema(self) -> None:
-        self._query(CATALOG_DDL)
+        self._query(CATALOG_DDL, retry_safe=True)
         existing = self._catalog_column_names()
         for name, column_type in CATALOG_COLUMN_TYPES:
             if name in existing:
@@ -933,12 +1175,16 @@ class HttpD1Client:
             # row and turns the retained serving_tier field into NULL.
             self._query(
                 f'INSERT INTO _catalog ("{column_names}") VALUES ({values}) '
-                f'ON CONFLICT("name") DO UPDATE SET {update_columns};'
+                f'ON CONFLICT("name") DO UPDATE SET {update_columns};',
+                retry_safe=True,
             )
 
     def delete_catalog_row(self, name: str) -> None:
         self._ensure_catalog_schema()
-        self._query(f"DELETE FROM _catalog WHERE name = {sql_literal(name)};")
+        self._query(
+            f"DELETE FROM _catalog WHERE name = {sql_literal(name)};",
+            retry_safe=True,
+        )
 
     def delete_catalog_product_ids(self, product_ids: Sequence[str]) -> None:
         """Remove public discovery rows without touching product tables or ledgers."""
@@ -954,7 +1200,10 @@ class HttpD1Client:
             return
         self._ensure_catalog_schema()
         product_id_literals = ", ".join(sql_literal(product_id) for product_id in normalized)
-        self._query(f"DELETE FROM _catalog WHERE product_id IN ({product_id_literals});")
+        self._query(
+            f"DELETE FROM _catalog WHERE product_id IN ({product_id_literals});",
+            retry_safe=True,
+        )
 
     def catalog_domain_count(self, model_names: set[str]) -> int:
         if not model_names:
@@ -979,7 +1228,7 @@ class HttpD1Client:
         return self._query(f"SELECT {select_columns} FROM {table} ORDER BY {order_columns};")
 
     def append_publication_ledger(self, record: dict[str, Any]) -> None:
-        self._query(PUBLICATION_LEDGER_DDL)
+        self._query(PUBLICATION_LEDGER_DDL, retry_safe=True)
         columns = '", "'.join(PUBLICATION_LEDGER_COLUMNS)
         values = ", ".join(sql_literal(record.get(column)) for column in PUBLICATION_LEDGER_COLUMNS)
         self._query(f'INSERT INTO _publication_ledger ("{columns}") VALUES ({values});')
@@ -1058,7 +1307,7 @@ class HttpD1Client:
         statements.append(handoff_prune_statement(
             "d1_pattern_params", product_id, [str(row["pattern_id"]) for row in param_rows]))
         for batch in group_api_batches(statements):
-            self._query_batch(batch)
+            self._query_batch(batch, retry_safe=True)
 
     def publish_glossary(self, rows: Sequence[dict[str, Any]]) -> None:
         """Fail closed, then replace declared terms only within each vocabulary scope."""
@@ -1086,7 +1335,7 @@ class HttpD1Client:
             for vocabulary_id, exported_at in markers.items()
         )
         for batch in group_api_batches(statements):
-            self._query_batch(batch)
+            self._query_batch(batch, retry_safe=True)
 
     def publish_product_evidence(
         self,
@@ -1140,4 +1389,4 @@ class HttpD1Client:
         }
         statements.extend(evidence_upsert_statements("d1_product_quality", [quality_row]))
         for batch in group_api_batches(statements):
-            self._query_batch(batch)
+            self._query_batch(batch, retry_safe=True)

@@ -52,6 +52,11 @@ EXPECTED_POOL_IMPORT_PAYLOAD = {
         "description": "Serialize Trino/dbt memory-heavy tasks",
         "include_deferred": False,
     },
+    "serving_d1_publish": {
+        "slots": 1,
+        "description": "Serialize common serving Publisher writes to the shared D1 database",
+        "include_deferred": False,
+    },
 }
 
 
@@ -132,6 +137,7 @@ class PoolRegistryTest(unittest.TestCase):
                 registry.TRINO_WEATHER_LEGACY_HEAVY_POOL,
                 registry.TRINO_WEATHER_RECOVERY_HEAVY_POOL,
                 registry.TRINO_HEAVY_POOL,
+                registry.SERVING_D1_PUBLISH_POOL,
             },
             set(EXPECTED_POOL_IMPORT_PAYLOAD),
         )
