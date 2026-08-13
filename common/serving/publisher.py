@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol, Sequence
+from zoneinfo import ZoneInfo
 
 import logging
 
@@ -230,7 +231,10 @@ def query_availability_fingerprint(
 
 
 def validate_query_availability(
-    contract: ServingContract, plan: QueryAvailabilityPlan | None
+    contract: ServingContract,
+    plan: QueryAvailabilityPlan | None,
+    *,
+    checked_at: datetime | None = None,
 ) -> str | None:
     """Reject incomplete companion evidence; this gate never repairs source rows."""
     if plan is None:
@@ -248,6 +252,7 @@ def validate_query_availability(
     common_horizon: datetime | None = None
     common_count: int | None = None
     common_revision: str | None = None
+    oldest_collection: datetime | None = None
     for row in plan.rows:
         place_id = row.get("place_id")
         if not isinstance(place_id, str) or not place_id.strip():
@@ -281,6 +286,8 @@ def validate_query_availability(
             return "query_availability availability bounds are reversed"
         if parsed["forecast_collected_at_min"] > parsed["forecast_collected_at_max"]:
             return "query_availability collection bounds are reversed"
+        if oldest_collection is None or parsed["forecast_collected_at_min"] < oldest_collection:
+            oldest_collection = parsed["forecast_collected_at_min"]
 
         if row.get("availability_status") != "complete":
             return "query_availability availability_status is not complete"
@@ -317,6 +324,21 @@ def validate_query_availability(
             return "query_availability common forecast hour count mismatch"
         if revision != common_revision:
             return "query_availability uniform source_population_revision mismatch"
+
+    if checked_at is not None and contract.freshness_slo_minutes is not None:
+        if checked_at.tzinfo is None:
+            return "query_availability freshness check requires a timezone-aware instant"
+        assert oldest_collection is not None
+        collected_at = oldest_collection.replace(
+            tzinfo=ZoneInfo("Asia/Seoul")
+        ).astimezone(timezone.utc)
+        age_minutes = (
+            checked_at.astimezone(timezone.utc) - collected_at
+        ).total_seconds() / 60
+        if age_minutes < 0:
+            return "query_availability forecast_collected_at_min is in the future"
+        if age_minutes > contract.freshness_slo_minutes:
+            return "query_availability forecast_collected_at_min freshness SLO breached"
     return None
 
 
@@ -857,7 +879,11 @@ def publish(
         plan = source.read(contract, last_good_max)
         record.source_row_count = len(plan.rows)
         if contract.query_availability_relation is not None:
-            availability_error = validate_query_availability(contract, plan.query_availability)
+            availability_error = validate_query_availability(
+                contract,
+                plan.query_availability,
+                checked_at=datetime.fromisoformat(record.published_at),
+            )
             if availability_error is not None:
                 record.stage = "query_availability"
                 record.reason = availability_error

@@ -346,11 +346,12 @@ def _availability_rows() -> list[dict[str, Any]]:
     ]
 
 
-def _risk_contract_with_query_availability() -> ServingContract:
+def _risk_contract_with_query_availability(**overrides: Any) -> ServingContract:
     return _projected_contract(
         product_id="weather_place_risk_window",
         model_name="gold_weather_place_risk_window",
         query_availability_relation="gold_weather_place_risk_query_availability",
+        **overrides,
     )
 
 
@@ -444,6 +445,14 @@ def test_query_availability_accepts_naive_datetimes_and_fractional_collection_ti
     ) is None
 
 
+def test_query_availability_freshness_interprets_naive_collection_time_as_kst():
+    assert validate_query_availability(
+        _risk_contract_with_query_availability(freshness_slo_minutes=240),
+        QueryAvailabilityPlan(AVAILABILITY_COLUMNS, _availability_rows()),
+        checked_at=datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc),
+    ) is None
+
+
 def test_invalid_query_availability_fails_before_d1_stage():
     contract = _risk_contract_with_query_availability()
     d1 = FakeD1()
@@ -458,6 +467,50 @@ def test_invalid_query_availability_fails_before_d1_stage():
     assert d1.replace_calls == 0
     assert d1.staged_query_availability == []
     assert excinfo.value.report.records[0].stage == "query_availability"
+
+
+def test_stale_query_availability_fails_before_d1_stage_and_preserves_last_good(monkeypatch):
+    contract = _risk_contract_with_query_availability(freshness_slo_minutes=240)
+    rows = _availability_rows()
+    for row in rows:
+        row["forecast_collected_at_min"] = "2026-08-08 00:00:00"
+        row["forecast_collected_at_max"] = "2026-08-08 00:05:00"
+
+    d1 = FakeD1()
+    last_good_rows = [{"product_row_id": "last-good"}]
+    last_good_catalog = {"row_count": 1, "publication_id": "last-good-publication"}
+    d1.tables[contract.model_name] = [dict(row) for row in last_good_rows]
+    d1.catalog[contract.model_name] = dict(last_good_catalog)
+    monkeypatch.setattr(
+        "common.serving.publisher._now_iso",
+        lambda: "2026-08-12T12:00:00+00:00",
+    )
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish(
+            [contract],
+            FakeSource({
+                contract.model_name: ReadPlan(
+                    COLUMNS,
+                    _rows(1),
+                    query_availability=QueryAvailabilityPlan(AVAILABILITY_COLUMNS, rows),
+                )
+            }),
+            d1,
+            FakeSmoke("passed"),
+            source_run_id="stale-query-availability",
+            verify_content_parity=True,
+        )
+
+    record = excinfo.value.report.records[0]
+    assert record.stage == "query_availability"
+    assert "freshness SLO breached" in record.reason
+    assert d1.stage_snapshot_calls == []
+    assert d1.staged_query_availability == []
+    assert getattr(d1, "activation_calls", []) == []
+    assert d1.tables[contract.model_name] == last_good_rows
+    assert d1.catalog[contract.model_name] == last_good_catalog
+    assert d1.ledger[-1]["outcome"] == "failed"
 
 
 def test_opted_in_snapshot_stages_then_activates_once_with_same_publication_identity():
