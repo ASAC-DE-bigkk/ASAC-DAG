@@ -172,7 +172,11 @@ def test_materializer_records_valid_zero_slot_outcome_after_verification_before_
         verify=verify,
         clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
         slot_receipts=SlotReceipts(),
-        slot_for_logical_date=traffic_incident_slot,
+        slot_for_logical_date=lambda logical_date: traffic_incident_slot(
+            logical_date,
+            recovery_boundary="2026-07-01T00:00:00+00:00",
+        ),
+        raw_manifest_is_verified=lambda *_args, **_kwargs: True,
     ).run(
         materializer_dag_id="traffic_incident_bronze",
         materializer_run_id="asset__materializer-1",
@@ -182,11 +186,425 @@ def test_materializer_records_valid_zero_slot_outcome_after_verification_before_
     outcome = next(event[1] for event in events if event[0] == "slot_outcome")
     assert outcome.collection_state == "source_empty_valid"
     assert outcome.source_result_code == "INFO-000"
+    assert outcome.dag_id == "traffic_incident_landing"
+    assert outcome.dag_run_id == "snapshot-zero"
+    assert outcome.task_id == "land_traffic_incident_snapshot"
     assert [event[0] for event in events] == [
         "verify",
         "slot_outcome",
         "materialized",
     ]
+
+
+@pytest.mark.parametrize(
+    ("raw_updates", "verified_rows"),
+    [
+        ({"result_code": "INFO-001", "expected_rows": 0, "list_total_count": 0}, 0),
+        ({"result_code": "INFO-000", "expected_rows": 1, "list_total_count": 0}, 0),
+        ({"result_code": "INFO-000", "expected_rows": 0, "list_total_count": 1}, 0),
+        ({"result_code": "INFO-000", "expected_rows": 0, "list_total_count": 0}, 1),
+    ],
+)
+def test_materializer_zero_slot_outcome_requires_topis_empty_and_verified_zero(
+    raw_updates,
+    verified_rows,
+):
+    from traffic_ingest.collection_slots import traffic_incident_slot
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    receipt = _receipt("snapshot-zero", "2026-07-16T00:05:00+00:00")
+    receipt.raw_result.update(
+        {
+            "manifest_key": "raw/snapshot-zero/_manifest.json",
+            "parsed_rows": int(raw_updates.get("expected_rows", 0)),
+            **raw_updates,
+        }
+    )
+
+    class Receipts:
+        def pending(self, *, limit):
+            return [receipt]
+
+        def record_materialized(self, _value):
+            pytest.fail("invalid zero evidence must not ack the receipt")
+
+    class SlotReceipts:
+        def record_outcome(self, outcome):
+            assert outcome.collection_state != "source_empty_valid"
+            return "ops/control/state/collection_slots/event.json"
+
+    class Manifest:
+        def start(self, *_args, **_kwargs):
+            return None
+
+        def publish(self, *_args, **_kwargs):
+            return None
+
+        def fail(self, *_args, **_kwargs):
+            return None
+
+    with pytest.raises(ValueError, match="source_empty_valid"):
+        IncidentMaterializer(
+            receipts=Receipts(),
+            manifest=Manifest(),
+            load=lambda raw_result, _snapshot_run_id: {
+                "raw_object_keys": raw_result["raw_object_keys"],
+                "inserted": int(raw_updates.get("expected_rows", 0)),
+                "expected_rows": int(raw_updates.get("expected_rows", 0)),
+                "page_count": 1,
+                "is_publishable": True,
+            },
+            verify=lambda _result, _snapshot_run_id: verified_rows,
+            clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
+            slot_receipts=SlotReceipts(),
+            slot_for_logical_date=lambda logical_date: traffic_incident_slot(
+                logical_date,
+                recovery_boundary="2026-07-01T00:00:00+00:00",
+            ),
+            raw_manifest_is_verified=lambda *_args, **_kwargs: True,
+        ).run(
+            materializer_dag_id="traffic_incident_bronze",
+            materializer_run_id="asset__materializer-1",
+            limit=1,
+        )
+
+
+def test_materializer_pre_activation_slot_does_not_mutate_slot_receipts():
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    events = []
+    receipt = _receipt("snapshot-1", "2026-07-16T00:05:00+00:00")
+
+    class Receipts:
+        def pending(self, *, limit):
+            return [receipt]
+
+        def record_materialized(self, value):
+            events.append(("materialized", value.snapshot_run_id))
+
+    class SlotReceipts:
+        def record_outcome(self, _outcome):
+            events.append(("slot_outcome", None))
+            pytest.fail("pre-activation materializer must not write slot outcome")
+
+    class Manifest:
+        def start(self, *_args, **_kwargs):
+            return None
+
+        def publish(self, *_args, **_kwargs):
+            return None
+
+        def fail(self, *_args, **_kwargs):
+            pytest.fail("successful snapshot must not fail")
+
+    IncidentMaterializer(
+        receipts=Receipts(),
+        manifest=Manifest(),
+        load=lambda raw_result, _snapshot_run_id: {
+            "raw_object_keys": raw_result["raw_object_keys"],
+            "inserted": 4,
+            "expected_rows": 4,
+            "page_count": 1,
+            "is_publishable": True,
+        },
+        verify=lambda _result, _snapshot_run_id: 4,
+        clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
+        slot_receipts=SlotReceipts(),
+        slot_for_logical_date=lambda _logical_date: None,
+    ).run(
+        materializer_dag_id="traffic_incident_bronze",
+        materializer_run_id="asset__materializer-1",
+        limit=1,
+    )
+
+    assert events == [("materialized", "snapshot-1")]
+
+
+def test_materializer_failure_after_landed_receipt_records_raw_replay_pending_without_ack():
+    from traffic_ingest.collection_slots import traffic_incident_slot
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    events = []
+    receipt = _receipt("snapshot-1", "2026-07-16T00:05:00+00:00")
+    receipt.raw_result["manifest_key"] = "raw/snapshot-1/_manifest.json"
+    failure = RuntimeError("Trino load failed")
+
+    class Receipts:
+        def pending(self, *, limit):
+            return [receipt]
+
+        def record_materialized(self, _value):
+            pytest.fail("failed materialization must leave receipt pending")
+
+    class SlotReceipts:
+        def record_outcome(self, outcome):
+            events.append(("slot_outcome", outcome))
+            return "ops/control/state/collection_slots/event.json"
+
+    class Manifest:
+        def start(self, *_args, **_kwargs):
+            return None
+
+        def fail(self, *_args, **_kwargs):
+            return None
+
+    with pytest.raises(RuntimeError, match="Trino load failed"):
+        IncidentMaterializer(
+            receipts=Receipts(),
+            manifest=Manifest(),
+            load=lambda *_args: (_ for _ in ()).throw(failure),
+            verify=lambda *_args: pytest.fail("failed load must not verify"),
+            clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
+            slot_receipts=SlotReceipts(),
+            slot_for_logical_date=lambda logical_date: traffic_incident_slot(
+                logical_date,
+                recovery_boundary="2026-07-01T00:00:00+00:00",
+            ),
+            raw_manifest_is_verified=lambda *_args, **_kwargs: True,
+        ).run(
+            materializer_dag_id="traffic_incident_bronze",
+            materializer_run_id="asset__materializer-1",
+            limit=1,
+        )
+
+    outcome = next(event[1] for event in events if event[0] == "slot_outcome")
+    assert outcome.collection_state == "collection_failed"
+    assert outcome.recovery_state == "pending"
+    assert outcome.recovery_class == "raw_replay"
+    assert outcome.gap_reason_code == "materialization_failed"
+    assert outcome.raw_manifest_key == "raw/snapshot-1/_manifest.json"
+    assert outcome.raw_object_count == 1
+    assert outcome.source_result_code == "INFO-000"
+    assert outcome.recovery_evidence_code == "raw_manifest_verified"
+
+
+def test_materializer_failure_does_not_promote_unverified_manifest_to_raw_replay():
+    from traffic_ingest.collection_slots import traffic_incident_slot
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    events = []
+    receipt = _receipt("snapshot-1", "2026-07-16T00:05:00+00:00")
+    receipt.raw_result["manifest_key"] = "raw/snapshot-1/_manifest.json"
+    failure = RuntimeError("Trino load failed")
+
+    class Receipts:
+        def pending(self, *, limit):
+            assert limit == 1
+            return [receipt]
+
+        def record_materialized(self, _value):
+            pytest.fail("failed materialization must leave receipt pending")
+
+    class SlotReceipts:
+        def record_outcome(self, outcome):
+            events.append(outcome)
+            return "ops/control/state/collection_slots/event.json"
+
+    class Manifest:
+        def start(self, *_args, **_kwargs):
+            return None
+
+        def fail(self, *_args, **_kwargs):
+            return None
+
+    with pytest.raises(RuntimeError, match="Trino load failed"):
+        IncidentMaterializer(
+            receipts=Receipts(),
+            manifest=Manifest(),
+            load=lambda *_args: (_ for _ in ()).throw(failure),
+            verify=lambda *_args: pytest.fail("failed load must not verify"),
+            clock=lambda: datetime(2026, 7, 16, 0, 6, tzinfo=timezone.utc),
+            slot_receipts=SlotReceipts(),
+            slot_for_logical_date=lambda logical_date: traffic_incident_slot(
+                logical_date,
+                recovery_boundary="2026-07-01T00:00:00+00:00",
+            ),
+            raw_manifest_is_verified=lambda *_args, **_kwargs: False,
+        ).run(
+            materializer_dag_id="traffic_incident_bronze",
+            materializer_run_id="asset__materializer-1",
+            limit=1,
+        )
+
+    assert events == []
+
+
+def test_materializer_preflight_failure_records_raw_replay_for_pending_raw_manifest_receipts():
+    from traffic_ingest.collection_slots import traffic_incident_slot
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    events = []
+    first = _receipt("snapshot-1", "2026-07-16T00:05:00+00:00")
+    second = _receipt("snapshot-2", "2026-07-16T00:10:00+00:00")
+    first.raw_result["manifest_key"] = "raw/snapshot-1/_manifest.json"
+    second.raw_result["manifest_key"] = "raw/snapshot-2/_manifest.json"
+    failure = ConnectionError("preflight Trino unavailable")
+
+    class Receipts:
+        def pending(self, *, limit):
+            assert limit == 24
+            return [first, second]
+
+        def record_materialized(self, _value):
+            pytest.fail("preflight failure must not ack snapshot receipts")
+
+    class SlotReceipts:
+        def record_outcome(self, outcome):
+            events.append(("slot_outcome", outcome))
+            return "ops/control/state/collection_slots/event.json"
+
+    class Manifest:
+        def start(self, run, **_kwargs):
+            events.append(("start", run.run_id))
+
+        def fail(self, run, *, task_id, error, **_kwargs):
+            events.append(("fail", run.run_id, task_id, error))
+
+    with pytest.raises(ConnectionError, match="preflight Trino unavailable") as raised:
+        IncidentMaterializer(
+            receipts=Receipts(),
+            manifest=Manifest(),
+            load=lambda *_args: pytest.fail("preflight failure must not load"),
+            verify=lambda *_args: pytest.fail("preflight failure must not verify"),
+            verified_receipts=lambda _receipts: (_ for _ in ()).throw(failure),
+            clock=lambda: datetime(2026, 7, 16, 0, 11, tzinfo=timezone.utc),
+            slot_receipts=SlotReceipts(),
+            slot_for_logical_date=lambda logical_date: traffic_incident_slot(
+                logical_date,
+                recovery_boundary="2026-07-01T00:00:00+00:00",
+            ),
+            raw_manifest_is_verified=lambda *_args, **_kwargs: True,
+        ).run(
+            materializer_dag_id="traffic_incident_bronze",
+            materializer_run_id="asset__materializer-1",
+            limit=24,
+        )
+
+    assert raised.value is failure
+    outcomes = [event[1] for event in events if event[0] == "slot_outcome"]
+    assert [outcome.dag_run_id for outcome in outcomes] == [
+        "snapshot-1",
+        "snapshot-2",
+    ]
+    assert {outcome.recovery_state for outcome in outcomes} == {"pending"}
+    assert {outcome.recovery_class for outcome in outcomes} == {"raw_replay"}
+    assert {outcome.recovery_evidence_code for outcome in outcomes} == {
+        "raw_manifest_verified"
+    }
+    assert [outcome.raw_manifest_key for outcome in outcomes] == [
+        "raw/snapshot-1/_manifest.json",
+        "raw/snapshot-2/_manifest.json",
+    ]
+    assert [outcome.raw_object_count for outcome in outcomes] == [1, 1]
+    assert {outcome.source_result_code for outcome in outcomes} == {"INFO-000"}
+    assert [event[0] for event in events] == [
+        "start",
+        "fail",
+        "slot_outcome",
+        "slot_outcome",
+    ]
+
+
+def test_materializer_batch_failure_appends_raw_replay_only_for_unterminalized_receipts():
+    from traffic_ingest.collection_slots import traffic_incident_slot
+    from traffic_ingest.incident_pipeline import IncidentMaterializer
+
+    events = []
+    terminalized = _receipt("snapshot-1", "2026-07-16T00:05:00+00:00")
+    unterminalized = _receipt("snapshot-2", "2026-07-16T00:10:00+00:00")
+    terminalized.raw_result["manifest_key"] = "raw/snapshot-1/_manifest.json"
+    unterminalized.raw_result["manifest_key"] = "raw/snapshot-2/_manifest.json"
+    failure = RuntimeError("terminal outcome write failed")
+
+    class Receipts:
+        def pending(self, *, limit):
+            assert limit == 24
+            return [terminalized, unterminalized]
+
+        def record_materialized(self, value):
+            events.append(("materialized", value.snapshot_run_id))
+
+    class SlotReceipts:
+        def record_outcome(self, outcome):
+            events.append(("slot_outcome", outcome))
+            if (
+                outcome.dag_run_id == "snapshot-2"
+                and outcome.recovery_state == "not_required"
+            ):
+                raise failure
+            return "ops/control/state/collection_slots/event.json"
+
+    class Manifest:
+        def start_many(self, entries):
+            events.append(("start_many", [run.run_id for run, _count in entries]))
+
+        def publish_many(self, entries):
+            events.append(("publish_many", [run.run_id for run, _metrics in entries]))
+
+        def fail_many(self, entries, *, task_id, error):
+            events.append(("fail_many", [run.run_id for run, _count in entries], task_id, error))
+
+    with pytest.raises(RuntimeError, match="terminal outcome write failed") as raised:
+        IncidentMaterializer(
+            receipts=Receipts(),
+            manifest=Manifest(),
+            load_many=lambda raw_results: {
+                run_id: {
+                    "raw_object_keys": raw_result["raw_object_keys"],
+                    "inserted": 4,
+                    "expected_rows": 4,
+                    "page_count": 1,
+                    "is_publishable": True,
+                }
+                for run_id, raw_result in raw_results.items()
+            },
+            verify_many=lambda load_results, _receipts: {
+                run_id: 4 for run_id in load_results
+            },
+            load=lambda *_args: pytest.fail("batch load port must be used"),
+            verify=lambda *_args: pytest.fail("batch verify port must be used"),
+            clock=lambda: datetime(2026, 7, 16, 0, 11, tzinfo=timezone.utc),
+            slot_receipts=SlotReceipts(),
+            slot_for_logical_date=lambda logical_date: traffic_incident_slot(
+                logical_date,
+                recovery_boundary="2026-07-01T00:00:00+00:00",
+            ),
+            raw_manifest_is_verified=lambda *_args, **_kwargs: True,
+        ).run(
+            materializer_dag_id="traffic_incident_bronze",
+            materializer_run_id="asset__materializer-1",
+            limit=24,
+        )
+
+    assert raised.value is failure
+    terminal = [
+        event[1]
+        for event in events
+        if event[0] == "slot_outcome"
+        and event[1].recovery_state == "not_required"
+    ]
+    replay = [
+        event[1]
+        for event in events
+        if event[0] == "slot_outcome"
+        and event[1].recovery_class == "raw_replay"
+    ]
+    assert [outcome.dag_run_id for outcome in terminal] == [
+        "snapshot-1",
+        "snapshot-2",
+    ]
+    assert [event for event in events if event[0] == "materialized"] == [
+        ("materialized", "snapshot-1"),
+    ]
+    assert [outcome.dag_run_id for outcome in replay] == [
+        "snapshot-2",
+    ]
+    assert [outcome.raw_manifest_key for outcome in replay] == [
+        "raw/snapshot-2/_manifest.json",
+    ]
+    assert {outcome.recovery_evidence_code for outcome in replay} == {
+        "raw_manifest_verified"
+    }
 
 
 def test_materializer_row_count_includes_nonpublishable_verified_snapshot():

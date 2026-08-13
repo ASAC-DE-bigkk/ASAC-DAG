@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
 from airflow import DAG
@@ -23,6 +23,7 @@ if DAGS_ROOT_DIR not in sys.path:
     sys.path.insert(0, DAGS_ROOT_DIR)
 
 from common.assets import WEATHER_BRONZE_ASSET  # noqa: E402
+from common.collection_slots.contract import ExpectedSlot  # noqa: E402
 from common.errors.airflow import problem_failure_callback  # noqa: E402
 from common.ops.product_observability import (  # noqa: E402
     record_domain_stage_event,
@@ -67,6 +68,10 @@ from weather_ingest.bronze_dag_support import (  # noqa: E402
     target_name as target_name,
 )
 from weather_ingest.common.resources import TRINO_HEAVY_POOL  # noqa: E402
+from weather_ingest.collection_slots import (  # noqa: E402
+    weather_collection_failure_outcomes,
+    weather_collection_success_outcomes,
+)
 from weather_ingest.common.runtime import (  # noqa: E402
     download_raw_object,
     trino_cursor,
@@ -86,13 +91,17 @@ from weather_ingest.landing import (  # noqa: E402
 )
 from weather_ingest.run_manifest import WeatherRun  # noqa: E402
 from weather_ingest.runtime import (  # noqa: E402
+    build_weather_collection_slot_receipt_ports,
     build_weather_landing,
     build_weather_manifest,
+    weather_raw_manifest_is_verified,
 )
 from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
 
 EXPECTED_RAW_OBJECT_COUNT_KEY = "expected_raw_object_count"
+WEATHER_COLLECTION_SLOT_PLAN_TASK_ID = "plan_weather_collection_slots"
+WEATHER_COLLECTION_SLOT_SUCCESS_TASK_ID = "record_weather_collection_slot_success"
 
 record_weather_problem = problem_failure_callback(
     domain="weather", source_system=SOURCE_ID
@@ -157,20 +166,163 @@ def record_weather_bronze_product_event(context: dict) -> dict:
     )
 
 
+def _base_datetime_for_context(context: dict) -> tuple[str, str]:
+    configured = kma_base_datetime_from_conf(dag_run_conf(context))
+    if configured is not None:
+        return configured
+    task_instance = context.get("ti") or context.get("task_instance")
+    if task_instance is not None:
+        try:
+            plan = task_instance.xcom_pull(
+                task_ids=WEATHER_COLLECTION_SLOT_PLAN_TASK_ID
+            )
+        except Exception:
+            plan = None
+        if isinstance(plan, dict):
+            planned = kma_base_datetime_from_conf(plan)
+            if planned is not None:
+                return planned
+    return resolve_kma_base_datetime()
+
+
+def _configured_kma_grids() -> tuple[KmaGrid, ...]:
+    return tuple(
+        KmaGrid(str(grid["place_id"]), int(grid["nx"]), int(grid["ny"]))
+        for grid in load_kma_grids()
+    )
+
+
+def plan_weather_collection_slots(**context) -> dict:
+    base_date, base_time = _base_datetime_for_context(context)
+    grids = _configured_kma_grids()
+    slot_receipts, slots_for_issue = build_weather_collection_slot_receipt_ports()
+    slots = tuple(slots_for_issue(base_date, base_time, grids))
+    for slot in slots:
+        slot_receipts.record_expected(slot)
+    return {
+        "base_date": base_date,
+        "base_time": base_time,
+        "slots": [slot.to_create_kwargs() for slot in slots],
+    }
+
+
+def _weather_slots_from_plan(context: dict) -> tuple[ExpectedSlot, ...]:
+    task_instance = context.get("ti") or context.get("task_instance")
+    if task_instance is None:
+        raise AirflowFailException("weather collection-slot plan task instance is unavailable")
+    plan = task_instance.xcom_pull(task_ids=WEATHER_COLLECTION_SLOT_PLAN_TASK_ID)
+    if not isinstance(plan, dict):
+        raise AirflowFailException("weather collection-slot plan is missing")
+    entries = plan.get("slots")
+    if not isinstance(entries, list):
+        raise AirflowFailException("weather collection-slot plan slots are invalid")
+    try:
+        return tuple(ExpectedSlot.create(**entry) for entry in entries)
+    except (TypeError, ValueError) as exc:
+        raise AirflowFailException("weather collection-slot plan is invalid") from exc
+
+
+def _raw_result_manifest_fields(raw_result: object) -> tuple[str | None, int | None]:
+    if not isinstance(raw_result, dict):
+        return None, None
+    manifest_key = raw_result.get("manifest_key")
+    raw_objects = raw_result.get("raw_objects")
+    return (
+        manifest_key if isinstance(manifest_key, str) and manifest_key else None,
+        len(raw_objects) if isinstance(raw_objects, list) else None,
+    )
+
+
+def record_weather_collection_slot_success(**context) -> int:
+    slots = _weather_slots_from_plan(context)
+    if not slots:
+        return 0
+    task_instance = context["ti"]
+    raw_result = pull_kma_raw_result(context)
+    ingest_result = task_instance.xcom_pull(task_ids="load_kma_bronze") or {}
+    manifest_key, raw_object_count = _raw_result_manifest_fields(raw_result)
+    raw_manifest_verified = weather_raw_manifest_is_verified(
+        raw_result,
+        dag_run_id=context["run_id"],
+        slots=slots,
+    )
+    slot_receipts, _ = build_weather_collection_slot_receipt_ports()
+    if not bool(ingest_result.get("is_publishable", True)):
+        outcomes = weather_collection_failure_outcomes(
+            slots,
+            raw_manifest_key=manifest_key,
+            raw_object_count=raw_object_count,
+            raw_manifest_verified=raw_manifest_verified,
+            event_at=datetime.now(timezone.utc),
+            dag_id=current_dag_id(context),
+            dag_run_id=context["run_id"],
+            task_id="verify_kma_bronze_runtime",
+        )
+    else:
+        if not raw_manifest_verified:
+            raise AirflowFailException(
+                "weather collection-slot success requires a verified raw manifest"
+            )
+        if not isinstance(raw_result, dict):
+            raise AirflowFailException("weather collection-slot raw result is invalid")
+        verified_rows = task_instance.xcom_pull(task_ids="verify_kma_bronze_runtime")
+        outcomes = weather_collection_success_outcomes(
+            slots,
+            raw_manifest_key=manifest_key,
+            raw_objects=raw_result.get("raw_objects") or (),
+            verified_rows=verified_rows,
+            event_at=datetime.now(timezone.utc),
+            dag_id=current_dag_id(context),
+            dag_run_id=context["run_id"],
+            task_id="verify_kma_bronze_runtime",
+        )
+    for outcome in outcomes:
+        slot_receipts.record_outcome(outcome)
+    return len(outcomes)
+
+
+def record_weather_collection_slot_failure(context: dict) -> None:
+    """Write best-effort failed-slot evidence without masking the original task error."""
+    try:
+        slots = _weather_slots_from_plan(context)
+        if not slots:
+            return
+        raw_result = pull_kma_raw_result(context)
+        manifest_key, raw_object_count = _raw_result_manifest_fields(raw_result)
+        raw_manifest_verified = weather_raw_manifest_is_verified(
+            raw_result,
+            dag_run_id=context["run_id"],
+            slots=slots,
+        )
+        slot_receipts, _ = build_weather_collection_slot_receipt_ports()
+        task_instance = context.get("ti") or context.get("task_instance")
+        outcomes = weather_collection_failure_outcomes(
+            slots,
+            raw_manifest_key=manifest_key,
+            raw_object_count=raw_object_count,
+            raw_manifest_verified=raw_manifest_verified,
+            event_at=datetime.now(timezone.utc),
+            dag_id=current_dag_id(context),
+            dag_run_id=context["run_id"],
+            task_id=getattr(task_instance, "task_id", "unknown"),
+        )
+        for outcome in outcomes:
+            slot_receipts.record_outcome(outcome)
+    except Exception as exc:
+        LOGGER.warning(
+            "Weather collection-slot failed outcome write failed: %s",
+            type(exc).__name__,
+        )
+
+
 @fail_fast_weather_bronze
 def land_kma_raw(**context) -> dict:
     conf = dag_run_conf(context)
-    base_date, base_time = (
-        kma_base_datetime_from_conf(conf)
-        or resolve_kma_base_datetime()
-    )
+    base_date, base_time = _base_datetime_for_context(context)
     request = KmaLandingRequest(
         base_date=base_date,
         base_time=base_time,
-        grids=tuple(
-            KmaGrid(str(grid["place_id"]), int(grid["nx"]), int(grid["ny"]))
-            for grid in load_kma_grids()
-        ),
+        grids=_configured_kma_grids(),
         num_of_rows=kma_num_of_rows(),
     )
     batch = build_weather_landing().collect(
@@ -265,6 +417,7 @@ def record_kma_run_failed(context) -> None:
 
 def record_and_notify_kma_run_failed(context) -> None:
     record_kma_run_failed(context)
+    record_weather_collection_slot_failure(context)
 
 
 @fail_fast_weather_bronze
@@ -352,7 +505,7 @@ def build_kma_bronze_dag(
         # ~4시간 running 으로 매달려 후속 스케줄을 막았다. 최악 land(~19분)+재시도보다는
         # 넉넉하고, 3시간 스케줄 간격보다는 짧게 잡아 연속 run 이 겹치지 않게 한다.
         dagrun_timeout=timedelta(minutes=60),
-        on_failure_callback=record_kma_run_failed,
+        on_failure_callback=record_and_notify_kma_run_failed,
         tags=tags,
     ) as built_dag:
         validate_runtime = PythonOperator(
@@ -366,6 +519,15 @@ def build_kma_bronze_dag(
             task_id="record_kma_run_started",
             python_callable=record_kma_run_started,
             on_failure_callback=record_weather_problem,
+        )
+
+        plan_collection_slots = PythonOperator(
+            task_id=WEATHER_COLLECTION_SLOT_PLAN_TASK_ID,
+            python_callable=plan_weather_collection_slots,
+            on_failure_callback=[
+                record_weather_collection_slot_failure,
+                record_weather_problem,
+            ],
         )
 
         land_raw = PythonOperator(
@@ -409,6 +571,14 @@ def build_kma_bronze_dag(
             ],
             on_success_callback=record_weather_bronze_product_event,
         )
+        record_collection_slot_success = PythonOperator(
+            task_id=WEATHER_COLLECTION_SLOT_SUCCESS_TASK_ID,
+            python_callable=record_weather_collection_slot_success,
+            on_failure_callback=[
+                record_and_notify_kma_run_failed,
+                record_weather_problem,
+            ],
+        )
         publish_bronze_asset = PythonOperator(
             task_id="publish_weather_bronze_asset",
             python_callable=publish_weather_bronze_asset,
@@ -418,9 +588,11 @@ def build_kma_bronze_dag(
         (
             validate_runtime
             >> start_manifest
+            >> plan_collection_slots
             >> land_raw
             >> load_bronze
             >> verify_bronze
+            >> record_collection_slot_success
             >> publish_bronze_asset
         )
     return enable_lineage_if_configured(built_dag)

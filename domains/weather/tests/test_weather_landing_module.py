@@ -19,7 +19,10 @@ from weather_ingest.landing import (  # noqa: E402
     KmaLandingRequest,
     RunIdentity,
 )
-from weather_ingest.errors import WeatherSourceSchemaError  # noqa: E402
+from weather_ingest.errors import (  # noqa: E402
+    WeatherRawIntegrityError,
+    WeatherSourceSchemaError,
+)
 
 
 def kma_payload(
@@ -29,6 +32,10 @@ def kma_payload(
     page_no: int = 1,
     num_of_rows: int = 1000,
     result_code: str = "00",
+    base_date: str = "20260714",
+    base_time: str = "0800",
+    nx: int = 60,
+    ny: int = 127,
 ) -> bytes:
     return json.dumps(
         {
@@ -38,14 +45,14 @@ def kma_payload(
                     "items": {
                         "item": [
                             {
-                                "baseDate": "20260714",
-                                "baseTime": "0800",
-                                "fcstDate": "20260714",
+                                "baseDate": base_date,
+                                "baseTime": base_time,
+                                "fcstDate": base_date,
                                 "fcstTime": "0900",
                                 "category": "TMP",
                                 "fcstValue": str(index),
-                                "nx": 60,
-                                "ny": 127,
+                                "nx": nx,
+                                "ny": ny,
                             }
                             for index in range(item_count)
                         ]
@@ -95,6 +102,14 @@ class MemoryRawObjectStore:
         self.objects[key] = (payload, content_type)
         self.write_order.append(key)
 
+    def write_bytes_if_absent(
+        self, key: str, payload: bytes, content_type: str
+    ) -> bool:
+        if key in self.objects:
+            return False
+        self.write_bytes(key, payload, content_type)
+        return True
+
 
 def test_collect_keeps_raw_and_manifest_in_run_start_partition_across_midnight():
     clock_values = iter(
@@ -109,8 +124,19 @@ def test_collect_keeps_raw_and_manifest_in_run_start_partition_across_midnight()
     batch = KmaLanding(
         source=ScriptedKmaSource(
             {
-                (60, 127, 1): kma_payload(total_count=1, item_count=1),
-                (61, 127, 1): kma_payload(total_count=1, item_count=1),
+                (60, 127, 1): kma_payload(
+                    total_count=1,
+                    item_count=1,
+                    base_date="20260730",
+                    base_time="2300",
+                ),
+                (61, 127, 1): kma_payload(
+                    total_count=1,
+                    item_count=1,
+                    base_date="20260730",
+                    base_time="2300",
+                    nx=61,
+                ),
             }
         ),
         raw_store=raw_store,
@@ -146,8 +172,26 @@ def test_replay_rejects_raw_objects_from_multiple_load_date_partitions():
         "raw/weather_forecast/kma_vilage_fcst/load_date=2026-07-31/nx=61/ny=127/"
         "20260731T000001KST_base-202607300800_request-2.json"
     )
-    raw_store.write_bytes(first_key, kma_payload(total_count=1, item_count=1), "application/json")
-    raw_store.write_bytes(second_key, kma_payload(total_count=1, item_count=1), "application/json")
+    raw_store.write_bytes(
+        first_key,
+        kma_payload(
+            total_count=1,
+            item_count=1,
+            base_date="20260730",
+            nx=60,
+        ),
+        "application/json",
+    )
+    raw_store.write_bytes(
+        second_key,
+        kma_payload(
+            total_count=1,
+            item_count=1,
+            base_date="20260730",
+            nx=61,
+        ),
+        "application/json",
+    )
     landing = KmaLanding(
         source=ScriptedKmaSource({}),
         raw_store=raw_store,
@@ -232,7 +276,12 @@ def test_collect_fetches_all_pages_for_every_configured_grid():
         {
             (60, 127, 1): kma_payload(total_count=1001, item_count=1000, page_no=1),
             (60, 127, 2): kma_payload(total_count=1001, item_count=1, page_no=2),
-            (61, 127, 1): kma_payload(total_count=1, item_count=1, page_no=1),
+                (61, 127, 1): kma_payload(
+                    total_count=1,
+                    item_count=1,
+                    page_no=1,
+                    nx=61,
+                ),
         }
     )
     request_ids = iter(("request-1", "request-2", "request-3"))
@@ -517,3 +566,107 @@ def test_landing_batch_round_trips_through_airflow_xcom_mapping():
     assert document["raw_page_count"] == 1
     assert document["expected_raw_object_count"] == 1
     assert KmaLandingBatch.from_xcom(document) == batch
+
+
+def test_collect_preserves_non_success_response_as_diagnostic_raw_without_manifest():
+    class ErrorKmaSource:
+        def fetch_page(self, **kwargs) -> tuple[int, bytes]:
+            assert kwargs["nx"] == 60
+            assert kwargs["ny"] == 127
+            return 503, b'{"error":"upstream unavailable"}'
+
+    raw_store = MemoryRawObjectStore()
+    with pytest.raises(WeatherSourceSchemaError, match="http_status=503") as raised:
+        KmaLanding(
+            source=ErrorKmaSource(),
+            raw_store=raw_store,
+            raw_prefix="raw",
+            clock=lambda: datetime(2026, 7, 31, tzinfo=timezone.utc),
+            request_id=lambda: "diagnostic-1",
+        ).collect(
+            RunIdentity("weather_vilage_fcst_bronze", "manual__upstream-error"),
+            KmaLandingRequest(
+                base_date="20260714",
+                base_time="0800",
+                grids=(KmaGrid("seoul", 60, 127),),
+                num_of_rows=1000,
+            ),
+        )
+
+    raw_keys = [
+        key
+        for key in raw_store.objects
+        if key.endswith(".json") and "/_checkpoints/" not in key
+    ]
+    assert len(raw_keys) == 1
+    assert raw_store.read_bytes(raw_keys[0]) == b'{"error":"upstream unavailable"}'
+    assert raw_keys[0] in str(raised.value)
+    assert not any(key.endswith("_manifest.json") for key in raw_store.objects)
+
+
+def test_collect_rejects_response_rows_that_disagree_with_the_requested_grid():
+    raw_store = MemoryRawObjectStore()
+    with pytest.raises(WeatherSourceSchemaError, match="response context mismatch"):
+        KmaLanding(
+            source=ScriptedKmaSource(
+                {
+                    (60, 127, 1): kma_payload(
+                        total_count=1,
+                        item_count=1,
+                        nx=61,
+                    )
+                }
+            ),
+            raw_store=raw_store,
+            raw_prefix="raw",
+            clock=lambda: datetime(2026, 7, 31, tzinfo=timezone.utc),
+            request_id=lambda: "context-1",
+        ).collect(
+            RunIdentity("weather_vilage_fcst_bronze", "manual__context-mismatch"),
+            KmaLandingRequest(
+                base_date="20260714",
+                base_time="0800",
+                grids=(KmaGrid("seoul", 60, 127),),
+                num_of_rows=1000,
+            ),
+        )
+
+    assert len(
+        [
+            key
+            for key in raw_store.objects
+            if key.endswith(".json") and "/_checkpoints/" not in key
+        ]
+    ) == 1
+    assert not any(key.endswith("_manifest.json") for key in raw_store.objects)
+
+
+def test_collect_rejects_divergent_payload_for_an_existing_raw_key():
+    raw_key = (
+        "raw/weather/kma_vilage_fcst/load_date=2026-07-31/"
+        "run_id=manual__collision/nx=60/ny=127/"
+        "20260731T090000KST_base-202607140800_request-1.json"
+    )
+    raw_store = MemoryRawObjectStore()
+    raw_store.objects[raw_key] = (b'{"existing":true}', "application/json")
+
+    with pytest.raises(WeatherRawIntegrityError, match="raw object already exists"):
+        KmaLanding(
+            source=ScriptedKmaSource(
+                {(60, 127, 1): kma_payload(total_count=1, item_count=1)}
+            ),
+            raw_store=raw_store,
+            raw_prefix="raw",
+            clock=lambda: datetime(2026, 7, 31, tzinfo=timezone.utc),
+            request_id=lambda: "request-1",
+        ).collect(
+            RunIdentity("weather_vilage_fcst_bronze", "manual__collision"),
+            KmaLandingRequest(
+                base_date="20260714",
+                base_time="0800",
+                grids=(KmaGrid("seoul", 60, 127),),
+                num_of_rows=1000,
+            ),
+        )
+
+    assert raw_store.read_bytes(raw_key) == b'{"existing":true}'

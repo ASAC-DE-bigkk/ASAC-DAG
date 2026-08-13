@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from traffic_ingest.errors import (  # noqa: E402
+    TrafficRawIntegrityError,
     TrafficSourceEmptyResponseError,
     TrafficSourceSchemaError,
 )
@@ -73,6 +74,14 @@ class MemoryRawObjectStore:
     def write_bytes(self, key: str, payload: bytes, content_type: str) -> None:
         self.objects[key] = (payload, content_type)
         self.write_order.append(key)
+
+    def write_bytes_if_absent(
+        self, key: str, payload: bytes, content_type: str
+    ) -> bool:
+        if key in self.objects:
+            return False
+        self.write_bytes(key, payload, content_type)
+        return True
 
 
 def test_collect_keeps_raw_and_manifest_in_run_start_partition_across_midnight():
@@ -627,3 +636,55 @@ def test_landing_batch_round_trips_through_airflow_xcom_mapping():
     assert document["list_total_count"] == 1
     assert document["page_count"] == 1
     assert TrafficLandingBatch.from_xcom(document) == batch
+
+
+def test_collect_preserves_non_success_response_as_diagnostic_raw_without_manifest():
+    class ErrorTopisSource:
+        def fetch_page(self, start_index: int, end_index: int) -> tuple[int, bytes]:
+            assert (start_index, end_index) == (1, 1000)
+            return 503, b"<html>upstream unavailable</html>"
+
+    raw_store = MemoryRawObjectStore()
+    with pytest.raises(TrafficSourceSchemaError, match="http_status=503") as raised:
+        TrafficLanding(
+            source=ErrorTopisSource(),
+            raw_store=raw_store,
+            raw_prefix="raw",
+            clock=lambda: datetime(2026, 7, 31, tzinfo=timezone.utc),
+            request_id=lambda: "diagnostic-1",
+        ).collect(
+            RunIdentity("traffic_incident_landing", "manual__upstream-error"),
+            TrafficLandingRequest(1, 1000, 1000),
+        )
+
+    raw_keys = [key for key in raw_store.objects if key.endswith(".xml")]
+    assert len(raw_keys) == 1
+    assert raw_store.read_bytes(raw_keys[0]) == b"<html>upstream unavailable</html>"
+    assert raw_keys[0] in str(raised.value)
+    assert not any(key.endswith("_manifest.json") for key in raw_store.objects)
+
+
+def test_collect_rejects_divergent_payload_for_an_existing_raw_key():
+    raw_key = (
+        "raw/traffic/seoul_traffic_incident/load_date=2026-07-31/"
+        "run_id=manual__collision/"
+        "20260731T090000KST_AccInfo-1-1000_request-1.xml"
+    )
+    raw_store = MemoryRawObjectStore()
+    raw_store.objects[raw_key] = (b"<AccInfo>existing</AccInfo>", "application/xml")
+
+    with pytest.raises(TrafficRawIntegrityError, match="raw object already exists"):
+        TrafficLanding(
+            source=ScriptedTopisSource(
+                {(1, 1000): acc_info_payload(total_count=1, incident_ids=("A1",))}
+            ),
+            raw_store=raw_store,
+            raw_prefix="raw",
+            clock=lambda: datetime(2026, 7, 31, tzinfo=timezone.utc),
+            request_id=lambda: "request-1",
+        ).collect(
+            RunIdentity("traffic_incident_landing", "manual__collision"),
+            TrafficLandingRequest(1, 1000, 1000),
+        )
+
+    assert raw_store.read_bytes(raw_key) == b"<AccInfo>existing</AccInfo>"

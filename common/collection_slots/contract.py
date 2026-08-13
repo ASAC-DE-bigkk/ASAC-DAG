@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ _TERMINAL_COLLECTION_STATES = frozenset(
     {"observed", "source_empty_valid", "not_scheduled"}
 )
 _GAP_REQUIRED_STATES = frozenset({"collection_failed", "missing_unknown"})
+_SAFE_CODE_PATTERN = re.compile(r"^[a-z0-9_]+$")
 
 
 def canonical_json(value: object) -> str:
@@ -82,6 +84,15 @@ def _text(value: object, *, field: str, required: bool = True) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
     return value
+
+
+def _safe_code(value: object, *, field: str, required: bool = False) -> str | None:
+    text = _text(value, field=field, required=required)
+    if text is None:
+        return None
+    if not _SAFE_CODE_PATTERN.fullmatch(text):
+        raise ValueError(f"{field} must contain only lowercase letters, digits, and underscores")
+    return text
 
 
 def _enum(value: object, *, field: str, allowed: frozenset[str]) -> str:
@@ -288,6 +299,7 @@ class CollectionOutcome:
     source_result_code: str | None
     recovery_run_id: str | None
     recovered_at: str | None
+    recovery_evidence_code: str | None
     event_at: str
 
     @classmethod
@@ -310,6 +322,7 @@ class CollectionOutcome:
         source_result_code: str | None = None,
         recovery_run_id: str | None = None,
         recovered_at: datetime | str | None = None,
+        recovery_evidence_code: str | None = None,
     ) -> "CollectionOutcome":
         normalized_collection_state = _enum(
             collection_state,
@@ -420,6 +433,10 @@ class CollectionOutcome:
             ),
             recovery_run_id=normalized_recovery_run_id,
             recovered_at=normalized_recovered_at,
+            recovery_evidence_code=_safe_code(
+                recovery_evidence_code,
+                field="recovery_evidence_code",
+            ),
             event_at=_timestamp(event_at, field="event_at"),
         )
 
@@ -441,6 +458,7 @@ class CollectionOutcome:
             "source_result_code": self.source_result_code,
             "recovery_run_id": self.recovery_run_id,
             "recovered_at": self.recovered_at,
+            "recovery_evidence_code": self.recovery_evidence_code,
             "event_at": self.event_at,
         }
 

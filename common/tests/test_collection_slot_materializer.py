@@ -55,6 +55,24 @@ def _event_document(slot_id: str = "slot-1", event_id: str = "event-1") -> dict[
     return document if event_id == "event-1" else dict(document, event_id=event_id)
 
 
+def _recovered_event_document(slot_id: str = "slot-1") -> dict[str, object]:
+    outcome = CollectionOutcome.create(
+        expected_slot_id=slot_id,
+        event_type="terminal",
+        collection_state="collection_failed",
+        recovery_state="recovered",
+        recovery_class="raw_replay",
+        gap_reason_code="bronze_load_failed",
+        dag_id="traffic_incident_bronze",
+        dag_run_id="run-1",
+        recovery_run_id="replay-run",
+        recovered_at="2026-08-08T00:20:00+00:00",
+        recovery_evidence_code="raw_manifest_verified",
+        event_at="2026-08-08T00:06:00+00:00",
+    )
+    return outcome.to_document()
+
+
 @dataclass
 class FakeStorage:
     documents: dict[str, object]
@@ -103,6 +121,31 @@ def test_materializer_reads_and_validates_expected_and_event_receipts():
     assert result == {"expected": 1, "events": 1}
     assert sink.expected[0]["expected_slot_id"] == slot_id
     assert sink.events[0]["event_id"] == _event_document(slot_id)["event_id"]
+
+
+def test_materializer_allows_legacy_missing_recovery_evidence_code_and_new_code():
+    expected = _expected_document()
+    slot_id = str(expected["expected_slot_id"])
+    legacy_event = _event_document(slot_id)
+    legacy_event.pop("recovery_evidence_code", None)
+    new_event = _recovered_event_document(slot_id)
+    materializer, sink = _materializer(
+        {
+            f"{EXPECTED_RECEIPTS_PREFIX}{slot_id}.json": expected,
+            f"{EVENT_RECEIPTS_PREFIX}{slot_id}/legacy.json": legacy_event,
+            f"{EVENT_RECEIPTS_PREFIX}{slot_id}/new.json": new_event,
+        }
+    )
+
+    result = materializer.run()
+
+    assert result == {"expected": 1, "events": 2}
+    by_event_id = {str(row["event_id"]): row for row in sink.events}
+    assert by_event_id[str(legacy_event["event_id"])]["recovery_evidence_code"] is None
+    assert (
+        by_event_id[str(new_event["event_id"])]["recovery_evidence_code"]
+        == "raw_manifest_verified"
+    )
 
 
 def test_materializer_rejects_event_without_expected_slot():

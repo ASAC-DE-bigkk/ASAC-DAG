@@ -2,6 +2,7 @@ import csv
 import json
 import math
 import os
+import re
 import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,6 +31,8 @@ DEFAULT_GRID_CSV = (
 )
 DEFAULT_EXPECTED_GRID_COUNT = 80
 DEFAULT_NUM_OF_ROWS = 1000
+_KMA_DATE = re.compile(r"^\d{8}$")
+_KMA_TIME = re.compile(r"^\d{4}$")
 
 
 def _configured_integer(name: str, value: object, *, minimum: int) -> int:
@@ -303,35 +306,154 @@ def parse_kma_response(raw_bytes: bytes) -> tuple[dict, list[dict]]:
         raise WeatherSourceSchemaError("KMA response is not valid UTF-8 JSON") from exc
     if not isinstance(payload, dict):
         raise WeatherSourceSchemaError("KMA JSON root must be an object")
-    response = payload.get("response") or {}
+    response = payload.get("response")
     if not isinstance(response, dict):
         raise WeatherSourceSchemaError("KMA response field must be an object")
-    header = response.get("header") or {}
-    body = response.get("body") or {}
-    if not isinstance(header, dict) or not isinstance(body, dict):
-        raise WeatherSourceSchemaError("KMA header and body must be objects")
-    result_code = str(header.get("resultCode", ""))
-    result_msg = str(header.get("resultMsg", ""))
+    header = response.get("header")
+    if not isinstance(header, dict):
+        raise WeatherSourceSchemaError("KMA header field must be an object")
+    result_code = header.get("resultCode")
+    if not isinstance(result_code, str) or not result_code.strip():
+        raise WeatherSourceSchemaError("KMA resultCode must be a non-empty string")
+    result_code = result_code.strip()
+    result_msg = str(header.get("resultMsg") or "")
 
     if result_code != "00":
         raise WeatherSourceBusinessError(
             f"KMA API returned resultCode={result_code}, resultMsg={result_msg}"
         )
 
-    items_node = ((body.get("items") or {}).get("item")) or []
+    body = response.get("body")
+    if not isinstance(body, dict):
+        raise WeatherSourceSchemaError("KMA body field must be an object")
+    total_count = _kma_nonnegative_integer(body, "totalCount")
+    items = body.get("items")
+    if not isinstance(items, dict):
+        raise WeatherSourceSchemaError("KMA items field must be an object")
+    items_node = items.get("item")
+    if items_node is None:
+        if total_count == 0:
+            rows = []
+        else:
+            raise WeatherSourceSchemaError("KMA items field is missing item")
     if isinstance(items_node, dict):
         rows = [items_node]
     elif isinstance(items_node, list):
         rows = items_node
-    else:
+    elif items_node is not None:
         raise WeatherSourceSchemaError(
             f"Unexpected KMA item payload type: {type(items_node).__name__}"
         )
+    for row_number, row in enumerate(rows, start=1):
+        _validate_kma_row(row, row_number)
+    if total_count == 0 and not rows:
+        raise WeatherSourceSchemaError(
+            "KMA response contains no forecast rows for request context validation"
+        )
+    if total_count == 0 and rows:
+        raise WeatherSourceSchemaError("KMA totalCount=0 cannot include item data")
 
     metadata = {
         "result_code": result_code,
         "result_msg": result_msg,
-        "total_count": body.get("totalCount"),
+        "total_count": total_count,
         "row_count": len(rows),
     }
     return metadata, rows
+
+
+def validate_kma_response_context(
+    rows: list[dict],
+    *,
+    base_date: str,
+    base_time: str,
+    nx: int,
+    ny: int,
+) -> None:
+    """Reject a valid-shaped response that belongs to another KMA request."""
+
+    expected = {
+        "baseDate": base_date,
+        "baseTime": base_time,
+        "nx": nx,
+        "ny": ny,
+    }
+    for row_number, row in enumerate(rows, start=1):
+        _validate_kma_row(row, row_number)
+        actual = {
+            "baseDate": str(row["baseDate"]),
+            "baseTime": str(row["baseTime"]),
+            "nx": int(row["nx"]),
+            "ny": int(row["ny"]),
+        }
+        for field, expected_value in expected.items():
+            if actual[field] != expected_value:
+                raise WeatherSourceSchemaError(
+                    "KMA item response context mismatch: "
+                    f"row={row_number}, field={field}, "
+                    f"expected={expected_value}, actual={actual[field]}"
+                )
+
+
+def _kma_nonnegative_integer(body: dict, field: str) -> int:
+    value = body.get(field)
+    if value is None or isinstance(value, bool) or value == "":
+        raise WeatherSourceSchemaError(f"KMA response is missing {field}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise WeatherSourceSchemaError(
+            f"KMA {field} must be an integer"
+        ) from exc
+    if parsed < 0:
+        raise WeatherSourceSchemaError(f"KMA {field} must be non-negative")
+    return parsed
+
+
+def _kma_required_text(row: dict, field: str, row_number: int) -> str:
+    value = row.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise WeatherSourceSchemaError(
+            f"KMA item {row_number} is missing required field: {field}"
+        )
+    return value.strip()
+
+
+def _validate_kma_timestamp(value: str, field: str, row_number: int) -> None:
+    pattern = _KMA_DATE if field.endswith("Date") else _KMA_TIME
+    format_string = "%Y%m%d" if field.endswith("Date") else "%H%M"
+    if not pattern.fullmatch(value):
+        raise WeatherSourceSchemaError(
+            f"KMA item {row_number} has invalid {field}"
+        )
+    try:
+        datetime.strptime(value, format_string)
+    except ValueError as exc:
+        raise WeatherSourceSchemaError(
+            f"KMA item {row_number} has invalid {field}"
+        ) from exc
+
+
+def _validate_kma_row(row: object, row_number: int) -> None:
+    if not isinstance(row, dict):
+        raise WeatherSourceSchemaError(f"KMA item {row_number} must be an object")
+    for field in ("baseDate", "baseTime", "category", "fcstDate", "fcstTime", "fcstValue"):
+        value = _kma_required_text(row, field, row_number)
+        if field in {"baseDate", "baseTime", "fcstDate", "fcstTime"}:
+            _validate_kma_timestamp(value, field, row_number)
+    for field in ("nx", "ny"):
+        value = row.get(field)
+        if value is None or isinstance(value, bool):
+            raise WeatherSourceSchemaError(
+                f"KMA item {row_number} is missing required field: {field}"
+            )
+        try:
+            coordinate = int(value)
+        except (TypeError, ValueError) as exc:
+            raise WeatherSourceSchemaError(
+                f"KMA item {row_number} has invalid {field}"
+            ) from exc
+        if coordinate <= 0:
+            raise WeatherSourceSchemaError(
+                f"KMA item {row_number} has invalid {field}"
+            )

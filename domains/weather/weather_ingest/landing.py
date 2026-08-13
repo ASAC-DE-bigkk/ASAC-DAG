@@ -12,10 +12,12 @@ from typing import Callable, Protocol
 
 from common.raw_manifest import RAW_MANIFEST_STATUS_COMPLETE, build_raw_manifest
 from common.raw_path import build_raw_run_prefix
-from weather_ingest.kma import KST, parse_kma_response
+from common.raw_write import RawObjectWriteConflictError, write_immutable_raw_object
+from weather_ingest.kma import KST, parse_kma_response, validate_kma_response_context
 from weather_ingest.errors import (
     WeatherCompletenessError,
     WeatherRawIntegrityError,
+    WeatherSourceBusinessError,
     WeatherSourceSchemaError,
 )
 from weather_ingest.raw_contract import normalize_kma_checkpoint_raw_object
@@ -200,6 +202,13 @@ class RawObjectStore(Protocol):
     def read_bytes(self, key: str) -> bytes: ...
 
     def write_bytes(self, key: str, payload: bytes, content_type: str) -> None: ...
+
+    def write_bytes_if_absent(
+        self,
+        key: str,
+        payload: bytes,
+        content_type: str,
+    ) -> bool: ...
 
 
 class KmaLanding:
@@ -413,6 +422,17 @@ class KmaLanding:
             f"base-{base_date}{base_time}_{request_id}.json"
         )
 
+    def _write_raw_payload(self, key: str, payload: bytes) -> None:
+        try:
+            write_immutable_raw_object(
+                self._raw_store,
+                key,
+                payload,
+                "application/json; charset=utf-8",
+            )
+        except RawObjectWriteConflictError as exc:
+            raise RawObjectIntegrityError(str(exc)) from exc
+
     def collect(
         self,
         run: RunIdentity,
@@ -519,9 +539,6 @@ class KmaLanding:
             page_no=page_no,
             num_of_rows=request.num_of_rows,
         )
-        metadata, rows = parse_kma_response(payload)
-        total_count = int(metadata.get("total_count") or len(rows))
-        page_count = max(1, math.ceil(total_count / request.num_of_rows))
         raw_object_key = self._raw_object_key(
             collected_at=collected_at,
             request_id=request_id,
@@ -532,11 +549,30 @@ class KmaLanding:
             landing_load_date=landing_load_date,
             run_id=run_id,
         )
-        self._raw_store.write_bytes(
-            raw_object_key,
-            payload,
-            "application/json; charset=utf-8",
-        )
+        self._write_raw_payload(raw_object_key, payload)
+        if not isinstance(http_status, int) or isinstance(http_status, bool):
+            raise WeatherSourceSchemaError(
+                "KMA response has invalid http_status: "
+                f"{http_status!r}; raw_object_key={raw_object_key}"
+            )
+        if not 200 <= http_status < 300:
+            raise WeatherSourceSchemaError(
+                "KMA response is not HTTP-successful: "
+                f"http_status={http_status}; raw_object_key={raw_object_key}"
+            )
+        try:
+            metadata, rows = parse_kma_response(payload)
+            validate_kma_response_context(
+                rows,
+                base_date=request.base_date,
+                base_time=request.base_time,
+                nx=grid.nx,
+                ny=grid.ny,
+            )
+        except (WeatherSourceBusinessError, WeatherSourceSchemaError) as exc:
+            raise type(exc)(f"{exc}; raw_object_key={raw_object_key}") from exc
+        total_count = int(metadata["total_count"])
+        page_count = max(1, math.ceil(total_count / request.num_of_rows))
         return KmaRawObject(
             request_id=request_id,
             raw_object_key=raw_object_key,
@@ -571,15 +607,27 @@ class KmaLanding:
                     f"Unsupported KMA raw_object_key: {raw_object_key}"
                 )
             payload = self._raw_store.read_bytes(raw_object_key)
-            metadata, rows = parse_kma_response(payload)
+            base_date = match.group("base_date")
+            base_time = match.group("base_time")
+            nx = int(match.group("nx"))
+            ny = int(match.group("ny"))
+            try:
+                metadata, rows = parse_kma_response(payload)
+                validate_kma_response_context(
+                    rows,
+                    base_date=base_date,
+                    base_time=base_time,
+                    nx=nx,
+                    ny=ny,
+                )
+            except (WeatherSourceBusinessError, WeatherSourceSchemaError) as exc:
+                raise type(exc)(f"{exc}; raw_object_key={raw_object_key}") from exc
             body = (json.loads(payload.decode("utf-8")).get("response") or {}).get(
                 "body"
             ) or {}
             page_no = int(body.get("pageNo") or 1)
             num_of_rows = int(body.get("numOfRows") or 1000)
-            total_count = int(metadata.get("total_count") or len(rows))
-            nx = int(match.group("nx"))
-            ny = int(match.group("ny"))
+            total_count = int(metadata["total_count"])
             collected_at = datetime.strptime(
                 match.group("collected"),
                 "%Y%m%dT%H%M%S",
@@ -592,8 +640,8 @@ class KmaLanding:
                     http_status=200,
                     collected_at=collected_at.isoformat(),
                     place_id=grid_place_ids.get((nx, ny), f"kma_{nx}_{ny}"),
-                    base_date=match.group("base_date"),
-                    base_time=match.group("base_time"),
+                    base_date=base_date,
+                    base_time=base_time,
                     nx=nx,
                     ny=ny,
                     page_no=page_no,

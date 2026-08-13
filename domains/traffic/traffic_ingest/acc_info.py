@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -17,6 +18,8 @@ KST = ZoneInfo("Asia/Seoul")
 
 SOURCE_ID = "seoul_traffic_incident"
 SOURCE_DOMAIN = "traffic_incident"
+_OCCR_DATE = re.compile(r"^\d{8}$")
+_OCCR_TIME = re.compile(r"^\d{4}(?:\d{2})?$")
 
 
 def build_raw_object_key(
@@ -132,6 +135,58 @@ def xml_text(element: ET.Element | None, name: str) -> str | None:
     return child.text.strip()
 
 
+def _required_nonnegative_integer(root: ET.Element, name: str) -> int:
+    value = xml_text(root, name)
+    if value is None:
+        raise TrafficSourceSchemaError(
+            f"Seoul AccInfo response is missing {name}"
+        )
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise TrafficSourceSchemaError(
+            f"Seoul AccInfo {name} must be an integer"
+        ) from exc
+    if parsed < 0:
+        raise TrafficSourceSchemaError(
+            f"Seoul AccInfo {name} must be non-negative"
+        )
+    return parsed
+
+
+def _required_row_text(row: ET.Element, name: str, row_number: int) -> str:
+    value = xml_text(row, name)
+    if value is None:
+        raise TrafficSourceSchemaError(
+            f"Seoul AccInfo row {row_number} is missing required field: {name}"
+        )
+    return value
+
+
+def _validate_occurrence_fields(row: ET.Element, row_number: int) -> None:
+    _required_row_text(row, "acc_id", row_number)
+    occurrence_date = _required_row_text(row, "occr_date", row_number)
+    occurrence_time = _required_row_text(row, "occr_time", row_number)
+    if not _OCCR_DATE.fullmatch(occurrence_date):
+        raise TrafficSourceSchemaError(
+            f"Seoul AccInfo row {row_number} has invalid occr_date"
+        )
+    if not _OCCR_TIME.fullmatch(occurrence_time):
+        raise TrafficSourceSchemaError(
+            f"Seoul AccInfo row {row_number} has invalid occr_time"
+        )
+    try:
+        datetime.strptime(occurrence_date, "%Y%m%d")
+        datetime.strptime(
+            occurrence_time,
+            "%H%M" if len(occurrence_time) == 4 else "%H%M%S",
+        )
+    except ValueError as exc:
+        raise TrafficSourceSchemaError(
+            f"Seoul AccInfo row {row_number} has invalid occurrence timestamp"
+        ) from exc
+
+
 def parse_seoul_acc_info_response(raw_bytes: bytes) -> tuple[dict, list[dict]]:
     if not raw_bytes.strip():
         raise TrafficSourceEmptyResponseError("Seoul AccInfo response body is empty")
@@ -164,8 +219,10 @@ def parse_seoul_acc_info_response(raw_bytes: bytes) -> tuple[dict, list[dict]]:
             f"Seoul AccInfo API returned resultCode={code}, resultMsg={message}"
         )
 
+    list_total_count = _required_nonnegative_integer(root, "list_total_count")
     rows = []
-    for row in root.findall("row"):
+    for row_number, row in enumerate(root.findall("row"), start=1):
+        _validate_occurrence_fields(row, row_number)
         rows.append(
             {
                 "acc_id": xml_text(row, "acc_id"),
@@ -182,11 +239,15 @@ def parse_seoul_acc_info_response(raw_bytes: bytes) -> tuple[dict, list[dict]]:
                 "acc_road_code": xml_text(row, "acc_road_code"),
             }
         )
+    if list_total_count == 0 and rows:
+        raise TrafficSourceSchemaError(
+            "Seoul AccInfo list_total_count=0 cannot include row data"
+        )
 
     metadata = {
         "result_code": code,
         "result_msg": message,
-        "list_total_count": xml_text(root, "list_total_count"),
+        "list_total_count": list_total_count,
         "row_count": len(rows),
     }
     return metadata, rows

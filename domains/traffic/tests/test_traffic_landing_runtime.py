@@ -9,6 +9,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from common.raw_manifest import build_raw_manifest  # noqa: E402
+from common.raw_write import write_immutable_raw_object  # noqa: E402
 import traffic_ingest.runtime as runtime  # noqa: E402
 from traffic_ingest.runtime import R2RawObjectStore, TopisHttpAdapter  # noqa: E402
 
@@ -25,10 +27,28 @@ class FakeSeoulClient:
 class FakeS3Client:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], tuple[bytes, str]] = {}
+        self.put_conditions: list[str | None] = []
 
     def put_object(
-        self, *, Bucket: str, Key: str, Body: bytes, ContentType: str
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: bytes,
+        ContentType: str,
+        IfNoneMatch: str | None = None,
     ) -> None:
+        self.put_conditions.append(IfNoneMatch)
+        if IfNoneMatch == "*" and (Bucket, Key) in self.objects:
+            from botocore.exceptions import ClientError
+
+            raise ClientError(
+                {
+                    "Error": {"Code": "PreconditionFailed"},
+                    "ResponseMetadata": {"HTTPStatusCode": 412},
+                },
+                "PutObject",
+            )
         self.objects[(Bucket, Key)] = (Body, ContentType)
 
     def get_object(self, *, Bucket: str, Key: str):
@@ -67,6 +87,86 @@ def test_r2_store_preserves_content_type_and_missing_object_semantics():
     )
 
 
+def test_r2_store_create_only_write_rejects_an_existing_raw_key():
+    client = FakeS3Client()
+    store = R2RawObjectStore(client, bucket="seoul-dev")
+
+    assert store.write_bytes_if_absent("raw/page.xml", b"first", "application/xml")
+    assert not store.write_bytes_if_absent(
+        "raw/page.xml", b"second", "application/xml"
+    )
+
+    assert store.read_bytes("raw/page.xml") == b"first"
+    assert client.put_conditions == ["*", "*"]
+
+
+def test_r2_store_retries_conditional_conflict_until_raw_creation_succeeds():
+    from botocore.exceptions import ClientError
+
+    class ConflictThenSuccessClient(FakeS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self._conflict = True
+
+        def put_object(self, **kwargs) -> None:
+            if self._conflict:
+                self._conflict = False
+                self.put_conditions.append(kwargs.get("IfNoneMatch"))
+                raise ClientError(
+                    {
+                        "Error": {"Code": "ConditionalRequestConflict"},
+                        "ResponseMetadata": {"HTTPStatusCode": 409},
+                    },
+                    "PutObject",
+                )
+            super().put_object(**kwargs)
+
+    client = ConflictThenSuccessClient()
+    store = R2RawObjectStore(client, bucket="seoul-dev")
+
+    assert store.write_bytes_if_absent("raw/page.xml", b"payload", "application/xml")
+    assert store.read_bytes("raw/page.xml") == b"payload"
+    assert client.put_conditions == ["*", "*"]
+
+
+def test_r2_store_retries_conditional_conflict_then_reuses_matching_raw_object():
+    from botocore.exceptions import ClientError
+
+    class ConflictThenOtherWriterClient(FakeS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self._conflict = True
+
+        def put_object(self, **kwargs) -> None:
+            if self._conflict:
+                self._conflict = False
+                self.put_conditions.append(kwargs.get("IfNoneMatch"))
+                self.objects[(kwargs["Bucket"], kwargs["Key"])] = (
+                    kwargs["Body"],
+                    kwargs["ContentType"],
+                )
+                raise ClientError(
+                    {
+                        "Error": {"Code": "ConditionalRequestConflict"},
+                        "ResponseMetadata": {"HTTPStatusCode": 409},
+                    },
+                    "PutObject",
+                )
+            super().put_object(**kwargs)
+
+    client = ConflictThenOtherWriterClient()
+    store = R2RawObjectStore(client, bucket="seoul-dev")
+
+    assert not write_immutable_raw_object(
+        store,
+        "raw/page.xml",
+        b"payload",
+        "application/xml",
+    )
+    assert store.read_bytes("raw/page.xml") == b"payload"
+    assert client.put_conditions == ["*", "*"]
+
+
 def test_r2_store_does_not_hide_permission_or_transport_failures():
     class DeniedClient(FakeS3Client):
         def head_object(self, *, Bucket: str, Key: str) -> None:
@@ -76,6 +176,51 @@ def test_r2_store_does_not_hide_permission_or_transport_failures():
 
     with pytest.raises(RuntimeError, match="denied"):
         R2RawObjectStore(DeniedClient(), bucket="seoul-dev").exists("raw/page.xml")
+
+
+def test_traffic_manifest_verifier_requires_a_matching_complete_manifest(monkeypatch):
+    raw_object_key = "raw/traffic/snapshot-1/page-1.xml"
+    raw_result = {
+        "manifest_key": "raw/traffic/snapshot-1/_manifest.json",
+        "raw_objects": [{"raw_object_key": raw_object_key}],
+    }
+    manifest = build_raw_manifest(
+        run_id="snapshot-1",
+        dataset="seoul_traffic_incident",
+        load_date="2026-07-16",
+        object_keys=[raw_object_key],
+        expected_count=1,
+        actual_count=1,
+        completed_at="2026-07-16T00:05:00+00:00",
+        status="complete",
+    )
+
+    class Storage:
+        def read_json(self, key):
+            assert key == raw_result["manifest_key"]
+            return manifest
+
+    monkeypatch.setattr(runtime, "build_traffic_collection_slot_storage", Storage)
+
+    assert runtime.traffic_raw_manifest_is_verified(
+        raw_result,
+        dag_run_id="snapshot-1",
+    )
+
+    class MissingStorage:
+        def read_json(self, _key):
+            raise FileNotFoundError("manifest disappeared")
+
+    monkeypatch.setattr(
+        runtime,
+        "build_traffic_collection_slot_storage",
+        MissingStorage,
+    )
+
+    assert not runtime.traffic_raw_manifest_is_verified(
+        raw_result,
+        dag_run_id="snapshot-1",
+    )
 
 
 def test_runtime_factory_lazily_composes_domain_landing(monkeypatch):
@@ -188,6 +333,14 @@ def test_landing_lifecycle_runtime_wires_slot_receipts_with_same_r2_factory(
 ):
     captured: dict[str, object] = {}
     slot_receipts = object()
+    monkeypatch.setenv(
+        "ASK_SEOUL_COLLECTION_SLOT_ACTIVATION_AT",
+        "2026-08-01T00:00:00+00:00",
+    )
+    monkeypatch.setenv(
+        "ASK_SEOUL_TRAFFIC_RAW_RETENTION_BOUNDARY_AT",
+        "2026-08-01T00:00:00+00:00",
+    )
     monkeypatch.setattr(runtime, "build_traffic_landing", lambda: object())
     monkeypatch.setattr(runtime, "build_traffic_snapshot_receipts", lambda: object())
     monkeypatch.setattr(
@@ -207,9 +360,11 @@ def test_landing_lifecycle_runtime_wires_slot_receipts_with_same_r2_factory(
 
     assert lifecycle is captured["lifecycle"]
     assert captured["lifecycle"]["slot_receipts"] is slot_receipts
-    assert captured["lifecycle"]["slot_for_logical_date"].__name__ == (
-        "traffic_incident_slot"
+    slot = captured["lifecycle"]["slot_for_logical_date"](
+        "2026-08-08T00:07:00+00:00"
     )
+    assert slot.collection_slot_at == "2026-08-08T00:05:00+00:00"
+    assert slot.recovery_boundary == "2026-08-01T00:00:00+00:00"
 
 
 def test_incident_materializer_runtime_replays_legacy_raw_before_loading(monkeypatch):

@@ -14,6 +14,7 @@ from typing import Callable, Protocol
 
 from common.raw_manifest import RAW_MANIFEST_STATUS_COMPLETE, build_raw_manifest
 from common.raw_path import build_raw_run_prefix
+from common.raw_write import RawObjectWriteConflictError, write_immutable_raw_object
 from traffic_ingest.acc_info import (
     KST,
     metadata_total_count,
@@ -24,6 +25,7 @@ from traffic_ingest.errors import (
     TrafficCompletenessError,
     TrafficInvalidWindowError,
     TrafficRawIntegrityError,
+    TrafficSourceBusinessError,
     TrafficSourceEmptyResponseError,
     TrafficSourceSchemaError,
 )
@@ -79,6 +81,13 @@ class RawObjectStore(Protocol):
     def read_bytes(self, key: str) -> bytes: ...
 
     def write_bytes(self, key: str, payload: bytes, content_type: str) -> None: ...
+
+    def write_bytes_if_absent(
+        self,
+        key: str,
+        payload: bytes,
+        content_type: str,
+    ) -> bool: ...
 
 
 class TrafficLanding:
@@ -304,6 +313,17 @@ class TrafficLanding:
             f"{start_index}-{end_index}_{request_id}.xml"
         )
 
+    def _write_raw_payload(self, key: str, payload: bytes) -> None:
+        try:
+            write_immutable_raw_object(
+                self._raw_store,
+                key,
+                payload,
+                "application/xml; charset=utf-8",
+            )
+        except RawObjectWriteConflictError as exc:
+            raise RawObjectIntegrityError(str(exc)) from exc
+
     def collect(
         self,
         run: RunIdentity,
@@ -386,27 +406,40 @@ class TrafficLanding:
                     http_status, payload = self._source.fetch_page(
                         start_index, end_index
                     )
+                    if not payload.strip():
+                        if empty_response_attempt == 0:
+                            continue
+                        parse_seoul_acc_info_response(payload)
+                        raise AssertionError("empty TOPIS payload must raise")
+                    raw_object_key = self._raw_object_key(
+                        collected_at=collected_at,
+                        request_id=request_id,
+                        start_index=start_index,
+                        end_index=end_index,
+                        landing_load_date=landing_load_date,
+                        run_id=run.run_id,
+                    )
+                    self._write_raw_payload(raw_object_key, payload)
+                    if not isinstance(http_status, int) or isinstance(http_status, bool):
+                        raise TrafficSourceSchemaError(
+                            "Seoul AccInfo response has invalid http_status: "
+                            f"{http_status!r}; raw_object_key={raw_object_key}"
+                        )
+                    if not 200 <= http_status < 300:
+                        raise TrafficSourceSchemaError(
+                            "Seoul AccInfo response is not HTTP-successful: "
+                            f"http_status={http_status}; raw_object_key={raw_object_key}"
+                        )
                     try:
                         metadata, rows = parse_seoul_acc_info_response(payload)
                     except TrafficSourceEmptyResponseError:
                         if empty_response_attempt == 0:
                             continue
                         raise
+                    except (TrafficSourceBusinessError, TrafficSourceSchemaError) as exc:
+                        raise type(exc)(f"{exc}; raw_object_key={raw_object_key}") from exc
                     break
                 result_code = str(metadata.get("result_code") or result_code)
-                raw_object_key = self._raw_object_key(
-                    collected_at=collected_at,
-                    request_id=request_id,
-                    start_index=start_index,
-                    end_index=end_index,
-                    landing_load_date=landing_load_date,
-                    run_id=run.run_id,
-                )
-                self._raw_store.write_bytes(
-                    raw_object_key,
-                    payload,
-                    "application/xml; charset=utf-8",
-                )
                 raw_object = TrafficRawObject(
                     request_id=request_id,
                     raw_object_key=raw_object_key,

@@ -57,6 +57,10 @@ class Manifest(Protocol):
     def fail(self, run: TrafficRun, **metrics) -> str: ...
 
 
+class RawManifestVerifier(Protocol):
+    def __call__(self, raw_result: Mapping[str, object], *, dag_run_id: str) -> bool: ...
+
+
 def _iso_timestamp(value: datetime | str) -> str:
     if isinstance(value, str):
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -127,7 +131,8 @@ class IncidentLandingLifecycle:
         landing: Landing,
         receipts: ReceiptWriter,
         slot_receipts: CollectionSlotReceiptWriter,
-        slot_for_logical_date: Callable[[datetime | str], ExpectedSlot],
+        slot_for_logical_date: Callable[[datetime | str], ExpectedSlot | None],
+        raw_manifest_is_verified: RawManifestVerifier,
         clock: Callable[[], datetime],
     ) -> None:
         self._runtime_guard = runtime_guard
@@ -136,6 +141,7 @@ class IncidentLandingLifecycle:
         self._receipts = receipts
         self._slot_receipts = slot_receipts
         self._slot_for_logical_date = slot_for_logical_date
+        self._raw_manifest_is_verified = raw_manifest_is_verified
         self._clock = clock
 
     def run(
@@ -148,10 +154,12 @@ class IncidentLandingLifecycle:
         logical_at = _iso_timestamp(logical_date)
         slot: ExpectedSlot | None = None
         expected_recorded = False
+        raw_result: dict[str, object] | None = None
         try:
             slot = self._slot_for_logical_date(logical_at)
-            self._slot_receipts.record_expected(slot)
-            expected_recorded = True
+            if slot is not None:
+                self._slot_receipts.record_expected(slot)
+                expected_recorded = True
             self._record_ledger(
                 run=run,
                 status=STATUS_STARTED,
@@ -183,17 +191,53 @@ class IncidentLandingLifecycle:
         except Exception as error:
             if expected_recorded and slot is not None:
                 try:
+                    raw_manifest_verified = (
+                        raw_result is not None
+                        and self._raw_manifest_is_verified(
+                            raw_result,
+                            dag_run_id=run.run_id,
+                        )
+                    )
                     self._slot_receipts.record_outcome(
                         CollectionOutcome.create(
                             expected_slot_id=slot.expected_slot_id,
                             collection_state="collection_failed",
-                            recovery_state="pending",
-                            recovery_class="none",
+                            recovery_state=(
+                                "pending"
+                                if raw_manifest_verified
+                                else "unrecoverable"
+                            ),
+                            recovery_class=(
+                                "raw_replay"
+                                if raw_manifest_verified
+                                else "none"
+                            ),
                             gap_reason_code="landing_failed",
                             event_at=self._clock(),
                             dag_id=run.dag_id,
                             dag_run_id=run.run_id,
                             task_id=LANDING_TASK_ID,
+                            raw_manifest_key=(
+                                str(raw_result["manifest_key"])
+                                if raw_manifest_verified
+                                else None
+                            ),
+                            raw_object_count=(
+                                len(_raw_objects(raw_result))
+                                if raw_manifest_verified
+                                else None
+                            ),
+                            source_result_code=(
+                                str(raw_result["result_code"])
+                                if raw_result is not None
+                                and raw_result.get("result_code")
+                                else None
+                            ),
+                            recovery_evidence_code=(
+                                "raw_manifest_verified"
+                                if raw_manifest_verified
+                                else None
+                            ),
                         )
                     )
                 except Exception as receipt_error:  # preserve landing failure cause
@@ -312,7 +356,8 @@ class IncidentMaterializer:
         ) = None,
         clock: Callable[[], datetime],
         slot_receipts: CollectionSlotReceiptWriter | None = None,
-        slot_for_logical_date: Callable[[datetime | str], ExpectedSlot] | None = None,
+        slot_for_logical_date: Callable[[datetime | str], ExpectedSlot | None] | None = None,
+        raw_manifest_is_verified: RawManifestVerifier | None = None,
     ) -> None:
         if (slot_receipts is None) != (slot_for_logical_date is None):
             raise ValueError(
@@ -329,6 +374,9 @@ class IncidentMaterializer:
         self._clock = clock
         self._slot_receipts = slot_receipts
         self._slot_for_logical_date = slot_for_logical_date
+        self._raw_manifest_is_verified = raw_manifest_is_verified or (
+            lambda _raw_result, **_kwargs: False
+        )
 
     def run(
         self,
@@ -368,6 +416,7 @@ class IncidentMaterializer:
             receipt.snapshot_run_id: len(_raw_objects(receipt.raw_result))
             for receipt in active_receipts
         }
+        terminalized_snapshot_ids: set[str] = set()
         try:
             self._manifest_start_many(
                 [
@@ -476,11 +525,12 @@ class IncidentMaterializer:
                 metrics = publish_metrics[receipt.snapshot_run_id]
                 verified_rows = int(metrics["actual_rows"])
                 page_count = int(metrics["expected_raw_objects"])
-                self._record_terminal_slot_outcome(
+                if self._record_terminal_slot_outcome(
                     receipt,
                     materializer_dag_id=materializer_dag_id,
                     verified_rows=verified_rows,
-                )
+                ):
+                    terminalized_snapshot_ids.add(receipt.snapshot_run_id)
                 self._receipts.record_materialized(
                     MaterializedSnapshot(
                         source_id=receipt.source_id,
@@ -523,6 +573,16 @@ class IncidentMaterializer:
                     "Traffic materialization FAILED manifest write failed: %s",
                     type(manifest_error).__name__,
                 )
+            for receipt in active_receipts:
+                if receipt.snapshot_run_id in terminalized_snapshot_ids:
+                    continue
+                try:
+                    self._record_pending_raw_replay_slot_outcome(receipt)
+                except Exception as receipt_error:
+                    LOGGER.warning(
+                        "Traffic materialization FAILED slot receipt write failed: %s",
+                        type(receipt_error).__name__,
+                    )
             raise
 
     def _record_terminal_slot_outcome(
@@ -531,22 +591,39 @@ class IncidentMaterializer:
         *,
         materializer_dag_id: str,
         verified_rows: int,
-    ) -> None:
+    ) -> bool:
         if self._slot_receipts is None:
-            return
+            return False
         assert self._slot_for_logical_date is not None
+        slot = self._slot_for_logical_date(receipt.logical_date)
+        if slot is None:
+            return False
         result_code = str(receipt.raw_result.get("result_code") or "")
+        expected_rows = int(receipt.raw_result.get("expected_rows") or 0)
+        list_total_count = int(receipt.raw_result.get("list_total_count") or 0)
+        source_empty_valid = (
+            result_code == "INFO-000"
+            and expected_rows == 0
+            and list_total_count == 0
+            and verified_rows == 0
+        )
+        if (
+            not source_empty_valid
+            and (expected_rows == 0 or list_total_count == 0 or verified_rows == 0)
+        ):
+            raise ValueError(
+                "Traffic source_empty_valid requires INFO-000, "
+                "list_total_count=0, expected_rows=0, and verified row_count=0"
+            )
         if result_code != "INFO-000":
             raise ValueError(
                 "Traffic slot outcome requires verified INFO-000 source evidence"
             )
-        expected_rows = int(receipt.raw_result.get("expected_rows") or 0)
         collection_state = (
             "source_empty_valid"
-            if expected_rows == 0 and verified_rows == 0
+            if source_empty_valid
             else "observed"
         )
-        slot = self._slot_for_logical_date(receipt.logical_date)
         self._slot_receipts.record_outcome(
             CollectionOutcome.create(
                 expected_slot_id=slot.expected_slot_id,
@@ -554,9 +631,9 @@ class IncidentMaterializer:
                 recovery_state="not_required",
                 recovery_class="none",
                 event_at=receipt.snapshot_at,
-                dag_id=materializer_dag_id,
+                dag_id=receipt.producer_dag_id,
                 dag_run_id=receipt.snapshot_run_id,
-                task_id=MATERIALIZER_TASK_ID,
+                task_id=LANDING_TASK_ID,
                 raw_manifest_key=(
                     str(receipt.raw_result["manifest_key"])
                     if receipt.raw_result.get("manifest_key")
@@ -565,6 +642,42 @@ class IncidentMaterializer:
                 raw_object_count=len(_raw_objects(receipt.raw_result)),
                 row_count=verified_rows,
                 source_result_code=result_code,
+            )
+        )
+        return True
+
+    def _record_pending_raw_replay_slot_outcome(self, receipt: LandedSnapshot) -> None:
+        if self._slot_receipts is None:
+            return
+        assert self._slot_for_logical_date is not None
+        slot = self._slot_for_logical_date(receipt.logical_date)
+        if slot is None:
+            return
+        if not self._raw_manifest_is_verified(
+            receipt.raw_result,
+            dag_run_id=receipt.snapshot_run_id,
+        ):
+            return
+        raw_manifest_key = receipt.raw_result["manifest_key"]
+        self._slot_receipts.record_outcome(
+            CollectionOutcome.create(
+                expected_slot_id=slot.expected_slot_id,
+                collection_state="collection_failed",
+                recovery_state="pending",
+                recovery_class="raw_replay",
+                gap_reason_code="materialization_failed",
+                event_at=self._clock(),
+                dag_id=receipt.producer_dag_id,
+                dag_run_id=receipt.snapshot_run_id,
+                task_id=LANDING_TASK_ID,
+                raw_manifest_key=str(raw_manifest_key),
+                raw_object_count=len(_raw_objects(receipt.raw_result)),
+                source_result_code=(
+                    str(receipt.raw_result["result_code"])
+                    if receipt.raw_result.get("result_code")
+                    else None
+                ),
+                recovery_evidence_code="raw_manifest_verified",
             )
         )
 
@@ -684,6 +797,14 @@ class IncidentMaterializer:
                     "Traffic preflight manifest FAILED write failed: %s",
                     type(manifest_error).__name__,
                 )
+            for receipt in pending_receipts:
+                try:
+                    self._record_pending_raw_replay_slot_outcome(receipt)
+                except Exception as receipt_error:
+                    LOGGER.warning(
+                        "Traffic preflight FAILED slot receipt write failed: %s",
+                        type(receipt_error).__name__,
+                    )
             raise
 
 

@@ -49,6 +49,14 @@ class MemoryRawObjectStore:
     def write_bytes(self, key: str, payload: bytes, _content_type: str) -> None:
         self.objects[key] = payload
 
+    def write_bytes_if_absent(
+        self, key: str, payload: bytes, content_type: str
+    ) -> bool:
+        if key in self.objects:
+            return False
+        self.write_bytes(key, payload, content_type)
+        return True
+
 
 class ScriptedKmaSource:
     def __init__(self, pages: dict[tuple[int, int, int], bytes]) -> None:
@@ -92,7 +100,14 @@ class TaskInstance:
 
 
 def kma_payload(
-    total_count: int = 1, item_count: int = 1, page_no: int = 1, num_of_rows: int = 1000
+    total_count: int = 1,
+    item_count: int = 1,
+    page_no: int = 1,
+    num_of_rows: int = 1000,
+    base_date: str = "20260705",
+    base_time: str = "1700",
+    nx: int = 56,
+    ny: int = 130,
 ) -> bytes:
     return json.dumps(
         {
@@ -101,7 +116,18 @@ def kma_payload(
                 "body": {
                     "items": {
                         "item": [
-                            {"category": "TMP", "seq": seq} for seq in range(item_count)
+                            {
+                                "baseDate": base_date,
+                                "baseTime": base_time,
+                                "nx": nx,
+                                "ny": ny,
+                                "category": "TMP",
+                                "fcstDate": base_date,
+                                "fcstTime": "0900",
+                                "fcstValue": str(seq),
+                                "seq": seq,
+                            }
+                            for seq in range(item_count)
                         ]
                     },
                     "pageNo": page_no,
@@ -134,7 +160,16 @@ def test_land_kma_raw_reuses_checkpointed_grid():
     run = RunIdentity("weather_vilage_fcst_bronze", "manual__retry:1")
     store = MemoryRawObjectStore()
 
-    first_source = ScriptedKmaSource({(56, 130, 1): kma_payload()})
+    first_source = ScriptedKmaSource(
+        {
+            (56, 130, 1): kma_payload(
+                base_date="20260703",
+                base_time="0800",
+                nx=56,
+                ny=130,
+            )
+        }
+    )
     with pytest.raises(KeyError):
         landing_for(first_source, store, iter(("request-1", "request-fails"))).collect(
             run,
@@ -146,7 +181,16 @@ def test_land_kma_raw_reuses_checkpointed_grid():
         for key in store.objects
         if "/nx=56/ny=130/" in key and not key.endswith("landing.json")
     )
-    retry_source = ScriptedKmaSource({(57, 130, 1): kma_payload()})
+    retry_source = ScriptedKmaSource(
+        {
+            (57, 130, 1): kma_payload(
+                base_date="20260703",
+                base_time="0800",
+                nx=57,
+                ny=130,
+            )
+        }
+    )
     result = (
         landing_for(retry_source, store, iter(("request-2",)))
         .collect(
@@ -205,7 +249,15 @@ def test_land_kma_raw_object_keys_rebuilds_loader_input():
     )
 
     store = MemoryRawObjectStore(
-        {raw_key: kma_payload(total_count=1, item_count=1, page_no=1, num_of_rows=1000)}
+        {
+            raw_key: kma_payload(
+                total_count=1,
+                item_count=1,
+                page_no=1,
+                num_of_rows=1000,
+                base_time="0800",
+            )
+        }
     )
     result = (
         landing_for(ScriptedKmaSource({}), store)
