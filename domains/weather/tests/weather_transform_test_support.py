@@ -99,6 +99,10 @@ class FakeAirflowFailException(FakeAirflowException):
     pass
 
 
+class FakeAirflowSkipException(FakeAirflowException):
+    pass
+
+
 class FakeTaskInstance:
     def __init__(self, *, task_id="dbt_run_silver", try_number=1, pulls=None):
         self.task_id = task_id
@@ -120,6 +124,7 @@ def install_airflow_fakes():
     airflow_exceptions = types.ModuleType("airflow.exceptions")
     airflow_exceptions.AirflowException = FakeAirflowException
     airflow_exceptions.AirflowFailException = FakeAirflowFailException
+    airflow_exceptions.AirflowSkipException = FakeAirflowSkipException
 
     airflow_models = types.ModuleType("airflow.models")
     airflow_models_param = types.ModuleType("airflow.models.param")

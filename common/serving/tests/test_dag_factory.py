@@ -39,6 +39,10 @@ def test_publication_xcom_payload_exposes_stage_and_snapshot_rollback_state():
         published_at="2026-07-29T00:00:00+00:00",
         serving_status="failed",
         reason="API smoke test 실패",
+        api_smoke_detail={
+            "http_status": 503,
+            "error_code": "product_not_ready",
+        },
         stage="api_smoke",
         rollback_status="restored",
         projection_schema_hash="projection-hash-1",
@@ -54,6 +58,10 @@ def test_publication_xcom_payload_exposes_stage_and_snapshot_rollback_state():
     assert payload["projection_schema_hash"] == "projection-hash-1"
     assert payload["source_content_hash"] == "source-hash-1"
     assert payload["d1_content_hash"] == "d1-hash-1"
+    assert payload["api_smoke_detail"] == {
+        "http_status": 503,
+        "error_code": "product_not_ready",
+    }
 
 
 def test_serving_export_factory_keeps_content_parity_opt_in_default_false():
@@ -62,6 +70,17 @@ def test_serving_export_factory_keeps_content_parity_opt_in_default_false():
     assert inspect.signature(dag_factory.build_serving_export_dag).parameters[
         "verify_content_parity"
     ].default is False
+
+
+def test_serving_export_factory_serializes_all_publishers_in_shared_d1_pool():
+    dag = dag_factory.build_serving_export_dag(
+        domain="test_domain",
+        product_ids=("test_product",),
+        dag_id="test_domain_serving_export_pool_contract",
+    )
+
+    assert dag.get_task("publish_to_d1").pool == "serving_d1_publish"
+    assert dag_factory.SERVING_D1_PUBLISH_POOL == "serving_d1_publish"
 
 
 def test_domain_catalog_retirement_uses_only_disabled_contract_product_ids(tmp_path):

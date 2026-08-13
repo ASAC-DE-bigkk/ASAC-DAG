@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +17,7 @@ from common.serving.d1_client import (
     MAX_STATEMENTS_PER_API_BATCH,
     MAX_ACTIVATION_STATEMENTS,
     QUERY_AVAILABILITY_TABLE,
+    D1RequestError,
     ProductPublicationState,
     HttpD1Client,
     build_insert_statements,
@@ -25,6 +28,209 @@ from common.serving.d1_client import (
     handoff_stale_delete_statement,
     handoff_upsert_statements,
 )
+
+
+class FakeHttpResponse:
+    def __init__(self, status_code, payload, headers=None):
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+
+    def json(self):
+        return self._payload
+
+
+def _success_response(results=None):
+    return FakeHttpResponse(
+        200,
+        {
+            "success": True,
+            "result": [{"success": True, "results": results or []}],
+        },
+    )
+
+
+def test_retry_safe_read_retries_transient_d1_7500_without_logging_sql_or_token(
+    monkeypatch, caplog
+):
+    responses = [
+        FakeHttpResponse(
+            200,
+            {
+                "success": False,
+                "errors": [{"code": 7500, "message": "internal detail"}],
+            },
+            {"CF-Ray": "safe-ray-1"},
+        ),
+        _success_response([{"value": 1}]),
+    ]
+    calls = []
+    sleeps = []
+
+    def post(_url, **kwargs):
+        calls.append(kwargs)
+        return responses.pop(0)
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(post=post))
+    client = HttpD1Client(
+        api_url="https://example.invalid",
+        token="secret-token-value",
+        sleep_fn=sleeps.append,
+        random_fn=lambda: 0.0,
+    )
+
+    assert client._query("SELECT 1 AS value") == [{"value": 1}]
+    assert len(calls) == 2
+    assert sleeps == [0.5]
+    assert "http_status=200" in caplog.text
+    assert "codes=7500" in caplog.text
+    assert "safe-ray-1" in caplog.text
+    assert "SELECT 1" not in caplog.text
+    assert "secret-token-value" not in caplog.text
+    assert "internal detail" not in caplog.text
+
+
+def test_retry_safe_read_retries_connection_timeout(monkeypatch):
+    class ConnectTimeout(Exception):
+        pass
+
+    calls = []
+    sleeps = []
+
+    def post(_url, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise ConnectTimeout("transport detail must not escape")
+        return _success_response([{"value": 1}])
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(post=post))
+    client = HttpD1Client(
+        api_url="https://example.invalid",
+        token="test-token",
+        sleep_fn=sleeps.append,
+        random_fn=lambda: 0.0,
+    )
+
+    assert client._query("SELECT 1 AS value") == [{"value": 1}]
+    assert len(calls) == 2
+    assert sleeps == [0.5]
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_non_idempotent_request_does_not_retry_transient_http_status(
+    monkeypatch, status
+):
+    calls = []
+    sleeps = []
+
+    def post(_url, **kwargs):
+        calls.append(kwargs)
+        return FakeHttpResponse(status, {"success": False, "errors": []})
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(post=post))
+    client = HttpD1Client(
+        api_url="https://example.invalid",
+        token="test-token",
+        sleep_fn=sleeps.append,
+        random_fn=lambda: 0.0,
+    )
+
+    with pytest.raises(D1RequestError) as excinfo:
+        client._request(
+            {"sql": "INSERT INTO _publication_ledger VALUES (...)"},
+            retry_safe=False,
+        )
+
+    assert excinfo.value.http_status == status
+    assert excinfo.value.attempt == 1
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_retry_safe_request_stops_after_bounded_attempts(monkeypatch):
+    calls = []
+    sleeps = []
+
+    def post(_url, **kwargs):
+        calls.append(kwargs)
+        return FakeHttpResponse(503, {"success": False, "errors": []})
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(post=post))
+    client = HttpD1Client(
+        api_url="https://example.invalid",
+        token="test-token",
+        sleep_fn=sleeps.append,
+        random_fn=lambda: 0.0,
+    )
+
+    with pytest.raises(D1RequestError) as excinfo:
+        client._request({"sql": "SELECT 1"}, retry_safe=True)
+
+    assert excinfo.value.attempt == 3
+    assert len(calls) == 3
+    assert sleeps == [0.5, 1.0]
+
+
+def test_ledger_and_atomic_transition_requests_are_explicitly_not_retry_safe(
+    monkeypatch
+):
+    client = HttpD1Client(
+        api_url="https://example.invalid",
+        token="test-token",
+    )
+    calls = []
+
+    def request(body, *, retry_safe=False):
+        calls.append((body, retry_safe))
+        statement_count = len(body.get("batch") or [body])
+        return {
+            "success": True,
+            "result": [
+                {"success": True, "results": []}
+                for _index in range(statement_count)
+            ],
+        }
+
+    monkeypatch.setattr(client, "_request", request)
+    client.append_publication_ledger({
+        "publication_id": "pub-1",
+        "product_id": "product-1",
+        "model_name": "model-1",
+        "source_run_id": "run-1",
+        "attempted_at": "2026-08-13T00:00:00+00:00",
+        "outcome": "published",
+        "stage": "completed",
+        "source_row_count": 1,
+        "published_row_count": 1,
+        "d1_row_count": 1,
+        "api_smoke_status": "passed",
+        "rollback_status": "not_needed",
+        "reason": "ok",
+    })
+    client._query_atomic_batch([
+        'ALTER TABLE "candidate" RENAME TO "active";'
+    ])
+
+    assert calls[0][1] is True  # CREATE TABLE IF NOT EXISTS ledger
+    assert calls[1][1] is False  # append-only ledger INSERT
+    assert calls[2][1] is False  # non-idempotent ALTER transition
+
+
+def test_staging_batches_use_idempotent_insert_or_replace():
+    client = SqliteCatalogClient()
+    client.stage_snapshot(
+        "gold_weather_place_current_outlook",
+        [("product_row_id", "varchar"), ("place_id", "varchar")],
+        [{"product_row_id": "row-1", "place_id": "place-1"}],
+        ("product_row_id",),
+    )
+
+    assert any(
+        query.startswith(
+            'INSERT OR REPLACE INTO "gold_weather_place_current_outlook__staging"'
+        )
+        for query in client.queries
+    )
 
 
 def _availability_rows() -> list[dict[str, Any]]:
@@ -127,7 +333,9 @@ class LegacyCatalogClient(HttpD1Client):
         ]
         self.queries: list[str] = []
 
-    def _query(self, sql: str) -> list[dict[str, Any]]:
+    def _query(
+        self, sql: str, *, retry_safe: bool | None = None
+    ) -> list[dict[str, Any]]:
         self.queries.append(sql)
         if sql == "PRAGMA table_info(_catalog);":
             return [{"name": name} for name in self.columns]
@@ -135,7 +343,9 @@ class LegacyCatalogClient(HttpD1Client):
             self.columns.append(sql.split('"')[1])
         return []
 
-    def _query_batch(self, statements: list[str]) -> list[list[dict[str, Any]]]:
+    def _query_batch(
+        self, statements: list[str], *, retry_safe: bool = False
+    ) -> list[list[dict[str, Any]]]:
         return [self._query(statement) for statement in statements]
 
 
@@ -148,7 +358,9 @@ class SqliteCatalogClient(HttpD1Client):
         self.connection.row_factory = sqlite3.Row
         self.queries: list[str] = []
 
-    def _query(self, sql: str) -> list[dict[str, Any]]:
+    def _query(
+        self, sql: str, *, retry_safe: bool | None = None
+    ) -> list[dict[str, Any]]:
         self.queries.append(sql)
         if ";" in sql.rstrip(";"):
             self.connection.executescript(sql)
@@ -158,7 +370,9 @@ class SqliteCatalogClient(HttpD1Client):
         self.connection.commit()
         return [dict(row) for row in cursor.fetchall()] if cursor.description else []
 
-    def _query_batch(self, statements: list[str]) -> list[list[dict[str, Any]]]:
+    def _query_batch(
+        self, statements: list[str], *, retry_safe: bool = False
+    ) -> list[list[dict[str, Any]]]:
         return [self._query(statement) for statement in statements]
 
 
@@ -442,7 +656,9 @@ def test_query_batch_sends_one_cloudflare_batch_request(monkeypatch):
     d1 = HttpD1Client(api_url="https://example.invalid", token="test-token")
     sent: list[dict[str, Any]] = []
 
-    def fake_request(body: dict[str, Any]) -> dict[str, Any]:
+    def fake_request(
+        body: dict[str, Any], *, retry_safe: bool = False
+    ) -> dict[str, Any]:
         sent.append(body)
         return {
             "success": True,
@@ -463,7 +679,7 @@ def test_query_rejects_a_failed_statement_in_a_multi_statement_response(monkeypa
     monkeypatch.setattr(
         d1,
         "_request",
-        lambda body: {
+        lambda body, *, retry_safe=False: {
             "success": True,
             "result": [
                 {"success": True, "results": []},

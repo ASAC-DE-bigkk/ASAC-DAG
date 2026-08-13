@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from airflow import DAG
-from airflow.exceptions import AirflowException, AirflowFailException
+from airflow.exceptions import AirflowException, AirflowFailException, AirflowSkipException
 from airflow.models.param import Param
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
@@ -58,6 +58,7 @@ from weather_dbt_runtime import (  # noqa: E402
     WEATHER_SNAPSHOT_VAR,
     resolve_weather_serving_as_of_hour,
     run_weather_dbt_phase,
+    weather_serving_as_of_hour_state,
 )
 from weather_lineage import enable_lineage_if_configured  # noqa: E402
 
@@ -478,7 +479,9 @@ def publish_dbt_run_metrics(run_results_path: str | None = None, **context) -> d
     return {"rows": len(records), "skipped": False}
 
 
-def mark_weather_gold_publication_ready(**context) -> dict[str, str]:
+def mark_weather_gold_publication_ready(
+    *, now: datetime | None = None, **context
+) -> dict[str, str]:
     """Emit the D1 trigger only after Weather Gold write and tests succeed."""
     bronze_run_id = str(
         context["ti"].xcom_pull(task_ids=SNAPSHOT_TASK_ID) or ""
@@ -486,6 +489,15 @@ def mark_weather_gold_publication_ready(**context) -> dict[str, str]:
     if not bronze_run_id:
         raise AirflowFailException(
             "weather Gold publication marker requires a Bronze snapshot"
+        )
+    serving_as_of_hour, serving_hour_state = weather_serving_as_of_hour_state(
+        ti=context["ti"],
+        now=now,
+    )
+    if serving_hour_state == "stale":
+        raise AirflowSkipException(
+            "weather Gold publication marker skipped a stale serving hour: "
+            f"serving_as_of_hour={serving_as_of_hour}"
         )
     outlet_events = context.get("outlet_events")
     if outlet_events is None:
@@ -495,6 +507,7 @@ def mark_weather_gold_publication_ready(**context) -> dict[str, str]:
     metadata = {
         "gold_dag_run_id": str(context.get("run_id") or ""),
         "bronze_dag_run_id": bronze_run_id,
+        "serving_as_of_hour": serving_as_of_hour,
     }
     outlet_events[WEATHER_GOLD_PUBLICATION_READY_ASSET_REF].extra = metadata
     return metadata

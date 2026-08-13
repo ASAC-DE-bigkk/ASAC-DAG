@@ -262,6 +262,12 @@ class ExplodingFinalizeD1(FakeD1):
         raise RuntimeError("simulated finalize failure")
 
 
+class ResponseLostAfterActivationD1(FakeD1):
+    def activate_staged_snapshot(self, product_id, model_name, candidate):
+        super().activate_staged_snapshot(product_id, model_name, candidate)
+        raise RuntimeError("simulated response loss after commit")
+
+
 class CorruptingSidecarReadbackD1(FakeD1):
     def read_query_availability_rows(self, product_id, publication_id):
         return super().read_query_availability_rows(product_id, publication_id)[:-1]
@@ -278,13 +284,21 @@ class FakeSource:
 
 
 class FakeSmoke:
-    def __init__(self, status: str = "passed") -> None:
+    def __init__(
+        self,
+        status: str = "passed",
+        detail: dict[str, Any] | None = None,
+    ) -> None:
         self.status = status
+        self.detail = detail
         self.checked: list[str] = []
 
     def check(self, model_name: str) -> str:
         self.checked.append(model_name)
         return self.status
+
+    def diagnostic(self, model_name: str) -> dict[str, Any] | None:
+        return self.detail
 
 
 def _contract(**overrides: Any) -> ServingContract:
@@ -456,6 +470,39 @@ def test_opted_in_snapshot_stages_then_activates_once_with_same_publication_iden
     record = report.records[0]
     assert d1.activation_calls == [(contract.product_id, contract.model_name, record.publication_id)]
     assert d1.preflight_calls == 1
+
+
+def test_response_lost_atomic_activation_is_reconciled_without_replaying_transition():
+    contract = _risk_contract_with_query_availability()
+    d1 = ResponseLostAfterActivationD1()
+
+    report = publish(
+        [contract],
+        FakeSource({
+            contract.model_name: ReadPlan(
+                COLUMNS,
+                _rows(1),
+                query_availability=QueryAvailabilityPlan(
+                    AVAILABILITY_COLUMNS,
+                    _availability_rows(),
+                ),
+            )
+        }),
+        d1,
+        FakeSmoke("passed"),
+        source_run_id="response-lost-activation",
+        verify_content_parity=True,
+    )
+
+    record = report.records[0]
+    assert report.ok
+    assert record.serving_status == STATUS_PUBLISHED
+    assert d1.activation_calls == [
+        (contract.product_id, contract.model_name, record.publication_id)
+    ]
+    assert d1.catalog[contract.model_name]["publication_id"] == record.publication_id
+    assert contract.model_name not in d1.previous_tables
+    assert d1.ledger[-1]["outcome"] == "published"
 
 
 def test_zero_allow_snapshot_activates_fresh_candidate_before_api_smoke():
@@ -1447,6 +1494,42 @@ def test_smoke_failure_on_external_product_raises():
     with pytest.raises(PublicationError) as excinfo:
         publish([contract], source, d1, FakeSmoke(status="failed"), source_run_id="run-7")
     assert any("smoke" in f for f in excinfo.value.report.failures)
+
+
+def test_smoke_failure_records_only_allowlisted_diagnostics():
+    contract = _contract()
+    d1 = FakeD1()
+    source = FakeSource({contract.model_name: ReadPlan(columns=COLUMNS, rows=_rows(2))})
+    smoke = FakeSmoke(
+        status="failed",
+        detail={
+            "http_status": 503,
+            "error_code": "product_not_ready",
+            "blockers": [
+                "quality_snapshot_not_current",
+                "Bearer secret-must-not-escape",
+            ],
+            "cf_ray": "safe-ray-123",
+            "latency_ms": 1250,
+            "raw_body": "secret-must-not-escape",
+        },
+    )
+
+    with pytest.raises(PublicationError) as excinfo:
+        publish([contract], source, d1, smoke, source_run_id="smoke-diagnostic")
+
+    record = excinfo.value.report.records[0]
+    assert record.api_smoke_detail == {
+        "http_status": 503,
+        "latency_ms": 1250,
+        "error_code": "product_not_ready",
+        "cf_ray": "safe-ray-123",
+        "blockers": ["quality_snapshot_not_current"],
+    }
+    assert "product_not_ready" in record.reason
+    assert "quality_snapshot_not_current" in record.reason
+    assert "secret-must-not-escape" not in record.reason
+    assert "secret-must-not-escape" not in d1.ledger[-1]["reason"]
 
 
 def test_snapshot_smoke_failure_restores_last_good_catalog_and_records_ledger():

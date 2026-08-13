@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Any
 
 from common.serving.d1_client import Column, HttpD1Client
@@ -22,6 +23,7 @@ from common.serving.publisher import QueryAvailabilityPlan, ReadPlan
 APPEND_LOOKBACK_HOURS = 2
 APPEND_LOOKBACK_DAYS = 2
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SMOKE_CODE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -268,14 +270,60 @@ class HttpSmokeTester:
             base_url if base_url.endswith("/api/v1") else f"{base_url}/api/v1"
         ) if base_url else ""
         self._bearer_token = bearer_token.strip()
+        self._diagnostics: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _response_diagnostic(resp: Any, latency_ms: int) -> dict[str, Any]:
+        diagnostic: dict[str, Any] = {
+            "http_status": getattr(resp, "status_code", None),
+            "latency_ms": latency_ms,
+        }
+        headers = getattr(resp, "headers", None)
+        header_get = getattr(headers, "get", None)
+        raw_cf_ray = header_get("CF-Ray") if callable(header_get) else None
+        cf_ray = raw_cf_ray.strip() if isinstance(raw_cf_ray, str) else ""
+        if SMOKE_CODE_RE.fullmatch(cf_ray):
+            diagnostic["cf_ray"] = cf_ray
+
+        try:
+            payload = resp.json()
+        except Exception:  # noqa: BLE001 - response body is intentionally not retained
+            return diagnostic
+        if not isinstance(payload, dict):
+            return diagnostic
+        error = payload.get("error")
+        source = error if isinstance(error, dict) else payload
+        error_code = str(source.get("code") or "").strip()
+        if SMOKE_CODE_RE.fullmatch(error_code):
+            diagnostic["error_code"] = error_code
+        blockers = source.get("blockers")
+        details = source.get("details")
+        if blockers is None and isinstance(details, dict):
+            blockers = details.get("blockers")
+        if isinstance(blockers, (list, tuple)):
+            safe_blockers = [
+                str(blocker)
+                for blocker in blockers[:10]
+                if SMOKE_CODE_RE.fullmatch(str(blocker))
+            ]
+            if safe_blockers:
+                diagnostic["blockers"] = safe_blockers
+        return diagnostic
+
+    def diagnostic(self, model_name: str) -> dict[str, Any] | None:
+        value = self._diagnostics.get(model_name)
+        return dict(value) if value is not None else None
 
     def check(self, model_name: str) -> str:
         if not self._api_base_url:
+            self._diagnostics[model_name] = {"reason": "missing_base_url"}
             return "not_evaluated"
         if not self._bearer_token:
+            self._diagnostics[model_name] = {"reason": "missing_bearer_token"}
             return "failed"
         import requests
 
+        started_at = time.perf_counter()
         try:
             resp = requests.get(
                 f"{self._api_base_url}/data/{model_name}",
@@ -283,8 +331,17 @@ class HttpSmokeTester:
                 headers={"Authorization": f"Bearer {self._bearer_token}"},
                 timeout=30,
             )
-        except Exception:  # noqa: BLE001 -- unreachable API is a smoke failure
+        except Exception as exc:  # noqa: BLE001 -- unreachable API is a smoke failure
+            self._diagnostics[model_name] = {
+                "reason": "request_exception",
+                "exception_type": type(exc).__name__,
+                "latency_ms": max(0, int((time.perf_counter() - started_at) * 1000)),
+            }
             return "failed"
+        self._diagnostics[model_name] = self._response_diagnostic(
+            resp,
+            max(0, int((time.perf_counter() - started_at) * 1000)),
+        )
         return "passed" if resp.status_code == 200 else "failed"
 
 

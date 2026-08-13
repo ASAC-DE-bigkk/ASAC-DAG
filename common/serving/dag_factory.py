@@ -23,6 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 
 from common.ops.product_observability import record_product_event
+from common.pools import SERVING_D1_PUBLISH_POOL
 from common.serving.publisher import ProductRecord, PublicationError
 
 # dbt project that owns each domain's manifest (weather+traffic share the monoproject).
@@ -41,6 +42,7 @@ def publication_record_payload(record: ProductRecord) -> dict[str, object]:
         "distinct_primary_key_count": record.distinct_primary_key_count,
         "null_primary_key_count": record.null_primary_key_count,
         "api_smoke_status": record.api_smoke_status,
+        "api_smoke_detail": record.api_smoke_detail,
         "publication_id": record.publication_id,
         "stage": record.stage,
         "rollback_status": record.rollback_status,
@@ -461,6 +463,10 @@ def build_serving_export_dag(
         params={"target": target},
         tags=["serving", domain, "d1", "gold"],
     ) as dag:
-        PythonOperator(task_id="publish_to_d1", python_callable=_run)
+        PythonOperator(
+            task_id="publish_to_d1",
+            python_callable=_run,
+            pool=SERVING_D1_PUBLISH_POOL,
+        )
 
     return dag

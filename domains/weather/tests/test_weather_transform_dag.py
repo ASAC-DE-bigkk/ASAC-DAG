@@ -190,7 +190,10 @@ def test_weather_gold_terminal_asset_records_gold_and_bronze_run_identity():
     module = load_transform_module()
     outlet_event = types.SimpleNamespace(extra=None)
     ti = FakeTaskInstance(
-        pulls={(module.SNAPSHOT_TASK_ID, None): "asset__weather-bronze-42"}
+        pulls={
+            (module.SNAPSHOT_TASK_ID, None): "asset__weather-bronze-42",
+            (module.SERVING_AS_OF_HOUR_TASK_ID, None): "2026-08-11 10:00:00",
+        }
     )
 
     result = module.mark_weather_gold_publication_ready(
@@ -199,11 +202,13 @@ def test_weather_gold_terminal_asset_records_gold_and_bronze_run_identity():
         outlet_events={
             module.WEATHER_GOLD_PUBLICATION_READY_ASSET_REF: outlet_event
         },
+        now=datetime(2026, 8, 11, 10, 59, 59, tzinfo=ZoneInfo("Asia/Seoul")),
     )
 
     assert result == {
         "gold_dag_run_id": "asset_triggered__weather-gold-42",
         "bronze_dag_run_id": "asset__weather-bronze-42",
+        "serving_as_of_hour": "2026-08-11 10:00:00",
     }
     assert outlet_event.extra == result
 
@@ -221,6 +226,45 @@ def test_weather_gold_terminal_asset_rejects_missing_bronze_identity():
                 )
             },
         )
+
+
+def test_weather_gold_terminal_asset_skips_stale_serving_hour_without_emitting_asset():
+    module = load_transform_module()
+    outlet_event = types.SimpleNamespace(extra=None)
+    ti = FakeTaskInstance(
+        pulls={
+            (module.SNAPSHOT_TASK_ID, None): "asset__weather-bronze-42",
+            (module.SERVING_AS_OF_HOUR_TASK_ID, None): "2026-08-11 10:00:00",
+        }
+    )
+
+    with pytest.raises(module.AirflowSkipException, match="stale serving hour"):
+        module.mark_weather_gold_publication_ready(
+            ti=ti,
+            run_id="asset_triggered__weather-gold-42",
+            outlet_events={
+                module.WEATHER_GOLD_PUBLICATION_READY_ASSET_REF: outlet_event
+            },
+            now=datetime(2026, 8, 11, 11, 0, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+        )
+
+    assert outlet_event.extra is None
+
+
+def test_weather_serving_hour_state_rejects_missing_or_future_anchor():
+    module = load_transform_module()
+    now = datetime(2026, 8, 11, 10, 30, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with pytest.raises(RuntimeError, match="valid frozen KST"):
+        module.weather_serving_as_of_hour_state(ti=FakeTaskInstance(), now=now)
+
+    future_ti = FakeTaskInstance(
+        pulls={
+            (module.SERVING_AS_OF_HOUR_TASK_ID, None): "2026-08-11 11:00:00"
+        }
+    )
+    with pytest.raises(RuntimeError, match="in the future"):
+        module.weather_serving_as_of_hour_state(ti=future_ti, now=now)
 
 
 def test_weather_transform_passes_w2_canonical_revision_to_model_commands():

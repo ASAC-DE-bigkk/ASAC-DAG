@@ -38,7 +38,67 @@ def test_smoke_uses_api_v1_and_bearer_token(monkeypatch):
 
 
 def test_smoke_fails_closed_when_api_token_is_missing():
-    assert HttpSmokeTester("https://ask-seoul.kr").check("gold_weather_place_current_outlook") == "failed"
+    smoke = HttpSmokeTester("https://ask-seoul.kr")
+
+    assert smoke.check("gold_weather_place_current_outlook") == "failed"
+    assert smoke.diagnostic("gold_weather_place_current_outlook") == {
+        "reason": "missing_bearer_token"
+    }
+
+
+def test_smoke_preserves_sanitized_product_not_ready_evidence(monkeypatch):
+    response = SimpleNamespace(
+        status_code=503,
+        headers={"CF-Ray": "ray-safe-123"},
+        json=lambda: {
+            "error": {
+                "code": "product_not_ready",
+                "details": {
+                    "blockers": ["quality_snapshot_not_current"],
+                    "raw": "response detail must not be retained",
+                },
+            },
+        },
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "requests",
+        SimpleNamespace(get=lambda *_args, **_kwargs: response),
+    )
+    smoke = HttpSmokeTester("https://ask-seoul.kr", "test-token")
+
+    assert smoke.check("gold_weather_place_current_outlook") == "failed"
+    detail = smoke.diagnostic("gold_weather_place_current_outlook")
+    assert detail is not None
+    assert detail["http_status"] == 503
+    assert detail["error_code"] == "product_not_ready"
+    assert detail["blockers"] == ["quality_snapshot_not_current"]
+    assert detail["cf_ray"] == "ray-safe-123"
+    assert isinstance(detail["latency_ms"], int)
+    assert "details" not in detail
+
+
+def test_smoke_exception_diagnostic_does_not_retain_exception_message(monkeypatch):
+    class ReadTimeout(Exception):
+        pass
+
+    def fail_request(*_args, **_kwargs):
+        raise ReadTimeout("secret response detail must not be retained")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "requests",
+        SimpleNamespace(get=fail_request),
+    )
+    smoke = HttpSmokeTester("https://ask-seoul.kr", "test-token")
+
+    assert smoke.check("gold_weather_place_current_outlook") == "failed"
+    detail = smoke.diagnostic("gold_weather_place_current_outlook")
+    assert detail is not None
+    assert detail["reason"] == "request_exception"
+    assert detail["exception_type"] == "ReadTimeout"
+    assert isinstance(detail["latency_ms"], int)
+    assert "secret response detail" not in str(detail)
 
 
 def test_smoke_factory_uses_configured_api_token(monkeypatch):
