@@ -12,6 +12,7 @@ from .commands import phase_commands, resource_type, selected_unique_ids
 from .contracts import (
     DEFAULT_DBT_OL_BIN,
     MATERIALIZATION_COMMANDS,
+    DbtAttemptPaths,
     DbtExecution,
     command_name,
     dbt_bin,
@@ -51,6 +52,22 @@ def _self_heal_deps_command(
     ]
 
 
+def _prepare_attempt_directories(paths: DbtAttemptPaths) -> None:
+    """Fail before dbt's silent exit 2 when bind-mounted artifacts are unwritable."""
+
+    for label, path_value in (
+        ("preflight-target", paths.preflight_target_path),
+        ("preflight-log", paths.preflight_log_path),
+        ("packages", paths.packages_path),
+    ):
+        try:
+            Path(path_value).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"weather dbt {label} directory is not writable"
+            ) from exc
+
+
 def execute_dbt_phase(
     *,
     dbt_command: str,
@@ -87,6 +104,7 @@ def execute_dbt_phase(
         packages_path=paths.packages_path,
         environ=environ,
     )
+    _prepare_attempt_directories(paths)
     retained_runs = retention_runs(raw_env) if phase == "deps" else None
     attempts: list[Any] = []
     selected_ids: tuple[str, ...] = ()
