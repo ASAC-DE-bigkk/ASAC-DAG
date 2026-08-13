@@ -132,6 +132,8 @@ def test_weather_non_deps_phase_self_heals_missing_packages_before_ls(tmp_path):
 
     def runner(command, **kwargs):
         observed.append((command, kwargs))
+        assert Path(command[command.index("--log-path") + 1]).is_dir()
+        assert Path(kwargs["env"]["DBT_PACKAGES_INSTALL_PATH"]).is_dir()
         if command[1] == "deps":
             packages_path = Path(kwargs["env"]["DBT_PACKAGES_INSTALL_PATH"])
             sentinel = packages_path / "asac_axes" / "dbt_project.yml"
@@ -166,6 +168,125 @@ def test_weather_non_deps_phase_self_heals_missing_packages_before_ls(tmp_path):
     deps_command, deps_kwargs = observed[0]
     assert "--target-path" not in deps_command
     assert deps_kwargs["env"]["DBT_PACKAGES_INSTALL_PATH"] == execution.paths.packages_path
+
+
+def test_weather_preflight_creates_target_and_log_directories_before_dbt_ls(
+    tmp_path,
+):
+    module = load_execution_module()
+    observed = []
+
+    def runner(command, **_kwargs):
+        observed.append(command)
+        assert Path(command[command.index("--log-path") + 1]).is_dir()
+        if command[1] == "ls":
+            assert Path(command[command.index("--target-path") + 1]).is_dir()
+            return completed(
+                command,
+                stdout='{"unique_id":"model.asac.silver","resource_type":"model"}\n',
+            )
+        write_artifacts(command)
+        return completed(command)
+
+    module.execute_dbt_phase(
+        dbt_command="run",
+        selector="ask_seoul_weather_transform_silver",
+        invocation_id="prepared-preflight-paths",
+        pipeline="weather-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        target="dev",
+        variables=None,
+        project_dir=str(tmp_path),
+        executable=RAW_DBT,
+        runner=runner,
+        environ={},
+    )
+
+    assert [command[1] for command in observed] == ["ls", "run"]
+    assert not list(tmp_path.rglob(".weather-dbt-write-probe-*"))
+
+
+def test_weather_preflight_reports_unwritable_artifact_directory_before_dbt(
+    tmp_path, monkeypatch
+):
+    module = load_execution_module()
+
+    class DeniedPath:
+        def __init__(self, _value):
+            pass
+
+        def mkdir(self, *, parents, exist_ok):
+            assert parents is True
+            assert exist_ok is True
+            raise PermissionError("simulated bind-mount ownership mismatch")
+
+    monkeypatch.setitem(module.execute_dbt_phase.__globals__, "Path", DeniedPath)
+
+    with pytest.raises(
+        RuntimeError,
+        match="weather dbt preflight-target directory is not writable",
+    ):
+        module.execute_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_weather_transform_silver",
+            invocation_id="unwritable-preflight",
+            pipeline="weather-transform",
+            run_id="manual__1",
+            task_id="dbt_run_silver",
+            try_number=1,
+            target="dev",
+            variables=None,
+            project_dir=str(tmp_path),
+            executable=RAW_DBT,
+            runner=lambda *_args, **_kwargs: pytest.fail("dbt must not start"),
+            environ={},
+        )
+
+
+def test_weather_preflight_probes_existing_artifact_directory_before_dbt(
+    tmp_path, monkeypatch
+):
+    module = load_execution_module()
+    paths = module.attempt_paths(
+        project_dir=str(tmp_path),
+        pipeline="weather-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        invocation_id="existing-unwritable-preflight",
+        dbt_command="run",
+    )
+    Path(paths.preflight_target_path).mkdir(parents=True)
+
+    def denied_probe(*_args, **kwargs):
+        assert Path(kwargs["dir"]) == Path(paths.preflight_target_path)
+        raise PermissionError("simulated existing bind-mount ownership mismatch")
+
+    monkeypatch.setitem(
+        module.execute_dbt_phase.__globals__, "NamedTemporaryFile", denied_probe
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="weather dbt preflight-target directory is not writable",
+    ):
+        module.execute_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_weather_transform_silver",
+            invocation_id="existing-unwritable-preflight",
+            pipeline="weather-transform",
+            run_id="manual__1",
+            task_id="dbt_run_silver",
+            try_number=1,
+            target="dev",
+            variables=None,
+            project_dir=str(tmp_path),
+            executable=RAW_DBT,
+            runner=lambda *_args, **_kwargs: pytest.fail("dbt must not start"),
+            environ={},
+        )
 
 
 def test_weather_non_deps_phase_stops_when_self_heal_deps_fails(tmp_path):
