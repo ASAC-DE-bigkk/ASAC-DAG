@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import pytest
 
 from common.collection_slots.iceberg_sink import (
+    EVENT_COLUMNS,
+    EVENT_TABLE,
     EXPECTED_COLUMNS,
     EXPECTED_TABLE,
     TrinoCollectionSlotSink,
@@ -30,6 +32,29 @@ def _row() -> dict[str, object]:
         "recovery_boundary": "r2-control",
         "declared_at": "2026-08-08T00:00:01+00:00",
         "declared_by": "traffic_incident_landing",
+    }
+
+
+def _event_row() -> dict[str, object]:
+    return {
+        "event_id": "c" * 64,
+        "expected_slot_id": "a" * 64,
+        "event_type": "terminal",
+        "collection_state": "collection_failed",
+        "recovery_state": "recovered",
+        "recovery_class": "raw_replay",
+        "gap_reason_code": "bronze_load_failed",
+        "dag_id": "traffic_incident_bronze",
+        "dag_run_id": "run-1",
+        "task_id": None,
+        "raw_manifest_key": None,
+        "raw_object_count": None,
+        "row_count": None,
+        "source_result_code": None,
+        "recovery_run_id": "replay-run",
+        "recovered_at": "2026-08-08T00:20:00+00:00",
+        "recovery_evidence_code": "raw_manifest_verified",
+        "event_at": "2026-08-08T00:06:00+00:00",
     }
 
 
@@ -61,6 +86,42 @@ def test_ddl_is_additive_and_partitioned_by_domain_source():
     assert f"CREATE TABLE IF NOT EXISTS iceberg_dev.weather_traffic_bronze.{EXPECTED_TABLE}" in sql
     assert "expected_slot_id VARCHAR" in sql
     assert "partitioning = ARRAY['domain', 'source_id']" in sql
+
+
+def test_event_ddl_merge_columns_and_ensure_tables_include_recovery_evidence_migration():
+    sql = TrinoCollectionSlotSink._create_event_sql("iceberg_dev", "weather_traffic_bronze")
+    assert f"CREATE TABLE IF NOT EXISTS iceberg_dev.weather_traffic_bronze.{EVENT_TABLE}" in sql
+    assert "recovery_evidence_code VARCHAR" in sql
+    assert "recovery_evidence_code" in EVENT_COLUMNS
+
+    created: list[FakeCursor] = []
+
+    def factory():
+        cursor = FakeCursor()
+        created.append(cursor)
+        return cursor, "iceberg_dev", "weather_traffic_bronze"
+
+    TrinoCollectionSlotSink(cursor_factory=factory).ensure_tables()
+
+    statements = created[0].sql
+    event_create_index = next(
+        index for index, statement in enumerate(statements) if f".{EVENT_TABLE}" in statement
+    )
+    migration_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement
+        == "ALTER TABLE iceberg_dev.weather_traffic_bronze."
+        f"{EVENT_TABLE} ADD COLUMN IF NOT EXISTS recovery_evidence_code VARCHAR"
+    )
+    assert migration_index > event_create_index
+
+    created.clear()
+    written = TrinoCollectionSlotSink(cursor_factory=factory).write_events([_event_row()])
+
+    assert written == 1
+    merge_sql = next(sql for cursor in created for sql in cursor.sql if sql.startswith("MERGE"))
+    assert "recovery_evidence_code" in merge_sql
 
 
 def test_sink_merges_new_rows_without_interpolating_untrusted_identifiers():

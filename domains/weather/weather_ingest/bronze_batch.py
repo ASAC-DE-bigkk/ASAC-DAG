@@ -13,10 +13,11 @@ from weather_ingest.kma import (
     kma_num_of_rows,
     kma_page_numbers,
     parse_kma_response,
+    validate_kma_response_context,
 )
 from common.raw_manifest import validate_raw_manifest
 from weather_ingest.landing import verify_raw_payload_hash
-from weather_ingest.errors import WeatherCompletenessError
+from weather_ingest.errors import WeatherCompletenessError, WeatherSourceSchemaError
 from weather_ingest.raw_contract import raw_object_page_no
 
 
@@ -43,6 +44,16 @@ def load_kma_bronze_batch(
         raise WeatherCompletenessError(
             "KMA raw landing result is empty; cannot load bronze rows."
         )
+    try:
+        manifest_object_keys = [str(item["raw_object_key"]) for item in raw_objects]
+    except (KeyError, TypeError) as exc:
+        raise WeatherCompletenessError(
+            "KMA raw landing result is missing raw_object_key"
+        ) from exc
+    if len(manifest_object_keys) != len(set(manifest_object_keys)):
+        raise WeatherCompletenessError(
+            "KMA raw landing result contains duplicate raw_object_key values"
+        )
     manifest_key = str(raw_result.get("manifest_key") or "")
     if not manifest_key:
         raise WeatherCompletenessError(
@@ -54,19 +65,39 @@ def load_kma_bronze_batch(
             manifest,
             run_id=dag_run_id,
             dataset=SOURCE_ID,
-            object_keys=[str(item["raw_object_key"]) for item in raw_objects],
+            object_keys=manifest_object_keys,
         )
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise WeatherCompletenessError(
             "KMA raw landing manifest validation failed"
         ) from exc
-    # The Airflow wrapper decides whether legacy partial pages are allowed.
-    cursor, catalog, schema = ports.open_trino()
-    qualified_table = ports.ensure_table(cursor, catalog, schema)
+    page_identities = [
+        (
+            str(item["base_date"]),
+            str(item["base_time"]),
+            int(item["nx"]),
+            int(item["ny"]),
+            raw_object_page_no(item),
+        )
+        for item in raw_objects
+    ]
+    if len(page_identities) != len(set(page_identities)):
+        raise WeatherCompletenessError(
+            "KMA raw landing result contains duplicate page identity"
+        )
     parsed_pages = []
     grid_summaries = {}
     raw_object_keys = []
     for raw_object in raw_objects:
+        http_status = raw_object["http_status"]
+        if not isinstance(http_status, int) or isinstance(http_status, bool):
+            raise WeatherSourceSchemaError(
+                f"KMA raw object has invalid http_status: {http_status!r}"
+            )
+        if not 200 <= http_status < 300:
+            raise WeatherSourceSchemaError(
+                f"KMA raw object is not HTTP-successful: http_status={http_status}"
+            )
         raw_bytes = ports.download(raw_object["raw_object_key"], "KMA raw payload")
         verify_raw_payload_hash(
             raw_bytes,
@@ -74,12 +105,19 @@ def load_kma_bronze_batch(
             raw_object_key=str(raw_object["raw_object_key"]),
         )
         metadata, rows = parse_kma_response(raw_bytes)
+        validate_kma_response_context(
+            rows,
+            base_date=str(raw_object["base_date"]),
+            base_time=str(raw_object["base_time"]),
+            nx=int(raw_object["nx"]),
+            ny=int(raw_object["ny"]),
+        )
         metadata = dict(metadata)
         page_no = raw_object_page_no(raw_object)
         num_of_rows = int(raw_object.get("num_of_rows") or kma_num_of_rows())
         metadata["page_no"] = page_no
         metadata["num_of_rows"] = num_of_rows
-        total_count = int(metadata.get("total_count") or len(rows))
+        total_count = int(metadata["total_count"])
         grid_key = (
             raw_object["base_date"],
             raw_object["base_time"],
@@ -162,6 +200,10 @@ def load_kma_bronze_batch(
             }
         )
 
+    # Do not open a persistence boundary until every raw object has passed
+    # hash, source-contract, and pagination preflight.
+    cursor, catalog, schema = ports.open_trino()
+    qualified_table = ports.ensure_table(cursor, catalog, schema)
     inserted = ports.append_batches(
         schema=schema,
         row_batches=batch_inputs,

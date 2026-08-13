@@ -51,6 +51,7 @@ EVENT_COLUMNS = (
     "source_result_code",
     "recovery_run_id",
     "recovered_at",
+    "recovery_evidence_code",
     "event_at",
 )
 _TIMESTAMP_COLUMNS = frozenset(
@@ -142,6 +143,7 @@ class TrinoCollectionSlotSink(CollectionSlotSink):
             cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
             cursor.execute(self._create_expected_sql(catalog, schema))
             cursor.execute(self._create_event_sql(catalog, schema))
+            cursor.execute(self._migrate_event_sql(catalog, schema))
         finally:
             connection = getattr(cursor, "connection", None)
             if connection is not None:
@@ -271,8 +273,17 @@ class TrinoCollectionSlotSink(CollectionSlotSink):
             source_result_code VARCHAR,
             recovery_run_id VARCHAR,
             recovered_at TIMESTAMP(6),
+            recovery_evidence_code VARCHAR,
             event_at TIMESTAMP(6)
         ) WITH (format = 'PARQUET', partitioning = ARRAY['collection_state'])"""
+
+    @staticmethod
+    def _migrate_event_sql(catalog: str, schema: str) -> str:
+        qualified = f"{catalog}.{schema}.{EVENT_TABLE}"
+        return (
+            f"ALTER TABLE {qualified} ADD COLUMN IF NOT EXISTS "
+            "recovery_evidence_code VARCHAR"
+        )
 
     @staticmethod
     def _default_cursor() -> tuple[Any, str, str]:

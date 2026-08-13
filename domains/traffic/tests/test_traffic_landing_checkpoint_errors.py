@@ -40,6 +40,14 @@ class MemoryRawObjectStore:
     def write_bytes(self, key: str, payload: bytes, _content_type: str) -> None:
         self.objects[key] = payload
 
+    def write_bytes_if_absent(
+        self, key: str, payload: bytes, content_type: str
+    ) -> bool:
+        if key in self.objects:
+            return False
+        self.write_bytes(key, payload, content_type)
+        return True
+
 
 def landing_for(source, store) -> TrafficLanding:
     return TrafficLanding(

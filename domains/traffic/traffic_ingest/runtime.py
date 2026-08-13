@@ -8,15 +8,22 @@ import warnings
 from datetime import datetime, timezone
 from typing import Callable, Protocol
 
+from common.collection_slots import (
+    ExpectedSlot,
+    is_slot_active,
+    parse_activation_at,
+    require_policy_boundary,
+)
 from common.http import HttpCore
 from common.http.seoul import SeoulOpenApiClient
+from common.raw_manifest import validate_raw_manifest
 from traffic_ingest.common.runtime import (
     checkpoint_prefix,
     raw_prefix,
     r2_env,
     trino_cursor,
 )
-from traffic_ingest.collection_slots import traffic_incident_slot
+from traffic_ingest.collection_slots import floor_to_five_minutes, traffic_incident_slot
 from traffic_ingest.landing import TrafficLanding
 from traffic_ingest.incident_pipeline import (
     IncidentLandingLifecycle,
@@ -29,6 +36,8 @@ from traffic_ingest.snapshot_receipt import TrafficSnapshotReceipts
 
 
 _MISSING_OBJECT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+_COLLECTION_SLOT_ACTIVATION_ENV = "ASK_SEOUL_COLLECTION_SLOT_ACTIVATION_AT"
+_TRAFFIC_RAW_RETENTION_BOUNDARY_ENV = "ASK_SEOUL_TRAFFIC_RAW_RETENTION_BOUNDARY_AT"
 
 
 class SeoulClient(Protocol):
@@ -54,6 +63,7 @@ class S3Client(Protocol):
         Key: str,
         Body: bytes,
         ContentType: str,
+        IfNoneMatch: str | None = None,
     ): ...
 
 
@@ -115,6 +125,38 @@ class R2RawObjectStore:
             Body=payload,
             ContentType=content_type,
         )
+
+    def write_bytes_if_absent(
+        self,
+        key: str,
+        payload: bytes,
+        content_type: str,
+    ) -> bool:
+        from botocore.exceptions import ClientError
+
+        for _ in range(3):
+            try:
+                self._client.put_object(
+                    Bucket=self._bucket,
+                    Key=key,
+                    Body=payload,
+                    ContentType=content_type,
+                    IfNoneMatch="*",
+                )
+                return True
+            except ClientError as exc:
+                response = exc.response or {}
+                error = response.get("Error", {})
+                code = str(error.get("Code", ""))
+                status = int((response.get("ResponseMetadata", {}) or {}).get(
+                    "HTTPStatusCode", 0
+                ))
+                if code == "PreconditionFailed" or status == 412:
+                    return False
+                if code == "ConditionalRequestConflict" or status == 409:
+                    continue
+                raise
+        raise RuntimeError("R2 conditional write conflicted repeatedly")
 
 
 def traffic_api_key() -> str:
@@ -195,22 +237,102 @@ def build_traffic_snapshot_receipts() -> TrafficSnapshotReceipts:
     return TrafficSnapshotReceipts(storage)
 
 
+def build_traffic_collection_slot_storage():
+    return _build_traffic_r2_storage()
+
+
 def build_traffic_collection_slot_receipts():
     from common.collection_slots.receipts import CollectionSlotReceipts
 
-    return CollectionSlotReceipts(_build_traffic_r2_storage())
+    return CollectionSlotReceipts(build_traffic_collection_slot_storage())
+
+
+class _NoOpCollectionSlotReceipts:
+    def record_expected(self, _slot: ExpectedSlot) -> str:
+        return "collection-slot-receipts/noop"
+
+    def record_outcome(self, _outcome) -> str:
+        return "collection-slot-receipts/noop"
+
+
+def _traffic_collection_slot_for_logical_date(logical_date: datetime | str):
+    activation_at = parse_activation_at(
+        os.environ.get(_COLLECTION_SLOT_ACTIVATION_ENV)
+    )
+    slot_at = floor_to_five_minutes(logical_date)
+    if not is_slot_active(slot_at, activation_at):
+        return None
+    recovery_boundary = require_policy_boundary(
+        os.environ.get(_TRAFFIC_RAW_RETENTION_BOUNDARY_ENV),
+        _TRAFFIC_RAW_RETENTION_BOUNDARY_ENV,
+    )
+    return traffic_incident_slot(
+        logical_date,
+        recovery_boundary=recovery_boundary,
+    )
+
+
+def build_traffic_collection_slot_receipt_ports():
+    activation_at = parse_activation_at(
+        os.environ.get(_COLLECTION_SLOT_ACTIVATION_ENV)
+    )
+    if activation_at is None:
+        return _NoOpCollectionSlotReceipts(), _traffic_collection_slot_for_logical_date
+    return (
+        build_traffic_collection_slot_receipts(),
+        _traffic_collection_slot_for_logical_date,
+    )
+
+
+def traffic_raw_manifest_is_verified(
+    raw_result: object,
+    *,
+    dag_run_id: str,
+) -> bool:
+    """Return true only for a complete manifest matching this run's raw objects."""
+    if not isinstance(raw_result, dict):
+        return False
+    manifest_key = raw_result.get("manifest_key")
+    raw_objects = raw_result.get("raw_objects")
+    if not isinstance(manifest_key, str) or not manifest_key:
+        return False
+    if not isinstance(raw_objects, list) or not raw_objects:
+        return False
+    object_keys: list[str] = []
+    for raw_object in raw_objects:
+        if not isinstance(raw_object, dict):
+            return False
+        raw_object_key = raw_object.get("raw_object_key")
+        if not isinstance(raw_object_key, str) or not raw_object_key:
+            return False
+        object_keys.append(raw_object_key)
+    if len(object_keys) != len(set(object_keys)):
+        return False
+    try:
+        manifest = build_traffic_collection_slot_storage().read_json(manifest_key)
+        validate_raw_manifest(
+            manifest,
+            run_id=dag_run_id,
+            dataset="seoul_traffic_incident",
+            object_keys=object_keys,
+        )
+    except (FileNotFoundError, TypeError, ValueError):
+        return False
+    return True
 
 
 def build_incident_landing_lifecycle() -> IncidentLandingLifecycle:
     from common.runtime_guard import validate_dev_runtime
 
+    slot_receipts, slot_for_logical_date = build_traffic_collection_slot_receipt_ports()
     return IncidentLandingLifecycle(
         runtime_guard=lambda: validate_dev_runtime("traffic"),
         ledger=TrafficRunLedger(),
         landing=build_traffic_landing(),
         receipts=build_traffic_snapshot_receipts(),
-        slot_receipts=build_traffic_collection_slot_receipts(),
-        slot_for_logical_date=traffic_incident_slot,
+        slot_receipts=slot_receipts,
+        slot_for_logical_date=slot_for_logical_date,
+        raw_manifest_is_verified=traffic_raw_manifest_is_verified,
         clock=lambda: datetime.now(timezone.utc),
     )
 
@@ -320,6 +442,7 @@ def build_incident_materializer() -> IncidentMaterializer:
             raise ValueError("legacy Traffic replay did not produce a raw manifest")
         return {**raw_result, "manifest_key": manifest_key}
 
+    slot_receipts, slot_for_logical_date = build_traffic_collection_slot_receipt_ports()
     return IncidentMaterializer(
         receipts=build_traffic_snapshot_receipts(),
         manifest=build_traffic_manifest(),
@@ -330,6 +453,7 @@ def build_incident_materializer() -> IncidentMaterializer:
         verified_receipts=verified_receipts,
         recover_legacy_raw_result=recover_legacy_raw_result,
         clock=lambda: datetime.now(timezone.utc),
-        slot_receipts=build_traffic_collection_slot_receipts(),
-        slot_for_logical_date=traffic_incident_slot,
+        slot_receipts=slot_receipts,
+        slot_for_logical_date=slot_for_logical_date,
+        raw_manifest_is_verified=traffic_raw_manifest_is_verified,
     )

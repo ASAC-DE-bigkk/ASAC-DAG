@@ -128,6 +128,53 @@ def test_recovered_outcome_preserves_original_failure_and_requires_recovery_evid
     assert outcome.to_document()["recovered_at"] == "2026-08-08T00:20:00+00:00"
 
 
+def test_recovery_evidence_code_is_safe_nullable_and_excluded_from_event_id():
+    baseline = CollectionOutcome.create(
+        expected_slot_id="slot",
+        collection_state="collection_failed",
+        recovery_state="recovered",
+        recovery_class="raw_replay",
+        gap_reason_code="bronze_load_failed",
+        event_at="2026-08-08T00:10:00+00:00",
+        dag_id="traffic_incident_bronze",
+        dag_run_id="run",
+        recovery_run_id="replay-run",
+        recovered_at="2026-08-08T00:20:00+00:00",
+    )
+    outcome = CollectionOutcome.create(
+        expected_slot_id="slot",
+        collection_state="collection_failed",
+        recovery_state="recovered",
+        recovery_class="raw_replay",
+        gap_reason_code="bronze_load_failed",
+        event_at="2026-08-08T00:10:00+00:00",
+        dag_id="traffic_incident_bronze",
+        dag_run_id="run",
+        recovery_run_id="replay-run",
+        recovered_at="2026-08-08T00:20:00+00:00",
+        recovery_evidence_code="raw_manifest_verified",
+    )
+
+    assert outcome.event_id == baseline.event_id
+    assert outcome.to_document()["recovery_evidence_code"] == "raw_manifest_verified"
+    assert baseline.to_document()["recovery_evidence_code"] is None
+    for unsafe in ("", "RawManifest", "raw manifest", "raw-manifest", " raw_manifest"):
+        with pytest.raises(ValueError, match="recovery_evidence_code"):
+            CollectionOutcome.create(
+                expected_slot_id="slot",
+                collection_state="collection_failed",
+                recovery_state="recovered",
+                recovery_class="raw_replay",
+                gap_reason_code="bronze_load_failed",
+                event_at="2026-08-08T00:10:00+00:00",
+                dag_id="traffic_incident_bronze",
+                dag_run_id="run",
+                recovery_run_id="replay-run",
+                recovered_at="2026-08-08T00:20:00+00:00",
+                recovery_evidence_code=unsafe,
+            )
+
+
 def test_failed_outcome_can_be_pending_before_recovery_method_is_classified():
     outcome = CollectionOutcome.create(
         expected_slot_id="slot",

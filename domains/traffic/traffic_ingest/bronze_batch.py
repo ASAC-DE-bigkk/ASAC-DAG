@@ -116,6 +116,10 @@ def _prepare_page(
     http_status = _integer(
         _required_value(raw_object, "http_status"), field="http_status"
     )
+    if not 200 <= http_status < 300:
+        raise TrafficSourceSchemaError(
+            f"Traffic raw object is not HTTP-successful: http_status={http_status}"
+        )
     start_index = _integer(
         _required_value(raw_object, "start_index"), field="start_index"
     )

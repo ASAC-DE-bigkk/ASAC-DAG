@@ -10,7 +10,6 @@ from common.collection_slots.contract import ExpectedSlot
 INCIDENT_SOURCE_ID = "seoul_traffic_incident"
 INCIDENT_COLLECTION_CONTRACT_ID = "traffic.incident.v1"
 INCIDENT_SCHEDULE_VERSION = "traffic.incident.5m.v1"
-INCIDENT_RECOVERY_BOUNDARY = "raw_retention_not_declared"
 
 
 def _as_utc_datetime(value: datetime | str) -> datetime:
@@ -38,7 +37,11 @@ def floor_to_five_minutes(value: datetime | str) -> datetime:
     )
 
 
-def traffic_incident_slot(logical_date: datetime | str) -> ExpectedSlot:
+def traffic_incident_slot(
+    logical_date: datetime | str,
+    *,
+    recovery_boundary: datetime | str,
+) -> ExpectedSlot:
     """Build one scheduled Traffic Incident expected slot without runtime I/O."""
     slot_at = floor_to_five_minutes(logical_date)
     return ExpectedSlot.create(
@@ -53,7 +56,7 @@ def traffic_incident_slot(logical_date: datetime | str) -> ExpectedSlot:
         schedule_version=INCIDENT_SCHEDULE_VERSION,
         is_scheduled=True,
         recovery_boundary_type="raw_retention",
-        recovery_boundary=INCIDENT_RECOVERY_BOUNDARY,
+        recovery_boundary=_as_utc_datetime(recovery_boundary).isoformat(),
         declared_at=slot_at,
         declared_by="traffic_incident_landing",
     )
@@ -61,7 +64,6 @@ def traffic_incident_slot(logical_date: datetime | str) -> ExpectedSlot:
 
 __all__ = [
     "INCIDENT_COLLECTION_CONTRACT_ID",
-    "INCIDENT_RECOVERY_BOUNDARY",
     "INCIDENT_SCHEDULE_VERSION",
     "INCIDENT_SOURCE_ID",
     "floor_to_five_minutes",

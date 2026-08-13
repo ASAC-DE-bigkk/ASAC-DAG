@@ -28,7 +28,8 @@ def _payload(total_count: int, incident_id: str) -> bytes:
         "<AccInfo>"
         f"<list_total_count>{total_count}</list_total_count>"
         "<RESULT><CODE>INFO-000</CODE><MESSAGE>OK</MESSAGE></RESULT>"
-        f"<row><acc_id>{incident_id}</acc_id></row>"
+        f"<row><acc_id>{incident_id}</acc_id><occr_date>20260715</occr_date>"
+        "<occr_time>0020</occr_time></row>"
         "</AccInfo>"
     ).encode()
 
@@ -147,6 +148,7 @@ def test_traffic_batch_prepares_every_raw_page_before_opening_trino():
     ("failure", "expected_error"),
     [
         ("raw-contract", TrafficSourceSchemaError),
+        ("http", TrafficSourceSchemaError),
         ("hash", TrafficRawIntegrityError),
         ("parse", TrafficSourceSchemaError),
         ("metadata", TrafficCompletenessError),
@@ -163,6 +165,8 @@ def test_incomplete_traffic_batch_performs_zero_database_mutations(
     second = raw_result["raw_objects"][1]
     if failure == "raw-contract":
         del second["request_id"]
+    elif failure == "http":
+        second["http_status"] = 503
     elif failure == "hash":
         second["raw_hash"] = hashlib.sha256(b"different").hexdigest()
     elif failure == "parse":

@@ -14,6 +14,7 @@ from weather_ingest.landing import (  # noqa: E402
     KmaLandingRequest,
     RunIdentity,
 )
+from weather_ingest.collection_slots import weather_vilage_fcst_slots  # noqa: E402
 from weather_ingest.run_manifest import WeatherRun  # noqa: E402
 
 
@@ -375,8 +376,179 @@ def test_publish_weather_bronze_asset_does_not_emit_nonpublishable_event():
 
 def test_weather_bronze_asset_is_owned_by_publish_gate_after_verification():
     verify = dag_module.dag.get_task("verify_kma_bronze_runtime")
+    record_slot_outcome = dag_module.dag.get_task(
+        "record_weather_collection_slot_success"
+    )
     publish = dag_module.dag.get_task("publish_weather_bronze_asset")
 
     assert verify.outlets == []
     assert publish.outlets == [dag_module.WEATHER_BRONZE_ASSET_REF]
-    assert publish.task_id in verify.downstream_task_ids
+    assert record_slot_outcome.task_id in verify.downstream_task_ids
+    assert publish.task_id in record_slot_outcome.downstream_task_ids
+
+
+def test_weather_slot_plan_locks_the_issue_cycle_for_landing(monkeypatch):
+    expected_slots = []
+    captured: dict[str, object] = {}
+
+    class SlotReceipts:
+        def record_expected(self, slot):
+            expected_slots.append(slot)
+
+    class Landing:
+        def collect(self, run, request):
+            captured.update(run=run, request=request)
+            return Result({"raw_object_keys": ["raw/weather/page.json"]})
+
+    grids = (KmaGrid("jongno", 60, 127),)
+    monkeypatch.setattr(
+        dag_module,
+        "build_weather_collection_slot_receipt_ports",
+        lambda: (
+            SlotReceipts(),
+            lambda base_date, base_time, actual_grids: weather_vilage_fcst_slots(
+                base_date,
+                base_time,
+                actual_grids,
+                recovery_boundary="2026-08-01T00:00:00+00:00",
+            ),
+        ),
+    )
+    monkeypatch.setattr(dag_module, "resolve_kma_base_datetime", lambda: ("20260808", "0800"))
+    monkeypatch.setattr(
+        dag_module,
+        "load_kma_grids",
+        lambda: [
+            {
+                "place_id": grids[0].place_id,
+                "nx": grids[0].nx,
+                "ny": grids[0].ny,
+            }
+        ],
+    )
+    monkeypatch.setattr(dag_module, "kma_num_of_rows", lambda: 500)
+    monkeypatch.setattr(dag_module, "build_weather_landing", lambda: Landing())
+
+    plan = dag_module.plan_weather_collection_slots(
+        dag=Dag(), dag_run=DagRun(), run_id="scheduled__weather"
+    )
+
+    class TI:
+        def xcom_pull(self, *, task_ids):
+            if task_ids == "plan_weather_collection_slots":
+                return plan
+            return None
+
+    result = dag_module.land_kma_raw(
+        dag=Dag(), dag_run=DagRun(), run_id="scheduled__weather", ti=TI()
+    )
+
+    assert plan["base_date"] == "20260808"
+    assert plan["base_time"] == "0800"
+    assert len(plan["slots"]) == 1
+    assert [slot.expected_slot_id for slot in expected_slots] == [
+        weather_vilage_fcst_slots(
+            "20260808",
+            "0800",
+            grids,
+            recovery_boundary="2026-08-01T00:00:00+00:00",
+        )[0].expected_slot_id
+    ]
+    assert result == {"raw_object_keys": ["raw/weather/page.json"]}
+    assert captured["request"] == KmaLandingRequest(
+        base_date="20260808",
+        base_time="0800",
+        grids=grids,
+        num_of_rows=500,
+    )
+
+
+def test_weather_slot_outcomes_require_verified_manifest_and_keep_diagnostic_raw_unreplayable(
+    monkeypatch,
+):
+    slots = weather_vilage_fcst_slots(
+        "20260808",
+        "0800",
+        (KmaGrid("jongno", 60, 127),),
+        recovery_boundary="2026-08-01T00:00:00+00:00",
+    )
+    plan = {
+        "base_date": "20260808",
+        "base_time": "0800",
+        "slots": [slot.to_create_kwargs() for slot in slots],
+    }
+    outcomes = []
+
+    class SlotReceipts:
+        def record_expected(self, _slot):
+            pytest.fail("plan has already declared the expected receipt")
+
+        def record_outcome(self, outcome):
+            outcomes.append(outcome)
+
+    raw_result = {
+        "manifest_key": "raw/weather/kma/_manifest.json",
+        "raw_objects": [
+            {
+                "raw_object_key": "raw/weather/kma/page-1.json",
+                "place_id": "jongno",
+                "nx": 60,
+                "ny": 127,
+                "base_date": "20260808",
+                "base_time": "0800",
+                "row_count": 2,
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        dag_module,
+        "build_weather_collection_slot_receipt_ports",
+        lambda: (SlotReceipts(), lambda *_args: slots),
+    )
+    monkeypatch.setattr(dag_module, "weather_raw_manifest_is_verified", lambda *_args, **_kwargs: True)
+
+    class SuccessTI:
+        task_id = "record_weather_collection_slot_success"
+
+        def xcom_pull(self, *, task_ids):
+            if task_ids == "plan_weather_collection_slots":
+                return plan
+            if task_ids == "land_kma_raw":
+                return raw_result
+            if task_ids == "load_kma_bronze":
+                return {"is_publishable": True}
+            if task_ids == "verify_kma_bronze_runtime":
+                return 2
+            return None
+
+    assert (
+        dag_module.record_weather_collection_slot_success(
+            dag=Dag(), run_id="scheduled__weather", ti=SuccessTI()
+        )
+        == 1
+    )
+    assert outcomes[0].collection_state == "observed"
+    assert outcomes[0].recovery_class == "none"
+
+    outcomes.clear()
+    monkeypatch.setattr(dag_module, "weather_raw_manifest_is_verified", lambda *_args, **_kwargs: False)
+
+    class FailureTI:
+        task_id = "land_kma_raw"
+
+        def xcom_pull(self, *, task_ids):
+            if task_ids == "plan_weather_collection_slots":
+                return plan
+            if task_ids == "land_kma_raw":
+                return raw_result
+            return None
+
+    dag_module.record_weather_collection_slot_failure(
+        {"dag": Dag(), "run_id": "scheduled__weather", "ti": FailureTI()}
+    )
+
+    assert outcomes[0].collection_state == "collection_failed"
+    assert outcomes[0].recovery_class == "historical_query"
+    assert outcomes[0].raw_manifest_key is None
+    assert outcomes[0].recovery_evidence_code == "weather_apihub_historical_range"

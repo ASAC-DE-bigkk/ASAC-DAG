@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -34,6 +36,7 @@ from weather_ingest.landing import (  # noqa: E402
     RawObjectIntegrityError,
     verify_raw_payload_hash,
 )
+from common.raw_manifest import build_raw_manifest  # noqa: E402
 
 
 DETERMINISTIC_ERRORS = (
@@ -197,6 +200,254 @@ def test_weather_missing_manifest_blocks_bronze_before_trino():
         load_kma_bronze_batch(
             raw_result={"raw_objects": [{"raw_object_key": "raw/weather/page.json"}]},
             dag_run_id="manual__missing-manifest",
+            allow_partial_pages=False,
+            expected_raw_object_count_key="expected_raw_object_count",
+            ports=ports,
+        )
+
+
+def test_weather_bronze_rejects_raw_response_context_before_opening_trino():
+    raw_object_key = "raw/weather/kma/page-1.json"
+    payload = json.dumps(
+        {
+            "response": {
+                "header": {"resultCode": "00", "resultMsg": "OK"},
+                "body": {
+                    "items": {
+                        "item": [
+                            {
+                                "baseDate": "20260714",
+                                "baseTime": "0800",
+                                "nx": 61,
+                                "ny": 127,
+                                "category": "TMP",
+                                "fcstDate": "20260714",
+                                "fcstTime": "0900",
+                                "fcstValue": "25",
+                            }
+                        ]
+                    },
+                    "totalCount": 1,
+                },
+            }
+        }
+    ).encode("utf-8")
+    raw_result = {
+        "raw_objects": [
+            {
+                "request_id": "request-1",
+                "raw_object_key": raw_object_key,
+                "raw_hash": hashlib.sha256(payload).hexdigest(),
+                "http_status": 200,
+                "collected_at": "2026-07-14T00:20:00+00:00",
+                "place_id": "seoul",
+                "base_date": "20260714",
+                "base_time": "0800",
+                "nx": 60,
+                "ny": 127,
+                "page_no": 1,
+                "num_of_rows": 1000,
+            }
+        ],
+        "manifest_key": "raw/weather/kma/_manifest.json",
+    }
+    manifest = json.dumps(
+        build_raw_manifest(
+            run_id="manual__context-mismatch",
+            dataset="kma_vilage_fcst",
+            load_date="2026-07-14",
+            object_keys=[raw_object_key],
+            expected_count=1,
+            actual_count=1,
+            completed_at="2026-07-14T00:20:01+00:00",
+        )
+    ).encode("utf-8")
+    events: list[str] = []
+
+    def download(key: str, _label: str) -> bytes:
+        events.append(f"download:{key}")
+        return manifest if key == raw_result["manifest_key"] else payload
+
+    def open_trino():
+        events.append("open-trino")
+        return object(), "iceberg_dev", "ask_seoul"
+
+    def ensure_table(*_args):
+        events.append("ensure-table")
+        return "iceberg_dev.ask_seoul.bronze_kma_vilage_fcst"
+
+    def append_batches(**_kwargs):
+        events.append("append")
+        return 1
+
+    ports = BronzeLoadPorts(
+        open_trino=open_trino,
+        ensure_table=ensure_table,
+        download=download,
+        append_batches=append_batches,
+    )
+
+    with pytest.raises(WeatherSourceSchemaError, match="response context mismatch"):
+        load_kma_bronze_batch(
+            raw_result=raw_result,
+            dag_run_id="manual__context-mismatch",
+            allow_partial_pages=False,
+            expected_raw_object_count_key="expected_raw_object_count",
+            ports=ports,
+        )
+
+    assert events == [
+        "download:raw/weather/kma/_manifest.json",
+        "download:raw/weather/kma/page-1.json",
+    ]
+
+
+def test_weather_duplicate_raw_object_keys_block_bronze_before_trino():
+    raw_object_key = "raw/weather/kma/page-1.json"
+    payload = json.dumps(
+        {
+            "response": {
+                "header": {"resultCode": "00", "resultMsg": "OK"},
+                "body": {
+                    "items": {
+                        "item": [
+                            {
+                                "baseDate": "20260714",
+                                "baseTime": "0800",
+                                "nx": 60,
+                                "ny": 127,
+                                "category": "TMP",
+                                "fcstDate": "20260714",
+                                "fcstTime": "0900",
+                                "fcstValue": "25",
+                            }
+                        ]
+                    },
+                    "totalCount": 1,
+                },
+            }
+        }
+    ).encode("utf-8")
+    raw_object = {
+        "request_id": "request-1",
+        "raw_object_key": raw_object_key,
+        "raw_hash": hashlib.sha256(payload).hexdigest(),
+        "http_status": 200,
+        "collected_at": "2026-07-14T00:20:00+00:00",
+        "place_id": "seoul",
+        "base_date": "20260714",
+        "base_time": "0800",
+        "nx": 60,
+        "ny": 127,
+        "page_no": 1,
+        "num_of_rows": 1000,
+    }
+    raw_result = {
+        "raw_objects": [
+            raw_object,
+            dict(raw_object),
+        ],
+        "manifest_key": "raw/weather/kma/_manifest.json",
+    }
+    manifest = json.dumps(
+        build_raw_manifest(
+            run_id="manual__duplicate-raw",
+            dataset="kma_vilage_fcst",
+            load_date="2026-07-14",
+            object_keys=[raw_object_key],
+            expected_count=1,
+            actual_count=1,
+            completed_at="2026-07-14T00:20:01+00:00",
+        )
+    ).encode("utf-8")
+    ports = BronzeLoadPorts(
+        open_trino=lambda: pytest.fail("must fail before Trino"),
+        ensure_table=lambda *_args: pytest.fail("must fail before Trino"),
+        download=lambda key, _label: manifest
+        if key == raw_result["manifest_key"]
+        else payload,
+        append_batches=lambda **_kwargs: pytest.fail("must fail before append"),
+    )
+
+    with pytest.raises(WeatherCompletenessError, match="duplicate raw_object_key"):
+        load_kma_bronze_batch(
+            raw_result=raw_result,
+            dag_run_id="manual__duplicate-raw",
+            allow_partial_pages=False,
+            expected_raw_object_count_key="expected_raw_object_count",
+            ports=ports,
+        )
+
+
+def test_weather_duplicate_page_identity_blocks_bronze_before_trino():
+    first_key = "raw/weather/kma/page-1-first.json"
+    second_key = "raw/weather/kma/page-1-second.json"
+    payload = json.dumps(
+        {
+            "response": {
+                "header": {"resultCode": "00", "resultMsg": "OK"},
+                "body": {
+                    "items": {
+                        "item": [
+                            {
+                                "baseDate": "20260714",
+                                "baseTime": "0800",
+                                "nx": 60,
+                                "ny": 127,
+                                "category": "TMP",
+                                "fcstDate": "20260714",
+                                "fcstTime": "0900",
+                                "fcstValue": "25",
+                            }
+                        ]
+                    },
+                    "totalCount": 1,
+                },
+            }
+        }
+    ).encode("utf-8")
+    raw_object = {
+        "request_id": "request-1",
+        "raw_object_key": first_key,
+        "raw_hash": hashlib.sha256(payload).hexdigest(),
+        "http_status": 200,
+        "collected_at": "2026-07-14T00:20:00+00:00",
+        "place_id": "seoul",
+        "base_date": "20260714",
+        "base_time": "0800",
+        "nx": 60,
+        "ny": 127,
+        "page_no": 1,
+        "num_of_rows": 1000,
+    }
+    raw_result = {
+        "raw_objects": [raw_object, {**raw_object, "raw_object_key": second_key}],
+        "manifest_key": "raw/weather/kma/_manifest.json",
+    }
+    manifest = json.dumps(
+        build_raw_manifest(
+            run_id="manual__duplicate-page",
+            dataset="kma_vilage_fcst",
+            load_date="2026-07-14",
+            object_keys=[first_key, second_key],
+            expected_count=2,
+            actual_count=2,
+            completed_at="2026-07-14T00:20:01+00:00",
+        )
+    ).encode("utf-8")
+    ports = BronzeLoadPorts(
+        open_trino=lambda: pytest.fail("must fail before Trino"),
+        ensure_table=lambda *_args: pytest.fail("must fail before Trino"),
+        download=lambda key, _label: manifest
+        if key == raw_result["manifest_key"]
+        else payload,
+        append_batches=lambda **_kwargs: pytest.fail("must fail before append"),
+    )
+
+    with pytest.raises(WeatherCompletenessError, match="duplicate page identity"):
+        load_kma_bronze_batch(
+            raw_result=raw_result,
+            dag_run_id="manual__duplicate-page",
             allow_partial_pages=False,
             expected_raw_object_count_key="expected_raw_object_count",
             ports=ports,

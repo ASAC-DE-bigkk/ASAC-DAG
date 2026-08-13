@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from common.raw_write import write_immutable_raw_object  # noqa: E402
 import weather_ingest.runtime as runtime  # noqa: E402
 from weather_ingest.runtime import KmaHttpAdapter, R2RawObjectStore  # noqa: E402
 
@@ -16,10 +17,28 @@ from weather_ingest.runtime import KmaHttpAdapter, R2RawObjectStore  # noqa: E40
 class FakeS3Client:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], tuple[bytes, str]] = {}
+        self.put_conditions: list[str | None] = []
 
     def put_object(
-        self, *, Bucket: str, Key: str, Body: bytes, ContentType: str
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: bytes,
+        ContentType: str,
+        IfNoneMatch: str | None = None,
     ) -> None:
+        self.put_conditions.append(IfNoneMatch)
+        if IfNoneMatch == "*" and (Bucket, Key) in self.objects:
+            from botocore.exceptions import ClientError
+
+            raise ClientError(
+                {
+                    "Error": {"Code": "PreconditionFailed"},
+                    "ResponseMetadata": {"HTTPStatusCode": 412},
+                },
+                "PutObject",
+            )
         self.objects[(Bucket, Key)] = (Body, ContentType)
 
     def get_object(self, *, Bucket: str, Key: str):
@@ -101,6 +120,86 @@ def test_r2_store_preserves_content_type_and_missing_object_semantics():
         client.objects[("seoul-dev", "raw/page.json")][1]
         == "application/json; charset=utf-8"
     )
+
+
+def test_r2_store_create_only_write_rejects_an_existing_raw_key():
+    client = FakeS3Client()
+    store = R2RawObjectStore(client, bucket="seoul-dev")
+
+    assert store.write_bytes_if_absent("raw/page.json", b"first", "application/json")
+    assert not store.write_bytes_if_absent(
+        "raw/page.json", b"second", "application/json"
+    )
+
+    assert store.read_bytes("raw/page.json") == b"first"
+    assert client.put_conditions == ["*", "*"]
+
+
+def test_r2_store_retries_conditional_conflict_until_raw_creation_succeeds():
+    from botocore.exceptions import ClientError
+
+    class ConflictThenSuccessClient(FakeS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self._conflict = True
+
+        def put_object(self, **kwargs) -> None:
+            if self._conflict:
+                self._conflict = False
+                self.put_conditions.append(kwargs.get("IfNoneMatch"))
+                raise ClientError(
+                    {
+                        "Error": {"Code": "ConditionalRequestConflict"},
+                        "ResponseMetadata": {"HTTPStatusCode": 409},
+                    },
+                    "PutObject",
+                )
+            super().put_object(**kwargs)
+
+    client = ConflictThenSuccessClient()
+    store = R2RawObjectStore(client, bucket="seoul-dev")
+
+    assert store.write_bytes_if_absent("raw/page.json", b"payload", "application/json")
+    assert store.read_bytes("raw/page.json") == b"payload"
+    assert client.put_conditions == ["*", "*"]
+
+
+def test_r2_store_retries_conditional_conflict_then_reuses_matching_raw_object():
+    from botocore.exceptions import ClientError
+
+    class ConflictThenOtherWriterClient(FakeS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self._conflict = True
+
+        def put_object(self, **kwargs) -> None:
+            if self._conflict:
+                self._conflict = False
+                self.put_conditions.append(kwargs.get("IfNoneMatch"))
+                self.objects[(kwargs["Bucket"], kwargs["Key"])] = (
+                    kwargs["Body"],
+                    kwargs["ContentType"],
+                )
+                raise ClientError(
+                    {
+                        "Error": {"Code": "ConditionalRequestConflict"},
+                        "ResponseMetadata": {"HTTPStatusCode": 409},
+                    },
+                    "PutObject",
+                )
+            super().put_object(**kwargs)
+
+    client = ConflictThenOtherWriterClient()
+    store = R2RawObjectStore(client, bucket="seoul-dev")
+
+    assert not write_immutable_raw_object(
+        store,
+        "raw/page.json",
+        b"payload",
+        "application/json",
+    )
+    assert store.read_bytes("raw/page.json") == b"payload"
+    assert client.put_conditions == ["*", "*"]
 
 
 def test_r2_store_does_not_hide_permission_or_transport_failures():

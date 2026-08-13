@@ -170,6 +170,7 @@ def _event(document: Mapping[str, object], *, key: str) -> dict[str, object]:
             source_result_code=document["source_result_code"],
             recovery_run_id=document["recovery_run_id"],
             recovered_at=document["recovered_at"],
+            recovery_evidence_code=document.get("recovery_evidence_code"),
             event_at=document["event_at"],
         )
     except (TypeError, ValueError) as exc:
