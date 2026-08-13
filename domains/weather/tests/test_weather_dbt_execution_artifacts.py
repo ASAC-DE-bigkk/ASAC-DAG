@@ -205,6 +205,7 @@ def test_weather_preflight_creates_target_and_log_directories_before_dbt_ls(
     )
 
     assert [command[1] for command in observed] == ["ls", "run"]
+    assert not list(tmp_path.rglob(".weather-dbt-write-probe-*"))
 
 
 def test_weather_preflight_reports_unwritable_artifact_directory_before_dbt(
@@ -231,6 +232,50 @@ def test_weather_preflight_reports_unwritable_artifact_directory_before_dbt(
             dbt_command="run",
             selector="ask_seoul_weather_transform_silver",
             invocation_id="unwritable-preflight",
+            pipeline="weather-transform",
+            run_id="manual__1",
+            task_id="dbt_run_silver",
+            try_number=1,
+            target="dev",
+            variables=None,
+            project_dir=str(tmp_path),
+            executable=RAW_DBT,
+            runner=lambda *_args, **_kwargs: pytest.fail("dbt must not start"),
+            environ={},
+        )
+
+
+def test_weather_preflight_probes_existing_artifact_directory_before_dbt(
+    tmp_path, monkeypatch
+):
+    module = load_execution_module()
+    paths = module.attempt_paths(
+        project_dir=str(tmp_path),
+        pipeline="weather-transform",
+        run_id="manual__1",
+        task_id="dbt_run_silver",
+        try_number=1,
+        invocation_id="existing-unwritable-preflight",
+        dbt_command="run",
+    )
+    Path(paths.preflight_target_path).mkdir(parents=True)
+
+    def denied_probe(*_args, **kwargs):
+        assert Path(kwargs["dir"]) == Path(paths.preflight_target_path)
+        raise PermissionError("simulated existing bind-mount ownership mismatch")
+
+    monkeypatch.setitem(
+        module.execute_dbt_phase.__globals__, "NamedTemporaryFile", denied_probe
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="weather dbt preflight-target directory is not writable",
+    ):
+        module.execute_dbt_phase(
+            dbt_command="run",
+            selector="ask_seoul_weather_transform_silver",
+            invocation_id="existing-unwritable-preflight",
             pipeline="weather-transform",
             run_id="manual__1",
             task_id="dbt_run_silver",
